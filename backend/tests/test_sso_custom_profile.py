@@ -274,6 +274,23 @@ async def test_top_level_keys_win_over_nested_ones():
     assert identity.email == "top@corp.example"
 
 
+async def test_any_container_name_is_hoisted_and_empties_never_shadow():
+    """The hoist is generic over container names (shared with the
+    backchannel kind), and a vestigial top-level ``groups: []`` no
+    longer shadows the populated list one level down."""
+    provider = CustomProfileProvider(_settings())
+    identity = await provider.fetch_identity(_jwt({
+        "sub": "u1",
+        "groups": [],
+        "whateverThePortalCallsIt": {
+            "email": "bob@corp.example",
+            "groups": ["my-super-cool-group"],
+        },
+    }))
+    assert identity.email == "bob@corp.example"
+    assert identity.groups == ("my-super-cool-group",)
+
+
 async def test_missing_email_is_rejected():
     provider = CustomProfileProvider(_settings())
     with pytest.raises(CustomProfileError) as exc:

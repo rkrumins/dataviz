@@ -37,6 +37,7 @@ import { AnimatePresence } from 'framer-motion'
 import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { generateColorFromType } from '@/lib/type-visuals'
+import { FeedMoreChip } from './FeedMoreChip'
 
 // Node/Edge components
 import { GhostNode } from './nodes/GhostNode'
@@ -50,6 +51,8 @@ import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
+import { useViewLibrary } from '@/hooks/useViewLibrary'
+import { useEffectiveBranchId } from '@/store/branchStore'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
@@ -79,7 +82,7 @@ import { useSemanticZoom } from '@/hooks/useSemanticZoom'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
-import { useLoadingToast, useToast } from '@/components/ui/toast'
+import { useLoadingNotification, useAppNotifications } from '@/components/ui/notifications'
 import { EdgeTypePickerPopover } from './edge-create/EdgeTypePickerPopover'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
 import { useCreateLinkStore } from './edge-create/createLinkStore'
@@ -124,7 +127,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 1. Schema readiness guard
   const isSchemaReady = useViewSchemaIsReady()
 
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   // 2. Canvas store
   const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges } = useCanvasStore()
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
@@ -167,6 +170,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   useDisplayRuleEngine(activeView?.id ?? null)
+  // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
+  const libraryBranchId = useEffectiveBranchId(
+    activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
+  useViewLibrary(activeView?.id ?? null, libraryBranchId)
 
   // Viewport-aware node filtering for large graphs
   const [viewportBounds, setViewportBounds] = useState<{ x: number; y: number; zoom: number } | null>(null)
@@ -285,13 +292,13 @@ export function GraphCanvas({ className }: { className?: string }) {
   // handles visibility by projecting to visible ancestors, not filtering.
 
   // 7. Progressive loading
-  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes } = useGraphHydration()
-  useLoadingToast('graph-children', isLoadingChildren, 'Expanding hierarchy')
+  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, loadMoreFeeds } = useGraphHydration()
+  useLoadingNotification('graph-children', isLoadingChildren, 'Expanding hierarchy')
   const provider = useGraphProvider()
 
   // Reveal a search hit on this canvas — same flow as ContextViewCanvas
   // (walk ancestor chain, expand each step, then select + scroll).
-  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // 8. Trace system (shared hook)
   const trace = useCanvasTrace({
@@ -335,7 +342,7 @@ export function GraphCanvas({ className }: { className?: string }) {
     fetchAggregated,
     isLoading: isLoadingAggEdges,
   } = useAggregatedLineage({ granularity: null })
-  useLoadingToast('graph-agg', isLoadingAggEdges, 'Loading lineage')
+  useLoadingNotification('graph-agg', isLoadingAggEdges, 'Loading lineage')
 
   // Stable ref for nodes (avoids effect dependency on nodes array)
   const nodesRef = useRef(rawNodes)
@@ -1068,7 +1075,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         entityTypes: schemaEntityTypes,
       })
       if (!verdict.allowed) {
-        showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+        notify('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
         setEdgePicker(null)
         return
       }
@@ -1082,7 +1089,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       }])
       setEdgePicker(null)
     },
-    [rawNodes, addEdges, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, showToast],
+    [rawNodes, addEdges, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, notify],
   )
 
   // Create edge by dragging between node handles — ontology-aware
@@ -1100,7 +1107,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       const validTypes = getValidEdgeTypes(sourceType, targetType)
 
       if (validTypes.length === 0) {
-        showToast('info', 'No relationship is allowed between these entities. Use “Add child” to nest one inside the other.')
+        notify('info', 'No relationship is allowed between these entities. Use “Add child” to nest one inside the other.')
         return
       }
 
@@ -1120,7 +1127,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           : { x: window.innerWidth / 2, y: window.innerHeight / 2 },
       })
     },
-    [rawNodes, getValidEdgeTypes, createEdgeWithType, showToast],
+    [rawNodes, getValidEdgeTypes, createEdgeWithType, notify],
   )
 
   // Edge reconnection — ontology-aware. Containment can't be re-drawn (route to "Move to"); a
@@ -1131,7 +1138,7 @@ export function GraphCanvas({ className }: { className?: string }) {
 
       const originalType = (oldEdge.data?.edgeType ?? oldEdge.data?.relationship ?? '') as string
       if (containmentEdgeTypes.some(t => t.toUpperCase() === originalType.toUpperCase())) {
-        showToast('info', 'Containment can’t be reconnected — use “Move to” to change an entity’s parent.')
+        notify('info', 'Containment can’t be reconnected — use “Move to” to change an entity’s parent.')
         return
       }
 
@@ -1146,7 +1153,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       const validTypes = getValidEdgeTypes(sourceType, targetType)
       const edgeType = validTypes.find(o => o.edgeType.toUpperCase() === originalType.toUpperCase())?.edgeType
       if (!edgeType) {
-        showToast('error', `“${originalType || 'This relationship'}” isn’t allowed between these entities.`)
+        notify('error', `“${originalType || 'This relationship'}” isn’t allowed between these entities.`)
         return
       }
 
@@ -1158,7 +1165,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         entityTypes: schemaEntityTypes,
       })
       if (!verdict.allowed) {
-        showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+        notify('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
         return
       }
 
@@ -1173,7 +1180,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         animated: true,
       }])
     },
-    [rawNodes, getValidEdgeTypes, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, showToast],
+    [rawNodes, getValidEdgeTypes, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, notify],
   )
 
   // Connection validation — checks ALL ontology relationship types
@@ -1474,6 +1481,8 @@ export function GraphCanvas({ className }: { className?: string }) {
           )}
         </ReactFlow>
         {rawNodes.length === 0 && !isHydratingInitial && <BuilderEmptyState />}
+        {/* Roots/orphans beyond the first page — above the stats bar. */}
+        <FeedMoreChip loadingNodes={loadingNodes} failedNodes={failedNodes} onLoadMore={keys => void loadMoreFeeds(keys)} bottomClass="bottom-16" />
       </div>
 
       {/* Stats Bar */}
@@ -1565,7 +1574,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       )}
       </div>{/* end canvas + right-rail row */}
 
-      {/* Advanced search trigger + panel. The trigger handles ⌘K
+      {/* Advanced search trigger + panel. The trigger handles ⌘⇧F
           globally; the panel mounts as a flex-sibling drawer (parity
           with ContextViewCanvas). Disabled when no view is active. */}
       <CanvasSearchTrigger

@@ -265,6 +265,34 @@ export interface AggregatedEdgeRequest {
     containmentEdgeTypes?: string[]
 }
 
+/** One canvas open, asked for in one request. See `canvasBootstrap`. */
+export interface CanvasBootstrapRequest {
+    /** The roots leg, as the canvas actually asks it: the nodes it NAMES.
+     *  Omit for the structural "no incoming containment edge" page. */
+    rootQuery?: {
+        urns?: string[]
+        entityTypes?: string[]
+        limit?: number
+        offset?: number
+        includeChildCount?: boolean
+    }
+    /** What is already painted. The edges and aggregated legs cover
+     *  roots ∪ this, which is what getEdgesBetween(new ∪ existing) asks for. */
+    visibleUrns?: string[]
+    includeAggregated?: boolean
+    lineageEdgeTypes?: string[]
+    containmentEdgeTypes?: string[]
+    limit?: number
+    cursor?: string | null
+}
+
+export interface CanvasBootstrapResult {
+    roots: { nodes: GraphNode[]; totalCount?: number | null; hasMore: boolean }
+    edges: GraphEdge[]
+    aggregated?: AggregatedEdgeResult | null
+    providerHealth?: string
+}
+
 export interface AggregatedEdgeInfo {
     id: string
     sourceUrn: string
@@ -288,6 +316,23 @@ export interface AggregatedEdgeResult {
     stale?: boolean
     /** Why the result is stale (e.g. "source_changed"), or null when fresh. */
     staleReason?: string | null
+    /**
+     * Why part of the read was lost under the graph store's per-query
+     * pressure (staleReason "query_memory" / "timeout"): the kind, how far
+     * the read-side ladder narrowed, the node and its ceiling. Absent when
+     * nothing was lost — narrowing that completed is a complete answer.
+     */
+    degradedDetail?: AggregatedDegradedDetail | null
+}
+
+export interface AggregatedDegradedDetail {
+    kind: 'query_memory' | 'timeout' | string
+    narrowedPages?: number
+    narrowedBatches?: number
+    degradedBatches?: number
+    floorRetries?: number
+    endpoint?: string | null
+    queryMemCapacity?: number | null
 }
 
 // ============================================
@@ -407,6 +452,15 @@ export interface NodeQuery {
 
     /** Pagination limit */
     limit?: number
+}
+
+/** One page of a node query. `nextOffset` is where the next page starts, in the
+ *  PROVIDER's order — a draft overlay adds and drops rows around the page it
+ *  read, so counting the rows returned would skip or repeat rows. */
+export interface NodePage {
+    nodes: GraphNode[]
+    hasMore: boolean
+    nextOffset: number
 }
 
 export interface EdgeQuery {
@@ -717,12 +771,26 @@ export interface GraphDataProvider {
     getNodes(query: NodeQuery): Promise<GraphNode[]>
 
     /**
+     * One page of a node query, with whether another follows and where it starts
+     * — for paging a whole type. Page with `offset: page.nextOffset`.
+     */
+    getNodesPage(query: NodeQuery): Promise<NodePage>
+
+    /**
      * TOTAL lineage degree (in/out) per URN over the full graph —
      * optional capability. Absent URNs in the result are UNKNOWN, never
      * zero. The canvas derives "lineage outside this view" as
      * total − internal(loaded).
      */
     getNodeDegrees?(urns: URN[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>>
+
+    /**
+     * Containment chains for many URNs — optional capability. Each chain is
+     * parent first, root last, as URNs: nothing is loaded. A URN absent from
+     * the result is UNKNOWN (the provider could not answer), never a root;
+     * a root maps to `[]`.
+     */
+    getAncestorChains?(urns: URN[]): Promise<Record<string, string[]>>
 
     /**
      * Search nodes by text query
@@ -783,6 +851,10 @@ export interface GraphDataProvider {
             sortProperty?: string | null // Node property to sort by (default: displayName, null = no sort)
             cursor?: string | null // Cursor for keyset pagination (displayName of last item)
             sortDirection?: 'asc' | 'desc' // Server-side direction (default asc); cursors are direction-bound
+            /** Far end of the lineage leg: 'page' (default) = among the parent and this
+             *  page; 'siblings' = between this page and the parent or ANY of its children,
+             *  loaded or not. A pager uses 'siblings' so cross-page edges arrive per page. */
+            lineageScope?: 'page' | 'siblings'
         }
     ): Promise<{
         children: GraphNode[]
@@ -791,6 +863,8 @@ export interface GraphDataProvider {
         totalChildren: number
         hasMore: boolean
         nextCursor?: string | null
+        /** Where the next page starts (see NodePage). Absent from an older server. */
+        nextOffset?: number | null
     }>
 
     /**
@@ -810,8 +884,9 @@ export interface GraphDataProvider {
     getDescendants(urn: URN, depth?: number): Promise<GraphNode[]>
 
     /**
-     * Get containment context: parent + children matching optional search
-     * Used for SearchChildrenPanel and similar UIs
+     * Get containment context: parent + children matching optional search.
+     * No caller today — the canvas's row-level search is a scoped instance
+     * of the view search session, which goes through `searchAdvanced`.
      */
     getContainment?(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult>
 
@@ -989,6 +1064,20 @@ export interface GraphDataProvider {
      */
     getAggregatedEdges(request: AggregatedEdgeRequest): Promise<AggregatedEdgeResult>
 
+    /**
+     * One request for a canvas open: the root page, the edges among that set,
+     * and the aggregated lineage among it.
+     *
+     * Replaces getNodes + getEdgesBetween (+ getAggregatedEdges) with a
+     * single round trip. The three fire together on every open and queue on
+     * the browser's six HTTP/1.1 connections, so over real RTT the saving is
+     * the queueing, not the query time.
+     *
+     * Optional: a provider that does not implement it leaves the caller on
+     * the three calls, which is also the fallback when it fails.
+     */
+    canvasBootstrap?(request: CanvasBootstrapRequest): Promise<CanvasBootstrapResult>
+
     // ==========================================
     // Node Creation
     // ==========================================
@@ -1148,20 +1237,36 @@ export function matchesRule(
 /**
  * Resolve layer assignment for a node based on rules
  */
-export function resolveLayerAssignment(
-    node: GraphNode,
-    rules: LayerAssignmentRule[]
-): string | undefined {
-    // Sort by priority (highest first)
-    const sortedRules = [...rules].sort((a, b) => b.priority - a.priority)
+/** Rule order for resolution: highest priority first. Returns a NEW array. */
+export function sortLayerRules(rules: LayerAssignmentRule[]): LayerAssignmentRule[] {
+    return [...rules].sort((a, b) => b.priority - a.priority)
+}
 
+/**
+ * `resolveLayerAssignment` for a list ALREADY ordered by `sortLayerRules`.
+ *
+ * Worth having separately because both callers resolve PER NODE against one
+ * unchanging rule list, and the sorting variant copies and re-sorts on every
+ * single call. Measured over 50,000 entities: 10.2ms of which ~8.7ms was that
+ * repeated copy-and-sort. Sort once, then use this.
+ */
+export function resolveLayerAssignmentIn(
+    node: GraphNode,
+    sortedRules: readonly LayerAssignmentRule[]
+): string | undefined {
     for (const rule of sortedRules) {
         if (matchesRule(node, rule)) {
             return rule.layerId
         }
     }
-
     return undefined
+}
+
+export function resolveLayerAssignment(
+    node: GraphNode,
+    rules: LayerAssignmentRule[]
+): string | undefined {
+    return resolveLayerAssignmentIn(node, sortLayerRules(rules))
 }
 
 /**

@@ -25,8 +25,9 @@ import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
 import { useAppliedTheme } from '@/hooks/useAppliedTheme'
-import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
-import { ToastContainer } from '@/components/ui/toast'
+import { useApplyLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
+import { ViewEditorContext, useViewEditorModal, type ViewEditorOpenOptions } from './viewEditorContext'
+import { NotificationStack } from '@/components/ui/notifications'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
 import { useFeature } from '@/store/features'
 import { TourOverlay } from '@/features/tour/TourOverlay'
@@ -56,9 +57,9 @@ export function AppLayout() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [viewEditorOpen, setViewEditorOpen] = useState(false)
   const [editingViewId, setEditingViewId] = useState<string | undefined>()
-  const [initialScope, setInitialScope] = useState<{ workspaceId?: string; dataSourceId?: string }>({})
+  const [initialScope, setInitialScope] = useState<ViewEditorOpenOptions>({})
 
-  const openViewEditor = (viewId?: string, options?: { workspaceId?: string; dataSourceId?: string }) => {
+  const openViewEditor = (viewId?: string, options?: ViewEditorOpenOptions) => {
     setEditingViewId(viewId)
     setInitialScope(options ?? {})
     setViewEditorOpen(true)
@@ -104,6 +105,10 @@ export function AppLayout() {
   useEffect(() => {
     document.documentElement.classList.toggle('reduce-motion', reducedMotion)
   }, [reducedMotion])
+
+  // The reader's lineage direction colours onto <html> — every surface that
+  // colours incoming / outgoing lineage reads them from there.
+  useApplyLineageDirectionColors()
 
   // Global "?" shortcut toggles the Help drawer — ignored while typing in a
   // field so it never steals a literal question mark.
@@ -174,10 +179,13 @@ export function AppLayout() {
           onComplete={() => closeViewEditor()}
           initialWorkspaceId={initialScope.workspaceId}
           initialDataSourceId={initialScope.dataSourceId}
+          journey={initialScope.journey}
+          importFile={initialScope.importFile}
+          importIntoViewId={initialScope.importIntoViewId}
         />
 
         <HelpPanel />
-        <ToastContainer />
+        <NotificationStack />
         <AccessDeniedModal />
 
         {/* Guided tours — experimental, gated by the toursEnabled feature flag */}

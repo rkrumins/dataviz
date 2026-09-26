@@ -12,6 +12,9 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useCanvasStore } from '@/store/canvas'
+import { liveProblems, useSaveProblemsStore } from '@/store/saveProblemsStore'
+import type { SaveProblem } from '@/features/versioning/model/saveProblems'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
   useStagedChangesStore,
@@ -29,6 +32,7 @@ const TYPE_LABELS: Record<StagedChangeType, string> = {
   delete_entity: 'Deletions',
   assign_layer: 'Layer assignments',
   move_to_layer: 'Layer rules',
+  move_entity: 'Moves',
   create_edge: 'New edges',
   edit_edge: 'Edge edits',
   delete_edge: 'Edge deletions',
@@ -44,12 +48,36 @@ const TYPE_ICONS: Record<StagedChangeType, keyof typeof LucideIcons> = {
   delete_entity: 'Trash2',
   assign_layer: 'Move',
   move_to_layer: 'ArrowRightLeft',
+  move_entity: 'CornerDownRight',
   create_edge: 'GitBranchPlus',
   edit_edge: 'Cable',
   delete_edge: 'Unlink',
   reverse_edge: 'Repeat',
   layer_config: 'Layers',
   reorder_nodes: 'ListOrdered',
+}
+
+// Where each change type is listed, in presentation order: creates → edits → moves → layout →
+// deletes. A Record over EVERY type, so a new type that is not placed here fails the type check —
+// the list used to be a plain array that had silently left out `update_entity` (every multi-field
+// drawer edit) and `move_entity`: staged and saved, but never shown for review.
+const SECTION_RANK: Record<StagedChangeType, number> = {
+  create_entity: 0, create_edge: 1,
+  rename_entity: 2, update_entity: 3, edit_edge: 4, reverse_edge: 5,
+  move_entity: 6,
+  assign_layer: 7, move_to_layer: 8, reorder_nodes: 9,
+  delete_edge: 10, delete_entity: 11,
+  layer_config: 12,
+}
+const SECTION_ORDER = (Object.keys(SECTION_RANK) as StagedChangeType[])
+  .sort((a, b) => SECTION_RANK[a] - SECTION_RANK[b])
+
+// Which header chip counts each type (layout changes have their own banner).
+const SUMMARY_KIND: Record<StagedChangeType, 'create' | 'edit' | 'delete' | null> = {
+  create_entity: 'create', create_edge: 'create',
+  rename_entity: 'edit', update_entity: 'edit', edit_edge: 'edit', reverse_edge: 'edit', move_entity: 'edit',
+  delete_entity: 'delete', delete_edge: 'delete',
+  assign_layer: null, move_to_layer: null, reorder_nodes: null, layer_config: null,
 }
 
 // View-layout changes (layer definitions AND entity placement) are VIEW presentation, not data-source
@@ -89,12 +117,19 @@ function timeAgo(ts: number): string {
 export interface SaveConfirmationModalProps {
   /** Called when the user confirms — implementer should run applyAll + saveToBackend. */
   onConfirm: () => void | Promise<void>
+  /** Words a change from the CURRENT state when its staged summary can go out of date — a
+   *  placement names its group and layer, and the group may since have been renamed or moved to
+   *  another layer. Returns undefined to keep the staged summary. */
+  describe?: (change: StagedChange) => string | undefined
 }
 
-export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
+export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModalProps) {
   const isOpen = useStagedChangesStore(s => s.isReviewPanelOpen)
   const close = useStagedChangesStore(s => s.closeReviewPanel)
-  const changes = useStagedChangesStore(s => s.changes)
+  const stagedChanges = useStagedChangesStore(s => s.changes)
+  const changes = useMemo(() => (describe
+    ? stagedChanges.map(c => { const now = describe(c); return now && now !== c.summary ? { ...c, summary: now } : c })
+    : stagedChanges), [stagedChanges, describe])
   const discard = useStagedChangesStore(s => s.discard)
   const discardAll = useStagedChangesStore(s => s.discardAll)
   const applyStatus = useStagedChangesStore(s => s.applyStatus)
@@ -137,15 +172,7 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
         list.push(c)
         groups.set(c.type, list)
       })
-    // Stable presentation order: creates → edits → moves → relations → deletes.
-    const ORDER: StagedChangeType[] = [
-      'create_entity', 'create_edge',
-      'rename_entity', 'edit_edge', 'reverse_edge',
-      'assign_layer', 'move_to_layer', 'reorder_nodes',
-      'delete_edge', 'delete_entity',
-      'layer_config',
-    ]
-    return ORDER
+    return SECTION_ORDER
       .map(type => [type, groups.get(type) ?? []] as const)
       .filter(([, items]) => items.length > 0)
   }, [changes, filter])
@@ -158,11 +185,17 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
 
   const total = changes.length
   const failedCount = changes.filter(c => c.error).length
+  // Why the last save was refused (nothing was written) — the problems still tied to staged changes.
+  const allProblems = useSaveProblemsStore(s => s.problems)
+  const problems = useMemo(
+    () => liveProblems(allProblems, new Set(changes.map(c => c.id))),
+    [allProblems, changes],
+  )
 
   const summaryStats = useMemo(() => ({
-    creates: changes.filter(c => c.type === 'create_entity' || c.type === 'create_edge').length,
-    edits: changes.filter(c => c.type === 'rename_entity' || c.type === 'edit_edge' || c.type === 'reverse_edge').length,
-    deletes: changes.filter(c => c.type === 'delete_entity' || c.type === 'delete_edge').length,
+    creates: changes.filter(c => SUMMARY_KIND[c.type] === 'create').length,
+    edits: changes.filter(c => SUMMARY_KIND[c.type] === 'edit').length,
+    deletes: changes.filter(c => SUMMARY_KIND[c.type] === 'delete').length,
   }), [changes])
 
   const handleConfirm = async () => {
@@ -236,7 +269,7 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
                     {total === 0
                       ? 'Nothing pending. Make some edits and they\'ll show up here for review.'
                       : <>Confirm <span className="font-semibold text-white/80 tabular-nums">{total}</span> edit{total === 1 ? '' : 's'} before they hit the backend.</>}
-                    {failedCount > 0 && (
+                    {failedCount > 0 && problems.length === 0 && (
                       <span className="ml-1.5 inline-flex items-center gap-1 text-rose-300 font-semibold">
                         <LucideIcons.AlertTriangle className="w-3 h-3" />
                         {failedCount} previously failed
@@ -245,6 +278,13 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
                   </p>
                 </div>
               </div>
+
+              {problems.length > 0 && (
+                <SaveProblemsBanner
+                  problems={problems}
+                  onDiscard={(ids) => ids.forEach(id => discard(id))}
+                />
+              )}
 
               {/* Summary chips + Undo/Redo cluster */}
               {total > 0 && (
@@ -598,10 +638,16 @@ function ChangeRow({
             {change.error && (
               <>
                 <span className="text-white/15">·</span>
-                <span className="text-rose-300 font-semibold" title={change.error}>failed</span>
+                <span className="text-rose-300 font-semibold">not saved</span>
               </>
             )}
           </p>
+          {change.error && (
+            <p className="mt-1.5 flex items-start gap-1.5 text-[11.5px] leading-snug text-rose-200/90">
+              <LucideIcons.CircleAlert className="w-3.5 h-3.5 mt-px flex-shrink-0 text-rose-300" aria-hidden />
+              <span>{change.error}</span>
+            </p>
+          )}
 
           <AnimatePresence initial={false}>
             {isExpanded && (
@@ -612,7 +658,9 @@ function ChangeRow({
                 transition={{ duration: 0.18, ease: 'easeOut' }}
                 className="overflow-hidden"
               >
-                {change.type === 'delete_entity' && (change.before as any)?.cascade ? (
+                {change.type === 'move_entity' ? (
+                  <MoveDetail change={change} />
+                ) : change.type === 'delete_entity' && (change.before as any)?.cascade ? (
                   // Itemised cascade impact — the full set of contained entities + edges
                   // this delete will remove (from the live delete-impact preview).
                   <CascadeImpactList
@@ -648,6 +696,79 @@ function ChangeRow({
           <LucideIcons.X className="w-3.5 h-3.5" />
         </button>
       </div>
+    </div>
+  )
+}
+
+/** A move, in words: where the entity sits now and where the save puts it. (Its raw `before` holds
+ *  the undo state — the whole view layout — which is no reading matter.) */
+function MoveDetail({ change }: { change: StagedChange }) {
+  const nodes = useCanvasStore(s => s.nodes)
+  const label = (id: string | null | undefined) =>
+    id ? ((nodes.find(n => n.id === id)?.data?.label as string | undefined) ?? id) : null
+  const after = change.after as { parentId?: string | null; edgeType?: string | null }
+  const removed = ((change.before as { removedLinks?: Array<{ source: string }> } | undefined)?.removedLinks ?? [])
+  const from = [...new Set(removed.map(e => label(e.source)))].filter(Boolean).join(', ')
+  const cell = (title: string, value: string, hint?: string) => (
+    <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
+      <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">{title}</p>
+      <p className="text-[12px] text-white/80 break-words">{value}</p>
+      {hint && <p className="text-[10.5px] text-white/45 mt-0.5">{hint}</p>}
+    </div>
+  )
+  return (
+    <div className="mt-2.5 grid grid-cols-2 gap-2">
+      {cell('From', from || 'Its current parent', from ? undefined : 'Replaced on save, wherever it is')}
+      {cell('To', label(after.parentId) ?? 'Top level', after.edgeType ? `as ${after.edgeType}` : undefined)}
+    </div>
+  )
+}
+
+/**
+ * The last save was refused as a whole, so NOTHING was written. Say so first, then each problem —
+ * what it is about and why — with the fix that is always available: discard the change that caused
+ * it (the rest stay staged, ready to save again).
+ */
+function SaveProblemsBanner({ problems, onDiscard }: {
+  problems: SaveProblem[]
+  onDiscard: (changeIds: string[]) => void
+}) {
+  const n = problems.length
+  return (
+    <div
+      role="alert"
+      className="relative mt-5 rounded-2xl border border-rose-400/35 bg-gradient-to-br from-rose-500/[0.14] via-rose-500/[0.08] to-transparent px-4 py-3.5 shadow-[inset_0_0_0_1px_rgba(244,63,94,0.10)]"
+    >
+      <div className="flex items-center gap-2.5">
+        <span className="w-7 h-7 rounded-xl bg-rose-500/20 border border-rose-400/30 flex items-center justify-center flex-shrink-0">
+          <LucideIcons.OctagonAlert className="w-4 h-4 text-rose-300" aria-hidden />
+        </span>
+        <div className="min-w-0">
+          <p className="text-[13.5px] font-semibold text-white leading-tight">Nothing was saved</p>
+          <p className="text-[11.5px] text-white/60 leading-tight mt-0.5">
+            {n === 1 ? '1 change needs attention' : `${n} changes need attention`} — fix or discard {n === 1 ? 'it' : 'them'}, then save again.
+          </p>
+        </div>
+      </div>
+      <ul className="mt-3 space-y-2">
+        {problems.map((p, i) => (
+          <li key={i} className="flex items-start gap-3 rounded-xl bg-black/25 border border-white/[0.06] px-3 py-2">
+            <div className="flex-1 min-w-0">
+              <p className="text-[12.5px] font-semibold text-white/95 truncate" title={p.name}>{p.name}</p>
+              <p className="text-[11.5px] text-rose-100/80 leading-snug mt-0.5">{p.reason}</p>
+            </div>
+            {p.changeIds.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onDiscard(p.changeIds)}
+                className="flex-shrink-0 mt-0.5 px-2.5 py-1 rounded-lg text-[11.5px] font-semibold text-rose-100 bg-rose-500/20 border border-rose-400/30 hover:bg-rose-500/30 focus-visible:outline focus-visible:outline-1 focus-visible:outline-rose-300 transition-colors"
+              >
+                Discard this change
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

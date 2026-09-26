@@ -16,6 +16,7 @@
  *     ``canvasFilterMode`` (persisted per-view). See
  *     ``useSearchHighlight`` for the per-row semantics.
  *   - Frame: fly the canvas viewport to encompass all matches.
+ *   - Export: every match, to a file (``ExportMatchesDialog``).
  *   - Clear: dismiss results.
  *
  * Pure presentational + store wiring. The auto-reveal effect lives in
@@ -25,13 +26,14 @@
 import { motion } from 'framer-motion'
 import {
     AlertTriangle, ChevronLeft, ChevronRight,
-    Crosshair, EyeOff, Filter, Maximize2, Sparkles, X,
+    Crosshair, EyeOff, FileDown, Filter, Maximize2, Sparkles, X,
 } from 'lucide-react'
 import {
     type FC, type ReactNode, useLayoutEffect, useMemo, useRef, useState,
 } from 'react'
 import { createPortal } from 'react-dom'
 
+import { ProgressBar } from '@/components/ui/ProgressBar'
 import { cn } from '@/lib/utils'
 import {
     useCanvasFilterMode,
@@ -50,8 +52,16 @@ export interface MatchBarProps {
     isRunning: boolean
     errorMessage?: string | null
     truncated?: boolean
+    /** Whether `count` is the server's exact total. A truncated run it
+     *  could still count has no "more than" to advertise. */
+    countIsExact?: boolean
     deadlineExceeded?: boolean
     candidateCount?: number | null
+    /** The search is still scanning the view: ``count`` is what it has
+     *  found so far, and ``progress`` how far through the view it is. The
+     *  matches shown are already the right ones, in their final order. */
+    scanning?: boolean
+    progress?: { scanned: number; total: number } | null
     /** Frame all matches on the canvas. Hidden when no matches or
      *  when running. */
     onFrame?: () => void
@@ -63,6 +73,12 @@ export interface MatchBarProps {
     onShowFocusedOnCanvas?: () => void
     /** Clear results + draft state. */
     onClear?: () => void
+    /** Export every match to a file. Shown only when there are matches. */
+    onExport?: () => void
+    /** What ``count`` counts: a search's matches, or a path search's
+     *  routes — which stop at the path limit, not the candidate cap, and
+     *  say so beside the paths themselves. */
+    unit?: 'match' | 'path'
     /** The view this panel is bound to — passed to setCanvasFilterMode
      *  so the choice persists for this view in localStorage. */
     viewId: string
@@ -70,9 +86,9 @@ export interface MatchBarProps {
 
 
 export const MatchBar: FC<MatchBarProps> = ({
-    count, elapsedMs, isRunning, errorMessage, truncated,
-    deadlineExceeded, candidateCount, onFrame, onShowFocusedOnCanvas,
-    onClear, viewId,
+    count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
+    deadlineExceeded, candidateCount, scanning, progress, onFrame,
+    onShowFocusedOnCanvas, onClear, onExport, unit = 'match', viewId,
 }) => {
     const orderedMatchUrns = useOrderedMatchUrns()
     const focusedMatchIndex = useFocusedMatchIndex()
@@ -82,6 +98,10 @@ export const MatchBar: FC<MatchBarProps> = ({
 
     const isError = Boolean(errorMessage)
     const showTruncation = Boolean(truncated && !isRunning && !isError)
+    // Two different facts. The banner reports that the RUN stopped at the
+    // cap; the plus claims the NUMBER is a floor, which it is not once
+    // the server has sent an exact total.
+    const showPlus = showTruncation && !countIsExact
     const showDeadlineExceeded = Boolean(
         deadlineExceeded && !isRunning && !isError,
     )
@@ -106,9 +126,21 @@ export const MatchBar: FC<MatchBarProps> = ({
                 errorMessage={errorMessage ?? null}
                 count={count}
                 elapsedMs={elapsedMs}
-                showTruncation={showTruncation}
+                showPlus={showPlus}
+                scannedPercent={scanning && !isRunning && !isError
+                    ? scannedPercent(progress) : null}
                 onClear={onClear}
+                onExport={!isRunning && !isError && (count ?? 0) > 0 ? onExport : undefined}
+                unit={unit}
             />
+            {scanning && !isRunning && !isError && (
+                <ProgressBar
+                    value={scannedPercent(progress)}
+                    label="Scanning the view for matches"
+                    className="h-1 rounded-none"
+                    barClassName="rounded-none"
+                />
+            )}
             {hasMatches && !isRunning && !isError && (
                 <ToolbarStrip
                     stepperPosition={displayPosition ?? 0}
@@ -122,9 +154,9 @@ export const MatchBar: FC<MatchBarProps> = ({
                     onFrame={onFrame}
                 />
             )}
-            {(showTruncation || showDeadlineExceeded) && (
+            {((showTruncation && unit === 'match') || showDeadlineExceeded) && (
                 <WarningBanner
-                    truncated={showTruncation}
+                    truncated={showTruncation && unit === 'match'}
                     deadlineExceeded={showDeadlineExceeded}
                     candidateCount={candidateCount ?? null}
                 />
@@ -141,17 +173,27 @@ export const MatchBar: FC<MatchBarProps> = ({
 // in a predictable, premium location (top-right of the results pane,
 // like every modal in the system).
 // ---------------------------------------------------------------------------
+function scannedPercent(progress: { scanned: number; total: number } | null | undefined): number {
+    if (!progress || progress.total <= 0) return 0
+    return Math.min(99, Math.floor((progress.scanned / progress.total) * 100))
+}
+
+
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showTruncation, onClear,
+    showPlus, scannedPercent: scanned, onClear, onExport, unit,
 }: {
     isRunning: boolean
     isError: boolean
     errorMessage: string | null
     count: number | null
     elapsedMs: number | null
-    showTruncation: boolean
+    showPlus: boolean
+    /** Set while the search is still scanning; its progress. */
+    scannedPercent: number | null
     onClear?: () => void
+    onExport?: () => void
+    unit: 'match' | 'path'
 }) {
     return (
         <div className={cn(
@@ -164,23 +206,42 @@ function SummaryStrip({
                 errorMessage={errorMessage}
                 count={count}
                 elapsedMs={elapsedMs}
-                showTruncation={showTruncation}
+                showPlus={showPlus}
+                scannedPercent={scanned}
+                unit={unit}
             />
-            {onClear && (
-                <button
-                    type="button"
-                    onClick={onClear}
-                    title="Clear results"
-                    aria-label="Clear results"
-                    className={cn(
-                        'inline-flex items-center justify-center w-7 h-7 rounded-md shrink-0',
-                        'text-ink-muted transition-colors',
-                        'hover:text-rose-500 hover:bg-rose-500/10',
-                    )}
-                >
-                    <X className="w-3.5 h-3.5" />
-                </button>
-            )}
+            <div className="flex items-center gap-1 shrink-0">
+                {onExport && (
+                    <button
+                        type="button"
+                        onClick={onExport}
+                        title="Export every match to a CSV or NDJSON file"
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2 h-7 rounded-md shrink-0',
+                            'text-[11px] font-medium text-ink-secondary transition-colors',
+                            'hover:text-cyan-600 dark:hover:text-cyan-400 hover:bg-cyan-500/10',
+                        )}
+                    >
+                        <FileDown className="w-3 h-3" />
+                        Export
+                    </button>
+                )}
+                {onClear && (
+                    <button
+                        type="button"
+                        onClick={onClear}
+                        title="Clear results"
+                        aria-label="Clear results"
+                        className={cn(
+                            'inline-flex items-center justify-center w-7 h-7 rounded-md shrink-0',
+                            'text-ink-muted transition-colors',
+                            'hover:text-rose-500 hover:bg-rose-500/10',
+                        )}
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                )}
+            </div>
         </div>
     )
 }
@@ -285,19 +346,36 @@ function ToolbarStrip({
 
 
 function CountReadout({
-    isRunning, isError, errorMessage, count, elapsedMs, showTruncation,
+    isRunning, isError, errorMessage, count, elapsedMs, showPlus, scannedPercent, unit,
 }: {
     isRunning: boolean
     isError: boolean
     errorMessage: string | null
     count: number | null
     elapsedMs: number | null
-    showTruncation: boolean
+    showPlus: boolean
+    scannedPercent: number | null
+    unit: 'match' | 'path'
 }) {
     return (
         <div className="flex items-baseline gap-2 min-w-0 flex-1">
             {isRunning ? (
                 <span className="text-[12px] text-ink-muted">Searching…</span>
+            ) : scannedPercent !== null && count !== null ? (
+                <>
+                    {/* Still scanning: what has been found so far — a count
+                        that only grows — and how far through the view. */}
+                    <span className="text-[20px] font-display font-bold text-ink tabular-nums leading-none">
+                        {count.toLocaleString()}
+                    </span>
+                    <span className="text-[12px] text-ink-secondary leading-none">found</span>
+                    <span
+                        className="text-[10.5px] text-ink-muted tabular-nums leading-none"
+                        aria-live="polite"
+                    >
+                        · scanning {scannedPercent}%
+                    </span>
+                </>
             ) : isError ? (
                 <span
                     className="text-[12px] text-rose-600 dark:text-rose-300 truncate font-medium"
@@ -311,10 +389,12 @@ function CountReadout({
                         Tabular numerals keep the digits aligned when the
                         count updates between runs. */}
                     <span className="text-[20px] font-display font-bold text-ink tabular-nums leading-none">
-                        {count.toLocaleString()}{showTruncation && '+'}
+                        {count.toLocaleString()}{showPlus && '+'}
                     </span>
                     <span className="text-[12px] text-ink-secondary leading-none">
-                        {count === 1 ? 'match' : 'matches'}
+                        {unit === 'path'
+                            ? (count === 1 ? 'path' : 'paths')
+                            : (count === 1 ? 'match' : 'matches')}
                     </span>
                     {elapsedMs !== null && (
                         <span className="text-[10.5px] text-ink-muted/70 tabular-nums leading-none">

@@ -23,6 +23,13 @@ import { ProviderEditorDrawer } from '../ProviderEditorDrawer'
 import { SsoCard, SsoEmpty } from '../ui/SsoCard'
 import { SsoListSkeleton, SsoLoading } from '../ui/SsoSkeleton'
 import { ErrorBanner } from './ErrorBanner'
+import { useAppNotifications } from '@/components/ui/notifications'
+
+/** The server's own words when it gave any, and a sentence naming the
+ *  action when it did not — a failure must never read as an empty box. */
+function errText(err: unknown, fallback: string): string {
+    return err instanceof Error && err.message ? err.message : fallback
+}
 
 export function ProvidersTab({
     openWizardSignal = 0, filter = null, onClearFilter, onChanged,
@@ -38,11 +45,12 @@ export function ProvidersTab({
 } = {}) {
     const [rows, setRows] = useState<IdpProvider[]>([])
     const [health, setHealth] = useState<Record<string, IdpHealth>>({})
+    // Only the list read writes this. Everything an operator DOES here —
+    // flipped, published, rehearsed, and every way those fail — is
+    // something that just happened, and goes to the app's one
+    // notification stack; a banner is for what is still true while it is
+    // being read, which a failed list is and a failed click is not.
     const [error, setError] = useState<string | null>(null)
-    // A rehearsal's verdict is a result, not a failure — it gets its own
-    // surface. Rendering "would sign in as ada@…" in the error banner
-    // taught operators that a working connection was broken.
-    const [notice, setNotice] = useState<string | null>(null)
     const [showCreate, setShowCreate] = useState(false)
     const [editingId, setEditingId] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
@@ -75,13 +83,14 @@ export function ProvidersTab({
     // browser confirm() for one and an unguarded click for the other.
     const [publishing, setPublishing] = useState<IdpProvider | null>(null)
     const [rehearsing, setRehearsing] = useState<IdpProvider | null>(null)
+    const { notify } = useAppNotifications()
 
     const refresh = useCallback(async () => {
         try {
             setRows(await ssoAdminService.listProviders())
             setError(null)
         } catch (err) {
-            setError((err as Error).message)
+            setError(errText(err, 'The list of connections could not be read.'))
         } finally {
             setLoaded(true)
         }
@@ -149,8 +158,11 @@ export function ProvidersTab({
             await ssoAdminService.updateProvider(p.id, { enabled: true })
             await refresh()
             onChanged?.()
+            notify('success', `${p.displayName} is on — it can sign people in again.`)
         } catch (err) {
-            setError((err as Error).message)
+            notify('error', errText(
+                err, `Could not turn ${p.displayName} on.`,
+            ))
         } finally {
             setBusy(false)
             setPending(null)
@@ -165,7 +177,9 @@ export function ProvidersTab({
         try {
             await ssoAdminService.updateProvider(p.id, { enabled: false })
         } catch (err) {
-            setError((err as Error).message)
+            notify('error', errText(
+                err, `Could not turn ${p.displayName} off.`,
+            ))
             setBusy(false)
             setPending(null)
             return
@@ -176,29 +190,27 @@ export function ProvidersTab({
             try {
                 ended = await ssoAdminService.endProviderSessions(p.id)
             } catch (err) {
-                endFailure = (err as Error).message
+                endFailure = errText(err, 'the request did not complete')
             }
         }
         setDisabling(null)
-        // refresh() clears the error banner on success, so the outcome
-        // message has to land after it, not before.
         await refresh()
         onChanged?.()
         if (endFailure !== null) {
             // The switch DID flip — say so, and say what didn't happen.
-            setError(
+            notify('error',
                 `${p.displayName} is off, but signing its users out `
                 + `failed: ${endFailure}`,
             )
         } else if (ended !== null) {
-            setNotice(
+            notify('success',
                 `${p.displayName} is off. Signed out `
                 + `${ended.usersAffected} ${
                     ended.usersAffected === 1 ? 'person' : 'people'
                 } who had signed in through it.`,
             )
         } else {
-            setNotice(
+            notify('success',
                 `${p.displayName} is off. People already signed in through `
                 + 'it keep their sessions until those expire.',
             )
@@ -214,8 +226,14 @@ export function ProvidersTab({
             await ssoAdminService.publishProvider(p.id)
             await refresh()
             onChanged?.()
+            notify('success',
+                `${p.displayName} is published — everyone sees it on the `
+                + 'sign-in screen now.',
+            )
         } catch (err) {
-            setError((err as Error).message)
+            notify('error', errText(
+                err, `Could not publish ${p.displayName}.`,
+            ))
         } finally {
             setBusy(false)
             setPending(null)
@@ -242,7 +260,6 @@ export function ProvidersTab({
     async function dryRun(p: IdpProvider) {
         setBusy(true)
         setPending({ id: p.id, action: 'rehearse' })
-        setNotice(null)
         try {
             const { loginUrl } = await ssoAdminService.startDryRun(p.id)
             const st = (p.settings ?? {}) as Record<string, unknown>
@@ -266,7 +283,7 @@ export function ProvidersTab({
                     ? [verdict.line,
                        ...summarizeRehearsalOutcome(verdict.outcome)].join('\n')
                     : verdict.line
-                ;(verdict.ok ? setNotice : setError)(text)
+                notify(verdict.ok ? 'success' : 'error', text)
             }
 
             if (p.kind === 'backchannel'
@@ -301,9 +318,9 @@ export function ProvidersTab({
 
             window.open(loginUrl, '_blank', 'noopener')
         } catch (err) {
-            setError(
+            notify('error',
                 `Could not start the sign-in for ${p.displayName}: `
-                + (err as Error).message,
+                + errText(err, 'the request did not complete'),
             )
         } finally {
             setBusy(false)
@@ -349,23 +366,6 @@ export function ProvidersTab({
                 </div>
             )}
             {error && <ErrorBanner message={error} />}
-            {notice && (
-                <div
-                    role="status"
-                    className="flex items-start gap-2 px-3 py-2 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06]"
-                >
-                    <FlaskConical className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
-                    <p className="text-xs text-ink flex-1 min-w-0 whitespace-pre-line">{notice}</p>
-                    <button
-                        type="button"
-                        aria-label="Dismiss notice"
-                        onClick={() => setNotice(null)}
-                        className="shrink-0 text-ink-muted hover:text-ink"
-                    >
-                        <X className="w-3.5 h-3.5" />
-                    </button>
-                </div>
-            )}
 
             {disabling && (
                 <div

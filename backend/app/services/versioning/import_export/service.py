@@ -6,34 +6,51 @@ full traceability metadata (workspace/data source/provider/graph); the ``ImportW
 populates the draft. Terminal review/publish/PR reuse the existing draft workflow — this service
 never writes to ``main`` itself.
 
-v1 dispatch is in-process (``run_import`` awaited or scheduled by the caller); a Redis/Postgres
-dispatcher can slot in later behind the same call, mirroring the aggregation pattern without
-importing it.
+A job runs in the API process that created it, as a task of its own, or — with
+``GRAPHVER_TRANSFER_INPROCESS`` off — on the versioning worker, which claims it from ``jobs``
+(:mod:`.runner`). Either way the caller starts it with :meth:`ImportExportService.start_import` /
+``start_export`` once its inputs are stored.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
+from backend.app.services.background import spawn_detached
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db
 from ..models import BranchORM, ImportRowORM, JobORM
 from ..service import GraphVersioningService
-from .export_worker import (
-    ExportWorker, column_order, example_template_records, records_from_state,
-)
+from .export_worker import ExportWorker, example_template_records, records_from_state
 from .formats import get_adapter
 from .import_worker import ImportWorker
+from .rowmodel import column_order
+from .runner import JOB_TYPES, QUEUED
 
 logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# What a job reads when it stopped mid-run: its task was cancelled, or its server went away.
+_INTERRUPTED = ("The job stopped before it finished (the server restarted or it was interrupted). "
+                "Start it again.")
+# What a queued job reads when no worker took it in ``TRANSFER_QUEUE_TIMEOUT_SECS``.
+_NOT_STARTED = ("No worker started the job in time. Start it again, or ask an administrator whether "
+                "the versioning worker is running.")
+
+
+def _silent_secs(row: JobORM) -> float:
+    """Seconds since the job last showed life: its heartbeat, else its start, else its creation."""
+    last = datetime.fromisoformat(row.updated_at or row.started_at or row.created_at)
+    return (datetime.now(timezone.utc) - last).total_seconds()
 
 
 class ImportExportService:
@@ -110,6 +127,26 @@ class ImportExportService:
                 job.source_uri = source_uri
         return {"job_id": job_id, "branch_id": branch_id, "source_uri": source_uri}
 
+    async def start_import(self, job_id: str) -> str:
+        """Start the import once its file is stored. Returns the status to report."""
+        return await self._start(job_id, self.run_import_safe, "import")
+
+    async def start_export(self, job_id: str) -> str:
+        """Start the export once its inputs are stored. Returns the status to report."""
+        return await self._start(job_id, self.run_export_safe, "export")
+
+    async def _start(self, job_id: str, run, kind: str) -> str:
+        """By default the job runs here, as a task of its own: a ``BackgroundTasks`` task would be
+        cancelled with its request at the timeout. With ``GRAPHVER_TRANSFER_INPROCESS`` off it is
+        only queued, and the versioning worker runs it (:mod:`.runner`)."""
+        if config.TRANSFER_INPROCESS:
+            spawn_detached(run(job_id), name=f"{kind} {job_id}")
+            return "running"
+        async with db.graphver_session() as s:
+            await s.execute(update(JobORM).where(JobORM.id == job_id, JobORM.status == "pending")
+                            .values(current_phase=QUEUED, updated_at=_now()))
+        return "pending"
+
     async def run_import_safe(self, job_id: str) -> None:
         """Run the import, marking the job ``failed`` on any error (dispatch entrypoint)."""
         await self._run_safe(job_id, self.run_import)
@@ -117,14 +154,25 @@ class ImportExportService:
     async def _run_safe(self, job_id: str, runner) -> None:
         try:
             await runner(job_id)
+        except asyncio.CancelledError:
+            # A shutdown or a cancelled task: record it, or the job reads "running" forever.
+            logger.warning("job %s was cancelled", job_id)
+            try:
+                await self._mark_failed(job_id, _INTERRUPTED)
+            except Exception:  # noqa: BLE001 — the cancellation must still propagate
+                logger.exception("recording the cancellation of job %s failed", job_id)
+            raise
         except Exception as exc:  # pragma: no cover - defensive; recorded on the job row
             logger.exception("job %s failed", job_id)
-            async with db.graphver_session() as s:
-                row = await s.get(JobORM, job_id)
-                if row is not None:
-                    row.status = "failed"
-                    row.error_message = str(exc)[:2000]
-                    row.completed_at = _now()
+            await self._mark_failed(job_id, str(exc))
+
+    async def _mark_failed(self, job_id: str, message: str) -> None:
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            if row is not None and row.status in ("pending", "running"):
+                row.status = "failed"
+                row.error_message = message[:2000]
+                row.completed_at = _now()
 
     async def get_preview(self, job_id: str, *, sample_limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Job summary + a bounded sample of resolved rows (the inline preview; the full diff is
@@ -185,7 +233,8 @@ class ImportExportService:
         ontology = None
         if self._ontology_resolver is not None:
             ontology = await self._ontology_resolver(ws, ds)
-        worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology)
+        worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology,
+                              facts=bool(view_id and self._layout_writer is not None))
         summary = await worker.run(job_id)
         # Post-commit: a view-scoped import that created new top-level entities writes canonical layer
         # assignments so the curated view shows them right away. Best-effort — never fails the import.
@@ -233,14 +282,22 @@ class ImportExportService:
         select_ids: Optional[List[str]] = None,
         select_types: Optional[List[str]] = None,
         idempotency_key: Optional[str] = None,
+        package: Optional[Dict[str, Any]] = None,
+        file_name: Optional[str] = None,
     ) -> Dict[str, str]:
         """Create an export job; mints the ``export.<fmt>`` artifact key. Returns
         ``{job_id, result_uri}``. A whole-data-source export is a re-importable backup.
         ``branch_id`` exports that working branch's composed state (main + committed + draft),
         defaulting to published main. Export options (``props``/``ids``/``types``) ride in
         ``field_scope``: ``extra_props`` = empty columns to add; ``select_ids``/``select_types`` =
-        row-scope to just those entities / entity types."""
+        row-scope to just those entities / entity types. ``package`` makes the job a view package's
+        (view_transfer.package): the data is written, then packaged with the views. ``file_name``
+        names the download."""
         options: Dict[str, Any] = {}
+        if package:
+            options["package"] = package
+        if file_name:
+            options["fileName"] = file_name
         if extra_props:
             options["props"] = extra_props
         if select_ids:
@@ -275,17 +332,18 @@ class ImportExportService:
             # Branch-effective: an export of a draft branch scopes to that
             # draft's own view assignments (base ⊕ overlay).
             scope = await self._scope_resolver(ws, ds, view_id, branch_id)
-        return await ExportWorker(self._svc, self._store, scope=scope, options=options or {}).run(job_id)
+        after_write = None
+        package = (options or {}).get("package")
+        if package:
+            from backend.app.services.view_transfer.package import finish_export
+
+            async def after_write(job_id, result_uri, summary):
+                return await finish_export(self._store, job_id, result_uri, summary, package=package)
+        return await ExportWorker(self._svc, self._store, scope=scope, options=options or {},
+                                  after_write=after_write).run(job_id)
 
     async def run_export_safe(self, job_id: str) -> None:
         await self._run_safe(job_id, self.run_export)
-
-    async def open_result(self, job_id: str):
-        """Return ``(job, byte-stream)`` for downloading a completed export, else ``None``."""
-        job = await self.get_job(job_id)
-        if job is None or not job.get("resultUri"):
-            return None
-        return job, self._store.open_stream(job["resultUri"])
 
     async def build_template(self, *, graph_id: str, export_format: str = "csv", limit: int = 5) -> bytes:
         """A small, prepopulated starter template so users learn the format instantly: the column
@@ -312,11 +370,27 @@ class ImportExportService:
         return b"".join(chunks)
 
     async def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """Job as a camelCase dict (frontend wire shape)."""
+        """Job as a camelCase dict (frontend wire shape). A pending or running import/export silent
+        for ``JOB_STALE_AFTER_SECS`` is reported failed: the process running it went away (a
+        restart, a killed pod) and nothing will finish it, while a live import beats every few
+        seconds (``ImportWorker``). A job queued for the versioning worker waits its turn instead,
+        for up to ``TRANSFER_QUEUE_TIMEOUT_SECS``, with ``queuedAhead`` the jobs queued before it."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             if row is None:
                 return None
+            queued = row.status == "pending" and row.current_phase == QUEUED
+            ahead = None
+            if row.job_type in JOB_TYPES and row.status in ("pending", "running"):
+                if _silent_secs(row) > (config.TRANSFER_QUEUE_TIMEOUT_SECS if queued
+                                        else config.JOB_STALE_AFTER_SECS):
+                    row.status = "failed"
+                    row.error_message = _NOT_STARTED if queued else _INTERRUPTED
+                    row.completed_at = _now()
+                elif queued:
+                    ahead = (await s.execute(select(func.count()).select_from(JobORM).where(
+                        JobORM.job_type.in_(JOB_TYPES), JobORM.status == "pending",
+                        JobORM.current_phase == QUEUED, JobORM.created_at < row.created_at))).scalar_one()
             return {
                 "jobId": row.id, "jobType": row.job_type, "status": row.status,
                 "graphId": row.graph_id, "branchId": row.branch_id,
@@ -327,4 +401,10 @@ class ImportExportService:
                 "reportUri": row.report_uri, "resultUri": row.result_uri,
                 "summary": row.summary, "errorMessage": row.error_message,
                 "createdAt": row.created_at, "completedAt": row.completed_at,
+                # Queued for the versioning worker: how many jobs it waits behind (else None).
+                "queuedAhead": ahead,
+                # The download's name: the export's own, or a view package's (view_transfer.package).
+                "fileName": (row.field_scope.get("fileName")
+                             or (row.field_scope.get("package") or {}).get("fileName"))
+                if isinstance(row.field_scope, dict) else None,
             }

@@ -31,8 +31,21 @@
     
     /* Accent Palette */
     --nx-accent-lineage: #6366f1;
+    /* Raw channels so Tailwind can apply alpha — `accent-lineage/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-lineage-rgb: 99 102 241;
     --nx-accent-lineage-soft: rgba(99, 102, 241, 0.12);
+    /* Lineage DIRECTION — incoming (upstream) and outgoing (downstream), one
+       pair for every surface: the canvas's ports, the entity drawer, the
+       Focus Lens, a trace (lib/lineageDirectionColors.ts). These are the
+       defaults; the app writes the reader's chosen pair over them.
+       Tailwind: `lineage-in` / `lineage-out` (tailwind.config.js). */
+    --nx-lineage-in-rgb: 59 130 246;
+    --nx-lineage-out-rgb: 34 197 94;
     --nx-accent-business: #10b981;
+    /* Raw channels so Tailwind can apply alpha — `accent-business/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-business-rgb: 16 185 129;
     --nx-accent-business-soft: rgba(16, 185, 129, 0.12);
     /* Sits between business (emerald) and lineage (indigo) on the wheel, which is
        how every call site uses it: as the middle of a business→lineage ramp.
@@ -40,12 +53,24 @@
        resolved to nothing and those gradients silently lost a stop — text using
        bg-clip-text faded out mid-word. */
     --nx-accent-explore: #06b6d4;
+    /* Raw channels so Tailwind can apply alpha — `accent-explore/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-explore-rgb: 6 182 212;
     --nx-accent-explore-soft: rgba(6, 182, 212, 0.12);
     --nx-accent-technical: #f59e0b;
+    /* Raw channels so Tailwind can apply alpha — `accent-technical/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-technical-rgb: 245 158 11;
     --nx-accent-technical-soft: rgba(245, 158, 11, 0.12);
     --nx-accent-warning: #ef4444;
+    /* Raw channels so Tailwind can apply alpha — `accent-warning/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-warning-rgb: 239 68 68;
     --nx-accent-warning-soft: rgba(239, 68, 68, 0.12);
     --nx-accent-muted: #64748b;
+    /* Raw channels so Tailwind can apply alpha — `accent-muted/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-muted-rgb: 100 116 139;
     
     /* Glassmorphism */
     --nx-glass-blur: 16px;
@@ -157,9 +182,9 @@
     opacity: 1;
   }
 
-  /* Toast auto-dismiss bar. Driven by the compositor rather than a 30ms
+  /* Notification auto-dismiss bar. Driven by the compositor rather than a 30ms
    * setInterval + setState, which re-rendered a `<motion.div layout>` ~33 times
-   * a second for the life of every toast. `width` is set inline to where the bar
+   * a second for the life of every notification. `width` is set inline to where the bar
    * should START (a remount mid-life resumes correctly); this runs it to zero
    * over whatever time is left. */
   @keyframes nx-toast-progress {
@@ -608,6 +633,114 @@
     @apply text-2xs font-mono font-medium;
     @apply bg-black/5 dark:bg-white/10 rounded border border-black/10 dark:border-white/10;
     @apply text-ink-secondary;
+  }
+
+  /* === Entity cards on the Context View canvas (FlatTreeItem) ===
+   * The lineage lines are drawn UNDER the cards. Solid by default: the card
+   * is the canvas's own colour, so it looks exactly as a bare row did, and a
+   * line crossing a column passes cleanly beneath its cards.
+   *
+   * Frosted is the reader's choice (Display > Lineage > Appearance, which
+   * sets `data-frosted-cards` on the canvas scroller): lines show softly
+   * through the card. It was the only look before, on a card whose tint class
+   * emitted no colour at all, so the blur was the whole surface — dense
+   * dashed lines behind it smeared into what read as a pixelated canvas, and
+   * a blur inside a scroller re-samples what lies under every card on each
+   * scroll frame. State tints (hover, selected, search) are background
+   * IMAGES and paint over either surface. */
+  .nx-row-card {
+    background-color: var(--nx-bg-canvas);
+  }
+  [data-frosted-cards] .nx-row-card {
+    background-color: transparent;
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+  }
+
+  /* Hover spotlight (LineageFlowOverlay, hoverSpotlight.ts). While a hover
+   * lights an entity's connections, every other card dims; the overlay marks
+   * the lit ones `data-spot-lit`, which restores them and adds this glow.
+   * Marks rather than React so a hover re-renders no row. */
+  [data-row-spotlight] {
+    --nx-spotlight-tint: linear-gradient(to right, rgb(59 130 246 / 0.05), transparent);
+    --nx-spotlight-ring: 0 0 0 1px rgb(96 165 250 / 0.15);
+  }
+  .dark [data-row-spotlight] {
+    --nx-spotlight-tint: linear-gradient(to right, rgb(96 165 250 / 0.06), transparent);
+    --nx-spotlight-ring: 0 0 0 1px rgb(96 165 250 / 0.12);
+  }
+  [data-row-spotlight] .nx-row-card {
+    opacity: 0.4;
+  }
+  [data-row-spotlight] .nx-row-card[data-spot-lit] {
+    opacity: 1;
+  }
+  [data-row-spotlight] .nx-row-card[data-spot-lit]:not([data-selected]) {
+    background-image: var(--nx-spotlight-tint);
+    box-shadow: var(--nx-spotlight-ring);
+  }
+
+  /* Lineage ports (LineagePortGlyph, lineagePorts.ts): where a card's lines
+   * plug in — a rail straddling the edge they meet, in the product's lineage
+   * direction pair: incoming (upstream) and outgoing (downstream), the same
+   * colours as the drawer, the Focus Lens and a trace. Colour alone: the
+   * hover tip (PortHoverTip) and the legends say what it means.
+   *
+   * The rail runs the card's height, inset past its 12px corners so both
+   * ends still sit on the edge — the same rail on every card of a column,
+   * whatever it carries. `--port-strength` (0..1, the side's volume against
+   * its column's busiest) sets only the glow. */
+  .nx-lineage-port {
+    --port-in: var(--nx-lineage-in-rgb);
+    --port-out: var(--nx-lineage-out-rgb);
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    width: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  /* A 4px rail is a thin target: the tip's hover area is wider than the ink. */
+  .nx-lineage-port::before {
+    content: '';
+    position: absolute;
+    inset: 0 -4px;
+  }
+  .nx-lineage-port-left {
+    left: -2px;
+  }
+  .nx-lineage-port-right {
+    right: -2px;
+  }
+  .nx-lineage-port-inline {
+    position: relative;
+    top: auto;
+    bottom: auto;
+    height: 12px;
+    flex-shrink: 0;
+  }
+  .nx-lineage-port-body {
+    flex: 1 1 0;
+    min-height: 0;
+    border-radius: 9999px;
+  }
+  .nx-lineage-port-in {
+    --port-c: var(--port-in);
+    background-color: rgb(var(--port-c));
+  }
+  .nx-lineage-port-out {
+    --port-c: var(--port-out);
+    background-color: rgb(var(--port-c));
+  }
+  /* Solid — lines to entities on this canvas; busier sides glow brighter. */
+  .nx-lineage-port[data-port="here"] .nx-lineage-port-body {
+    box-shadow: 0 0 calc(2px + 6px * var(--port-strength, 0)) rgb(var(--port-c) / calc(0.3 + 0.45 * var(--port-strength, 0)));
+  }
+  /* Hollow — lineage in the data, none of it to anything on this canvas. */
+  .nx-lineage-port[data-port="beyond"] .nx-lineage-port-body {
+    background-color: var(--nx-bg-canvas);
+    box-shadow: inset 0 0 0 1.25px rgb(var(--port-c));
   }
 }
 

@@ -7,8 +7,10 @@ import {
     Globe,
     Database,
     Eye,
+    FileText,
     LayoutTemplate,
     BookOpen,
+    Settings,
     Loader2,
     Clock,
 } from 'lucide-react'
@@ -18,11 +20,14 @@ import { CATEGORY_ORDER, type GlobalSearchResult, type SearchHit, type SearchCat
 import { HighlightedText } from '@/components/ui/HighlightedText'
 
 const CATEGORY_ICONS: Record<SearchResultCategory, React.ComponentType<{ className?: string }>> = {
+    Page: FileText,
     Workspace: Globe,
     'Data Source': Database,
     View: Eye,
     Template: LayoutTemplate,
     'Semantic Layer': BookOpen,
+    Setting: Settings,
+    Doc: BookOpen,
 }
 
 interface DashboardHeroProps {

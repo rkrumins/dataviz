@@ -18,6 +18,7 @@
  */
 
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { readJsonLossless } from '@/lib/losslessJson'
 import type { GraphNode, GraphEdge } from '@/providers/GraphDataProvider'
 
 // ============================================
@@ -355,7 +356,7 @@ async function postJson<TBody, TResult>(
     throw await parseError(res)
   }
 
-  return (await res.json()) as TResult
+  return readJsonLossless<TResult>(res)
 }
 
 // ============================================

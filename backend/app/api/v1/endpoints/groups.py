@@ -17,6 +17,7 @@ delegate group management without granting full system admin.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,9 +27,11 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import binding_repo, group_repo, grant_repo, user_repo
 from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
+from backend.common.display_name import resolve_display_name
 from backend.common.models.rbac import (
     GroupCreateRequest,
     GroupMemberAddRequest,
+    GroupMemberPreview,
     GroupMemberResponse,
     GroupResponse,
     GroupUpdateRequest,
@@ -38,11 +41,26 @@ from backend.common.models.rbac import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+#: Faces the admin groups table draws per row before it collapses the
+#: rest into a "+N" chip.
+_MEMBER_PREVIEW = 4
+
 
 # ── helpers ──────────────────────────────────────────────────────────
 
-async def _to_response(session: AsyncSession, group_orm) -> GroupResponse:
-    member_count = await group_repo.count_members(session, group_orm.id)
+def _to_response(
+    group_orm,
+    *,
+    member_count: int,
+    member_preview: Sequence[dict[str, str | None]] = (),
+) -> GroupResponse:
+    """Build the DTO from a group row plus counts the CALLER resolved.
+
+    Deliberately takes ``member_count`` rather than fetching it: this used
+    to run its own COUNT, which made ``list_groups`` an N+1 over the whole
+    page. The list route resolves counts and previews once, in two batched
+    queries, and hands them in.
+    """
     return GroupResponse(
         id=group_orm.id,
         name=group_orm.name,
@@ -52,6 +70,38 @@ async def _to_response(session: AsyncSession, group_orm) -> GroupResponse:
         created_at=group_orm.created_at,
         updated_at=group_orm.updated_at,
         member_count=member_count,
+        member_preview=[
+            GroupMemberPreview(
+                id=p["id"], display_name=p["name"], avatar_id=p.get("avatar_id"),
+            )
+            for p in member_preview
+        ],
+    )
+
+
+def _member_response(member_orm, identity: dict | None) -> GroupMemberResponse:
+    """One membership row, with the member's identity folded in.
+
+    ``identity`` is a row from ``user_repo.get_identities_by_ids`` — or
+    ``None`` when the id resolves to nothing at all. That case keeps
+    ``display_name=None`` on purpose: an orphaned membership is a real
+    state, the admin needs to see it to remove it, and the FE must show
+    the raw id rather than invent a name over it.
+    """
+    identity = identity or {}
+    return GroupMemberResponse(
+        user_id=member_orm.user_id,
+        group_id=member_orm.group_id,
+        added_at=member_orm.added_at,
+        added_by=member_orm.added_by,
+        source=getattr(member_orm, "source", None) or "local",
+        # ``resolve_display_name`` yields "" for an account with no name
+        # parts at all; the email is a better label than a blank line.
+        display_name=identity.get("name") or identity.get("email") or None,
+        email=identity.get("email"),
+        status=identity.get("status"),
+        deleted=bool(identity.get("deleted")),
+        avatar_id=identity.get("avatar_id"),
     )
 
 
@@ -65,7 +115,19 @@ async def list_groups(
     session: AsyncSession = Depends(get_db_session),
 ):
     groups = await group_repo.list_groups(session, limit=limit, offset=offset)
-    return [await _to_response(session, g) for g in groups]
+    ids = [g.id for g in groups]
+    counts = await group_repo.count_members_batch(session, ids)
+    previews = await group_repo.member_preview_batch(
+        session, ids, per_group=_MEMBER_PREVIEW,
+    )
+    return [
+        _to_response(
+            g,
+            member_count=counts.get(g.id, 0),
+            member_preview=previews.get(g.id, []),
+        )
+        for g in groups
+    ]
 
 
 @router.post(
@@ -94,7 +156,8 @@ async def create_group(
         payload={"group_id": group.id, "name": group.name, "actor_id": admin.id},
     )
     logger.info("Group %s created by %s", group.id, admin.id)
-    return await _to_response(session, group)
+    # Nothing has had time to join it.
+    return _to_response(group, member_count=0)
 
 
 @router.patch(
@@ -118,7 +181,10 @@ async def update_group(
         event_type="rbac.group.updated",
         payload={"group_id": group_id, "actor_id": admin.id},
     )
-    return await _to_response(session, group)
+    return _to_response(
+        group,
+        member_count=await group_repo.count_members(session, group_id),
+    )
 
 
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -186,14 +252,20 @@ async def list_members(
     if await group_repo.get_group_by_id(session, group_id) is None:
         raise HTTPException(status_code=404, detail="Group not found")
     members = await group_repo.list_group_members(session, group_id)
+    # Who these people ARE, resolved here in one batched query.
+    #
+    # The FE used to answer this by fetching the whole admin user list and
+    # joining client-side, which was wrong two ways: that list caps at its
+    # 50 newest accounts (so any older member rendered as a bare
+    # ``usr_...`` id), and it is gated on ``system:admin`` — which a
+    # delegated groups admin does not hold, so the member list 403'd and
+    # sat on its spinner forever. Neither is a UI problem; both are this
+    # endpoint declining to say who it is talking about.
+    identities = await user_repo.get_identities_by_ids(
+        session, [m.user_id for m in members],
+    )
     return [
-        GroupMemberResponse(
-            user_id=m.user_id,
-            group_id=m.group_id,
-            added_at=m.added_at,
-            added_by=m.added_by,
-            source=getattr(m, "source", None) or "local",
-        )
+        _member_response(m, identities.get(m.user_id))
         for m in members
     ]
 
@@ -212,7 +284,8 @@ async def add_member(
 ):
     if await group_repo.get_group_by_id(session, group_id) is None:
         raise HTTPException(status_code=404, detail="Group not found")
-    if await user_repo.get_user_by_id(session, body.user_id) is None:
+    user = await user_repo.get_user_by_id(session, body.user_id)
+    if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
     member = await group_repo.add_member(
@@ -244,13 +317,17 @@ async def add_member(
         "User %s added to group %s by %s (sessions killed: %d)",
         body.user_id, group_id, admin.id, revoked,
     )
-    return GroupMemberResponse(
-        user_id=member.user_id,
-        group_id=member.group_id,
-        added_at=member.added_at,
-        added_by=member.added_by,
-        source=getattr(member, "source", None) or "local",
-    )
+    # Identity off the row the 404 check already fetched — no extra query,
+    # and the route stops advertising fields that only IT leaves null.
+    return _member_response(member, {
+        "name": resolve_display_name(
+            user.display_name, user.first_name, user.last_name,
+        ),
+        "email": user.email,
+        "status": user.status,
+        "deleted": user.deleted_at is not None,
+        "avatar_id": user.avatar_id,
+    })
 
 
 @router.delete(

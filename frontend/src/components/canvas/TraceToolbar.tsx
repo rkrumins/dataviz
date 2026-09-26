@@ -14,6 +14,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import {
     useTraceStore,
     type TraceConfig,
@@ -603,7 +604,7 @@ export function TraceToolbar({
                                                             : "bg-black/5 dark:bg-white/5 text-ink-muted border-transparent hover:border-glass-border"
                                                     )}
                                                 >
-                                                    {edgeType}
+                                                    {edgeTypeCopy(edgeType)?.label ?? edgeType}
                                                 </button>
                                             )
                                         })}

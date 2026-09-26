@@ -16,7 +16,7 @@ vi.mock('react-router-dom', async () => ({
   useNavigate: () => vi.fn(),
 }))
 vi.mock('@/store/branding', () => ({ useBrand: () => ({ appName: 'Test' }) }))
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast: vi.fn() }) }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
 vi.mock('@/services/redisConfigService', () => ({
   fetchRedisConfig: vi.fn().mockResolvedValue(null),
 }))

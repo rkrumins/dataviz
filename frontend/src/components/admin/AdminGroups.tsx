@@ -3,32 +3,33 @@
  *
  * KPI summary cards + rich groups table with inline actions:
  *  - Create / edit / delete groups
- *  - Manage members (add / remove)
+ *  - See a group's members as faces on the row, and the whole list in a
+ *    drawer (``GroupMembersDrawer``) that also adds and removes them
  *  - SCIM-source badge for IdP-synced groups
  *
  * Visual language matches AdminUsers.tsx: gradient hero icon, KPI strip
  * with colored gradient overlays, framer-motion animated banners,
  * gradient avatars, sortable table headers, and framer-motion modals.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Users2, Users, UserPlus, Pencil, Trash2, RefreshCw, Search,
-    Loader2, Plus, X, AlertCircle, AlertTriangle, CheckCircle2,
-    Cloud, ChevronDown, ChevronUp, Sparkles, Mail,
+    Loader2, Plus, X, AlertCircle, AlertTriangle,
+    Cloud, ChevronDown, ChevronUp, Sparkles,
 } from 'lucide-react'
 import {
     groupsService,
     type GroupResponse,
-    type GroupMemberResponse,
 } from '@/services/groupsService'
-import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
 import { UserAvatar } from '@/components/ui/UserAvatar'
+import { GroupMembersDrawer } from './GroupMembersDrawer'
 import { usePermission } from '@/store/auth'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -42,7 +43,6 @@ type ModalType =
     | { kind: 'create' }
     | { kind: 'edit'; group: GroupResponse }
     | { kind: 'delete'; group: GroupResponse }
-    | { kind: 'members'; group: GroupResponse }
     | null
 
 const KPI_CARDS = [
@@ -133,6 +133,85 @@ function SortHeader({
 }
 
 
+// ── Member avatar stack ──────────────────────────────────────────────
+
+/**
+ * WHO is in a group, on the face of the row.
+ *
+ * This cell was a bare number, and the only way to turn it into people was
+ * to open the member-management modal. Faces answer the question the number
+ * was standing in for, and the button still opens the drawer for the rest.
+ *
+ * Read-only, so it is never disabled: reaching this page already requires
+ * ``system:groups:manage``, and seeing a group's membership grants nothing
+ * that managing it does not.
+ */
+function MemberStack({ group, onOpen }: { group: GroupResponse; onOpen: () => void }) {
+    const preview = group.memberPreview ?? []
+    const overflow = group.memberCount - preview.length
+
+    if (group.memberCount === 0) {
+        return (
+            <button
+                onClick={onOpen}
+                aria-label={`No members in ${group.name}. View group.`}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-sm text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+            >
+                <Users className="w-3.5 h-3.5" />
+                None yet
+            </button>
+        )
+    }
+
+    return (
+        <HoverTip
+            label={
+                <div className="space-y-0.5">
+                    {preview.map(m => (
+                        <p key={m.id} className="truncate">{m.displayName ?? m.id}</p>
+                    ))}
+                    {overflow > 0 && <p className="text-ink-muted">+{overflow} more</p>}
+                    {preview.length === 0 && <p className="text-ink-muted">Open to see who</p>}
+                </div>
+            }
+        >
+            <button
+                type="button"
+                onClick={onOpen}
+                aria-label={`${group.memberCount} member${group.memberCount !== 1 ? 's' : ''} in ${group.name}. View all.`}
+                className="flex items-center gap-2.5 -ml-1 px-1.5 py-1 rounded-xl hover:bg-black/[0.03] dark:hover:bg-white/[0.05] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+                {/* The faces are decoration; the button carries the name.
+                    N unlabelled avatars in the a11y tree is noise. */}
+                <span className="flex items-center -space-x-2" aria-hidden>
+                    {preview.map(m => (
+                        <UserAvatar
+                            key={m.id}
+                            userId={m.id}
+                            avatarId={m.avatarId}
+                            name={m.displayName ?? m.id}
+                            shape="gradient"
+                            /* The ring cuts each avatar out of the one behind
+                               it. `ring-canvas-elevated` is a bare var() —
+                               NEVER add an opacity suffix, it emits nothing. */
+                            className="w-7 h-7 text-[10px] font-bold ring-2 ring-canvas-elevated"
+                        />
+                    ))}
+                    {overflow > 0 && (
+                        <span className="w-7 h-7 rounded-full ring-2 ring-canvas-elevated bg-black/[0.06] dark:bg-white/[0.10] text-[10px] font-bold text-ink-secondary flex items-center justify-center">
+                            +{overflow}
+                        </span>
+                    )}
+                </span>
+                <span className="text-sm font-semibold text-ink-secondary tabular-nums">
+                    {group.memberCount}
+                </span>
+            </button>
+        </HoverTip>
+    )
+}
+
+
 // ── Main component ───────────────────────────────────────────────────
 
 export function AdminGroups() {
@@ -144,14 +223,19 @@ export function AdminGroups() {
     const [sortDir, setSortDir] = useState<SortDir>('asc')
     const [actionLoading, setActionLoading] = useState<string | null>(null)
     const [modal, setModal] = useState<ModalType>(null)
+    // The members drawer is not a centred modal, so it keeps its own state.
+    // ``onClose`` must be referentially stable: ``useModalA11y`` re-focuses
+    // the panel whenever it changes, which would fight typing in the filter.
+    const [membersGroup, setMembersGroup] = useState<GroupResponse | null>(null)
+    const closeMembers = useCallback(() => setMembersGroup(null), [])
     const [page, setPage] = useState(0)
     const PAGE_SIZE = 25
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // The whole page requires ``system:groups:manage`` on the
     // backend; show the actions to viewers as disabled-with-tooltip
     // so they understand WHY they can't act, rather than letting them
-    // click into a 403 toast.
+    // click into a 403 notification.
     const canManageGroups = usePermission('system:groups:manage')
 
 
@@ -171,6 +255,27 @@ export function AdminGroups() {
     }, [])
 
     useEffect(() => { void fetchGroups() }, [fetchGroups])
+
+    // ``?group=<id>`` is a shareable link to ONE group's membership — the
+    // answer to "who is in this?" without walking somebody through the
+    // admin nav. Read once at mount from ``window.location``, NOT through
+    // ``useSearchParams``: the hook would make this component unrenderable
+    // outside a Router, which the existing test files depend on.
+    const deepLinkGroup = useMemo(() => {
+        try {
+            return new URLSearchParams(window.location.search).get('group')
+        } catch {
+            return null
+        }
+    }, [])
+    const deepLinkOpened = useRef(false)
+    useEffect(() => {
+        if (deepLinkOpened.current || !deepLinkGroup || groups.length === 0) return
+        const match = groups.find(g => g.id === deepLinkGroup)
+        if (!match) return
+        deepLinkOpened.current = true
+        setMembersGroup(match)
+    }, [groups, deepLinkGroup])
 
 
     // ── KPI computation ──────────────────────────────────────────────
@@ -230,18 +335,21 @@ export function AdminGroups() {
         key: string,
         fn: () => Promise<T>,
         successMsg?: string,
+        /** What to say when the server sends nothing readable. Never
+         *  "Action failed" — one withAction serves create, rename and delete,
+         *  and only the caller knows which of them the user just tried. */
+        failureMsg?: string,
     ): Promise<T | undefined> => {
         setActionLoading(key)
-        setError(null)
         try {
             const result = await fn()
-            if (successMsg) showToast('success', successMsg)
+            if (successMsg) notify('success', successMsg)
             await fetchGroups()
             return result
         } catch (err) {
-            const message = err instanceof Error ? err.message : 'Action failed'
-            showToast('error', message)
-            setError(message)
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : failureMsg ?? 'Could not complete that change to the group.')
             return undefined
         } finally {
             setActionLoading(null)
@@ -343,7 +451,10 @@ export function AdminGroups() {
                 )}
             </AnimatePresence>
 
-            {/* Error banner (in addition to toast) */}
+            {/* The list itself failed to load — still true while it is read, so it
+                stays on the page. Everything that merely HAPPENED (a group created,
+                renamed, deleted) speaks through the app's notification stack, and
+                used to be reported twice: once here and once there. */}
             <AnimatePresence>
                 {error && (
                     <motion.div
@@ -456,15 +567,9 @@ export function AdminGroups() {
                                             </div>
                                         </td>
 
-                                        {/* Member count */}
+                                        {/* Members — the faces, not just the count */}
                                         <td className="px-5 py-4">
-                                            <button
-                                                onClick={() => setModal({ kind: 'members', group: g })}
-                                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-sm font-semibold text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                                            >
-                                                <Users className="w-3.5 h-3.5 text-ink-muted" />
-                                                {g.memberCount}
-                                            </button>
+                                            <MemberStack group={g} onOpen={() => setMembersGroup(g)} />
                                         </td>
 
                                         {/* Source badge */}
@@ -490,7 +595,7 @@ export function AdminGroups() {
                                         <td className="px-5 py-4 text-right">
                                             <div className="flex items-center gap-1.5 justify-end">
                                                 <button
-                                                    onClick={() => setModal({ kind: 'members', group: g })}
+                                                    onClick={() => setMembersGroup(g)}
                                                     disabled={isActing || !canManageGroups}
                                                     title={canManageGroups
                                                         ? 'Manage members'
@@ -567,10 +672,7 @@ export function AdminGroups() {
                             exit={{ scale: 0.96, opacity: 0 }}
                             transition={{ duration: 0.2 }}
                             onClick={(e) => e.stopPropagation()}
-                            className={cn(
-                                'pointer-events-auto relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6',
-                                modal.kind === 'members' ? 'max-w-2xl' : 'max-w-md',
-                            )}
+                            className="pointer-events-auto relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md p-6"
                         >
                             {modal.kind === 'create' && (
                                 <CreateOrEditModal
@@ -578,7 +680,7 @@ export function AdminGroups() {
                                     onSubmit={async (vals) => {
                                         const created = await withAction('create', async () => {
                                             return await groupsService.create(vals)
-                                        }, `Group "${vals.name}" created`)
+                                        }, `Group "${vals.name}" created`, `Could not create the group "${vals.name}".`)
                                         if (created) setModal(null)
                                     }}
                                     submitting={actionLoading === 'create'}
@@ -591,7 +693,7 @@ export function AdminGroups() {
                                     onSubmit={async (vals) => {
                                         const updated = await withAction(`edit-${modal.group.id}`, async () => {
                                             return await groupsService.update(modal.group.id, vals)
-                                        }, 'Group updated')
+                                        }, 'Group updated', `Could not save the changes to "${modal.group.name}".`)
                                         if (updated) setModal(null)
                                     }}
                                     submitting={actionLoading === `edit-${modal.group.id}`}
@@ -605,23 +707,26 @@ export function AdminGroups() {
                                         const ok = await withAction(`del-${modal.group.id}`, async () => {
                                             await groupsService.delete(modal.group.id)
                                             return true
-                                        }, `Deleted "${modal.group.name}"`)
+                                        }, `Deleted "${modal.group.name}"`, `Could not delete "${modal.group.name}".`)
                                         if (ok) setModal(null)
                                     }}
                                     submitting={actionLoading === `del-${modal.group.id}`}
-                                />
-                            )}
-                            {modal.kind === 'members' && (
-                                <ManageMembersModal
-                                    group={modal.group}
-                                    onClose={() => setModal(null)}
-                                    onChange={() => void fetchGroups()}
                                 />
                             )}
                         </motion.div>
                     )}
                 </AnimatePresence>
             </div>
+
+            {/* Members — a drawer, not a modal: the list is the content, and
+                a side panel gives it the full height to be one. Mounted
+                unconditionally so AnimatePresence can play the exit. */}
+            <GroupMembersDrawer
+                group={membersGroup}
+                canManage={canManageGroups}
+                onClose={closeMembers}
+                onChanged={() => void fetchGroups()}
+            />
         </PageContainer>
     )
 }
@@ -800,241 +905,6 @@ function DeleteConfirmModal({
                 >
                     {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
                     Delete group
-                </button>
-            </div>
-        </>
-    )
-}
-
-
-function ManageMembersModal({
-    group, onClose, onChange,
-}: {
-    group: GroupResponse
-    onClose: () => void
-    onChange: () => void
-}) {
-    const [members, setMembers] = useState<GroupMemberResponse[] | null>(null)
-    const [users, setUsers] = useState<AdminUserResponse[] | null>(null)
-    const [busy, setBusy] = useState<string | null>(null)
-    const [search, setSearch] = useState('')
-    const { showToast } = useToast()
-
-    const refresh = useCallback(async () => {
-        try {
-            const [m, u] = await Promise.all([
-                groupsService.listMembers(group.id),
-                adminUserService.listUsers(),
-            ])
-            setMembers(m)
-            setUsers(u)
-        } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Failed to load members')
-        }
-    }, [group.id, showToast])
-
-    useEffect(() => { void refresh() }, [refresh])
-
-    const memberIds = useMemo(() => new Set((members ?? []).map(m => m.userId)), [members])
-    const memberRows = useMemo(() => {
-        if (!members || !users) return []
-        return members
-            .map(m => ({ member: m, user: users.find(u => u.id === m.userId) }))
-            .sort((a, b) => (a.user?.displayName ?? '').localeCompare(b.user?.displayName ?? ''))
-    }, [members, users])
-    const candidates = useMemo(() => {
-        if (!users) return []
-        const q = search.trim().toLowerCase()
-        return users
-            .filter(u => !memberIds.has(u.id) && u.status === 'active')
-            .filter(u => !q
-                || u.displayName.toLowerCase().includes(q)
-                || u.email.toLowerCase().includes(q))
-            .sort((a, b) => a.displayName.localeCompare(b.displayName))
-    }, [users, memberIds, search])
-
-    const isScim = group.source === 'scim'
-
-    return (
-        <>
-            <ModalHeader
-                icon={Users}
-                iconBg="bg-violet-500/10 border-violet-500/20"
-                iconColor="text-violet-500"
-                title={`${group.name} — members`}
-                subtitle={isScim
-                    ? 'SCIM-synced membership — local edits will be overwritten on next sync'
-                    : `${group.memberCount} member${group.memberCount !== 1 ? 's' : ''}`}
-                onClose={onClose}
-            />
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {/* Current members */}
-                <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                        <h4 className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
-                            Current ({members?.length ?? 0})
-                        </h4>
-                    </div>
-                    <div className="rounded-xl border border-glass-border bg-glass-base/30 max-h-72 overflow-y-auto">
-                        {members === null ? (
-                            <div className="p-6 text-center text-ink-muted text-sm">
-                                <Loader2 className="w-4 h-4 animate-spin inline-block mr-2" />
-                                Loading…
-                            </div>
-                        ) : memberRows.length === 0 ? (
-                            <div className="p-6 text-center text-ink-muted text-sm">
-                                No members yet — add some →
-                            </div>
-                        ) : (
-                            memberRows.map(({ member, user }) => {
-                                const name = user?.displayName ?? member.userId
-                                return (
-                                    <div
-                                        key={member.userId}
-                                        className="flex items-center gap-2.5 px-3 py-2 border-b last:border-b-0 border-glass-border group hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
-                                    >
-                                        <UserAvatar
-                                            userId={member.userId}
-                                            name={name}
-                                            shape="gradient"
-                                            className="w-7 h-7 text-[10px] font-bold"
-                                        />
-                                        <div className="min-w-0 flex-1">
-                                            <div className="flex items-center gap-1.5 min-w-0">
-                                                <p className="text-sm text-ink truncate">{name}</p>
-                                                {member.source === 'sso' && (
-                                                    <span
-                                                        title="Added by the identity provider through a group mapping. Removing them by hand only lasts until their next sign-in — remove the mapping, or the group in the directory, instead."
-                                                        className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide bg-violet-500/15 text-violet-600 dark:text-violet-400"
-                                                    >
-                                                        SSO
-                                                    </span>
-                                                )}
-                                            </div>
-                                            {user?.email && (
-                                                <div className="flex items-center gap-1 mt-0.5">
-                                                    <Mail className="w-3 h-3 text-ink-muted shrink-0" />
-                                                    <p className="text-[11px] text-ink-muted truncate">{user.email}</p>
-                                                </div>
-                                            )}
-                                        </div>
-                                        {!isScim && (
-                                            <button
-                                                onClick={async () => {
-                                                    setBusy(member.userId)
-                                                    try {
-                                                        await groupsService.removeMember(group.id, member.userId)
-                                                        await refresh()
-                                                        onChange()
-                                                        showToast('success', `Removed ${name}`)
-                                                    } catch (err) {
-                                                        showToast('error', err instanceof Error ? err.message : 'Remove failed')
-                                                    } finally {
-                                                        setBusy(null)
-                                                    }
-                                                }}
-                                                disabled={busy === member.userId}
-                                                className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-all disabled:opacity-50"
-                                                title="Remove from group"
-                                            >
-                                                {busy === member.userId
-                                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                                    : <X className="w-3.5 h-3.5" />}
-                                            </button>
-                                        )}
-                                    </div>
-                                )
-                            })
-                        )}
-                    </div>
-                </div>
-
-                {/* Add member picker */}
-                <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                        <h4 className="text-xs font-semibold uppercase tracking-wider text-ink-muted">
-                            Add a user
-                        </h4>
-                    </div>
-                    {isScim ? (
-                        <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4 text-xs text-violet-600 dark:text-violet-400">
-                            <Cloud className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
-                            SCIM-synced groups manage their members through the identity provider. Local edits are not allowed.
-                        </div>
-                    ) : (
-                        <>
-                            <div className="relative">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
-                                <input
-                                    type="text"
-                                    placeholder="Search users..."
-                                    value={search}
-                                    onChange={(e) => setSearch(e.target.value)}
-                                    className="input pl-9 h-9 w-full text-sm"
-                                />
-                            </div>
-                            <div className="rounded-xl border border-glass-border bg-glass-base/30 max-h-60 overflow-y-auto">
-                                {users === null ? (
-                                    <div className="p-6 text-center text-ink-muted text-sm">
-                                        <Loader2 className="w-4 h-4 animate-spin inline-block mr-2" />
-                                        Loading users…
-                                    </div>
-                                ) : candidates.length === 0 ? (
-                                    <div className="p-6 text-center text-ink-muted text-sm">
-                                        {search
-                                            ? 'No users match your search.'
-                                            : 'All active users are already members.'}
-                                    </div>
-                                ) : (
-                                    candidates.map(u => (
-                                        <button
-                                            key={u.id}
-                                            onClick={async () => {
-                                                setBusy(u.id)
-                                                try {
-                                                    await groupsService.addMember(group.id, u.id)
-                                                    await refresh()
-                                                    onChange()
-                                                    showToast('success', `Added ${u.displayName}`)
-                                                } catch (err) {
-                                                    showToast('error', err instanceof Error ? err.message : 'Add failed')
-                                                } finally {
-                                                    setBusy(null)
-                                                }
-                                            }}
-                                            disabled={busy === u.id}
-                                            className="w-full flex items-center gap-2.5 px-3 py-2 border-b last:border-b-0 border-glass-border text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
-                                        >
-                                            <UserAvatar
-                                                userId={u.id}
-                                                name={u.displayName}
-                                                shape="gradient"
-                                                className="w-7 h-7 text-[10px] font-bold"
-                                            />
-                                            <div className="min-w-0 flex-1">
-                                                <p className="text-sm text-ink truncate">{u.displayName}</p>
-                                                <p className="text-[11px] text-ink-muted truncate">{u.email}</p>
-                                            </div>
-                                            {busy === u.id
-                                                ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted" />
-                                                : <Plus className="w-3.5 h-3.5 text-accent-lineage opacity-0 group-hover:opacity-100" />}
-                                        </button>
-                                    ))
-                                )}
-                            </div>
-                        </>
-                    )}
-                </div>
-            </div>
-
-            <div className="mt-6 flex items-center justify-end gap-2">
-                <button
-                    onClick={onClose}
-                    className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                >
-                    <CheckCircle2 className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
-                    Done
                 </button>
             </div>
         </>

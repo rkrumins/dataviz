@@ -23,6 +23,7 @@ vi.mock('@/services/aggregationService', () => ({
 }))
 vi.mock('@/components/admin/workspace/VocabAlignmentWarning', () => ({ VocabAlignmentWarning: () => <div data-testid="vocab" /> }))
 
+import { aggregationService } from '@/services/aggregationService'
 import { DataSourceProfile } from './DataSourceProfile'
 
 function wrapper({ children }: { children: React.ReactNode }) {
@@ -64,5 +65,30 @@ describe('DataSourceProfile', () => {
     expect(screen.queryByText('Semantic layer')).not.toBeInTheDocument()
     expect(screen.queryByTestId('vocab')).not.toBeInTheDocument()
     expect(screen.getByText('68k')).toBeInTheDocument()   // insight content still renders
+  })
+})
+
+describe('DataSourceProfile — a source whose rolled-up connections are not being served', () => {
+  const wedged = {
+    aggregationStatus: 'ready', lastAggregatedAt: new Date().toISOString(),
+    aggregationEdgeCount: 1234, driftDetected: true,
+    driftState: 'projectionStalled', projectorCurrent: false,
+    projectionCommitsBehind: 3, isReady: true, canCreateViews: true,
+  }
+
+  it('says lineage may be incomplete, and never tells anyone to re-aggregate', async () => {
+    vi.mocked(aggregationService.getReadiness).mockResolvedValueOnce(wedged as never)
+    const ctx = { wsId: 'w', dataSourceId: 'ds-1' }
+    render(<MemoryRouter><DataSourceProfile catalogId="cat-1" context={ctx} /></MemoryRouter>, { wrapper })
+
+    // The verdict must reach the profile at all — it suppressed every drift
+    // affordance for a version-controlled source, and this one is wedged.
+    expect(await screen.findByText('Connections not up to date')).toBeInTheDocument()
+    expect(screen.getByText(/lineage may look incomplete/i)).toBeInTheDocument()
+    // Re-aggregating does not restart a projector. Saying so here would send
+    // the reader to the one action that cannot help.
+    expect(screen.queryByText(/re-aggregate from the workspace/i)).not.toBeInTheDocument()
+    // ...but there IS somewhere to go.
+    expect(screen.getByRole('link', { name: /Open Freshness/i })).toBeInTheDocument()
   })
 })

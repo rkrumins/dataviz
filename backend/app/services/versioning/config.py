@@ -20,6 +20,18 @@ import hashlib
 import json
 import os
 
+# In-graph bookkeeping nodes that live in a FalkorDB cache graph but are NOT
+# committed-main entities: the projector's rollup watermark, the aggregation
+# pipeline's run stamp, and the dedicated-projection scaffolding. They are the
+# projector's and the aggregation worker's own output, so every comparison of a
+# cache graph against committed main must exclude them. ONE definition, shared
+# — see the module docstring there for the two separate outages a second copy
+# of this list caused.
+from backend.common.derived_artifacts import (  # noqa: F401  (re-export)
+    DERIVED_LABELS,
+    not_derived_clause,
+)
+
 # --------------------------------------------------------------------------- #
 # Store / decoupling (RUNTIME-TUNABLE)                                         #
 # --------------------------------------------------------------------------- #
@@ -136,6 +148,11 @@ PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "1")
 # is skipped on the automatic rebuild (count verify still runs); the on-demand reconcile ("Check sync")
 # can still deep-diff any size when an operator explicitly asks. 0 disables the ceiling.
 PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES", "500000"))
+# Largest rollup change the projector applies itself, by delta (a window's or a reconcile's
+# lineage-edge contributions; a moved container's subtree). Chains are resolved in one batched
+# climb per window and the pair math is in memory, so tens of thousands of edges stay inline;
+# past this the aggregation batch job — which also writes only the difference — takes over.
+PROJECTION_ROLLUP_INLINE_CAP: int = int(os.getenv("GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP", "50000"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
@@ -167,19 +184,12 @@ FALKOR_BUDGETS: dict = json.loads(os.getenv("GRAPHVER_FALKOR_BUDGETS", "") or "{
 DEFAULT_FALKOR_PROVIDER: str = "default"
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
-# In-graph bookkeeping nodes that live in a FalkorDB cache graph but are NOT
-# committed-main entities: the projector's rollup watermark, the aggregation
-# pipeline's run stamp, and the dedicated-projection scaffolding. They are the
-# projector's and the aggregation worker's own output, so every comparison of a
-# cache graph against committed main must exclude them.
-#
-# ONE definition on purpose. Two copies of this list is exactly how
-# ``reconcile.falkor_counts`` came to omit ``_AggMeta``: in ``in_source`` mode —
-# which is the versioned mode — the aggregation pipeline stamps ``_AggMeta``
-# into the same graph the projector verifies, so any aggregation job left the
-# node count one high, the verify reported "extra entities vs committed main",
-# and the watermark was pinned until a human rebuilt.
-DERIVED_LABELS: tuple = ("_GVRollupMeta", "_AggMeta", "_Projection")
+# DERIVED_LABELS / not_derived_clause are imported at the top of this module and
+# re-exported here for this package's callers. The definition moved OUT to
+# ``backend/common/derived_artifacts`` because the provider and profiling read
+# paths need the same list and cannot import from the versioning package
+# (deliberately decoupled) — so they went without one and re-broke this a second
+# way. That module's docstring records both incidents.
 
 
 def falkor_eviction_configured() -> bool:
@@ -226,14 +236,19 @@ TRACE_LEASE_TTL_SECS: int = int(os.getenv("GRAPHVER_TRACE_LEASE_TTL_SECS", "120"
 # Import / Export (bulk CRUD) — object store + pipeline tunables               #
 # --------------------------------------------------------------------------- #
 def object_store_backend() -> str:
-    """Which ObjectStore backend serves import/export artifacts: local | s3 | gcs.
+    """Which ObjectStore backend serves import/export artifacts: database | local | s3 | gcs.
 
-    LocalFS in v1 (a mounted volume); S3/GCS are drop-in behind the same Protocol."""
-    return os.getenv("OBJECT_STORE_BACKEND", "local").lower()
+    The management database by default, which every API pod shares: an artifact one pod stored
+    is there whichever pod serves the next request. ``local`` keeps them as files under
+    ``IMPORT_STORE_ROOT``: a directory every API and versioning-worker pod mounts (a shared volume,
+    or an S3/GCS bucket through its FUSE driver), or one pod's own disk for a single-pod stack.
+    S3/GCS are drop-in behind the same Protocol."""
+    return os.getenv("OBJECT_STORE_BACKEND", "database").lower()
 
 
 def import_store_root() -> str:
-    """Filesystem root for the LocalFs object store (a mounted volume in prod).
+    """Filesystem root for the LocalFs object store (``OBJECT_STORE_BACKEND=local``): where the
+    files land, typically a mount every pod shares.
 
     Artifacts live under ``{root}/{workspace}/{data_source}/{graph}/{job}/{name}`` so any file
     is attributable to its workspace/data source/graph/job at a glance."""
@@ -251,6 +266,24 @@ INLINE_IMPORT_MAX: int = int(os.getenv("INLINE_IMPORT_MAX", "5000"))
 IMPORT_MAX_ROWS: int = int(os.getenv("IMPORT_MAX_ROWS", "0"))
 # Retain import/export artifacts + staging rows this many days after a terminal job.
 STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
+# The worker's daily sweep deletes object-store artifacts (uploads, exports, view packages)
+# written more than this many hours ago.
+OBJECT_STORE_TTL_HOURS: float = float(os.getenv("OBJECT_STORE_TTL_HOURS", "24"))
+# A pending/running import or export job silent this long (no ``updated_at`` heartbeat) is
+# reported failed: the process running it went away, and nothing else will ever finish it.
+JOB_STALE_AFTER_SECS: int = int(os.getenv("JOB_STALE_AFTER_SECS", "900"))
+# Where import and export jobs run. On (the default): in the API process that took the request,
+# as a task of its own. Off: API processes only queue them and the versioning worker runs them
+# (import_export/runner.py) — for deployments that run that worker, so a large import or export
+# never shares an API pod's CPU and memory with interactive requests.
+TRANSFER_INPROCESS: bool = os.getenv("GRAPHVER_TRANSFER_INPROCESS", "1").lower() in ("1", "true", "yes")
+# Jobs one versioning-worker process runs at once. An export job also takes one of its pod's export
+# turns (GRAPH_EXPORT_CONCURRENCY, 2), so raise the two together.
+TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
+# How often an idle worker looks for a queued job: about how long a queued job waits for a free one.
+TRANSFER_POLL_SECS: float = float(os.getenv("GRAPHVER_TRANSFER_POLL_SECS", "1"))
+# A queued job no worker has started in this long reads as failed: none may be running.
+TRANSFER_QUEUE_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS", str(6 * 3600)))
 
 
 # --------------------------------------------------------------------------- #

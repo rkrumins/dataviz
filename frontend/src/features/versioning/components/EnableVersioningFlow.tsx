@@ -13,7 +13,7 @@ import { useState } from 'react'
 import { Check, GitBranch, History, Loader2, ShieldCheck, Sparkles, X } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useBootstrapGraph } from '../hooks/useVersioning'
 
 const BENEFITS = [
@@ -44,7 +44,7 @@ export function EnableVersioningFlow({
   /** Best-known size of the source graph (nodes + edges), for the pre-flight line. */
   itemCount?: number | null
 }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const bootstrap = useBootstrapGraph(wsId)
   const [started, setStarted] = useState(false)
 
@@ -53,7 +53,7 @@ export function EnableVersioningFlow({
     bootstrap.mutate(dataSourceId, {
       onSuccess: (res) => {
         onClose()
-        showToast(
+        notify(
           'success',
           res.alreadyEnabled
             ? 'Version control is already on for this data source.'
@@ -62,7 +62,7 @@ export function EnableVersioningFlow({
       },
       onError: (e) => {
         setStarted(false)
-        showToast('error', e instanceof Error ? e.message : 'Could not start.')
+        notify('error', e instanceof Error ? e.message : 'Could not start.')
       },
     })
   }

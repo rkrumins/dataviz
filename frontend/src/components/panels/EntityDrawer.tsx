@@ -13,18 +13,12 @@
  * persisted. FalkorDB already stores arbitrary JSON property bags (scalars +
  * flat scalar-lists as native node props, complex values in a `propertiesRaw`
  * JSON blob — see falkordb_provider._split_user_properties), so these values
- * round-trip as-is once the write path below lands.
+ * round-trip as-is.
  *
- * TODO(backend): Drawer edits currently stage as `update_entity` with a no-op
- * apply hook. To persist edits, mirror the existing edge PATCH pattern:
- *   1. `PATCH /api/v1/{wsId}/graph/nodes/{urn}` route in
- *      backend/app/api/v1/endpoints/graph.py (mirror PATCH /edges/{id})
- *   2. `GraphDataProvider.update_node(urn, payload)` (mirror `update_edge`),
- *      implemented for FalkorDB (Neo4j/Spanner can follow).
- *   3. `RemoteGraphProvider.updateNode` + replace the `apply` console.warn
- *      below with the call.
- * Payload persists the editable surface: `properties` + descriptive fields
- * (displayName, description, qualifiedName, sourceSystem, layerAssignment, tags).
+ * An edit is kept only as a change in the view's draft (useEntityEditing):
+ * Stage Changes stages it, and Review & Save commits it to the draft as
+ * /graph/changes ops (stagedChangesToOps). A data source without version
+ * control is read-only here — there is no direct write to an external graph.
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
@@ -44,6 +38,7 @@ import {
 } from '@/store/schema'
 import { allowedChildTypeIds, setHasId, deriveContainmentEdges } from '@/services/ontologyPreflightService'
 import { relationshipLabel, parentPlacementPhrase } from '@/lib/relationshipLabel'
+import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { useReparentNode } from '@/components/canvas/context-view/useReparentNode'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
@@ -54,6 +49,8 @@ import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
 import { useResolveGraph, useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
 import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
@@ -61,6 +58,8 @@ import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
+import { Section } from './DrawerSection'
+import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 
 // ============================================
 // Types
@@ -84,10 +83,17 @@ interface EntityDrawerProps {
    *  collapsed ancestors (lazy-loading from the backend if needed), then
    *  pans/scrolls to the target. May return a promise; the drawer's
    *  neighbor row awaits it to show a loading spinner. */
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
   /** Reveal a set of neighbors at once and fit the canvas around them.
    *  Used by the LineageNeighbors multi-select action bar. */
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
+  /** Open the canvas down a KNOWN containment path to an entity at any
+   *  depth — the reveal search uses. The lineage list knows every partner's
+   *  path, so a column five levels down opens exactly its own spine instead
+   *  of paging every level for it. */
+  onRevealPath?: RevealSearchHit
   /** External link URL builder */
   getExternalUrl?: (urn: string) => string | null
   /** Entities the surface is DRAWING that the canvas store does not hold —
@@ -111,6 +117,7 @@ export function EntityDrawer({
   onFullTrace,
   onFocusNode,
   onLocateMany,
+  onRevealPath,
   getExternalUrl,
   resolveNode,
 }: EntityDrawerProps) {
@@ -121,6 +128,24 @@ export function EntityDrawer({
   const updateNode = useCanvasStore((s) => s.updateNode)
   const clearSelection = useCanvasStore((s) => s.clearSelection)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
+  const drawerBackStep = useCanvasStore((s) => s.drawerBack)
+  const drawerForwardStep = useCanvasStore((s) => s.drawerForward)
+  const canDrawerBack = useCanvasStore((s) => s.drawerHistory.cursor > 0)
+  const canDrawerForward = useCanvasStore(
+    (s) => s.drawerHistory.cursor < s.drawerHistory.entries.length - 1)
+  // Retracing is a move on the CANVAS too: the drawer showing an entity the
+  // board is not looking at is how people lose their place. Select it (so the
+  // canvas highlight follows) and reveal it, exactly as clicking a neighbour
+  // row does — the reveal is best-effort and never blocks the panel swap.
+  const stepDrawer = useCallback((step: () => void) => {
+    step()
+    const target = useCanvasStore.getState().drawerNodeId
+    if (!target) return
+    useCanvasStore.getState().selectNode(target)
+    void onFocusNode?.(target)
+  }, [onFocusNode])
+  const drawerBack = useCallback(() => stepDrawer(drawerBackStep), [stepDrawer, drawerBackStep])
+  const drawerForward = useCallback(() => stepDrawer(drawerForwardStep), [stepDrawer, drawerForwardStep])
   const schema = useSchemaStore((s) => s.schema)
   const mode = usePersonaStore((s) => s.mode)
 
@@ -175,9 +200,12 @@ export function EntityDrawer({
   // surfaces: when the admin turns version control off, the queries stop and the
   // History section disappears (undefined ids disable the hooks).
   const versioningEnabled = useFeature('versioningEnabled')
-  // Independent switch: OFF means every canvas is view-only even with versioning on
-  // (POST /nodes/create, /edges, PATCH/DELETE /edges, /changes all 403 server-side).
-  const editModeEnabled = useFeature('editModeEnabled')
+  // An edit is kept only as a change in this view's draft: where there is none (or the source has
+  // no version control) the Edit tab stays, disabled with the reason; where editing isn't offered
+  // at all (switched off, a read-only view, a ghost, a locked surface) it goes.
+  const editing = useEntityEditing()
+  const editOffered = !isGhost && !writesLocked && editing.offered
+  const canEdit = editOffered && !editing.blocked
   const entityHistory = useEntityHistory(
     versioningEnabled ? historyWsId : undefined,
     versioningEnabled ? historyGraphId : undefined,
@@ -202,7 +230,6 @@ export function EntityDrawer({
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
   const [showSaved, setShowSaved] = useState(false)
-  const [isPinned, setIsPinned] = useState(false)
   const [copiedUrn, setCopiedUrn] = useState(false)
   const drawerRef = useRef<HTMLElement>(null)
   // Unsaved-changes guard: confirm before closing or switching nodes.
@@ -242,14 +269,17 @@ export function EntityDrawer({
   // Colors based on entity type (resolved from schema with hash-based fallback)
   const colors = useEntityColorSet((selectedNode?.data.type as string) ?? '')
 
-  // Get display label based on persona mode
-  const displayLabel = useMemo(() => {
-    if (!selectedNode) return ''
-    const data = selectedNode.data as Record<string, any>
-    return mode === 'business'
-      ? (data.businessLabel || data.label || data.name || selectedNode.id)
-      : (data.technicalLabel || data.label || data.name || selectedNode.id)
-  }, [selectedNode, mode])
+  // Name + (in Technical mode) the technical identity revealed beneath it —
+  // both from the shared resolver, so the drawer and the canvas row it was
+  // opened from can never disagree about what this entity is called.
+  const displayLabel = useMemo(
+    () => (selectedNode ? resolveEntityName(selectedNode.data, mode, selectedNode.id) : ''),
+    [selectedNode, mode],
+  )
+  const technicalLine = useMemo(
+    () => (selectedNode ? technicalSubtitle(selectedNode.data, mode) : undefined),
+    [selectedNode, mode],
+  )
 
   // Handle form field changes
   const handleChange = useCallback((key: string, value: any) => {
@@ -352,9 +382,7 @@ export function EntityDrawer({
       return
     }
 
-    // Multi-field edit — stage as update_entity. Apply hook is a stub until
-    // the backend ships PATCH /api/v1/{wsId}/graph/nodes/{urn}; see the file
-    // header for the full backlog.
+    // Multi-field edit — stage as update_entity (saved to the draft by stagedChangesToOps).
     stagedChanges.stageOrReplace(
       (c) => c.type === 'update_entity' && c.targetId === selectedNode.id,
       {
@@ -366,17 +394,6 @@ export function EntityDrawer({
         summary: `Edit ${changedKeys.length} field${changedKeys.length === 1 ? '' : 's'} on '${previousLabel || selectedNode.id}'`,
         discard: () => {
           useCanvasStore.getState().updateNode(selectedNode.id, previousData)
-        },
-        apply: async () => {
-          // TODO(backend): replace with
-          //   await authFetch(`/api/v1/${wsId}/graph/nodes/${urn}`, {
-          //     method: 'PATCH', body: JSON.stringify({ properties: after })
-          //   })
-          // once the endpoint and provider methods land.
-          console.warn(
-            '[update_entity] TODO: PATCH /api/v1/{wsId}/graph/nodes/{urn} not yet implemented',
-            { targetId: selectedNode.id, urn: previousData.urn, changedKeys },
-          )
         },
       },
     )
@@ -407,12 +424,15 @@ export function EntityDrawer({
   // Close drawer — the X button is the only close path. The drawer is
   // sticky: clicking other entities or the canvas background never closes
   // it, it only swaps the data shown inside.
+  // Close always closes. It used to return early while the drawer was
+  // "pinned" — the X became a dead control with no tooltip, no disabled state
+  // and no way back except reloading the page. That flag was local state and
+  // nothing else in the app ever read it, so the pin did nothing but this.
   const handleClose = useCallback(() => {
-    if (isPinned) return
     if (hasChanges) { setConfirmClose(true); return }
     closeNodeDrawer()
     clearSelection()
-  }, [closeNodeDrawer, clearSelection, isPinned, hasChanges])
+  }, [closeNodeDrawer, clearSelection, hasChanges])
 
   // Resolve the unsaved-changes prompt (shared by close + node-switch).
   const discardAndProceed = useCallback(() => {
@@ -504,6 +524,47 @@ export function EntityDrawer({
           {/* Type Badge & Close */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
+              {/* The trail. Following lineage from here is a WALK — a
+                  consumer, then its consumer — and a walk you cannot retrace
+                  is one people stop taking. Rendered only once there is
+                  somewhere to go, so a drawer opened on one entity carries no
+                  dead controls. */}
+              {(canDrawerBack || canDrawerForward) && (
+                <div className="flex items-center gap-0.5 mr-0.5">
+                  <button
+                    type="button"
+                    onClick={drawerBack}
+                    disabled={!canDrawerBack}
+                    aria-label="Back to the previous entity"
+                    title="Back"
+                    className={cn(
+                      'p-1.5 rounded-lg transition-colors duration-150',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                      canDrawerBack
+                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
+                        : 'text-ink-muted opacity-40 cursor-not-allowed',
+                    )}
+                  >
+                    <LucideIcons.ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={drawerForward}
+                    disabled={!canDrawerForward}
+                    aria-label="Forward to the next entity"
+                    title="Forward"
+                    className={cn(
+                      'p-1.5 rounded-lg transition-colors duration-150',
+                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                      canDrawerForward
+                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
+                        : 'text-ink-muted opacity-40 cursor-not-allowed',
+                    )}
+                  >
+                    <LucideIcons.ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
               <span
                 className="px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide"
                 style={{ backgroundColor: colors.bg, color: colors.text }}
@@ -528,10 +589,22 @@ export function EntityDrawer({
             </button>
           </div>
 
-          {/* Entity Name */}
-          <h2 className="text-xl font-display font-semibold text-ink leading-tight mb-4">
+          {/* Entity Name — Technical mode adds the fully-qualified identity
+              underneath, and only when it says something the name does not. */}
+          <h2 className={cn(
+            'text-xl font-display font-semibold text-ink leading-tight',
+            technicalLine ? 'mb-1' : 'mb-4',
+          )}>
             {displayLabel}
           </h2>
+          {technicalLine && (
+            <p
+              className="text-xs font-mono text-ink-muted break-all mb-4"
+              title={technicalLine}
+            >
+              {technicalLine}
+            </p>
+          )}
 
           {/* Committed-deletion ghost → a Restore banner takes the place of the trace/edit actions. */}
           {isGhost && (
@@ -561,26 +634,29 @@ export function EntityDrawer({
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => onTraceUp?.(selectedNode.id)}
-                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20 transition-colors duration-150 group"
+                // Upstream and downstream wear the product's lineage direction
+                // pair (lib/lineageDirectionColors.ts) — the canvas's ports,
+                // the lineage cards below, the Focus Lens and a trace.
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-lineage-in/10 border border-lineage-in/20 hover:bg-lineage-in/20 transition-colors duration-150 group"
               >
-                <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center group-hover:bg-blue-500/30 transition-colors">
-                  <LucideIcons.ArrowUpLeft className="w-5 h-5 text-blue-500" />
+                <div className="w-10 h-10 rounded-full bg-lineage-in/20 flex items-center justify-center group-hover:bg-lineage-in/30 transition-colors">
+                  <LucideIcons.ArrowUpLeft className="w-5 h-5 text-lineage-in" />
                 </div>
-                <span className="text-xs font-medium text-blue-600 dark:text-blue-400">Root Cause</span>
-                <span className="text-[10px] text-blue-500/60">Trace Upstream</span>
+                <span className="text-xs font-medium text-lineage-in">Root Cause</span>
+                <span className="text-[10px] text-lineage-in/60">Trace Upstream</span>
               </motion.button>
 
               <motion.button
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => onTraceDown?.(selectedNode.id)}
-                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-green-500/10 border border-green-500/20 hover:bg-green-500/20 transition-colors duration-150 group"
+                className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-lineage-out/10 border border-lineage-out/20 hover:bg-lineage-out/20 transition-colors duration-150 group"
               >
-                <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center group-hover:bg-green-500/30 transition-colors">
-                  <LucideIcons.ArrowDownRight className="w-5 h-5 text-green-500" />
+                <div className="w-10 h-10 rounded-full bg-lineage-out/20 flex items-center justify-center group-hover:bg-lineage-out/30 transition-colors">
+                  <LucideIcons.ArrowDownRight className="w-5 h-5 text-lineage-out" />
                 </div>
-                <span className="text-xs font-medium text-green-600 dark:text-green-400">Impact</span>
-                <span className="text-[10px] text-green-500/60">Trace Downstream</span>
+                <span className="text-xs font-medium text-lineage-out">Impact</span>
+                <span className="text-[10px] text-lineage-out/60">Trace Downstream</span>
               </motion.button>
 
               <motion.button
@@ -609,12 +685,6 @@ export function EntityDrawer({
               />
             )}
             <ActionButton
-              icon={LucideIcons.Pin}
-              label={isPinned ? "Unpin" : "Pin"}
-              active={isPinned}
-              onClick={() => setIsPinned(!isPinned)}
-            />
-            <ActionButton
               icon={LucideIcons.Copy}
               label={copiedUrn ? "Copied!" : "Copy URN"}
               onClick={() => {
@@ -641,7 +711,11 @@ export function EntityDrawer({
               icon={LucideIcons.Eye}
               label="View"
             />
-            {!isGhost && versioningEnabled && editModeEnabled && !writesLocked && (
+            {editOffered && (editing.blocked ? (
+              <HoverTip label={editing.blocked} className="flex-1 flex">
+                <ModeTab active={false} disabled icon={LucideIcons.Pencil} label="Edit" />
+              </HoverTip>
+            ) : (
               <ModeTab
                 active={viewMode === 'edit'}
                 onClick={() => setViewMode('edit')}
@@ -649,7 +723,7 @@ export function EntityDrawer({
                 label="Edit"
                 badge={hasChanges ? '•' : undefined}
               />
-            )}
+            ))}
             <ModeTab
               active={viewMode === 'json'}
               onClick={openJsonView}
@@ -675,7 +749,7 @@ export function EntityDrawer({
                 ) : showSaved ? (
                   <div className="px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/20 text-green-500 text-xs flex items-center gap-2">
                     <LucideIcons.CheckCircle className="w-4 h-4" />
-                    Changes saved successfully
+                    Staged — Review &amp; Save to keep it
                   </div>
                 ) : hasChanges ? (
                   <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-500 text-xs flex items-center gap-2">
@@ -703,6 +777,7 @@ export function EntityDrawer({
               copiedUrn={copiedUrn}
               onFocusNode={onFocusNode}
               onLocateMany={onLocateMany}
+              onRevealPath={onRevealPath}
               wsId={historyWsId}
               graphId={historyGraphId}
               mainBranchId={historyMainBranch}
@@ -728,7 +803,7 @@ export function EntityDrawer({
               rawJson={rawJson}
               jsonError={jsonError}
               onChange={handleRawJsonChange}
-              canEdit={!isGhost && versioningEnabled && editModeEnabled && !writesLocked}
+              canEdit={canEdit}
             />
           )}
         </div>
@@ -774,10 +849,10 @@ export function EntityDrawer({
               </button>
               <button
                 onClick={handleSave}
-                disabled={!hasChanges || !!jsonError}
+                disabled={!hasChanges || !!jsonError || !canEdit}
                 className={cn(
                   "px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors duration-150",
-                  hasChanges && !jsonError
+                  hasChanges && !jsonError && canEdit
                     ? "bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25"
                     : "bg-white/5 text-ink-muted cursor-not-allowed"
                 )}
@@ -827,21 +902,25 @@ function ActionButton({ icon: Icon, label, primary, active, onClick }: ActionBut
 
 interface ModeTabProps {
   active: boolean
-  onClick: () => void
+  onClick?: () => void
+  disabled?: boolean
   icon: React.ComponentType<{ className?: string }>
   label: string
   badge?: string
 }
 
-function ModeTab({ active, onClick, icon: Icon, label, badge }: ModeTabProps) {
+function ModeTab({ active, onClick, disabled, icon: Icon, label, badge }: ModeTabProps) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       className={cn(
         "flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-150 duration-200",
         active
           ? "bg-white/10 text-ink shadow-sm"
-          : "text-ink-muted hover:text-ink hover:bg-white/5"
+          : disabled
+            ? "text-ink-muted opacity-50"
+            : "text-ink-muted hover:text-ink hover:bg-white/5"
       )}
     >
       <Icon className="w-4 h-4" />
@@ -853,32 +932,6 @@ function ModeTab({ active, onClick, icon: Icon, label, badge }: ModeTabProps) {
   )
 }
 
-interface SectionProps {
-  title: string
-  icon?: React.ComponentType<{ className?: string }>
-  children: React.ReactNode
-  action?: React.ReactNode
-  /** Let content extend closer to the drawer edges (title stays aligned).
-   *  Used for the content-dense Properties section. */
-  flush?: boolean
-}
-
-function Section({ title, icon: Icon, children, action, flush }: SectionProps) {
-  return (
-    <div className="px-5 py-4">
-      <div className="flex items-center justify-between gap-2 mb-3">
-        <div className="flex items-center gap-2">
-          {Icon && <Icon className="w-4 h-4 text-ink-muted" />}
-          <h3 className="text-xs font-semibold text-ink-muted uppercase tracking-wider">
-            {title}
-          </h3>
-        </div>
-        {action}
-      </div>
-      {flush ? <div className="-mx-3">{children}</div> : children}
-    </div>
-  )
-}
 
 // A rich freshness stat — icon chip + label (with an optional live pulse) + the relative time, and
 // the exact UTC timestamp on hover. Used for "Updated" (last change) and "Synced" (live layer).
@@ -1070,7 +1123,9 @@ function RelationshipSummary({
 }: {
   nodeId: string
   childCount: number
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
 }) {
   const { node, parentNode, parentName, currentEdgeType, childCountLoaded } = useContainmentPlacement(nodeId)
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
@@ -1089,7 +1144,7 @@ function RelationshipSummary({
   }
 
   return (
-    <Section title="Relationship" icon={LucideIcons.Network}>
+    <Section title="Relationship" icon={LucideIcons.Network} collapsible sectionKey="relationship">
       <div className="space-y-2">
         {parentNode ? (
           <button
@@ -1143,7 +1198,10 @@ function RelationshipEditor({ nodeId }: { nodeId: string }) {
   const { reparent, retypeContainment } = useReparentNode()
   const { node, parentNode, parentName, currentEdgeType, relTypeOptions, moveTargets } = useContainmentPlacement(nodeId)
   const inDraft = useBranchStore((s) => !!s.currentBranchId)
+  const openReview = useStagedChangesStore((s) => s.openReviewPanel)
   if (!node) return null
+  // A new entity's parent is part of its unsaved create, so it can be moved once it is saved.
+  const unsaved = node.data?.isPending === 'create'
 
   return (
     <div className="pt-5 border-t border-glass-border/30">
@@ -1152,7 +1210,25 @@ function RelationshipEditor({ nodeId }: { nodeId: string }) {
         Relationship
       </h4>
 
-      {!inDraft ? (
+      {inDraft && unsaved ? (
+        <div className="px-3 py-2.5 rounded-xl bg-accent-lineage/10 border border-accent-lineage/20 text-xs text-ink flex items-start gap-2">
+          <LucideIcons.Save className="w-3.5 h-3.5 mt-0.5 shrink-0 text-accent-lineage" />
+          <div className="space-y-2">
+            <p>
+              <span className="font-semibold">Save this new entity before moving it.</span>{' '}
+              {parentNode ? `It will be created inside ${parentName}.` : 'It will be created at the top level.'}{' '}
+              Once saved, you can move it anywhere or change how it relates to its parent.
+            </p>
+            <button
+              type="button"
+              onClick={openReview}
+              className="px-2.5 py-1 rounded-lg bg-accent-lineage/20 hover:bg-accent-lineage/30 text-accent-lineage font-semibold transition-colors"
+            >
+              Review &amp; Save
+            </button>
+          </div>
+        </div>
+      ) : !inDraft ? (
         <div className="px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2">
           <LucideIcons.Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
           <span>Switch to a draft to change where this entity sits or how it relates to its parent.</span>
@@ -1231,8 +1307,11 @@ interface ViewModeContentProps {
   propertiesBag: Record<string, any>
   onCopyUrn: () => void
   copiedUrn: boolean
-  onFocusNode?: (nodeId: string) => void | Promise<void>
+  /** Reveal on canvas. May report a `RevealOutcome` — 'unavailable' means
+   *  the walk finished and the entity is still not there. */
+  onFocusNode?: (nodeId: string) => void | Promise<unknown>
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
+  onRevealPath?: RevealSearchHit
   wsId?: string
   graphId?: string | null
   mainBranchId?: string | null
@@ -1250,6 +1329,7 @@ function ViewModeContent({
   copiedUrn,
   onFocusNode,
   onLocateMany,
+  onRevealPath,
   wsId,
   graphId,
   mainBranchId,
@@ -1326,6 +1406,7 @@ function ViewModeContent({
         nodeId={nodeId}
         onFocusNode={onFocusNode}
         onLocateMany={onLocateMany}
+        onRevealPath={onRevealPath}
       />
 
       {/* History — real per-entity revision history (main line). Hidden when version control is off. */}

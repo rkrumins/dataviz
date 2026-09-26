@@ -59,7 +59,12 @@ DEFAULT_OIDC: dict[str, Any] = {
     "first_name":     ["given_name", "givenName"],
     "last_name":      ["family_name", "surname"],
     "display_name":   ["name", "displayName"],
-    "groups":         ["groups", "wids", "roles"],
+    # ``entitlements.groups`` is a dotted path, not a key: directories
+    # that nest their membership under an entitlements object (a common
+    # AD-federation shape) work without an override. Last, so a
+    # top-level claim always wins — and any other nesting is one dotted
+    # override away in the mapping studio.
+    "groups":         ["groups", "wids", "roles", "entitlements.groups"],
     "auth_time":      ["auth_time"],
     # Empty by default outside the backchannel kind: mapping a picture
     # makes the server fetch it at login, and that participation is a
@@ -113,10 +118,11 @@ DEFAULT_CUSTOM: dict[str, Any] = {
     "first_name":     ["first_name"],
     "last_name":      ["last_name"],
     # The grab-bag the other custom-ish kinds carry: a custom IdP that
-    # releases only "name" or "fullName" deserves the split too.
+    # releases only "name" or "fullName" deserves the split too — in
+    # snake_case, camelCase, or kebab-case.
     "display_name":   ["display_name", "displayName", "fullName",
-                       "full_name", "name"],
-    "groups":         ["groups"],
+                       "full_name", "full-name", "name"],
+    "groups":         ["groups", "entitlements.groups"],
     "auth_time":      ["auth_time"],
     "avatar_url":     [],
     "extras":         {},
@@ -133,8 +139,9 @@ DEFAULT_CUSTOM_PROFILE: dict[str, Any] = {
     "email_verified": ["email_verified", "emailVerified"],
     "first_name":     ["firstName", "first_name", "givenName", "given_name"],
     "last_name":      ["lastName", "last_name", "surname", "family_name", "sn"],
-    "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
-    "groups":         ["groups", "roles", "memberOf"],
+    "display_name":   ["fullName", "full_name", "full-name", "displayName",
+                       "display_name", "name"],
+    "groups":         ["groups", "roles", "memberOf", "entitlements.groups"],
     "auth_time":      ["auth_time", "authTime", "iat"],
     "avatar_url":     [],
     "extras":         {},
@@ -154,8 +161,10 @@ DEFAULT_BACKCHANNEL: dict[str, Any] = {
     "email_verified": ["email_verified", "emailVerified"],
     "first_name":     ["firstName", "first_name", "givenName", "given_name"],
     "last_name":      ["lastName", "last_name", "surname", "family_name", "sn"],
-    "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
-    "groups":         ["groups", "roles", "memberOf", "groupMembership"],
+    "display_name":   ["fullName", "full_name", "full-name", "displayName",
+                       "display_name", "name"],
+    "groups":         ["groups", "roles", "memberOf", "groupMembership",
+                       "entitlements.groups"],
     "auth_time":      ["auth_time", "authTime", "authenticationTime",
                        "lastLogin", "last_login"],
     #: Candidates only; nothing is fetched unless the connection's
@@ -230,6 +239,55 @@ def _resolve(claims: Any, path: str) -> Any:
 #: for the underscored name across modules would misreport it as
 #: private to this one.
 resolve_path = _resolve
+
+
+#: Top-level values a populated nested one may overwrite during a
+#: hoist. Membership is by equality on purpose: ``0`` and ``False`` are
+#: real answers a directory can give and must never read as absent.
+_EMPTYISH = (None, "", [], {})
+
+
+def hoist_nested(claims: dict, *, priority: tuple[str, ...] = ()) -> dict:
+    """One level of object nesting flattened — whatever the container
+    is called — so a mapping can say ``groups`` even when the payload
+    says ``{"entitlements": {"groups": [...]}}``, or nests under a name
+    nobody predicted.
+
+    Merge rules, in order:
+
+    * A top-level key wins over a hoisted one — except when its value
+      is emptyish (``None``, ``""``, ``[]``, ``{}``) and the nested one
+      is not. Real gateways emit exactly that shape: a vestigial
+      top-level ``groups: []`` beside the real list one level down, and
+      "present but empty shadows populated" silently turned group
+      mapping off.
+    * Containers named in *priority* hoist first, in that order, so
+      precedence between the well-known container names stays exactly
+      what it always was.
+    * Every other object-valued key follows, in payload order —
+      deterministic per payload, and when two containers disagree the
+      mapping studio's preview names which key actually supplied each
+      field.
+
+    One level only, by design: dotted candidate paths already reach any
+    depth, and a recursive flatten would make "which value won" an
+    accident — a hoisted inner object is itself reachable by its dotted
+    path afterwards. Pure, so the login and the admin preview run the
+    very same hoist.
+    """
+    flat = {**claims}
+    ordered = [c for c in priority if c in claims]
+    ordered += [k for k in claims if k not in priority]
+    for container in ordered:
+        nested = claims.get(container)
+        if not isinstance(nested, dict):
+            continue
+        for k, v in nested.items():
+            if k not in flat:
+                flat[k] = v
+            elif flat[k] in _EMPTYISH and v not in _EMPTYISH:
+                flat[k] = v
+    return flat
 
 
 def _first_non_empty(claims: dict, paths: Iterable[str]) -> Any:

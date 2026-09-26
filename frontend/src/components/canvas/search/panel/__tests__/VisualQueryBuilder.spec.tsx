@@ -98,6 +98,34 @@ describe('VisualQueryBuilder', () => {
         expect(onCommit).toHaveBeenCalledTimes(1)
     })
 
+    const degree = {
+        kind: 'degree', direction: 'both', op: 'gte', value: 3, edgeClass: 'lineage',
+    } as Predicate
+
+    it('shows a degree condition as one edited in Code, never as unsupported', async () => {
+        const onOpenAdvanced = vi.fn()
+        render(<VisualQueryBuilder {...baseProps({ predicate: degree, onOpenAdvanced })} />)
+
+        expect(screen.getByText('Number of edges')).toBeInTheDocument()
+        expect(screen.queryByText('unsupported')).not.toBeInTheDocument()
+        await userEvent.setup().click(screen.getByRole('button', { name: /Open in Code/ }))
+        expect(onOpenAdvanced).toHaveBeenCalled()
+    })
+
+    it('offers no hand-off where there is no Code mode, and says where it is edited', () => {
+        render(<VisualQueryBuilder {...baseProps({ predicate: degree })} />)
+
+        expect(screen.getByText(/edited as JSON in Advanced Search/)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Open in Code/ })).not.toBeInTheDocument()
+    })
+
+    it('shows every entity as a condition with nothing to fill in', () => {
+        render(<VisualQueryBuilder {...baseProps({ predicate: { kind: 'all' } as Predicate })} />)
+
+        expect(screen.getByText('Every entity')).toBeInTheDocument()
+        expect(screen.queryByText('unsupported')).not.toBeInTheDocument()
+    })
+
     it('renders no bulk-select checkbox when row selection is disabled', () => {
         render(<VisualQueryBuilder {...baseProps()} />)
         expect(screen.queryByLabelText(/select filter row/i)).not.toBeInTheDocument()

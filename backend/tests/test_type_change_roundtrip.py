@@ -22,6 +22,7 @@ fixed here (a projector redesign/relabel strategy is a human design decision); t
 only documents the gap with a reproduction.
 """
 import asyncio
+from types import SimpleNamespace
 
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService, _graphnode_dict
@@ -77,6 +78,26 @@ class _LabelAwareFakeGraph:
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
+        # Before it writes, the projector reads the graph's registered
+        # attribute names — what the native-property budget counts against
+        # (``_registered_property_names``, projection.py:147). It is not a
+        # node upsert, and an empty answer is the truth for this in-memory
+        # fake: nothing is registered, so every key is admitted.
+        if cypher.startswith("CALL db.propertyKeys()"):
+            return SimpleNamespace(result_set=[])
+        if cypher.startswith("CREATE (r:_PropReserve)") or cypher.startswith("MATCH (r:_PropReserve)"):
+            return SimpleNamespace(result_set=[])
+        if cypher.endswith("RETURN u, keys(n)"):                      # removed-property read
+            label = cypher.split("MATCH (n:", 1)[1].split(" {urn:", 1)[0]
+            return SimpleNamespace(result_set=[
+                [u, list(self.nodes[(label, u)])] for u in params["urns"] if (label, u) in self.nodes])
+        if " SET n:" in cypher and " REMOVE n:" in cypher:            # retype in place
+            old = cypher.split("MATCH (n:", 1)[1].split(" {urn:", 1)[0]
+            new = cypher.split(" SET n:", 1)[1].split(" REMOVE", 1)[0]
+            for u in params["urns"]:
+                if (old, u) in self.nodes:
+                    self.nodes[(new, u)] = self.nodes.pop((old, u))
+            return SimpleNamespace(result_set=[])
         assert cypher.startswith("UNWIND $batch AS item MERGE (n:"), f"unexpected cypher: {cypher!r}"
         label = cypher[len("UNWIND $batch AS item MERGE (n:"):].split(" {urn:", 1)[0]
         for it in params["batch"]:
@@ -86,13 +107,12 @@ class _LabelAwareFakeGraph:
         return [(label, item) for (label, u), item in self.nodes.items() if u == urn]
 
 
-def test_projector_leaves_stale_duplicate_node_on_entity_type_change():
-    """DOCUMENTS A GAP — see task-2-report.md for the BLOCKED write-up. Not fixed here.
-
-    Re-projecting the SAME node ("A" / urn:x) after its entityType changes from "dataset"
-    to "container" emits a MERGE under a NEW label. A correct re-kind would leave exactly
-    one node (now labelled "container"); instead the old "dataset"-labelled node is never
-    relabeled or removed, so the cache ends up with TWO nodes for one logical entity.
+def test_projector_retypes_a_node_in_place_on_entity_type_change():
+    """Re-projecting the SAME node ("A" / urn:x) after its entityType changes from "dataset"
+    to "container": a MERGE under the new label alone used to create a second node and leave
+    the old "dataset" one behind — two nodes for one entity (the gap this test pinned). The
+    window now relabels the node in place first, so exactly one node remains, under the new
+    label, keeping its id and edges.
     """
     fake = _LabelAwareFakeGraph()
     proj = FalkorProjector(graph_client_factory=lambda name, provider_id=None: fake)
@@ -103,17 +123,14 @@ def test_projector_leaves_stale_duplicate_node_on_entity_type_change():
     assert [l for l, _ in fake.rows_for_urn(urn)] == ["dataset"]
 
     v2 = {**v1, "entityType": "container"}          # the type-change update, same entity/urn
+    asyncio.run(proj._relabel_in_place(fake, [(urn, "dataset", "container")]))
     asyncio.run(proj._apply(fake, [("A", urn, v2)], [], [], []))
 
     labels = sorted(l for l, _ in fake.rows_for_urn(urn))
-    # THE GAP: a real re-kind would leave exactly ["container"]. Two rows means the
-    # stale "dataset" node was never removed/relabeled by the projector.
-    assert labels == ["container", "dataset"], (
-        "if this now reads ['container'] the projector has been fixed to re-kind nodes "
-        f"on an entityType change — update this pin (and the task-2 BLOCKED report). Got: {labels}")
+    assert labels == ["container"], f"one node, under its new label — got {labels}"
 
 
 if __name__ == "__main__":
     test_update_op_changes_entity_type_and_preserves_other_fields()
-    test_projector_leaves_stale_duplicate_node_on_entity_type_change()
-    print("entity-type round-trip + projector gap pin: OK")
+    test_projector_retypes_a_node_in_place_on_entity_type_change()
+    print("entity-type round-trip + in-place retype: OK")

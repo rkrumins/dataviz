@@ -16,6 +16,7 @@ import logging
 import pytest
 
 from backend.app.providers.falkordb_provider import FalkorDBProvider
+from backend.app.providers.graph_generation import GraphRebuildWatch
 
 
 class _FakeResult:
@@ -49,6 +50,13 @@ def _make_provider(delay_s=0.0):
 
     p._ensure_connected = _noop_connect
     p._graph = _FakeGraph(delay_s=delay_s)
+
+    # No job-bus Redis here: the rebuild check would wait out its read timeout
+    # before the query even queues, hiding the queue wait these tests measure.
+    async def _no_generation(_name):
+        return None
+
+    p._rebuild_watch = GraphRebuildWatch(reader=_no_generation)
     return p
 
 

@@ -19,7 +19,7 @@ import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { useLoadingToast } from '@/components/ui/toast'
+import { useLoadingNotification, useNotificationStore } from '@/components/ui/notifications'
 import { useCanvasStore } from '@/store/canvas'
 import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
@@ -28,7 +28,8 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
 import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
 import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
-import { CanvasProviderStateOverlay } from './CanvasProviderStateOverlay'
+import { CanvasProviderStateOverlay, CanvasProviderStatePill } from './CanvasProviderStateOverlay'
+import { isHydrationFailure } from '@/hooks/useGraphHydration'
 import { useAutoDraftForBlankModel } from '@/features/versioning/model/useAutoDraftForBlankModel'
 import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
@@ -66,17 +67,27 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // without hydration (loadChildren/searchChildren only).
   const { hydrationStatus, hydrationPhase, retryHydration, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
-  useLoadingToast(
+  // The three ways a load ends without (complete) data. Each keeps
+  // auto-retrying; what the user SEES depends on whether the canvas has
+  // anything on it: an empty canvas gets the state card, a canvas with
+  // data — a partial load, or a refresh of a view already open — keeps its
+  // nodes interactive under a small pill. Never dim data the user has.
+  const failedState = isHydrationFailure(hydrationStatus) ? hydrationStatus : null
+  const hydrationFailed = failedState !== null
+  const hasNodes = useCanvasStore((s) => s.nodes.length > 0)
+  const nodeFetchFailures = useCanvasStore((s) => s.nodeFetchFailures)
+  const missingEntityCount = useCanvasStore((s) => s.missingEntityCount)
+  useLoadingNotification(
     'hydration',
     isInitialLoad && hydrationStatus === 'loading',
-    hydrationPhase === 'roots' ? 'Loading entities' : hydrationPhase === 'edges' ? 'Loading edges' : 'Preparing view',
-    'Canvas ready',
-    // Never announce "Canvas ready" when the load ended warming/unavailable.
-    hydrationStatus === 'warming' || hydrationStatus === 'unavailable',
+    hydrationPhase === 'roots' ? 'Opening this view…' : hydrationPhase === 'edges' ? 'Loading connections…' : 'Preparing view',
+    'View ready',
+    // Never announce "View ready" when the load ended warming/slow/unavailable.
+    hydrationFailed,
   )
 
   // Mirror hydration phase + status into the canvas store so downstream
-  // components (ContextViewCanvas empty-state/toasts, LayerColumn ghost cards,
+  // components (ContextViewCanvas empty-state/notifications, LayerColumn ghost cards,
   // GhostLineageOverlay) derive their UI from ONE authoritative source and
   // never render a failed/loading load as an empty graph.
   const setHydrationPhase = useCanvasStore((s) => s.setHydrationPhase)
@@ -104,6 +115,11 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     const { clearTrace, resetAddedEdgeIds } = useTraceStore.getState()
     clearTrace()
     resetAddedEdgeIds()
+    // Same reasoning for the notification message log the status chips surface: it is
+    // an app singleton, so without this the messages raised while view A was
+    // open would be listed as view B's. In memory only — no persistence, so a
+    // refresh starts clean too.
+    useNotificationStore.getState().clearHistory()
   }, [activeViewId, currentBranchId])
 
   // Scope staged changes to the active (workspace, data source, branch). Staged edits belong to
@@ -164,6 +180,10 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
         <CanvasVersioningBar
           workspaceId={activeView.workspaceId}
           dataSourceId={activeView.dataSourceId ?? null}
+          // The Context View hosts the branch switcher in its own toolbar — the slot
+          // freed by removing the title it duplicated from the page header. Every
+          // other canvas has no such slot, so the bar keeps the switcher for them.
+          showBranchSwitcher={CanvasComponent !== ReferenceModelCanvas}
         />
       )}
       <RestoredDraftBanner
@@ -187,9 +207,17 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
           </motion.div>
         </AnimatePresence>
 
-        {(hydrationStatus === 'warming' || hydrationStatus === 'unavailable') && (
+        {failedState && !hasNodes && (
           <CanvasProviderStateOverlay
-            warming={hydrationStatus === 'warming'}
+            state={failedState}
+            onRetry={retryHydration}
+          />
+        )}
+        {failedState && hasNodes && (
+          <CanvasProviderStatePill
+            state={failedState}
+            partial={nodeFetchFailures > 0}
+            missingEntities={missingEntityCount}
             onRetry={retryHydration}
           />
         )}

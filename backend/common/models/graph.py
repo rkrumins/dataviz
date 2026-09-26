@@ -422,6 +422,25 @@ class ChildrenWithEdgesResult(BaseModel):
     total_children: int = Field(alias="totalChildren")
     has_more: bool = Field(alias="hasMore")
     next_cursor: Optional[str] = Field(None, alias="nextCursor")
+    # Where the NEXT page starts, as an offset into the provider's own order.
+    # Only the provider knows: a draft overlay drops and adds rows around the
+    # page it read, so "offset + rows returned" would skip or repeat rows.
+    next_offset: Optional[int] = Field(None, alias="nextOffset")
+    # Set when part of the answer could not be read (a lineage query failed or
+    # timed out): the children are right, their lineage may not be complete. The
+    # response cache keeps such an answer for seconds, never as the fallback.
+    degraded_detail: Optional[str] = Field(None, alias="degradedDetail")
+
+    class Config:
+        populate_by_name = True
+
+
+class NodePage(BaseModel):
+    """One page of a node query, with where the next page starts (see
+    ChildrenWithEdgesResult.next_offset) and whether there is one."""
+    nodes: List[GraphNode]
+    has_more: bool = Field(alias="hasMore")
+    next_offset: int = Field(alias="nextOffset")
 
     class Config:
         populate_by_name = True
@@ -665,12 +684,33 @@ class AggregatedEdgeResult(BaseModel):
     # "legacy_cells" (cells predate depth stamps — mixed/leaf derivation off),
     # "chain_cache_miss" (leaf/mixed resolution dropped pairs pending cache),
     # "degraded" (an on-demand sub-query failed),
+    # "query_memory" / "timeout" (the store refused part of the read at its
+    # per-query memory ceiling or time limit, at the narrowest page or batch
+    # the read-side ladder goes to — what it could read is kept),
     # "source_changed" (source data changed; rebuild in flight — overlaid
-    # post-cache, so cached/composed reads reflect it too).
+    # post-cache, so cached/composed reads reflect it too),
+    # "failing_over" (the graph store node holding this graph is restarting
+    # or being replaced; this answer is the last good one, and the client
+    # retries per Retry-After).
     stale: bool = False
     stale_reason: Optional[str] = Field(default=None, alias="staleReason")
     stamp_version: Optional[int] = Field(default=None, alias="stampVersion")
     regime: Optional[str] = None
+    # Why a loss under the store's per-query pressure happened, for the
+    # canvas: kind, how far the ladder narrowed, the node and its ceiling.
+    # None unless rows were lost — narrowing that completed is complete.
+    degraded_detail: Optional[Dict[str, Any]] = Field(default=None, alias="degradedDetail")
+    # Why the answer is SHORT — for ANY cause, not only a store limit.
+    # ``degraded_detail`` names a limit an administrator can act on and is
+    # therefore None when no limit was involved, which left a lost batch
+    # with nothing machine-readable to say: the response cache's
+    # determinism test (``graph_cache._is_incomplete_result``) reads this
+    # to tell a cap that recomputes to the identical bytes ("truncated",
+    # "max_nodes" — full TTL) from a read that GAVE UP and may do better
+    # next time ("queue_full", "timeout", "query_memory", "failed" —
+    # negative TTL, never mirrored as last-known-good). None unless rows
+    # were lost.
+    truncation_reason: Optional[str] = Field(default=None, alias="truncationReason")
 
     class Config:
         populate_by_name = True

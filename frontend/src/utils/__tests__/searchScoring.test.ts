@@ -104,4 +104,52 @@ describe('scoreCandidates', () => {
         expect(result).toHaveLength(1)
         expect(result[0].score).toBe(60)
     })
+
+    describe('tokenised multi-word queries', () => {
+        it('finds a candidate whose words are out of query order (AND of tokens)', () => {
+            // tokens: 'pipeline' (word-boundary=40), 'sales' (prefix=60); phrase 'pipeline sales'
+            // doesn't occur literally, so this is a pure token-AND match.
+            const result = scoreCandidates([{ name: 'Sales Pipeline Q4' }], 'pipeline sales', NAME_ONLY)
+            expect(result).toHaveLength(1)
+            expect(result[0].item.name).toBe('Sales Pipeline Q4')
+            expect(result[0].score).toBe(100) // 0 (no literal phrase) + 40 + 60
+        })
+
+        it('ranks a literal phrase match above a token-only match with the same token sum', () => {
+            const candidates: Item[] = [
+                { name: 'Pipeline Sales Data' }, // tokens only: sales=40 (word-boundary) + pipeline=60 (prefix) = 100
+                { name: 'Sales Pipeline Q4' }, // phrase 'sales pipeline' is a literal prefix (60) on top of the same 100
+            ]
+            const result = scoreCandidates(candidates, 'sales pipeline', NAME_ONLY)
+            expect(result.map(r => r.item.name)).toEqual(['Sales Pipeline Q4', 'Pipeline Sales Data'])
+            expect(result[0].score).toBe(160) // 60 (phrase prefix) + 60 (sales prefix) + 40 (pipeline word-boundary)
+            expect(result[1].score).toBe(100) // 0 (no literal phrase) + 40 (sales word-boundary) + 60 (pipeline prefix)
+        })
+
+        it('drops a candidate that matches only one of the tokens (AND, not OR)', () => {
+            const candidates: Item[] = [
+                { name: 'Sales Report' }, // matches 'sales', not 'pipeline' → dropped
+                { name: 'Sales Pipeline' }, // matches both → kept
+            ]
+            const result = scoreCandidates(candidates, 'sales pipeline', NAME_ONLY)
+            expect(result.map(r => r.item.name)).toEqual(['Sales Pipeline'])
+        })
+
+        it('requires each token to match, even when different tokens hit different fields', () => {
+            // 'sales' only matches description; 'pipeline' only matches description too — but
+            // spread across the FULL field set, not both required to hit the same single field.
+            const item: Item = { name: 'Q4 Report', description: 'sales pipeline summary' }
+            const other: Item = { name: 'Q4 Report', description: 'sales figures only' } // no 'pipeline' anywhere → dropped
+            const result = scoreCandidates([item, other], 'sales pipeline', FULL)
+            expect(result.map(r => r.item.description)).toEqual(['sales pipeline summary'])
+            // phrase 'sales pipeline' is a prefix of description (60*0.4=24)
+            // + sales prefix (60*0.4=24) + pipeline word-boundary (40*0.4=16)
+            expect(result[0].score).toBe(24 + 24 + 16)
+        })
+
+        it('collapses to the single-token path for one-word queries (unchanged behaviour)', () => {
+            const result = scoreCandidates([{ name: 'Sales Pipeline' }], 'sales', NAME_ONLY)
+            expect(result[0].score).toBe(scoreCandidate({ name: 'Sales Pipeline' }, 'sales', NAME_ONLY))
+        })
+    })
 })

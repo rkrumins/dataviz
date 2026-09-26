@@ -383,6 +383,7 @@ class ImportRowORM(VersioningBase):
         PrimaryKeyConstraint("job_id", "row_index", name="pk_import_rows"),
         Index("ix_import_rows_match", "job_id", "kind", "match_key"),
         Index("ix_import_rows_status", "job_id", "status"),
+        Index("ix_import_rows_matched", "job_id", "matched_entity_id"),   # a replace's absence check
         CheckConstraint("kind IN ('node','edge')", name="ck_import_rows_kind"),
     )
 
@@ -463,6 +464,7 @@ class NodeVersionORM(VersioningBase):
         Index("ix_nv_content_hash", "graph_id", "content_hash"),
         Index("ix_nv_commit", "graph_id", "commit_id"),
         Index("ix_nv_urn", "graph_id", "urn"),
+        Index("ix_nv_qname", "graph_id", "qualified_name"),     # a windowed import's lookups
         Index("ix_nv_seq_brin", "commit_seq", postgresql_using="brin"),
         CheckConstraint("op IN ('create','update','delete')", name="ck_nv_op"),
     )

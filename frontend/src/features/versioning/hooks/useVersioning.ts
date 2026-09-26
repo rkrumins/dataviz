@@ -5,7 +5,8 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { ResolutionMap, StageOp } from '@/services/versioningApiService'
+import type { ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
@@ -46,6 +47,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'prDiffSummary', ws, prId] as const,
   branchDiffSummary: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'branchDiffSummary', ws, gid, bid] as const,
+  branchViewChanges: (ws?: string, gid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'branchViewChanges', ws, gid, bid] as const,
   commitDiffSummary: (ws?: string, gid?: string | null, cid?: string | null) =>
     [...VERSIONING_KEYS.all, 'commitDiffSummary', ws, gid, cid] as const,
   viewPrs: (ws?: string, viewId?: string | null, status?: string | null) =>
@@ -112,6 +115,29 @@ export function useBranchState(wsId?: string, graphId?: string | null, branchId?
   })
 }
 
+/** When main last advanced here (publish / merge / rollback), per graph. Right after that the
+ *  projection has not started yet — the watermark reads idle-and-behind for a moment — and the
+ *  status-gated poll below would stop on exactly that reading and never see it catch up. So for a
+ *  short window after main moves, behind-and-idle keeps polling too. */
+const mainAdvancedAt = new Map<string, number>()
+const CATCH_UP_WINDOW_MS = 60_000
+function expectCatchUp(wsId?: string, graphId?: string | null) {
+  if (wsId && graphId) mainAdvancedAt.set(`${wsId}:${graphId}`, Date.now())
+}
+
+/** How often to re-read the watermark (false = stop): while forced; while catching up or
+ *  rebuilding; and, for a short window after main advanced, while merely behind — until the
+ *  projection has had its chance to start. A recorded failure ends that window early. */
+export function watermarkPollInterval(
+  d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
+): number | false {
+  if (force) return 3_000
+  if (!d || d.fresh !== false) return false
+  const active = d.status === 'projecting' || d.status === 'rebuilding'
+  const justAdvanced = advancedAt !== undefined && now - advancedAt < CATCH_UP_WINDOW_MS
+  return active || (justAdvanced && !d.lastError) ? 3_000 : false
+}
+
 /** Poll a graph's projection freshness; drives the "refreshing…" badge. Polls every 3s ONLY while a
  *  projection is actively catching up (status projecting/rebuilding), then stops. A graph that is
  *  merely behind-and-idle (no FalkorDB worker running) is not polled — otherwise it would poll
@@ -127,12 +153,7 @@ export function useProjectionWatermark(
     queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId),
     queryFn: () => api.getWatermark(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
-    refetchInterval: (q) => {
-      if (force) return 3_000
-      const d = q.state.data
-      const active = d?.status === 'projecting' || d?.status === 'rebuilding'
-      return d && d.fresh === false && active ? 3_000 : false
-    },
+    refetchInterval: (q) => watermarkPollInterval(q.state.data, force, mainAdvancedAt.get(`${wsId}:${graphId}`), Date.now()),
     staleTime: 2_000,
     refetchOnWindowFocus: false,
   })
@@ -272,6 +293,17 @@ export function useBranchDiffSummary(
   return useQuery({
     queryKey: VERSIONING_KEYS.branchDiffSummary(wsId, graphId, branchId),
     queryFn: () => api.getBranchDiffSummary(wsId!, graphId!, branchId!, limit),
+    enabled: !!wsId && !!graphId && !!branchId,
+    staleTime: 10_000,
+  })
+}
+
+/** What a draft changes in views: views it creates (imports waiting to go live), imports staged
+ *  for views here, and layer edits. A draft with only these is still worth publishing. */
+export function useBranchViewChanges(wsId?: string, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.branchViewChanges(wsId, graphId, branchId),
+    queryFn: () => api.getBranchViewChanges(wsId!, graphId!, branchId!),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
   })
@@ -520,6 +552,8 @@ export function usePublishBranch(wsId: string, graphId: string) {
       invalidatePrScopes(qc, wsId, graphId)
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show while
       // the FalkorDB cache catches up, and force live graph reads to refetch.
+      expectCatchUp(wsId, graphId)
+      qc.invalidateQueries({ queryKey: SYNC_STATUS_KEY })   // the header's sync chip
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
       bumpMainEpoch()
       // Rollups changed with main. Refetch now, and once more after the post-commit
@@ -543,6 +577,8 @@ function invalidateAfterMainAdvance(
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'restorePreview'] })
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+  expectCatchUp(wsId, graphId)
+  qc.invalidateQueries({ queryKey: SYNC_STATUS_KEY })   // the header's sync chip
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
   bumpMainEpoch()
   invalidateAggregatedEdges()
@@ -602,7 +638,7 @@ export function useRebuildProjection(wsId: string, graphId: string) {
 }
 
 /** Check the fast read layer against the source of truth (user-triggered). Returns the DriftReport;
- *  a 409 (a check already running) surfaces as a plain error for the caller to toast. */
+ *  a 409 (a check already running) surfaces as a plain error for the caller to notify. */
 export function useReconcileProjection(wsId: string, graphId: string) {
   return useMutation({
     mutationFn: (v: { deep?: boolean } = {}) => api.reconcileProjection(wsId, graphId, v),
@@ -681,6 +717,8 @@ export function useMergeMergeRequest(wsId: string) {
       // no other draft showed as behind for up to five minutes: they looked mergeable and then 409'd.
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show if lagging.
+      expectCatchUp(wsId, v.graphId)
+      qc.invalidateQueries({ queryKey: SYNC_STATUS_KEY })   // the header's sync chip
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, v.graphId) })
       bumpMainEpoch()   // main@head moved
       // Rollups changed with main (see usePublishBranch): refetch now + after the projection nudge.

@@ -5,7 +5,7 @@ One shared column schema across every format (xlsx/csv/tsv/ndjson/json):
     locked identity : entity_id, urn, baseVersion (=content_hash)
     node core       : entityType, displayName, qualifiedName, description, sourceSystem,
                       layerAssignment, tags
-    edge core       : edgeType, sourceQualifiedName, targetQualifiedName,
+    edge core       : edgeType, sourceQualifiedName, targetQualifiedName, sourceUrn, targetUrn,
                       source_entity_id, target_entity_id, confidence
     properties      : dynamic ``prop.<name>`` columns + a ``properties_json`` overflow
     op              : ``_op`` (blank = upsert, ``delete`` = delete)
@@ -15,12 +15,13 @@ assembled from ``prop.*`` + ``properties_json``, **empty cells are dropped** (a 
 a field — PATCH semantics), and ``tags``/``confidence`` are coerced. ``denormalize_node`` /
 ``denormalize_edge`` do the reverse for export, spilling nested/complex property values into
 ``properties_json`` (mirroring the projector's native-vs-``propertiesRaw`` split so round-trips are
-lossless).
+lossless). In TEXT formats a flat-list ``prop.*`` value is written by ``cell_text`` as JSON and read
+back by ``parse_list_cells``.
 """
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 _NODE_CORE = (
     "urn", "entityType", "displayName", "qualifiedName",
@@ -28,6 +29,9 @@ _NODE_CORE = (
 )
 _EDGE_CORE = (
     "edgeType", "sourceQualifiedName", "targetQualifiedName",
+    # Endpoint URNs: entity ids are minted per graph, so an edge exported from one environment
+    # finds its endpoints in another by URN (the same data source onboarded twice shares them).
+    "sourceUrn", "targetUrn",
     "source_entity_id", "target_entity_id",
 )
 
@@ -149,8 +153,10 @@ def denormalize_edge(
     *,
     source_qname: Optional[str] = None,
     target_qname: Optional[str] = None,
+    source_urn: Optional[str] = None,
+    target_urn: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Edge version payload -> flat export record (endpoint ids + human qualified names)."""
+    """Edge version payload -> flat export record (endpoint ids, human qualified names and URNs)."""
     rec: Dict[str, Any] = {"entity_id": entity_id or "", "baseVersion": base_version or "", "_op": ""}
     if payload.get("edgeType") is not None:
         rec["edgeType"] = payload["edgeType"]
@@ -162,7 +168,81 @@ def denormalize_edge(
         rec["sourceQualifiedName"] = source_qname
     if target_qname is not None:
         rec["targetQualifiedName"] = target_qname
+    if source_urn:
+        rec["sourceUrn"] = source_urn
+    if target_urn:
+        rec["targetUrn"] = target_urn
     if payload.get("confidence") is not None:
         rec["confidence"] = payload["confidence"]
     _spill_properties(rec, payload.get("properties"))
     return rec
+
+
+def cell_text(value: Any) -> str:
+    """A flat-record value as a TEXT cell (csv/tsv, xlsx string cells). A flat list is written as
+    JSON so :func:`parse_list_cells` reads it back as the same list — ``str`` would give Python's
+    ``"['a', 'b']"``, which re-imports as a string. Scalars stay ``str`` (``5`` vs ``"5"`` already
+    compare equal on re-import)."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def parse_list_cells(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """The TEXT-format inverse of :func:`cell_text` (csv/tsv/xlsx parsers only): a ``prop.*`` cell
+    holding a JSON list of scalars becomes that list again; anything else (``"[draft]"``) stays the
+    string. ndjson/json values are already typed, so a ``"[1,2]"`` string there stays a string."""
+    for key, val in rec.items():
+        if not key.startswith(_PROP_PREFIX) or not isinstance(val, str):
+            continue
+        text = val.strip()
+        if not (text.startswith("[") and text.endswith("]")):
+            continue
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(parsed, list) and _is_scalar_or_flat_list(parsed):
+            rec[key] = parsed
+    return rec
+
+
+_NODE_COL_ORDER = ["entity_id", "urn", "entityType", "displayName", "qualifiedName",
+                   "description", "sourceSystem", "layerAssignment", "tags", "baseVersion"]
+_EDGE_COL_ORDER = ["entity_id", "edgeType", "sourceQualifiedName", "targetQualifiedName",
+                   "sourceUrn", "targetUrn",
+                   "source_entity_id", "target_entity_id", "confidence", "baseVersion"]
+
+
+def column_order(records: List[Dict[str, Any]], schema_props: Optional[Dict[str, List[str]]] = None) -> List[str]:
+    """Deterministic, EDIT-READY column order (csv/tsv/xlsx; ndjson ignores).
+
+    Property management is TABULAR — **every property is its own ``prop.<name>`` column**, like a
+    spreadsheet/Airtable grid, so 10–50 properties are 10–50 columns you edit in place (never a
+    bulky JSON blob). The property columns are the union of: what entities actually have + what the
+    ontology defines for the types present (``schema_props`` = ``{"node": [...], "edge": [...]}``),
+    so a defined-but-empty property is still a column to fill. ``properties_json`` is demoted to a
+    pure OVERFLOW column for genuinely nested/complex values — emitted only when a record needs it.
+    The full editable node core (description/tags/layer/…) is always present; edge columns only when
+    the export has edges."""
+    has_edge = any(r.get("kind") == "edge" for r in records)
+    schema_props = schema_props or {}
+    cols: List[str] = ["kind"] + list(_NODE_COL_ORDER)
+    if has_edge:
+        cols += [c for c in _EDGE_COL_ORDER if c not in cols]
+    prop_cols = {k for r in records for k in r if k.startswith("prop.")}
+    prop_cols |= {f"prop.{n}" for n in (schema_props.get("node") or [])}
+    if has_edge:
+        prop_cols |= {f"prop.{n}" for n in (schema_props.get("edge") or [])}
+    cols += sorted(prop_cols)
+    if any("properties_json" in r for r in records):    # overflow only — nested values, when present
+        cols.append("properties_json")
+    cols.append("_op")
+    seen, out = set(), []                                # dedup, preserve order
+    for c in cols:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out

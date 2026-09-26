@@ -17,7 +17,7 @@ import { useState } from 'react'
 import { AlertCircle, Loader2, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { SectionHeader } from './SectionHeader'
 
 export function DangerSection({
@@ -29,7 +29,7 @@ export function DangerSection({
     const [typed, setTyped] = useState('')
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const armed = typed.trim() === provider.slug
 
@@ -38,7 +38,7 @@ export function DangerSection({
         setError(null)
         try {
             await ssoAdminService.deleteProvider(provider.id)
-            showToast('success', `Deleted ${provider.slug}`)
+            notify('success', `Deleted ${provider.slug}`)
             onDeleted()
         } catch (err) {
             setError((err as Error).message)

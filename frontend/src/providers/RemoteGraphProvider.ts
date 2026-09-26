@@ -1,6 +1,17 @@
 import { unwrapEnvelope } from '@/services/cacheEnvelope'
 import { getCircuitBreaker, classifyEndpoint } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { readJsonLossless } from '@/lib/losslessJson'
+import {
+    MAX_READ_RETRIES,
+    isClientTimeout,
+    isIdempotentGraphRead,
+    isNetworkError,
+    isProviderOutageSignal,
+    isRetryableGraphFailure,
+    retryDelayMs,
+    toApiStatusError,
+} from '@/services/graphRequestFailure'
 import { TIMEOUTS } from '@/config/timeouts'
 import { useProviderHealthStore } from '@/store/providerHealth'
 import { useCacheStalenessStore } from '@/store/cacheStaleness'
@@ -12,6 +23,7 @@ import type {
     EntityType,
     URN,
     NodeQuery,
+    NodePage,
     EdgeQuery,
     LineageResult,
     ContainmentResult,
@@ -36,6 +48,8 @@ import type {
     EdgeMutationResult,
     TopLevelNodesQuery,
     TopLevelNodesResult,
+    CanvasBootstrapRequest,
+    CanvasBootstrapResult,
 } from './GraphDataProvider'
 import type { TraceMeta } from '@/services/traceApi'
 import type {
@@ -43,6 +57,17 @@ import type {
     SearchResultPage,
     SearchExplainResult,
     SearchDiscoverResult,
+    SearchValuesResult,
+    SearchMembershipRequest,
+    SearchMembershipResult,
+    SearchCountsRequest,
+    SearchCountsResult,
+    SearchAncestorCountsRequest,
+    SearchAncestorCountsResult,
+    SearchCatalogRequest,
+    SearchCatalogResult,
+    SearchExportRequest,
+    SearchExportResult,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -83,6 +108,13 @@ function normalizeTraceV2(raw: RawTraceV2Result): TraceV2Result {
 }
 
 const API_BASE = '/api/v1'
+
+
+// The error shape and its status accessor live with the shared failure
+// classification now (services/graphRequestFailure) so the request layer and
+// the canvas read one definition; re-exported to keep this import surface.
+export type { ApiStatusError } from '@/services/graphRequestFailure'
+export { httpStatusOf } from '@/services/graphRequestFailure'
 
 export interface RemoteGraphProviderOptions {
     /** Workspace ID. When set, routes through /v1/{ws_id}/graph/... */
@@ -127,6 +159,41 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
     /** Short-lived response cache for GET requests (prevents rapid re-fetches during re-renders) */
     private _responseCache = new Map<string, { data: unknown; ts: number; ttl: number }>()
+    /**
+     * The response cache's ceiling. Entries live 2–60 s, but the map used to
+     * KEEP every one it was given — a read skipped a stale entry, nothing
+     * removed it — so a session spent expanding and scrolling held every
+     * children page and node query it had ever fetched, for the life of the
+     * tab. Now a stale entry is dropped when read, stale ones are swept when
+     * the map passes this size, and past it the oldest go first.
+     */
+    static readonly RESPONSE_CACHE_MAX = 256
+
+    private _cacheResponse(key: string, data: unknown, ttl: number): void {
+        const now = Date.now()
+        // Re-inserted at the end, so insertion order is recency order.
+        this._responseCache.delete(key)
+        this._responseCache.set(key, { data, ts: now, ttl })
+        if (this._responseCache.size <= RemoteGraphProvider.RESPONSE_CACHE_MAX) return
+        for (const [k, v] of this._responseCache) {
+            if (now - v.ts >= v.ttl) this._responseCache.delete(k)
+        }
+        for (const k of this._responseCache.keys()) {
+            if (this._responseCache.size <= RemoteGraphProvider.RESPONSE_CACHE_MAX) break
+            this._responseCache.delete(k)
+        }
+    }
+
+    /** Drop every cached response — the memory gauge's "Free memory". A
+     *  cache, not state: the next read simply asks the server. */
+    releaseCaches(): void {
+        this._responseCache.clear()
+    }
+
+    /** How many responses are cached — for the memory gauge. */
+    get cachedResponseCount(): number {
+        return this._responseCache.size
+    }
     /** Fallback TTL for endpoints not matched in {@link responseCacheTtlMs}. */
     private static DEFAULT_RESPONSE_CACHE_TTL_MS = 2000
 
@@ -232,110 +299,174 @@ export class RemoteGraphProvider implements GraphDataProvider {
             if (cached && Date.now() - cached.ts < cached.ttl) {
                 return cached.data as T
             }
+            if (cached) this._responseCache.delete(cacheKey)
         }
 
-        // Deduplicate identical in-flight requests
-        const existing = this._inflight.get(cacheKey)
-        if (existing) return existing as Promise<T>
+        // Deduplicate identical in-flight requests — skipped when the
+        // caller supplies an AbortSignal. Sharing one promise would let
+        // aborting a superseded call reject the identical superseding
+        // call too (e.g. search-as-you-type re-firing the same text).
+        if (!fetchOptions.signal) {
+            const existing = this._inflight.get(cacheKey)
+            if (existing) return existing as Promise<T>
+        }
 
         const promise = this._doFetch<T>(url, fetchOptions, method, cacheKey, timeoutMs)
-        this._inflight.set(cacheKey, promise)
+        if (!fetchOptions.signal) {
+            this._inflight.set(cacheKey, promise)
+        }
         return promise
     }
 
     private async _doFetch<T>(url: string, fetchOptions: RequestInit, method: string, cacheKey: string, timeoutMs?: number): Promise<T> {
-        // Per-endpoint-class circuit breaker: a trace 504 opens only the
+        // Per-endpoint-class circuit breaker: a trace failure opens only the
         // 'trace' breaker, never the browse (children/aggregated/canvas)
         // ones — the fix for "one dead endpoint blocked ALL graph reads".
+        //
+        // What the breaker COUNTS is deliberately narrow: only a confirmed
+        // outage (503 PROVIDER_UNAVAILABLE — the backend's own breaker or
+        // preflight said the graph store is unreachable — or a request that
+        // never reached the backend). A slow request (504, a client-side
+        // timeout), load shedding (429), a gateway hiccup (502) or a
+        // rejected query (500) says nothing about reachability; counting
+        // those opened the breaker after three of them and turned a busy
+        // afternoon into "Provider unavailable (circuit open)" on every
+        // read until a page reload rebuilt the breaker.
         const circuitBreaker = getCircuitBreaker(
             this.workspaceId, this.dataSourceId, classifyEndpoint(url),
         )
-        if (!circuitBreaker.canRequest()) {
-            this._inflight.delete(cacheKey)
-            throw new Error('Provider unavailable (circuit open)')
-        }
+        // Idempotent reads (every GET, and the POSTs that only query) are
+        // retried in place on the transient failures the backend asks us
+        // to retry: 429/503 + Retry-After, 504 from a query that ran out of
+        // budget (the backend's stale-fallback or now-warm cache usually
+        // answers the retry), 502, a client timeout, a dropped connection.
+        // A write is never replayed.
+        const retryable = isIdempotentGraphRead(method, url)
 
         try {
-            // Use the global default timeout (5s). The graph endpoints
-            // are all cache-only post-insights-refactor — they read from
-            // Postgres and respond in <100ms; an empty/computing cache
-            // surfaces as `meta.status="computing"` in the body, never
-            // as a timeout. The legacy 12s window was sized for live
-            // provider calls that no longer happen here.
-            const response = await fetchWithTimeout(url, {
-                ...fetchOptions,
-                ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...fetchOptions?.headers,
-                },
-            })
+            for (let attempt = 0; ; attempt++) {
+                if (!circuitBreaker.canRequest()) {
+                    throw new Error('Provider unavailable (circuit open)')
+                }
 
-            if (!response.ok) {
-                const errorText = await response.text()
-                const error = new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
-                // 5xx errors indicate provider/backend failure — feed circuit breaker
-                if (response.status >= 500) {
-                    // Honor Retry-After header from backend (sent on 503 ProviderUnavailable)
-                    const retryAfter = response.headers.get('Retry-After')
-                    const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : undefined
-                    circuitBreaker.recordFailure(
-                        retryAfterMs && !isNaN(retryAfterMs) ? retryAfterMs : undefined,
+                let response: Response
+                try {
+                    response = await fetchWithTimeout(url, {
+                        ...fetchOptions,
+                        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...fetchOptions?.headers,
+                        },
+                    })
+                } catch (err) {
+                    // A caller-initiated abort (e.g. search-as-you-type
+                    // superseding its own previous request) surfaces here as
+                    // the same generic "timed out" TypeError a real
+                    // client-side timeout would raise — fetchWithTimeout's
+                    // runOnce links both onto one internal AbortController
+                    // and can't tell them apart. It is not a backend health
+                    // signal, so it must not feed the breaker or be retried.
+                    if (fetchOptions.signal?.aborted || !(err instanceof TypeError)) {
+                        throw err
+                    }
+                    const timedOut = isClientTimeout(err)
+                    // A timeout already cost a full deadline — one more go
+                    // is enough; a dropped connection gets the full budget.
+                    const budget = timedOut ? 1 : MAX_READ_RETRIES
+                    if (retryable && attempt < budget && isRetryableGraphFailure(err)) {
+                        await this._retryPause(err, attempt, fetchOptions.signal)
+                        continue
+                    }
+                    // Only a request that never reached the backend — even
+                    // after its retries — is an outage signal; a deadline
+                    // miss is a slowness signal. Counted once per logical
+                    // request, so one blip on a flaky link is one strike.
+                    if (isNetworkError(err)) circuitBreaker.recordFailure()
+                    throw timedOut ? new Error(`Request timed out: ${method} ${url}`) : err
+                }
+
+                if (!response.ok) {
+                    const errorText = await response.text()
+                    // The status (and the backend's structured code) ride
+                    // along on the error. Callers that need to tell "you are
+                    // not allowed this here" apart from "the backend is
+                    // broken" — a share link hitting /search/discover is the
+                    // live case — cannot get that out of a message.
+                    const error = toApiStatusError(response, errorText)
+                    if (isProviderOutageSignal(error)) {
+                        // Honor Retry-After from the backend's own breaker so
+                        // the client waits at least as long as it suggests.
+                        circuitBreaker.recordFailure(error.retryAfterMs)
+                    }
+                    if (retryable && attempt < MAX_READ_RETRIES && isRetryableGraphFailure(error)) {
+                        await this._retryPause(error, attempt, fetchOptions.signal)
+                        continue
+                    }
+                    throw error
+                }
+
+                // Header-borne resilience signals from the backend GraphCache.
+                // - ``X-Provider-Health``: 'healthy' | 'unreachable' — pushed
+                //   into providerHealth store so the UI banner reacts faster
+                //   than the 30s /health/providers poll cycle.
+                // - ``X-Cache-Status: stale-fallback`` — backend served from
+                //   the last-known-good snapshot; signal so the user sees a
+                //   "data may be stale" hint near affected widgets.
+                const providerHealth = response.headers.get('X-Provider-Health')
+                if (providerHealth) {
+                    useProviderHealthStore.getState().markFromHeader(
+                        this.workspaceId, this.dataSourceId, providerHealth,
                     )
                 }
-                throw error
-            }
-
-            // Header-borne resilience signals from the backend GraphCache.
-            // - ``X-Provider-Health``: 'healthy' | 'unreachable' — pushed
-            //   into providerHealth store so the UI banner reacts faster
-            //   than the 30s /health/providers poll cycle.
-            // - ``X-Cache-Status: stale-fallback`` — backend served from
-            //   the last-known-good snapshot; signal so the user sees a
-            //   "data may be stale" hint near affected widgets.
-            const providerHealth = response.headers.get('X-Provider-Health')
-            if (providerHealth) {
-                useProviderHealthStore.getState().markFromHeader(
-                    this.workspaceId, this.dataSourceId, providerHealth,
-                )
-            }
-            const cacheStatus = response.headers.get('X-Cache-Status')
-            if (cacheStatus === 'stale-fallback') {
-                useCacheStalenessStore.getState().markStale(
-                    this.workspaceId, this.dataSourceId, url,
-                )
-            } else if (providerHealth === 'healthy') {
-                // Fresh response from a healthy provider — clear any
-                // stale flag for this scope so the banner disappears on
-                // recovery without waiting for the TTL.
-                useCacheStalenessStore.getState().clear(
-                    this.workspaceId, this.dataSourceId,
-                )
-            }
-
-            const data = await response.json() as T
-
-            // Cache GET responses; TTL is per-endpoint (hot read paths 30s,
-            // metadata 60s, default 2s) so a "expand all" doesn't re-fire
-            // the same children query on every render.
-            if (method === 'GET') {
-                const ttl = RemoteGraphProvider.responseCacheTtlMs(url)
-                this._responseCache.set(cacheKey, { data, ts: Date.now(), ttl })
-            }
-
-            circuitBreaker.recordSuccess()
-            return data
-        } catch (err) {
-            if (err instanceof TypeError) {
-                circuitBreaker.recordFailure()
-                if (err.message.includes('timed out')) {
-                    throw new Error(`Request timed out: ${method} ${url}`)
+                const cacheStatus = response.headers.get('X-Cache-Status')
+                if (cacheStatus === 'stale-fallback') {
+                    useCacheStalenessStore.getState().markStale(
+                        this.workspaceId, this.dataSourceId, url,
+                    )
+                } else if (providerHealth === 'healthy') {
+                    // Fresh response from a healthy provider — clear any
+                    // stale flag for this scope so the banner disappears on
+                    // recovery without waiting for the TTL.
+                    useCacheStalenessStore.getState().clear(
+                        this.workspaceId, this.dataSourceId,
+                    )
                 }
+
+                // Lossless: an integer past 2^53 (ids, hashes) arrives as its exact
+                // digits instead of a rounded double nobody's graph holds.
+                const data = await readJsonLossless<T>(response)
+
+                // Cache GET responses; TTL is per-endpoint (hot read paths 30s,
+                // metadata 60s, default 2s) so a "expand all" doesn't re-fire
+                // the same children query on every render.
+                if (method === 'GET') {
+                    this._cacheResponse(cacheKey, data, RemoteGraphProvider.responseCacheTtlMs(url))
+                }
+
+                circuitBreaker.recordSuccess()
+                return data
             }
-            throw err
         } finally {
-            this._inflight.delete(cacheKey)
+            if (!fetchOptions.signal) this._inflight.delete(cacheKey)
         }
+    }
+
+    /** Sleep before retry `attempt`, honouring the server's Retry-After and
+     *  bailing out immediately if the caller aborts meanwhile. */
+    private _retryPause(err: unknown, attempt: number, signal?: AbortSignal | null): Promise<void> {
+        const delay = retryDelayMs(err, attempt)
+        return new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                signal?.removeEventListener('abort', onAbort)
+                resolve()
+            }, delay)
+            const onAbort = () => {
+                clearTimeout(timer)
+                reject(signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError'))
+            }
+            signal?.addEventListener('abort', onAbort, { once: true })
+        })
     }
 
     // ==========================================
@@ -358,7 +489,29 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return await this.fetch<GraphNode[]>('/nodes/query', {
             method: 'POST',
             body: JSON.stringify({ query }),
+            timeoutMs: TIMEOUTS.NODES_QUERY_MS,
         })
+    }
+
+    async getNodesPage(query: NodeQuery): Promise<NodePage> {
+        try {
+            return await this.fetch<NodePage>('/nodes/page', {
+                method: 'POST',
+                body: JSON.stringify({ query }),
+                timeoutMs: TIMEOUTS.NODES_QUERY_MS,
+            })
+        } catch (error) {
+            // A server from before /nodes/page (a deploy in progress): its POST lands
+            // on GET /nodes/{urn} — 405 — or nowhere — 404. Page by counting, as
+            // clients did before; a full page is taken to mean there may be more.
+            const status = (error as { status?: number } | null)?.status
+            if (status === 404 || status === 405) {
+                const nodes = await this.getNodes(query)
+                const limit = query.limit ?? 100
+                return { nodes, hasMore: nodes.length >= limit, nextOffset: (query.offset ?? 0) + nodes.length }
+            }
+            throw error
+        }
     }
 
     async getNodeDegrees(urns: string[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>> {
@@ -369,6 +522,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
             method: 'POST',
             body: JSON.stringify({ urns, edgeTypes }),
         })
+    }
+
+    async getAncestorChains(urns: string[]): Promise<Record<string, string[]>> {
+        // Absent = unknown, [] = a root: see GraphDataProvider.
+        const res = await this.fetch<{ chains: Record<string, string[]> }>('/nodes/ancestor-chains', {
+            method: 'POST',
+            body: JSON.stringify({ urns }),
+        })
+        return res.chains
     }
 
     async searchNodes(query: string, limit = 10): Promise<GraphNode[]> {
@@ -390,11 +552,101 @@ export class RemoteGraphProvider implements GraphDataProvider {
      * body which the GET-cache layer can't key on, and the backend will
      * grow its own Redis cache in workstream 3.
      */
-    async searchAdvanced(query: SearchQuery): Promise<SearchResultPage> {
+    async searchAdvanced(query: SearchQuery, opts?: { signal?: AbortSignal }): Promise<SearchResultPage> {
         return await this.fetch<SearchResultPage>('/search/advanced', {
             method: 'POST',
             body: JSON.stringify(query),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
         })
+    }
+
+    /**
+     * Which of these entities (the ones on screen, ≤ 1,000) match which
+     * display rules (≤ 32) — POST /search/membership. The server resolves
+     * the view's scope; an entity outside it never matches.
+     */
+    async searchMembership(
+        body: SearchMembershipRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchMembershipResult> {
+        return await this.fetch<SearchMembershipResult>('/search/membership', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+        })
+    }
+
+    /**
+     * Each display rule's exact total in the view — POST /search/counts.
+     * A large view takes several calls: send the returned sessions back
+     * until every count is complete (``services/ruleCounts.ts``).
+     */
+    async searchCounts(
+        body: SearchCountsRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchCountsResult> {
+        return await this.fetch<SearchCountsResult>('/search/counts', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /**
+     * Every property the view's entities carry — on how many, stored as
+     * which kinds, with which values — read from every entity in the view
+     * (POST /search/catalog). A large view takes several calls: send the
+     * returned session back until it is complete (``services/propertyCatalog``).
+     */
+    async searchCatalog(
+        body: SearchCatalogRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchCatalogResult> {
+        return await this.fetch<SearchCatalogResult>('/search/catalog', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /**
+     * How many of a finished search's matches each of these containers
+     * (≤ 2,000) holds — POST /search/ancestor-counts, read from the
+     * search's session. Answers for any container, not only the fullest
+     * ones the search's ``ancestor`` facet lists.
+     */
+    async searchAncestorCounts(
+        body: SearchAncestorCountsRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchAncestorCountsResult> {
+        return await this.fetch<SearchAncestorCountsResult>('/search/ancestor-counts', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+        })
+    }
+
+    /**
+     * Every match of a search, written to a CSV or NDJSON file on the
+     * server — POST /search/exports. A large export takes several calls:
+     * send the returned session back until it is complete
+     * (``services/searchExport.ts``); that answer carries a download token.
+     */
+    async searchExport(
+        body: SearchExportRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchExportResult> {
+        return await this.fetch<SearchExportResult>('/search/exports', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /** Where a complete export downloads from. The browser sends the
+     *  session cookie; ``token`` names the export and whose it is. */
+    searchExportDownloadUrl(sessionId: string, token: string): string {
+        return this.buildUrl(
+            `/search/exports/${encodeURIComponent(sessionId)}/download`, { token })
     }
 
     /**
@@ -448,6 +700,23 @@ export class RemoteGraphProvider implements GraphDataProvider {
         )
     }
 
+    /**
+     * A property's most common values in a view — the value picker's
+     * suggestions, counted over every entity of the view's types (the
+     * discover sample above sees 200 nodes per type, so a property's
+     * values showed up by accident). Narrowed to values whose text contains
+     * `q`. Time-bounded server-side: `complete` / `truncated` say how far
+     * the count got.
+     */
+    async searchPropertyValues(
+        viewId: string, key: string, q = '', limit = 25, signal?: AbortSignal,
+    ): Promise<SearchValuesResult> {
+        return await this.fetch<SearchValuesResult>('/search/values', {
+            extraParams: { viewId, key, q, limit: String(limit) },
+            signal,
+        })
+    }
+
     // ==========================================
     // Edge Operations
     // ==========================================
@@ -466,6 +735,20 @@ export class RemoteGraphProvider implements GraphDataProvider {
             method: 'POST',
             body: JSON.stringify({ urns, edgeTypes, limit }),
             timeoutMs: TIMEOUTS.EDGES_BETWEEN_MS,
+        })
+    }
+
+    /** One canvas open in one request — roots, the edges among that set, and
+     *  the aggregated lineage among it. The three calls this replaces fire
+     *  together and queue on the browser's six HTTP/1.1 connections, so over
+     *  real RTT what it saves is the queueing. `/canvas/` is its own circuit
+     *  breaker class, so a bootstrap failing does not trip the per-purpose
+     *  endpoints the caller falls back to. */
+    async canvasBootstrap(request: CanvasBootstrapRequest): Promise<CanvasBootstrapResult> {
+        return await this.fetch<CanvasBootstrapResult>('/canvas/bootstrap', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            timeoutMs: TIMEOUTS.CANVAS_BOOTSTRAP_MS,
         })
     }
 
@@ -515,6 +798,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             sortProperty?: string | null
             cursor?: string | null
             sortDirection?: 'asc' | 'desc'
+            lineageScope?: 'page' | 'siblings'
         }
     ): Promise<{
         children: GraphNode[]
@@ -523,8 +807,10 @@ export class RemoteGraphProvider implements GraphDataProvider {
         totalChildren: number
         hasMore: boolean
         nextCursor?: string | null
+        nextOffset?: number | null
     }> {
         const params = new URLSearchParams()
+        if (options?.lineageScope === 'siblings') params.append('lineageScope', 'siblings')
         if (options?.offset) params.append('offset', String(options.offset))
         if (options?.limit) params.append('limit', String(options.limit))
         if (options?.searchQuery) params.append('searchQuery', options.searchQuery)

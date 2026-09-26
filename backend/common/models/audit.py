@@ -30,6 +30,35 @@ class AuditEventResponse(BaseModel):
     target_role: Optional[str] = Field(default=None, alias="targetRole")
     workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
 
+    # WHO those ids actually are, resolved in one batched lookup per page.
+    # An audit row used to carry nothing but `usr_ac3f19`-shaped strings, so
+    # reading the log meant opening a tab per row to find out who did what to
+    # whom — and once an account was deleted, there was no way to find out at
+    # all.
+    #
+    # NULL HERE MEANS UNRESOLVED, NEVER "nobody". A system-generated event, a
+    # hard-deleted row, or a payload naming something that was never a user all
+    # leave these empty, and the id stays authoritative — the client must go on
+    # showing it rather than print a name the database cannot vouch for.
+    #
+    # `*_deleted` marks an account that is soft-deleted but still named: the
+    # log is a record of what happened, and "who was that account we removed"
+    # is precisely the question it exists to answer.
+    # Every other internal id this event mentions — groups, IdP
+    # connections, views, workspaces inside the payload — resolved to
+    # its display name, keyed by the id. Same contract as the people
+    # above: absence means unresolved, and the id stays authoritative.
+    resolved_names: dict[str, str] = Field(
+        default_factory=dict, alias="resolvedNames",
+    )
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
+    actor_name: Optional[str] = Field(default=None, alias="actorName")
+    actor_email: Optional[str] = Field(default=None, alias="actorEmail")
+    actor_deleted: bool = Field(default=False, alias="actorDeleted")
+    target_user_name: Optional[str] = Field(default=None, alias="targetUserName")
+    target_user_email: Optional[str] = Field(default=None, alias="targetUserEmail")
+    target_user_deleted: bool = Field(default=False, alias="targetUserDeleted")
+
     # Phase 8: human-readable display fields the FE keys off so the
     # admin audit table doesn't show raw event_type codes.
     # ``severity`` is one of ``info`` / ``warning`` / ``critical`` and

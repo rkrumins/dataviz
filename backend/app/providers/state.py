@@ -75,8 +75,23 @@ class ProbeOutcome:
 _AMBIGUOUS_PROBE_REASONS: Tuple[str, ...] = (
     "timeout", "wall_clock", "exceeded", "empty_reply",
 )
-# Consecutive ambiguous failures required before the fast-fail gate blocks reads.
-_READ_GATE_PERSISTENCE: int = 2
+# Consecutive ambiguous failures required before the fast-fail gate blocks reads
+# (and before warmup pre-trips the instantiation breaker). Three, not two: a
+# busy FalkorDB answers a fresh AUTH+PING late on its main thread while a large
+# reply is being serialized or an RDB fork is in flight, and in the 5s recovery
+# lane two such misses land within seconds of each other. A genuinely dead host
+# misses every probe, so it still gates — ~15s later than before, which is the
+# price of never vetoing a provider that real traffic can reach.
+_READ_GATE_PERSISTENCE: int = 3
+
+
+def is_ambiguous_probe_reason(reason: Optional[str]) -> bool:
+    """True when a probe failure reason is timeout-class — reachable-but-slow
+    is as likely as down. Definitive reasons (refused, DNS, os_error) are
+    False. Shared by the read gate, the warmup pre-trip and the request-path
+    preflight so all three apply the same persistence rule."""
+    r = (reason or "").lower()
+    return any(a in r for a in _AMBIGUOUS_PROBE_REASONS)
 
 
 @dataclass
@@ -148,8 +163,7 @@ class ProviderState:
             return False
         if (time.monotonic() - obs.observed_at) > max_age_s:
             return False
-        reason = (obs.reason or "").lower()
-        if any(a in reason for a in _AMBIGUOUS_PROBE_REASONS):
+        if is_ambiguous_probe_reason(obs.reason):
             return self.consecutive_failures >= _READ_GATE_PERSISTENCE
         return True
 

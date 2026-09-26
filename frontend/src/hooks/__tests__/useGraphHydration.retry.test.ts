@@ -19,13 +19,20 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockProvider } = vi.hoisted(() => ({
-  mockProvider: {
+const { mockProvider } = vi.hoisted(() => {
+  const mockProvider = {
     getNodes: vi.fn(async () => []),
     getEdgesBetween: vi.fn(async () => []),
     getChildren: vi.fn(async () => []),
-  },
-}))
+    // Type and root loads page through getNodesPage; it answers from this
+    // file's own getNodes mock, so each test's getNodes behaviour applies.
+    getNodesPage: vi.fn(async (q: { offset?: number }) => {
+      const nodes = await (mockProvider.getNodes as (q: unknown) => Promise<unknown[]>)(q)
+      return { nodes, hasMore: false, nextOffset: (q.offset ?? 0) + nodes.length }
+    }),
+  }
+  return { mockProvider }
+})
 
 vi.mock('@/providers/GraphProviderContext', () => ({
   useGraphProvider: () => mockProvider,
@@ -87,10 +94,36 @@ describe('useGraphHydration auto-retry (node-rotation outage)', () => {
     expect(mockProvider.getNodes.mock.calls.length).toBeGreaterThanOrEqual(7)
   })
 
+  it('failing over: a node being replaced waits like a warm-up, in its own words', async () => {
+    // A pod rotation, not an outage: the cluster promotes a replica in
+    // seconds. Reporting it as "unavailable" put this view behind the slow
+    // background cadence and told the person their data was gone.
+    let failures = 5
+    mockProvider.getNodes.mockImplementation(async () => {
+      if (failures > 0) {
+        failures--
+        throw new Error('{"detail":{"code":"PROVIDER_FAILING_OVER","endpoint":"10.0.0.3:6379"}}')
+      }
+      return []
+    })
+
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('warming'))
+    expect(result.current.hydrationError).toContain('Reconnecting to the graph store')
+    expect(result.current.hydrationError).not.toContain('unavailable')
+    await waitFor(
+      () => expect(result.current.hydrationStatus).toBe('ready'),
+      { timeout: 5_000 },
+    )
+  })
+
   it('unavailable: degrades to the slow cadence instead of stopping, then recovers', async () => {
     let down = true
     mockProvider.getNodes.mockImplementation(async () => {
-      if (down) throw new Error('ECONNREFUSED')
+      // No backend at all — the browser's fetch rejection. (A plain error
+      // with no status is a transient 'slow' now, not an outage.)
+      if (down) throw new TypeError('Failed to fetch')
       return []
     })
 

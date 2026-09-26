@@ -72,7 +72,7 @@ services:
       # THREAD_COUNT should track vCPUs in prod (managed FalkorDB): it is
       # the parallel Cypher execution width and the ceiling the app's
       # slot-shed (PROVIDER_MAX_CONCURRENCY, 429 on saturation) sits above.
-      FALKORDB_ARGS: THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 256
+      FALKORDB_ARGS: THREAD_COUNT 8 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY ${FALKORDB_QUERY_MEM_CAPACITY:-536870912} CACHE_SIZE 256 EFFECTS_THRESHOLD 0
       # Instance-level memory ceiling: QUERY_MEM_CAPACITY bounds ONE query;
       # without maxmemory the dataset itself can still OOM-kill the container.
       # noeviction = writes fail loudly at the ceiling instead of silent eviction.
@@ -385,6 +385,11 @@ services:
       # versioning-worker service owns projection. Only set 1 for a
       # single-process dev run with no worker container.
       GRAPHVER_PROJECTION_INPROCESS: "${GRAPHVER_PROJECTION_INPROCESS:-0}"
+      # Import and export jobs are only queued here: the versioning-worker
+      # service claims them from the jobs table and runs them, so a large
+      # import or export never shares this container's CPU with requests.
+      # Only set 1 for a single-process dev run with no worker container.
+      GRAPHVER_TRANSFER_INPROCESS: "${GRAPHVER_TRANSFER_INPROCESS:-0}"
 
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -506,6 +511,9 @@ services:
     # a dedicated liveness endpoint is a follow-up.
     healthcheck:
       disable: true
+    # On stop it gives running import/export jobs 40 s to finish, then
+    # records the rest as interrupted: allow for that, as the Deployment does.
+    stop_grace_period: 60s
     depends_on:
       upgrade:
         condition: service_completed_successfully

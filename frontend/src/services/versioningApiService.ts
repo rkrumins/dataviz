@@ -10,10 +10,12 @@
  *
  * Conflict-aware by design: `stageChanges`/`commitDraft`/`publish`/`merge` can return
  * `409 merge_conflict` (main moved) or `422 ontology_violation`; both surface as typed
- * errors so the UI can route to a resolution flow instead of a generic toast.
+ * errors so the UI can route to a resolution flow instead of a generic notification.
  */
+import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
+import { readJsonLossless } from '@/lib/losslessJson'
 
 // ============================================
 // Wire types (match the backend `_ApiModel` aliases — camelCase)
@@ -174,6 +176,9 @@ export interface DriftReport {
   checkedAt: string
   durationMs: number
   skippedReason?: string | null
+  /** Health of the derived lineage summaries (`:AGGREGATED`) — "missing"/"untrusted" means
+   *  "Rebuild fast read layer" hands them to the aggregation job to re-derive. */
+  rollups?: { status: 'ok' | 'missing' | 'untrusted'; aggregated: number; stubs: number } | null
 }
 
 export interface StateResponse {
@@ -439,7 +444,7 @@ async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number 
     throw new Error(msg)
   }
   if (res.status === 204) return undefined as T
-  return res.json()
+  return readJsonLossless<T>(res)
 }
 
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`
@@ -738,7 +743,9 @@ export function commitDraft(
 /** One typed canvas edit for the atomic `/graph/changes` save. `update` payloads are
  *  partial — the server merges them onto current state. */
 export interface GraphChangeOp {
-  op: 'create' | 'update' | 'delete'
+  /** `move` (node only): `payload = { parentEntityId | null, edgeType }` — the server replaces
+   *  whatever parent link the node has; `ref` names the client's pending link. */
+  op: 'create' | 'update' | 'delete' | 'move'
   kind: 'node' | 'edge'
   id?: string
   ref?: string
@@ -885,6 +892,37 @@ export function getDiffVsMain(wsId: string, graphId: string, branchId: string): 
 // ============================================
 // Hierarchical (containment-tree) diff — lazy, capped, business-friendly
 // ============================================
+
+/** What a draft changes in views, beside its graph changes. They go live when the draft does. */
+export interface BranchViewChange {
+  viewId: string
+  workspaceId: string
+  name: string
+  /** `create`: a view that exists only in the draft (an import waiting to go live); `update`: an
+   *  import staged for a view here; `layout`: layer edits made in the draft. */
+  change: 'create' | 'update' | 'layout'
+  origin: { environment?: string | null; version?: number | null; name?: string | null } | null
+  matchRate: number | null
+  stagedBy?: string | null
+  stagedByName?: string | null
+  stagedAt?: string | null
+  /** create: its headline counts, and who it goes live for. */
+  stats?: { layers?: number; assignments?: number }
+  goesLiveAs?: 'private' | 'workspace'
+  /** update / layout: what it changes. */
+  diff?: ViewDefinitionDiff
+}
+
+export interface BranchViewChanges {
+  branchId: string
+  views: BranchViewChange[]
+  /** Changes to views the caller can't read: counted, never shown. */
+  hidden: number
+}
+
+export function getBranchViewChanges(wsId: string, graphId: string, branchId: string): Promise<BranchViewChanges> {
+  return vfetch<BranchViewChanges>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/view-changes`)
+}
 
 /** Top-level groups of a draft's changes as a containment tree (canvas Changes panel). */
 export function getBranchDiffSummary(

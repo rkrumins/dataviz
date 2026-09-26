@@ -22,10 +22,26 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
-    AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
-    GraphEdge, GraphNode, GraphSchemaStats, NodeQuery, TagSummary, TopLevelNodesResult,
+    AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
+    GraphEdge, GraphNode, GraphSchemaStats, NodePage, NodeQuery, TagSummary, TopLevelNodesResult,
     TraceClosureResult, TraceFocus, TraceResult,
+)
+
+
+#: Bounds on the derived-rollup containment descent (see
+#: ``get_aggregated_edges_between``). A branch is draft-scale, so these are a
+#: runaway guard, not a paging scheme — when either bites, the answer is
+#: reported ``truncated``/``stale`` rather than quietly returned short.
+_DERIVE_HOP_BOUND = 16
+_DERIVE_SCOPE_CAP = 20_000
+
+#: Surfaced verbatim as the 501 body, so it is product copy: what
+#: happened and that waiting fixes it — no provider names, no internals.
+_NO_DEEP_SEARCH = (
+    "Search isn't available while the published graph is catching up — "
+    "try again in a moment."
 )
 
 
@@ -84,6 +100,23 @@ class VersionedBranchProvider:
             include_child_count=getattr(query, "include_child_count", True))
         return [GraphNode(**d) for d in rows]
 
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which ``urns`` exist on this branch, and as what: the three states of
+        ``GraphDataProvider.resolve_identities`` (found / absent / left out when its lookup
+        failed), from bounded ``get_nodes`` reads. This class doesn't inherit that default, and
+        without it every view checked against a version-controlled data source came back
+        "couldn't be checked"."""
+        return await resolve_identities_by_query(self, urns)
+
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        # Same probe as the interface default (this class doesn't inherit it):
+        # one row past the page says exactly whether another follows.
+        limit = query.limit or 100
+        offset = query.offset or 0
+        rows = await self.get_nodes(query.model_copy(update={"limit": limit + 1}))
+        page = rows[:limit]
+        return NodePage(nodes=page, hasMore=len(rows) > limit, nextOffset=offset + len(page))
+
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         rows = await self._svc.search_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
@@ -115,13 +148,15 @@ class VersionedBranchProvider:
         lineage_edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
         offset: int = 0, limit: int = 100, include_lineage_edges: bool = True,
         sort_property: Optional[str] = "displayName", cursor: Optional[str] = None,
-        sort_direction: str = "asc",
+        sort_direction: str = "asc", lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
+        # Pages by OFFSET (the cursor is not an input here) — which is why paging
+        # clients send both: FalkorDB takes the cursor, this path the offset.
         d = await self._svc.get_children_with_edges_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             parent_urn=parent_urn, containment_edge_types=edge_types or [],
             lineage_edge_types=lineage_edge_types, include_lineage_edges=include_lineage_edges,
-            limit=limit, offset=offset)
+            limit=limit, offset=offset, lineage_scope=lineage_scope)
         result = ChildrenWithEdgesResult(**d)
         if sort_direction == "desc":
             result.children = self._page_resort(result.children, sort_direction)
@@ -346,17 +381,161 @@ class VersionedBranchProvider:
         granularity: Any, containment_edges: List[str], lineage_edges: List[str],
         *, timeout: Optional[float] = None,
     ) -> AggregatedEdgeResult:
-        """AGGREGATED rollups are a published-``main`` projection (FalkorDB) concept — a draft
-        branch has none materialised. Return an empty result, exactly as the FalkorDB provider
-        does before a backfill; the engine finds no ``materialize_*`` hook on this provider and
-        degrades gracefully (no rollups), so the draft canvas still renders from raw edges."""
-        return AggregatedEdgeResult(aggregated_edges=[], total_source_edges=0)
+        """Roll-ups DERIVED from this branch's own committed state.
+
+        This used to return an unconditional empty result, reasoning that ``:AGGREGATED``
+        is a published-``main`` FalkorDB artifact a branch has none of, and that the canvas
+        "still renders from raw edges". It does not, and cannot: ``get_children_with_edges``
+        carries only the lineage BETWEEN a container's children, so this call is the ONLY
+        channel by which lineage from OUTSIDE a container reaches the children an expand
+        just revealed. Answering ``[]`` drew four dashboards with no wires into them — and,
+        because nothing was dropped, nothing said so. That is what a data source whose
+        projection watermark had fallen behind (``projected_commit_seq <
+        main_head_commit_seq`` routes MAIN reads here too) looked like live.
+
+        A rollup is a pure function of two relations this provider already reads from
+        Postgres — containment and raw lineage — so derive it instead of declaring it
+        absent: descend containment from the asked-about set, take the raw lineage inside
+        that scope, and roll each edge up the cross-product of both endpoints' ancestor
+        chains (``common.providers.pair_rules`` — the same rule the FalkorDB pipeline
+        materialises and the projector mirrors, so a branch and a fresh main answer alike).
+        With a collapsed source and an expanded container that is one cell per visible
+        child, plus the coarse container cell the canvas stamps ``isDelegated`` so it does
+        not double-draw over them.
+
+        Bounded, and honest about it: the descent stops at ``_DERIVE_HOP_BOUND`` hops and
+        ``_DERIVE_SCOPE_CAP`` nodes — and a single edge read stops at that same cap — and
+        each of the three says ``truncated``/``stale`` with the bound that bit as the
+        reason, never a short answer that reads as a complete one, which was the whole
+        defect."""
+        from backend.common.providers.pair_rules import ancestor_closure, cube_pairs
+
+        srcs = [u for u in (source_urns or []) if u]
+        tgts = [u for u in (target_urns or []) if u] if target_urns else list(srcs)
+        # AGGREGATED is the derived layer itself: publishing a draft can commit
+        # materialised rollups into the version log, and replaying those as raw
+        # lineage would count every flow twice.
+        ltypes = [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
+        if not srcs or not tgts or not ltypes:
+            return AggregatedEdgeResult(aggregatedEdges=[], totalSourceEdges=0)
+        ctypes = [t for t in (containment_edges or []) if t]
+
+        chunk = 200
+        # Which bound bit, if any — the whole answer's honesty in one variable:
+        # it is the `truncated`/`stale` flags AND the reason on the wire.
+        bound: Optional[str] = None
+
+        async def _out_edges(urns: List[str], types: List[str]) -> List[GraphEdge]:
+            nonlocal bound
+            out: List[GraphEdge] = []
+            for i in range(0, len(urns), chunk):
+                rows = await self.get_edges(EdgeQuery(
+                    source_urns=urns[i:i + chunk], edge_types=types,
+                    limit=_DERIVE_SCOPE_CAP))
+                # A chunk that comes back AT the limit dropped edges we will
+                # never see, so everything built on it is short.
+                if len(rows) >= _DERIVE_SCOPE_CAP:
+                    bound = bound or "derive_scope_cap"
+                out.extend(rows)
+            return out
+
+        # ── Containment descent from the asked-about set: the raw lineage that rolls
+        # up into a visible pair lives somewhere underneath it.
+        parents: Dict[str, List[str]] = {}
+        scope = set(srcs) | set(tgts)
+        frontier = list(scope)
+        for _ in range(_DERIVE_HOP_BOUND if ctypes else 0):
+            if not frontier or bound:
+                break
+            nxt: List[str] = []
+            for e in await _out_edges(frontier, ctypes):
+                # Containment is a DAG — a node can have several parents, and the
+                # closure below dedupes on that set.
+                ps = parents.setdefault(e.target_urn, [])
+                if e.source_urn not in ps:
+                    ps.append(e.source_urn)
+                if e.target_urn in scope:
+                    continue
+                if len(scope) >= _DERIVE_SCOPE_CAP:
+                    bound = "derive_scope_cap"
+                    break
+                scope.add(e.target_urn)
+                nxt.append(e.target_urn)
+            frontier = nxt
+        # A live frontier means the chain runs deeper than the hop bound: the
+        # lineage under it never entered `scope` and the answer is short. This
+        # was the silent half — falling out of the loop said nothing at all.
+        if ctypes and frontier:
+            bound = bound or "derive_hop_bound"
+
+        # ── Roll the raw lineage inside that scope up to the requested pairs.
+        asked_src, asked_tgt = set(srcs), set(tgts)
+        memo: Dict[str, Dict[str, int]] = {}
+        cells: Dict[Any, List[Any]] = {}
+        for e in await _out_edges(sorted(scope), ltypes):
+            if e.target_urn not in scope:
+                continue
+            for a, b in cube_pairs(
+                ancestor_closure(parents, e.source_urn, memo),
+                ancestor_closure(parents, e.target_urn, memo),
+                # The raw (s, t) mirror ships when the caller asked about both
+                # endpoints, matching the FalkorDB read path
+                # (`_synthesize_raw_lineage_pairs`): a cross-container leaf-to-leaf
+                # flow reaches the canvas through no other call.
+                include_leaf_mirror=True, s=e.source_urn, t=e.target_urn,
+            ):
+                if a not in asked_src or b not in asked_tgt:
+                    continue
+                cell = cells.setdefault((a, b), [0, set()])
+                cell[0] += 1
+                if e.edge_type:
+                    cell[1].add(e.edge_type)
+
+        edges = [AggregatedEdgeInfo(
+            id=f"agg-{a}-{b}", sourceUrn=a, targetUrn=b, edgeCount=w,
+            edgeTypes=sorted(types), confidence=1.0, sourceEdgeIds=[])
+            for (a, b), (w, types) in cells.items()]
+        edges.sort(key=lambda x: (-x.edge_count, x.source_urn, x.target_urn))
+        return AggregatedEdgeResult(
+            aggregatedEdges=edges,
+            totalSourceEdges=sum(e.edge_count for e in edges),
+            truncated=bound is not None,
+            stale=bound is not None,
+            staleReason=bound,
+        )
 
     async def get_ontology_metadata(self):
         """No ontology surface by design — the engine resolves ontology from the data source
         (shared by main and every branch) and passes edge-type sets into each call. Raising here
         makes ``ContextEngine._resolve_ontology``'s graceful-degradation explicit."""
         raise NotImplementedError("VersionedBranchProvider does not introspect ontology")
+
+    # ---- deep search: no engine to run it, and nothing to delegate to ---- #
+    async def deep_search(self, query, *, deadline_ms=None):
+        """Advanced search has no implementation over composed branch state.
+
+        The predicate tree compiles to Cypher against the FalkorDB
+        projection; this provider reads Postgres graph-version rows and —
+        unlike :class:`DraftOverlayProvider` — wraps no graph provider to
+        hand the query to. ``NotImplementedError`` is deliberate: the
+        route maps it to 501, whereas simply not having the method (the
+        state this replaces) surfaced as ``AttributeError`` → 500.
+
+        Only reached while the projection lags a commit — a fresh main,
+        and every draft overlaid on one, searches FalkorDB directly."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_explain(self, query):
+        """Compile-only path — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_discover(self, *, sample_per_label: int = 200):
+        """Schema discovery — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
+        """Value suggestions — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
 
     # ---- stats: counts + schema summaries over the composed branch state - #
     async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:
@@ -385,7 +564,9 @@ class VersionedBranchProvider:
             "edgeTypeCounts": edge_type_counts,
         }
 
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None,
+    ) -> GraphSchemaStats:
         """One composed-state pass → the same ``GraphSchemaStats`` shape FalkorDB builds (per-label
         counts + up-to-3 sample displayNames, per-edge-type counts, tag counts). Serves the insights
         deep facet + graph-schema build for a branch / stale-main, which have no projection to scan."""
@@ -419,6 +600,22 @@ class VersionedBranchProvider:
             edgeTypeStats=[EdgeTypeSummary(id=t, name=t, count=c) for t, c in edge_counts.items()],
             tagStats=[TagSummary(tag=t, count=c, entityTypes=["entity"]) for t, c in tag_counts.items()],
         )
+
+    async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
+        """An entity's ancestors on this branch, parent first, root last (as FalkorDB's reader)."""
+        chain = (await self.get_ancestor_chains([urn])).get(urn, [])[offset: offset + limit]
+        if not chain:
+            return []
+        nodes = await self.get_nodes(NodeQuery(urns=chain, limit=len(chain)))
+        by_urn = {n.urn: n for n in nodes}
+        return [by_urn[u] for u in chain if u in by_urn]
+
+    async def get_ancestor_chains(self, urns: List[str]) -> Dict[str, List[str]]:
+        """``{urn: [parent, …, root]}`` from this branch's own state (a draft's moves included);
+        absent = unknown, ``[]`` = a root — the GraphDataProvider contract."""
+        return await self._svc.ancestor_chains(
+            graph_id=self._gid, branch_id=self._branch, urns=urns,
+            containment_edge_types=self._containment_types, as_of_seq=self._as_of)
 
     # ---- writes: one audited commit on this branch via apply_ops -------- #
     async def _commit(self, ops: List[dict], message: str) -> Optional[str]:

@@ -12,6 +12,10 @@ spec:
     type: HTTP
     requestPath: /api/v1/health/ready
     port: 8000
-  timeoutSec: 120
+  # The load balancer's limit on a whole response. An hour, so a streamed
+  # export can finish (see the frontend's BackendConfig, which the base
+  # ingress routes everything through); the app's own tiers (120s at most)
+  # still end every other request first, with its JSON 504.
+  timeoutSec: 3600
   connectionDraining:
     drainingTimeoutSec: 30

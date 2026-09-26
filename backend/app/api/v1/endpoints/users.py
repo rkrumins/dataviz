@@ -5,7 +5,8 @@ Authenticated:
     GET  /api/v1/users/me
 
 Admin:
-    GET   /api/v1/admin/users?status=pending
+    GET   /api/v1/admin/users?status=pending&search=&sort=&order=&limit=&offset=
+    GET   /api/v1/admin/users/stats
     POST  /api/v1/admin/users/{user_id}/approve
     POST  /api/v1/admin/users/{user_id}/reject
     PUT   /api/v1/admin/users/{user_id}/role
@@ -20,7 +21,7 @@ import json
 import logging
 import re
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from slowapi import Limiter
@@ -47,13 +48,15 @@ from backend.auth_service.cookies import clear_session_cookies
 from backend.auth_service.core.tokens import invite_expiry
 from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import user_repo
+from backend.app.db.repositories import user_identity_repo, user_repo
 from backend.common.display_name import resolve_display_name
 from backend.common.models.auth import (
     AccountActivityItem,
     AdminCreateUserRequest,
     AdminCreateUserResponse,
+    AdminUserIdentityRef,
     AdminUserResponse,
+    AdminUserStatsResponse,
     AdminResetPasswordRequest,
     ChangeMyPasswordRequest,
     BulkCreateUsersRequest,
@@ -71,6 +74,7 @@ from backend.common.models.auth import (
     InviteSummaryResponse,
     InviteTokenResponse,
     ResetTokenResponse,
+    SetSystemAccountRequest,
     UpdateUserRequest,
     UserPublicResponse,
 )
@@ -105,10 +109,29 @@ async def _public_response(session: AsyncSession, user) -> UserPublicResponse:
     )
 
 
-async def _admin_response(session: AsyncSession, user) -> AdminUserResponse:
+def _identity_ref(row) -> AdminUserIdentityRef:
+    return AdminUserIdentityRef(
+        providerId=row.provider_id,
+        slug=row.provider.slug if row.provider else row.provider_id,
+        displayName=(
+            row.provider.display_name if row.provider else row.provider_id
+        ),
+        kind=row.provider.kind if row.provider else "unknown",
+        lastLoginAt=row.last_login_at,
+    )
+
+
+async def _admin_response(
+    session: AsyncSession, user, *, identities=None,
+) -> AdminUserResponse:
     roles = await user_repo.get_user_roles(session, user.id)
     role = roles[0] if roles else "user"
     has_reset = await user_repo.has_pending_reset(session, user.id)
+    # ``identities=None`` means "not batched by the caller" — fetch this
+    # one user's rows rather than reporting an SSO account as local. The
+    # list endpoint batches; the single-user paths pay one small query.
+    if identities is None:
+        identities = await user_identity_repo.list_for_user(session, user.id)
     return AdminUserResponse(
         id=user.id,
         email=user.email,
@@ -123,6 +146,10 @@ async def _admin_response(session: AsyncSession, user) -> AdminUserResponse:
         updatedAt=user.updated_at,
         resetRequested=has_reset,
         mustChangePassword=bool(user.must_change_password),
+        hasPassword=is_password_set(user.password_hash),
+        signupSource=getattr(user, "signup_source", None),
+        identities=[_identity_ref(row) for row in identities],
+        isSystemAccount=bool(getattr(user, "is_system_account", False)),
     )
 
 
@@ -318,9 +345,16 @@ async def get_user_avatar(
         user_id = current_user.id
     user = await user_repo.get_user_by_id(session, user_id)
     image_b64 = getattr(user, "avatar_image", None) if user else None
+    # The bytes came from a third party. Only raster types are ever
+    # stored, but a served image endpoint must not depend on that: no
+    # sniffing, and a document context gets an empty sandbox.
+    guard = {
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox",
+    }
     absent = Response(
         status_code=404,
-        headers={"Cache-Control": "private, max-age=60"},
+        headers={"Cache-Control": "private, max-age=60", **guard},
     )
     if not image_b64:
         return absent
@@ -329,7 +363,7 @@ async def get_user_avatar(
     except (ValueError, TypeError):
         return absent
     etag = f'"{hashlib.sha256(content).hexdigest()[:32]}"'
-    cache = {"ETag": etag, "Cache-Control": "private, max-age=300"}
+    cache = {"ETag": etag, "Cache-Control": "private, max-age=300", **guard}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=cache)
     return Response(
@@ -560,14 +594,48 @@ admin_router = APIRouter()
 
 @admin_router.get("", response_model=list[AdminUserResponse])
 async def list_users(
+    response: Response,
     status_filter: Optional[str] = Query(None, alias="status"),
+    search: Optional[str] = Query(None, max_length=200),
+    sort: Literal["name", "email", "status", "role", "createdAt"] = Query("createdAt"),
+    order: Literal["asc", "desc"] = Query("desc"),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
     admin=Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    users = await user_repo.list_users(session, status=status_filter, limit=limit, offset=offset)
-    return [await _admin_response(session, u) for u in users]
+    """One page of accounts, searched and sorted in SQL.
+
+    ``X-Total-Count`` is how many accounts match ``status`` + ``search``
+    across ALL pages — the page alone can't say, and a client that only ever
+    fetched the first page (with its default ``limit``) is how the admin
+    table came to stop at fifty people. ``search`` covers what a row shows:
+    name, email, id, role, and the providers the account signs in with.
+    """
+    users = await user_repo.list_users(
+        session, status=status_filter, limit=limit, offset=offset,
+        search=search, sort=sort, order=order,
+    )
+    response.headers["X-Total-Count"] = str(await user_repo.count_users(
+        session, status=status_filter, search=search,
+    ))
+    # One query for the whole page's identities, not one per row.
+    linked = await user_identity_repo.list_for_users(
+        session, [u.id for u in users],
+    )
+    return [
+        await _admin_response(session, u, identities=linked.get(u.id, []))
+        for u in users
+    ]
+
+
+@admin_router.get("/stats", response_model=AdminUserStatsResponse)
+async def admin_user_stats(
+    admin=Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Counts across every account for the admin list's cards and tabs."""
+    return AdminUserStatsResponse(**await user_repo.user_stats(session))
 
 
 @admin_router.post("/{user_id}/approve", status_code=status.HTTP_200_OK)
@@ -812,6 +880,82 @@ async def suspend_user(
 
     logger.info("User %s suspended by %s", user_id, admin.id)
     return {"detail": "User suspended"}
+
+
+# ── System account (break-glass) ──────────────────────────────────────
+
+@admin_router.post("/{user_id}/system-account", response_model=AdminUserResponse)
+async def set_system_account(
+    user_id: str,
+    body: SetSystemAccountRequest,
+    admin=Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Mark or unmark an account as a system account.
+
+    A system account is the SSO-enforcement carve-out: while
+    ``allowLocalLogin`` is off it can still sign in with its password
+    (break-glass), forced sign-out sweeps skip it, and the
+    admin-lockout guard does not count it.
+
+    Unmarking re-runs the one check that marking bypassed: with
+    passwords already off, stripping the flag from an active
+    super-admin who has no linked SSO identity would strand them — the
+    same 409 the config PATCH answers.
+    """
+    user = await user_repo.get_user_by_id(session, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if bool(getattr(user, "is_system_account", False)) == body.is_system_account:
+        raise HTTPException(
+            status_code=409,
+            detail="User is already " + (
+                "a system account" if body.is_system_account
+                else "not a system account"
+            ),
+        )
+
+    if not body.is_system_account:
+        from backend.app.api.v1.endpoints.admin_sso_config import (
+            _super_admin_user_ids,
+        )
+        from backend.app.db.repositories import app_auth_config_repo
+        snap = await app_auth_config_repo.get_snapshot(session)
+        if not snap.allow_local_login and user.status == "active":
+            admin_ids = await _super_admin_user_ids(session)
+            if user.id in admin_ids:
+                idents = await user_identity_repo.list_for_user(
+                    session, user.id,
+                )
+                if not idents:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": "would_lock_out_admin",
+                            "message": "Passwords are off and this admin has "
+                                       "no linked SSO identity — unmarking "
+                                       "the system account would lock them "
+                                       "out.",
+                        },
+                    )
+
+    await user_repo.set_system_account(session, user_id, body.is_system_account)
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.system_account_changed",
+        payload={
+            "user_id": user_id,
+            "is_system_account": body.is_system_account,
+            "changed_by": admin.id,
+        },
+    )
+    logger.info(
+        "User %s %s as a system account by %s",
+        user_id,
+        "marked" if body.is_system_account else "unmarked",
+        admin.id,
+    )
+    return await _admin_response(session, user)
 
 
 # ── Reactivate ────────────────────────────────────────────────────────

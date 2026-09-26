@@ -42,8 +42,10 @@ import {
     type WorkspaceMemberResponse,
 } from '@/services/workspaceMembersService'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { UserAvatar } from '@/components/ui/UserAvatar'
+import { TablePagination } from '@/components/ui/TablePagination'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { cn } from '@/lib/utils'
 import { PermissionTooltip } from './PermissionTooltip'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -794,7 +796,7 @@ function PermissionDetailDrawer({
     const [editLong, setEditLong] = useState(permission.longDescription ?? '')
     const [editExamples, setEditExamples] = useState((permission.examples ?? []).join('\n'))
     const [saving, setSaving] = useState(false)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const startEdit = () => {
         setEditDescription(permission.description)
@@ -808,7 +810,7 @@ function PermissionDetailDrawer({
     const handleSave = async () => {
         const trimmed = editDescription.trim()
         if (!trimmed) {
-            showToast('error', 'Short description is required.')
+            notify('error', 'Short description is required.')
             return
         }
         setSaving(true)
@@ -822,11 +824,11 @@ function PermissionDetailDrawer({
                 longDescription: editLong.trim() || '',
                 examples,
             })
-            showToast('success', `Updated ${permission.id}`)
+            notify('success', `Updated ${permission.id}`)
             setEditing(false)
             onUpdated(updated)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Save failed')
+            notify('error', err instanceof Error ? err.message : 'Save failed')
         } finally {
             setSaving(false)
         }
@@ -1222,6 +1224,9 @@ function PermissionCatalogTab({
 // Tab 3 — By user (subject lens)
 // ─────────────────────────────────────────────────────────────────────
 
+/** Users per page in the By-user picker; the server searches and pages. */
+const BY_USER_PAGE_SIZE = 25
+
 function ByUserTab({
     permissions: _permissions, initialUserId,
 }: {
@@ -1231,7 +1236,11 @@ function ByUserTab({
     initialUserId?: string | null
 }) {
     void _permissions
+    /** One page of matching users; null until the first arrives. */
     const [users, setUsers] = useState<AdminUserResponse[] | null>(null)
+    /** Users matching the search across every page. */
+    const [userTotal, setUserTotal] = useState(0)
+    const [userPage, setUserPage] = useState(0)
     const [search, setSearch] = useState('')
     const [selectedId, setSelectedId] = useState<string | null>(initialUserId ?? null)
 
@@ -1244,18 +1253,30 @@ function ByUserTab({
     const [access, setAccess] = useState<UserAccessResponse | null>(null)
     const [loadingAccess, setLoadingAccess] = useState(false)
     const [error, setError] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
-    // Initial user list
+    // Searched and paged by the server, so every account is reachable —
+    // this list used to hold only the first page (fifty) of them.
+    const debouncedSearch = useDebouncedValue(search.trim(), 300)
     useEffect(() => {
-        ;(async () => {
-            try {
-                setUsers(await adminUserService.listUsers())
-            } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load users')
-            }
-        })()
-    }, [showToast])
+        let cancelled = false
+        adminUserService.listUsers({
+            search: debouncedSearch,
+            sort: 'name',
+            order: 'asc',
+            limit: BY_USER_PAGE_SIZE,
+            offset: userPage * BY_USER_PAGE_SIZE,
+        })
+            .then(({ items, total }) => {
+                if (cancelled) return
+                setUsers(items)
+                setUserTotal(total)
+            })
+            .catch(err => {
+                if (!cancelled) notify('error', err instanceof Error ? err.message : 'Failed to load users')
+            })
+        return () => { cancelled = true }
+    }, [debouncedSearch, userPage, notify])
 
     // Fetch selected user's access
     useEffect(() => {
@@ -1275,14 +1296,6 @@ function ByUserTab({
         })()
     }, [selectedId])
 
-    const filteredUsers = useMemo(() => {
-        if (!users) return []
-        const q = search.trim().toLowerCase()
-        return users
-            .filter(u => !q || u.displayName.toLowerCase().includes(q) || u.email.toLowerCase().includes(q))
-            .sort((a, b) => a.displayName.localeCompare(b.displayName))
-    }, [users, search])
-
     return (
         <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5 min-h-[60vh]">
             {/* Left pane — user picker */}
@@ -1294,7 +1307,7 @@ function ByUserTab({
                             type="text"
                             placeholder="Search users..."
                             value={search}
-                            onChange={(e) => setSearch(e.target.value)}
+                            onChange={(e) => { setSearch(e.target.value); setUserPage(0) }}
                             className="input pl-9 h-9 text-sm bg-glass-base/40 w-full"
                         />
                     </div>
@@ -1305,10 +1318,10 @@ function ByUserTab({
                             <Loader2 className="w-4 h-4 animate-spin inline-block mr-2" />
                             Loading…
                         </div>
-                    ) : filteredUsers.length === 0 ? (
+                    ) : users.length === 0 ? (
                         <div className="p-8 text-center text-ink-muted text-sm">No matching users.</div>
                     ) : (
-                        filteredUsers.map(u => {
+                        users.map(u => {
                             const isSel = selectedId === u.id
                             return (
                                 <button
@@ -1337,6 +1350,13 @@ function ByUserTab({
                         })
                     )}
                 </div>
+                <TablePagination
+                    className="justify-end px-3 py-2 border-t border-glass-border"
+                    page={userPage}
+                    pageSize={BY_USER_PAGE_SIZE}
+                    total={userTotal}
+                    onPageChange={setUserPage}
+                />
             </div>
 
             {/* Right pane — access detail */}
@@ -1450,17 +1470,17 @@ function ByWorkspaceTab({
     const [members, setMembers] = useState<WorkspaceMemberResponse[] | null>(null)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     useEffect(() => {
         ;(async () => {
             try {
                 setWorkspaces(await workspaceService.list())
             } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load workspaces')
+                notify('error', err instanceof Error ? err.message : 'Failed to load workspaces')
             }
         })()
-    }, [showToast])
+    }, [notify])
 
     useEffect(() => {
         if (!selectedId) { setMembers(null); return }
@@ -1716,7 +1736,7 @@ export function RoleEditorDrawer({
         preview: ImpactPreviewResponse | null
         error: string | null
     } | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // The permission floor a system role must keep (e.g. super_admin must
     // retain system:admin). Locked checkboxes render checked + disabled.
@@ -1750,11 +1770,11 @@ export function RoleEditorDrawer({
                 description: description.trim() || null,
                 permissions: Array.from(selectedPerms),
             })
-            showToast('success', `Updated role "${labelText}"`)
+            notify('success', `Updated role "${labelText}"`)
             setPreviewState(null)
             await onChanged()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Save failed')
+            notify('error', err instanceof Error ? err.message : 'Save failed')
         } finally {
             setSaving(false)
         }
@@ -1764,11 +1784,11 @@ export function RoleEditorDrawer({
         setSaving(true)
         try {
             await permissionsService.resetRole(role.name)
-            showToast('success', `Reset "${labelText}" to default`)
+            notify('success', `Reset "${labelText}" to default`)
             setPreviewState(null)
             await onChanged()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Reset failed')
+            notify('error', err instanceof Error ? err.message : 'Reset failed')
         } finally {
             setSaving(false)
         }
@@ -1779,11 +1799,11 @@ export function RoleEditorDrawer({
         setSaving(true)
         try {
             await permissionsService.deleteRole(role.name)
-            showToast('success', `Deleted role "${role.name}"`)
+            notify('success', `Deleted role "${role.name}"`)
             setPreviewState(null)
             await onChanged()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Delete failed')
+            notify('error', err instanceof Error ? err.message : 'Delete failed')
         } finally {
             setSaving(false)
         }
@@ -1849,12 +1869,16 @@ export function RoleEditorDrawer({
 
     return (
         <>
-            <AnimatePresence>
+            {/* Entrance-only, and no <AnimatePresence>: this drawer is mounted
+                only while a role is being edited, so the presence tree unmounted
+                with it and the `exit` never ran. A full-height edge panel inside
+                a presence tree is the shape that strands a click-blocker down
+                the right of the page when an exit is interrupted — rows and
+                buttons under that band go dead until a reload. */}
                 <motion.aside
                     key="role-editor-drawer"
                     initial={{ x: '100%' }}
                     animate={{ x: 0 }}
-                    exit={{ x: '100%' }}
                     transition={{ type: 'spring', damping: 30, stiffness: 280 }}
                     onClick={(e) => e.stopPropagation()}
                     className="fixed right-0 top-0 h-full w-full max-w-md z-[51] bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col"
@@ -2072,8 +2096,7 @@ export function RoleEditorDrawer({
                     </button>
                 </div>
                 </motion.aside>
-            </AnimatePresence>
-
+            
             {/* Phase 4.4 — impact preview gates the destructive write. */}
             <ImpactPreviewModal
                 open={previewState !== null}
@@ -2128,7 +2151,7 @@ function CreateRoleModal({
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[] | null>(null)
     const [submitting, setSubmitting] = useState(false)
     const [error, setError] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // Phase 7: the resolver's category × scope filter silently drops
     // perms whose category doesn't match the binding's scope. So a
@@ -2173,10 +2196,10 @@ function CreateRoleModal({
             try {
                 setWorkspaces(await workspaceService.list())
             } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load workspaces')
+                notify('error', err instanceof Error ? err.message : 'Failed to load workspaces')
             }
         })()
-    }, [scopeType, workspaces, showToast])
+    }, [scopeType, workspaces, notify])
 
     const togglePerm = (id: string) => {
         setSelectedPerms(prev => {
@@ -2204,12 +2227,12 @@ function CreateRoleModal({
                 scopeId: scopeType === 'workspace' ? scopeId : null,
                 permissions: Array.from(selectedPerms),
             })
-            showToast('success', `Created role "${name.trim()}"`)
+            notify('success', `Created role "${name.trim()}"`)
             await onCreated()
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Create failed'
             setError(msg)
-            showToast('error', msg)
+            notify('error', msg)
         } finally {
             setSubmitting(false)
         }

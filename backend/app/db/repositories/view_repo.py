@@ -3,11 +3,12 @@ Repository for views table.
 Views define how to visually render context models (or ad-hoc graphs).
 Supports CRUD, filtering, favourites, and enterprise discovery.
 """
+import asyncio
 import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, NamedTuple, Optional, Sequence, Set
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set
 
 from sqlalchemy import and_, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,7 @@ from ..models import (
     ContextModelORM,
     WorkspaceDataSourceORM,
     UserORM,
+    view_is_live,
 )
 from backend.common.models.management import (
     ViewHealthInfo,
@@ -43,6 +45,10 @@ from backend.app.services.layout_config import (
     sanitize_node_ordering,
     strip_node_ordering,
 )
+from backend.app.services.view_transfer.canonical import (
+    config_from_definition, join_definition,
+)
+from backend.app.services.view_transfer.merge import merge_layout_side_fields
 from backend.app.services.versioning.layout_promote import (
     merge_layout_3way,
     merge_scope_3way,
@@ -253,11 +259,15 @@ def _to_response(
     config_override: Optional[dict] = None,
     health: Optional[Dict[str, Optional[str]]] = None,
     publish_requester_name: Optional[str] = None,
+    label_override: Optional[dict] = None,
 ) -> ViewResponse:
     # ``config_override`` lets branch-scoped-layout callers project the
     # EFFECTIVE (base ⊕ overlay) config into the response without touching the
     # row. Default None = read ``row.config`` verbatim (unchanged behaviour).
+    # ``label_override`` does the same for the name, description, tags and view
+    # type an import staged in the draft proposes.
     config_dict = config_override if config_override is not None else json.loads(row.config or "{}")
+    label = label_override or {}
     # Project layoutType from config so metadata-only consumers (e.g. the
     # ViewWizard scope resolver) don't have to parse the full config blob.
     layout_type = None
@@ -276,15 +286,15 @@ def _to_response(
             if getattr(row, "publish_requested_at", None) else None
         ),
         id=row.id,
-        name=row.name,
-        description=row.description,
+        name=label.get("name") or row.name,
+        description=label.get("description") if label_override else row.description,
         contextModelId=row.context_model_id,
         contextModelName=context_model_name,
         workspaceId=row.workspace_id,
         workspaceName=workspace_name,
         dataSourceId=row.data_source_id,
         dataSourceName=data_source_name,
-        viewType=row.view_type or "graph",
+        viewType=label.get("viewType") or row.view_type or "graph",
         layoutType=layout_type,
         config=config_dict,
         visibility=row.visibility or "private",
@@ -298,7 +308,7 @@ def _to_response(
         dataUpdatedBy=getattr(row, 'data_updated_by', None),
         dataUpdatedByName=data_updated_by_name,
         dataUpdatedByEmail=data_updated_by_email,
-        tags=json.loads(row.tags) if row.tags else None,
+        tags=(label.get("tags") or None) if label_override else (json.loads(row.tags) if row.tags else None),
         isPinned=bool(row.is_pinned) if row.is_pinned else False,
         favouriteCount=favourite_count,
         isFavourited=is_favourited,
@@ -306,6 +316,8 @@ def _to_response(
         updatedAt=row.updated_at,
         deletedAt=getattr(row, 'deleted_at', None),
         ontologyDigest=getattr(row, 'ontology_digest', None),
+        portableId=getattr(row, 'portable_id', None),
+        draftBranchId=getattr(row, 'draft_branch_id', None),
     )
 
 
@@ -315,6 +327,7 @@ async def _to_enriched_response(
     user_id: Optional[str] = None,
     *,
     config_override: Optional[dict] = None,
+    label_override: Optional[dict] = None,
 ) -> ViewResponse:
     """Build a ViewResponse enriched with workspace name, data source name, CM name, and favourite info.
 
@@ -360,6 +373,7 @@ async def _to_enriched_response(
         favourite_count=fav_count,
         is_favourited=fav,
         config_override=config_override,
+        label_override=label_override,
     )
 
 
@@ -534,6 +548,27 @@ async def create_view(
         req.name, req.workspace_id, req.data_source_id,
         ontology_digest[:12] + "…" if ontology_digest else None,
     )
+
+    # Stamp the entity scope at BIRTH so it is never inferred later.
+    #
+    # `derive_entity_scope` falls back to "curated iff this view has any
+    # assignment", which is a property that CHANGES as the view is edited: a
+    # rule-driven view reads 'all' until the first drag and 'curated' after,
+    # and that flip switches off the very rules placing its contents. Writing
+    # the answer once, here, is what stops it moving.
+    #
+    # Done in the repository rather than in a client so it holds for every
+    # caller — wizard, import, duplicate, direct API — in every environment.
+    # The value written is exactly what the read path would have derived, so a
+    # view created before and after this behaves identically.
+    config = dict(req.config) if isinstance(req.config, dict) else {}
+    if config:
+        content = config.get("content")
+        content = dict(content) if isinstance(content, dict) else {}
+        if content.get("entityScope") not in ("all", "curated"):
+            content["entityScope"] = derive_entity_scope(config)
+        config["content"] = content
+
     row = ViewORM(
         name=req.name,
         description=req.description,
@@ -541,7 +576,7 @@ async def create_view(
         workspace_id=req.workspace_id,
         data_source_id=req.data_source_id,
         view_type=req.view_type or "graph",
-        config=json.dumps(req.config) if req.config else "{}",
+        config=json.dumps(config) if config else "{}",
         visibility=req.visibility or "private",
         created_by=user_id,
         tags=json.dumps(req.tags) if req.tags else None,
@@ -579,11 +614,16 @@ async def get_view_enriched(
     if not row:
         return None
     # Branch-effective read: when a draft (branch_id) is reading, project the
-    # base ⊕ overlay config; no branch (or no overlay) → base, byte-identical.
-    override = (
-        await effective_view_config(session, row, branch_id) if branch_id else None
+    # base ⊕ overlay config (and the label an import staged there proposes);
+    # no branch (or no overlay) → base, byte-identical.
+    if not branch_id:
+        return await _to_enriched_response(session, row, user_id)
+    overlay = await get_overlay(session, row.id, branch_id)
+    return await _to_enriched_response(
+        session, row, user_id,
+        config_override=_with_overlay(_load_config(row), overlay),
+        label_override=_json_or_none(overlay.label) if overlay is not None else None,
     )
-    return await _to_enriched_response(session, row, user_id, config_override=override)
 
 
 async def update_view(
@@ -622,6 +662,7 @@ async def update_view(
     if req.view_type is not None:
         row.view_type = req.view_type
     if req.config is not None:
+        _keep_config_display_rules(req.config, _load_config(row))
         row.config = json.dumps(req.config)
     # visibility is NOT written here: it is a security field with its own
     # authorization (publish gate) — see update_visibility. The endpoint
@@ -639,6 +680,50 @@ async def update_view(
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     return await _to_enriched_response(session, row)
+
+
+def _keep_display_rules(new_layout: Any, previous_layout: Any) -> None:
+    """Keep the stored ``displayRules`` on a replacement ``referenceLayout``,
+    whatever the replacement says about them.
+
+    Every layout writer replaces ``referenceLayout`` wholesale, and the rules
+    live inside it. A caller that edits layers — the View Wizard, a config
+    save built from its own copy of the layout — sent back the rules it had
+    read, or none: a copy read before someone changed a rule put the old
+    rules back, and a layout without the key deleted every rule on the view.
+    Rules are written only through the view's library
+    (``backend.app.services.view_library``), one rule at a time; every other
+    writer keeps the ones stored.
+    """
+    if not isinstance(new_layout, dict):
+        return
+    rules = previous_layout.get("displayRules") if isinstance(previous_layout, dict) else None
+    if isinstance(rules, list):
+        new_layout["displayRules"] = rules
+    else:
+        new_layout.pop("displayRules", None)
+
+
+def _keep_config_display_rules(new_config: Any, stored_config: Any) -> None:
+    """``_keep_display_rules`` for a whole replacement config. A config with
+    no referenceLayout of its own — a graph view's, which the wizard saves
+    with none — gets one to hold the stored rules, so a config save never
+    drops them."""
+    if not isinstance(new_config, dict):
+        return
+    stored = _base_reference_layout(stored_config)
+    layout = new_config.get("layout")
+    if isinstance(layout, dict) and isinstance(layout.get("referenceLayout"), dict):
+        target = layout["referenceLayout"]
+    elif isinstance(new_config.get("referenceLayout"), dict):
+        target = new_config["referenceLayout"]
+    elif isinstance(stored.get("displayRules"), list):
+        if not isinstance(layout, dict):
+            layout = new_config["layout"] = {}
+        target = layout["referenceLayout"] = {}
+    else:
+        return
+    _keep_display_rules(target, stored)
 
 
 async def _gate_node_ordering(session: AsyncSession, reference_layout: dict) -> dict:
@@ -673,9 +758,9 @@ async def update_view_layout(
     """Persist a view's layer layout in isolation.
 
     Only touches ``config["layout"]["referenceLayout"]`` (and, when
-    supplied, ``config["content"]["entityScope"]`` and
-    ``referenceLayout["displayRules"]``) — every other config key
-    (name/description/content/filters/...) is left untouched.
+    supplied, ``config["content"]["entityScope"]``) — every other config key
+    (name/description/content/filters/...) is left untouched, and so are the
+    view's display rules (see ``_keep_display_rules``).
 
     Raises ``ValueError`` if an assignment names a ``layerId`` that isn't
     one of the submitted layers' ids (the endpoint maps this to a 422).
@@ -690,6 +775,7 @@ async def update_view_layout(
     config = json.loads(row.config or "{}")
     if not isinstance(config, dict):
         config = {}
+    previous_layout = _base_reference_layout(config)
     layout = config.get("layout")
     if not isinstance(layout, dict):
         layout = {}
@@ -708,8 +794,7 @@ async def update_view_layout(
         content["entityScope"] = req.entity_scope
         config["content"] = content
 
-    if req.display_rules is not None:
-        layout["referenceLayout"]["displayRules"] = req.display_rules
+    _keep_display_rules(layout["referenceLayout"], previous_layout)
 
     layer_ids = {
         layer.get("id") for layer in req.reference_layout.get("layers", [])
@@ -857,15 +942,13 @@ async def update_overlay_layout(
     reference_layout = dict(await _gate_node_ordering(
         session, sanitize_node_ordering(req.reference_layout),
     ))
-    if req.display_rules is not None:
-        reference_layout["displayRules"] = req.display_rules
+    _keep_display_rules(reference_layout, json.loads(overlay.reference_layout or "{}"))
     overlay.reference_layout = json.dumps(reference_layout)
     if req.entity_scope is not None:
         overlay.entity_scope = req.entity_scope
     await session.flush()  # onupdate stamps overlay.updated_at
 
-    effective = await effective_view_config(session, row, branch_id)
-    return await _to_enriched_response(session, row, config_override=effective)
+    return await get_view_enriched(session, view_id, branch_id=branch_id)
 
 
 async def effective_view_config(
@@ -894,10 +977,28 @@ async def effective_view_config(
     config = _load_config(row)
     if not branch_id:
         return config
+    return _with_overlay(config, await get_overlay(session, row.id, branch_id))
 
-    overlay = await get_overlay(session, row.id, branch_id)
+
+def _json_or_none(text: Optional[str]) -> Optional[dict]:
+    value = json.loads(text) if text else None
+    return value if isinstance(value, dict) else None
+
+
+def _with_overlay(config: dict, overlay: Optional[ViewLayoutOverlayORM]) -> dict:
+    """``config`` as the draft holding ``overlay`` sees it.
+
+    A draft whose overlay only edits layers overrides the layout and scope. One holding a staged
+    import proposes the whole design: the view reads as that design (the layout, scope and rest
+    of the definition from the overlay), as it will once the draft goes live."""
     if overlay is None:
         return config
+    if overlay.definition is not None:
+        label = _json_or_none(overlay.label) or {}
+        definition = join_definition(
+            json.loads(overlay.definition), json.loads(overlay.reference_layout or "{}"), overlay.entity_scope,
+        )
+        return config_from_definition(definition, icon=label.get("icon"))
 
     layout = config.get("layout")
     if not isinstance(layout, dict):
@@ -939,6 +1040,10 @@ async def promote_overlay(
         await session.flush()
         return False
 
+    if overlay.definition is not None:
+        await _promote_staged_import(session, row, overlay, branch_id, actor)
+        return True
+
     config = _load_config(row)
     fork_base = json.loads(overlay.fork_base_layout or "{}")
     published = _base_reference_layout(config)
@@ -953,6 +1058,8 @@ async def promote_overlay(
     merged_default_sort = merge_default_sort_3way(fork_base, published, draft)
     if merged_default_sort is not None:
         merged_layout["defaultNodeSortMode"] = merged_default_sort
+    # And every other side field, so publishing a draft never drops one it doesn't know.
+    merged_layout.update(merge_layout_side_fields(fork_base, published, draft))
     merged_scope = merge_scope_3way(
         overlay.fork_base_entity_scope,
         derive_entity_scope(config),
@@ -978,14 +1085,125 @@ async def promote_overlay(
 
     await session.delete(overlay)
     await session.flush()
+
+    # The draft's layout is now the view's: record it in the view's history. Imported here,
+    # not at module level, because the version repository reads back through this module.
+    # Best-effort like the promote itself: a history write must never undo a merge.
+    from backend.app.db.repositories import view_version_repo
+    try:
+        await view_version_repo.checkpoint(
+            session, row, source="promote", actor=actor,
+            message="Draft changes published", provenance={"branchId": branch_id},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("promote_overlay: version checkpoint failed for view %s", view_id)
     return True
+
+
+async def _promote_staged_import(
+    session: AsyncSession, row: ViewORM, overlay: ViewLayoutOverlayORM, branch_id: str,
+    actor: Optional[str],
+) -> None:
+    """An import staged in the draft goes live: its design and label merge 3-way into the view,
+    the file winning where both sides changed the same thing, recorded as the import in the
+    view's history. Base is the view as published when the import was staged; ours, the view as
+    published now; theirs, what the draft proposes (the file, plus any layer edits made in the
+    draft since)."""
+    # Imported here, not at module level: these read back through this module.
+    from backend.app.db.repositories import view_activity_repo, view_version_repo
+    from backend.app.services.view_transfer.canonical import content_hash
+    from backend.app.services.view_transfer.merge import merge_definitions, merge_labels
+
+    staged = _json_or_none(overlay.staged_provenance) or {}
+    await view_version_repo.snapshot_if_dirty(
+        session, row, actor=actor, message="Saved automatically before a draft's import went live")
+    published = await view_version_repo.working_state_async(row)
+    label = merge_labels(_json_or_none(overlay.fork_base_label) or {}, published.label,
+                         _json_or_none(overlay.label) or {})
+    # The overlay's columns are read here, on the event loop; decoding and merging the designs
+    # (seconds for a large view) runs in a worker thread.
+    parts = (overlay.fork_base_definition, overlay.fork_base_layout, overlay.fork_base_entity_scope,
+             overlay.definition, overlay.reference_layout, overlay.entity_scope)
+
+    def merge() -> tuple:
+        base_rest, base_layout, base_scope, rest, layout, scope = parts
+        base = join_definition(json.loads(base_rest or "{}"), json.loads(base_layout or "{}"), base_scope)
+        proposed = join_definition(json.loads(rest), json.loads(layout or "{}"), scope)
+        merged = merge_definitions(base, published.definition, proposed)
+        return merged, json.dumps(config_from_definition(merged.definition, icon=label.get("icon")))
+
+    merged, row.config = await asyncio.to_thread(merge)
+    row.name = label.get("name") or row.name
+    row.description = label.get("description") or None
+    row.tags = json.dumps(label["tags"]) if label.get("tags") else None
+    row.view_type = label.get("viewType") or row.view_type
+    if staged.get("portableId"):
+        row.portable_id = staged["portableId"]
+    if actor is not None:
+        row.updated_by = actor
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+    await session.delete(overlay)
+    await session.flush()
+
+    stored = await view_version_repo.working_state_async(row)
+    provenance = {**(staged.get("provenance") or {}), "branchId": branch_id,
+                  "stagedBy": staged.get("actor"), "stagedAt": staged.get("stagedAt"), "publishedBy": actor}
+    if merged.conflicts:
+        provenance["conflicts"] = merged.conflicts[:200]
+    # The view holds something other than the file: keep the file's design, so a later file
+    # from the same lineage still finds it (view_version_repo.base_definition).
+    origin_hash = None
+    file_definition = staged.get("fileDefinition")
+    file_hash = await asyncio.to_thread(content_hash, file_definition) if isinstance(file_definition, dict) else None
+    if file_hash is not None and file_hash != stored.content_hash:
+        provenance["originDefinition"] = file_definition
+        origin_hash = file_hash
+    version, _ = await view_version_repo.checkpoint(
+        session, row, source="import", actor=staged.get("actor") or actor, force=True,
+        origin_hash=origin_hash, message=f"{staged.get('message') or 'Imported'}, published from a draft",
+        provenance=provenance, request_id=staged.get("requestId"),
+    )
+    await view_activity_repo.record_view_activity(
+        session, view_id=row.id, workspace_id=row.workspace_id, action="imported", actor=actor,
+        summary=f"{staged.get('summary') or 'Imported'} · published from a draft",
+        changes={"action": staged.get("action"), "version": version.version, "branchId": branch_id},
+    )
+
+
+async def _go_live(
+    session: AsyncSession, row: ViewORM, visibility: Optional[str], actor: Optional[str],
+) -> None:
+    """A view that existed only in its draft is now there for everyone its visibility reaches:
+    private, or shared with its workspace as asked when it was imported."""
+    from backend.app.db.repositories import view_activity_repo
+
+    row.draft_branch_id = None
+    target = visibility if visibility in ("private", "workspace") else "private"
+    if target != row.visibility:
+        previous, row.visibility = row.visibility, target
+        await view_activity_repo.record_view_activity(
+            session, view_id=row.id, workspace_id=row.workspace_id, action="visibility_changed",
+            actor=actor, summary=f"Visibility {previous} → {target}, as its draft was published",
+            changes={"visibility": {"from": previous, "to": target}},
+        )
+    await session.flush()
 
 
 async def promote_overlays_for_branch(
     session: AsyncSession, branch_id: str, *, actor: Optional[str] = None
 ) -> int:
     """Promote every overlay on ``branch_id`` (usually one — branch-per-view)
-    into its view's published base. Returns the number promoted."""
+    into its view's published base, and bring any view that existed only in
+    that draft live. Returns the number of overlays promoted."""
+    waiting = (await session.execute(
+        select(ViewORM).where(ViewORM.draft_branch_id == branch_id)
+    )).scalars().all()
+    goes_live_as: Dict[str, Optional[str]] = {}
+    for row in waiting:
+        overlay = await get_overlay(session, row.id, branch_id)
+        staged = _json_or_none(overlay.staged_provenance) if overlay is not None else None
+        goes_live_as[row.id] = (staged or {}).get("visibility")
+
     result = await session.execute(
         select(ViewLayoutOverlayORM.view_id).where(
             ViewLayoutOverlayORM.branch_id == branch_id
@@ -996,19 +1214,23 @@ async def promote_overlays_for_branch(
     for view_id in view_ids:
         if await promote_overlay(session, view_id, branch_id, actor=actor):
             promoted += 1
+    for row in waiting:
+        await _go_live(session, row, goes_live_as.get(row.id), actor)
     return promoted
 
 
 async def drop_overlays_for_branch(
     session: AsyncSession, branch_id: str
 ) -> int:
-    """Discard every overlay on ``branch_id`` (draft abandon). Returns the
-    number of overlay rows deleted."""
+    """Discard every overlay on ``branch_id`` (draft abandon), and every view
+    that existed only in that draft: it never went live, so nothing of it is
+    kept. Returns the number of overlay rows deleted."""
     result = await session.execute(
         delete(ViewLayoutOverlayORM).where(
             ViewLayoutOverlayORM.branch_id == branch_id
         )
     )
+    await session.execute(delete(ViewORM).where(ViewORM.draft_branch_id == branch_id))
     return result.rowcount or 0
 
 
@@ -1092,11 +1314,13 @@ def _apply_view_filters(
     if readable is not None:
         query = query.where(readable)
 
-    # Soft-delete filtering
+    # Soft-delete filtering. A view waiting in a draft to go live is in no live list.
     if deleted_only:
         query = query.where(ViewORM.deleted_at.isnot(None))
     elif not include_deleted:
-        query = query.where(ViewORM.deleted_at.is_(None))
+        query = query.where(view_is_live())
+    else:
+        query = query.where(ViewORM.draft_branch_id.is_(None))
 
     if ids_in is not None:
         query = query.where(ViewORM.id.in_(ids_in))
@@ -1170,15 +1394,19 @@ def _apply_view_filters(
         )
 
     if search:
-        pattern = f"%{search}%"
-        query = query.where(
-            ViewORM.name.ilike(pattern)
-            | ViewORM.description.ilike(pattern)
-            | WorkspaceORM.name.ilike(pattern)
-            | WorkspaceDataSourceORM.label.ilike(pattern)
-            | ViewORM.created_by.ilike(pattern)
-            | ViewORM.tags.ilike(pattern)
-        )
+        terms = search.split()
+        if terms:
+            query = query.where(and_(*[
+                (
+                    ViewORM.name.ilike(f"%{term}%")
+                    | ViewORM.description.ilike(f"%{term}%")
+                    | WorkspaceORM.name.ilike(f"%{term}%")
+                    | WorkspaceDataSourceORM.label.ilike(f"%{term}%")
+                    | ViewORM.created_by.ilike(f"%{term}%")
+                    | ViewORM.tags.ilike(f"%{term}%")
+                )
+                for term in terms
+            ]))
 
     if attention_only:
         # Views "needing attention" are those that are stale (not updated in
@@ -1281,7 +1509,7 @@ async def list_recent_views(
         .join(ViewVisitORM, ViewVisitORM.view_id == ViewORM.id)
         .where(
             ViewVisitORM.user_id == user_id,
-            ViewORM.deleted_at.is_(None),
+            view_is_live(),
         )
         .order_by(ViewVisitORM.visited_at.desc())
         .limit(limit)
@@ -1462,7 +1690,7 @@ async def get_view_facets(
     refinement) — but ALWAYS scoped by ``readable``: a facet computed
     over views the caller cannot read leaks their tags and creators.
     """
-    base_where = ViewORM.deleted_at.is_(None)
+    base_where = view_is_live()
     if readable is not None:
         base_where = and_(base_where, readable)
 
@@ -1703,7 +1931,7 @@ async def list_popular_views(
     query = (
         select(ViewORM, fav_count_sq.c.fav_count)
         .join(fav_count_sq, ViewORM.id == fav_count_sq.c.view_id)
-        .where(ViewORM.deleted_at.is_(None))
+        .where(view_is_live())
         .where(fav_count_sq.c.fav_count > 0)
         .where(visibility_predicate)
         .order_by(
@@ -1762,7 +1990,7 @@ async def list_views_for_context_model(
     query = (
         select(ViewORM)
         .where(ViewORM.context_model_id == context_model_id)
-        .where(ViewORM.deleted_at.is_(None))
+        .where(view_is_live())
         .order_by(ViewORM.updated_at.desc())
     )
     result = await session.execute(query)

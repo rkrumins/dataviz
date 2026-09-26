@@ -4,6 +4,10 @@
  * always reachable; the Import item is disabled with an explainer when not in Edit mode, because
  * import targets the working draft and there is no branch to write to in a published View.
  *
+ * Below the graph's own items, "This view" moves the VIEW between environments: its design as a
+ * view file, or its design with its data as a package, and updating it from a file. Each item
+ * shows only where its switch is on and the host passed its callback.
+ *
  * Mirrors the header's portal-menu pattern (ViewTitleMenu / DisplayMenu): trigger + fixed-positioned
  * portal to document.body (escapes the header's backdrop-blur stacking context), outside-click/Escape
  * to close. Store-free — props + callbacks only.
@@ -13,18 +17,29 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useFeature } from '@/store/features'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
+
+/** Moving this view between environments (see the "This view" section). */
+export interface ViewFileActions {
+  onExport?: () => void
+  onExportWithData?: () => void
+  /** Only for someone who may edit the view. */
+  onUpdateFromFile?: () => void
+}
 
 export interface ImportExportMenuProps {
   onImport?: () => void
   onExport?: () => void
   /** Edit mode (a draft is open). Import requires it; Export does not. */
   isDraft: boolean
+  thisView?: ViewFileActions
 }
 
 const POPOVER_WIDTH = 268
 
-export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMenuProps) {
+export function ImportExportMenu({ onImport, onExport, isDraft, thisView }: ImportExportMenuProps) {
   // Bulk import writes to a draft — pointless (and misleading) when the admin
   // has versioning off, so the item is hidden entirely.
   const versioningEnabled = useFeature('versioningEnabled')
@@ -33,6 +48,27 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
   // itself still walked out through here. Locking the shape of the estate while leaving the
   // contents open is the kind of gap that only looks safe.
   const exportEnabled = useFeature('graphExportEnabled')
+  const { canExport: viewExportEnabled, canImport: viewImportEnabled } = useViewPortability()
+  const viewItems: Array<{ key: string; icon: LucideIcons.LucideIcon; label: string; detail: string; run: () => void }> = []
+  if (viewExportEnabled && thisView?.onExport) {
+    viewItems.push({
+      key: 'export', icon: LucideIcons.FileDown, label: 'Export view…', run: thisView.onExport,
+      detail: 'Its design as a file, to import in another environment.',
+    })
+  }
+  // A view with its data is a view export AND a graph export: both switches must be on.
+  if (viewExportEnabled && exportEnabled && versioningEnabled && thisView?.onExportWithData) {
+    viewItems.push({
+      key: 'export-data', icon: LucideIcons.PackageOpen, label: 'Export view + data…', run: thisView.onExportWithData,
+      detail: 'Its design and its graph data, in one package.',
+    })
+  }
+  if (viewImportEnabled && thisView?.onUpdateFromFile) {
+    viewItems.push({
+      key: 'update', icon: LucideIcons.FileUp, label: 'Update this view from a file…', run: thisView.onUpdateFromFile,
+      detail: 'Bring in a newer design of it from another environment.',
+    })
+  }
   const [open, setOpen] = useState(false)
   const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -73,13 +109,20 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
 
   return (
     <>
+      {/* Below 2000px the words stand down and this is an icon-only button —
+          so the hover is the ONLY thing that says what it does, and a
+          one-second native pill that repeated the label said nothing. */}
+      <HoverTip
+        className="inline-flex"
+        label="Bring entities in from a file, or download this graph"
+      >
       <button
         ref={triggerRef}
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
-        title="Import / Export"
+        aria-label="Import / Export"
         className={cn(
           'flex items-center gap-1.5 px-3 py-2 rounded-xl text-[11.5px] font-semibold tracking-tight transition-all',
           open
@@ -88,9 +131,19 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
         )}
       >
         <LucideIcons.ArrowDownUp className="w-3.5 h-3.5" strokeWidth={2.4} />
-        <span>Import / Export</span>
+        {/* The header's content budget, spent where it buys the most. This
+            row must also hold the branch switcher, and at ordinary laptop
+            widths the two longest labels here left the switcher a track
+            narrower than itself — so it overflowed and the search box painted
+            over its right-hand half. The icon, the tooltip and the accessible
+            name all stay; only the words stand down, and only until there is
+            room for them. The threshold is where EDIT mode stops being the
+            binding case: it carries Undo/Redo, Review & Save and Done on top of
+            everything View mode shows, so it runs out of row first. */}
+        <span className="hidden min-[2000px]:inline">Import / Export</span>
         <LucideIcons.ChevronDown className={cn('w-3 h-3 transition-transform duration-200', open && 'rotate-180')} />
       </button>
+      </HoverTip>
 
       {/* No AnimatePresence: the popover unmounts instantly on close so an
           interrupted exit can never strand an invisible click-blocker at
@@ -102,7 +155,7 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
               ref={popoverRef}
               initial={{ opacity: 0, y: -6, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ duration: 0.15, ease: 'easeOut' }}
+              transition={{ duration: 0.1, ease: 'easeOut' }}
               role="menu"
               aria-label="Import and export"
               style={{ position: 'fixed', top: anchor.top, right: anchor.right, width: POPOVER_WIDTH, zIndex: 1000 }}
@@ -110,12 +163,22 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
             >
               {/* Import — needs Edit mode + a branch (import writes to the working draft). */}
               {versioningEnabled && (
+                // The disabled rule is PRINTED INLINE two lines below, so the
+                // tooltip only said it a second time in different words. The
+                // tip is now reserved for the thing the row cannot say: where
+                // an import lands.
+                <HoverTip
+                  className="block"
+                  label={isDraft
+                    ? 'Add entities to your draft from a file'
+                    : 'Import needs Edit mode — start a draft first'}
+                  detail={isDraft ? 'Nothing reaches the published version until you publish' : undefined}
+                >
                 <button
                   type="button"
                   role="menuitem"
                   disabled={!isDraft || !onImport}
                   onClick={() => { if (isDraft && onImport) runItem(onImport) }}
-                  title={isDraft ? undefined : 'Import needs Edit mode — start a branch first'}
                   className={cn(
                     'w-full flex items-start gap-2.5 px-3 py-2 text-left transition-colors',
                     isDraft
@@ -129,16 +192,26 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
                     <span className="block text-[11px] text-ink-muted/80 leading-snug">
                       {isDraft
                         ? 'Bring entities in from CSV, Excel or NDJSON.'
-                        : 'Available in Edit mode — start a branch to import.'}
+                        : 'Available in Edit mode — start a draft to import.'}
                     </span>
                   </span>
                 </button>
+                </HoverTip>
               )}
 
               {/* Export — the door the DATA leaves by, and the server now refuses it when the
                   admin has turned it off. Hidden rather than disabled: a greyed-out control invites
                   people to hunt for the permission they think they're missing. */}
               {exportEnabled && (
+                // WHICH version leaves the building — the one thing neither
+                // the label nor the line under it says, and the one thing a
+                // person about to send this file to somebody needs.
+                <HoverTip
+                  className="block"
+                  label={isDraft
+                    ? 'Downloads the canvas as it stands in your draft'
+                    : 'Downloads the published version, as everyone else sees it'}
+                >
                 <button
                   type="button"
                   role="menuitem"
@@ -154,6 +227,28 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
                     </span>
                   </span>
                 </button>
+                </HoverTip>
+              )}
+
+              {viewItems.length > 0 && (
+                <div role="group" aria-label="This view" className="mt-1 pt-1 border-t border-black/[0.06] dark:border-white/[0.06]">
+                  <p className="px-3 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-muted">This view</p>
+                  {viewItems.map(({ key, icon: Icon, label, detail, run }) => (
+                    <button
+                      key={key}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => runItem(run)}
+                      className="w-full flex items-start gap-2.5 px-3 py-2 text-left text-ink hover:bg-accent-lineage/[0.08] dark:hover:bg-accent-lineage/[0.12] transition-colors"
+                    >
+                      <Icon className="w-4 h-4 mt-0.5 flex-shrink-0" strokeWidth={2} />
+                      <span className="min-w-0">
+                        <span className="block text-[13px] font-medium">{label}</span>
+                        <span className="block text-[11px] text-ink-muted leading-snug">{detail}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
               )}
             </motion.div>
           )}

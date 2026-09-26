@@ -5,7 +5,7 @@
  * props (Task 4: canonical view-config store). It must never write to the
  * referenceModelStore directly — that store is a render cache now, not a writer.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // jsdom has no layout, so @tanstack/react-virtual would render 0 rows without a
@@ -29,7 +29,7 @@ type FakeEntry = {
   totalChildren: number
   totalIsExact: boolean
   hasMore: boolean
-  nextCursor: string | null
+  nextOffset: number
   loaded: boolean
 }
 
@@ -40,7 +40,7 @@ function nodeA(overrides: Partial<FakeEntry> = {}): FakeEntry {
     totalChildren: 0,
     totalIsExact: true,
     hasMore: false,
-    nextCursor: null,
+    nextOffset: 0,
     loaded: true,
     ...overrides,
   }
@@ -53,7 +53,7 @@ function child(urn: string, name: string, overrides: Partial<FakeEntry> = {}): F
     totalChildren: 0,
     totalIsExact: true,
     hasMore: false,
-    nextCursor: null,
+    nextOffset: 0,
     loaded: true,
     ...overrides,
   }
@@ -82,6 +82,7 @@ const fakeBrowser = {
   topLevelHasMore: false,
   topLevelTotalCount: 1,
   topLevelMetadata: { rootTypeCount: 1, orphanCount: 0 },
+  failedIds: new Set<string>(),
   loadingNodes: new Set<string>(),
 }
 
@@ -223,7 +224,7 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     // 888 children, only the first page loaded — the exact case that used to
     // mean clicking "Load more" seventeen times.
     fakeBrowser.nodes = new Map<string, FakeEntry>([
-      ['urn:a', nodeA({ totalChildren: 888, hasMore: true, nextCursor: 'cursor-1', loaded: true })],
+      ['urn:a', nodeA({ totalChildren: 888, hasMore: true, nextOffset: 50, loaded: true })],
     ])
     renderTree()
 
@@ -242,14 +243,14 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     //     would just be a slow way of placing the parent (its children inherit),
     //     and would give no way to place children WITHOUT their parent.
     fakeBrowser.nodes = new Map<string, FakeEntry>([
-      ['urn:a', nodeA({ totalChildren: 2, hasMore: true, nextCursor: 'c1', loaded: true })],
+      ['urn:a', nodeA({ totalChildren: 2, hasMore: true, nextOffset: 1, loaded: true })],
     ])
     fakeBrowser.loadAllChildren.mockImplementationOnce(async (urn: string) => {
       // Simulate the hook: children land in the map and the ids come back.
       // A NEW Map — the tree memoises on map identity, as the real hook does.
       fakeBrowser.nodes = new Map<string, FakeEntry>([
         [urn, nodeA({
-          totalChildren: 2, hasMore: false, nextCursor: null, loaded: true,
+          totalChildren: 2, hasMore: false, nextOffset: 0, loaded: true,
           childIds: ['urn:c1', 'urn:c2'],
         })],
         ['urn:c1', child('urn:c1', 'Child One')],
@@ -270,7 +271,25 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     expect(screen.getByText(/itself won’t be placed/)).toBeInTheDocument()
 
     // Placing sends the two children and NOT the parent.
+    //
+    // The key is pressed EXACTLY ONCE, and it has to be. The window listener
+    // is registered in an effect keyed on `selectedIds`
+    // (WizardAssignmentTree.tsx:990-992), and "2 selected" above is RENDER
+    // output, so that text does not prove the listener closing over THAT
+    // selection is the one attached — on a loaded CI worker the previous
+    // listener, still holding the parent, caught the key and placed `urn:a`.
+    //
+    // Retrying the press inside waitFor does NOT fix that, it entrenches it:
+    // `handleBulkAssign` CLEARS the selection when it fires
+    // (WizardAssignmentTree.tsx:901), so a first press against a stale
+    // listener spends the selection, every later press returns early at
+    // `selectedIds.size === 0`, and the last call stays the wrong one
+    // forever. So: flush the pending effect first, then press once, and
+    // assert the count as well as the payload — a stale listener now fails
+    // as a wrong payload rather than hiding behind a retry.
+    await act(async () => {})
     fireEvent.keyDown(window, { key: '1' })
+    expect(onBulkAssign).toHaveBeenCalledTimes(1)
     expect(onBulkAssign).toHaveBeenCalledWith('l1', ['urn:c1', 'urn:c2'])
   })
 
@@ -324,5 +343,82 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     // Nothing is selected any more, so a quick-assign key must do nothing.
     fireEvent.keyDown(window, { key: '1' })
     expect(onBulkAssign).not.toHaveBeenCalled()
+  })
+})
+
+describe('WizardAssignmentTree — rule-placed entities', () => {
+  // A layer that declares the entity's type places it with NO assignment entry.
+  // The tree has to say so, or it would call the entity unassigned while the
+  // canvas rendered it inside that column.
+  const typedLayers: ViewLayerConfig[] = [
+    { id: 'l1', name: 'Domains', entityTypes: ['domain'], order: 0 },
+    { id: 'l2', name: 'Other', entityTypes: [], order: 1 },
+  ]
+
+  function renderTyped(props: Partial<React.ComponentProps<typeof WizardAssignmentTree>> = {}) {
+    return render(
+      <WizardAssignmentTree
+        layers={typedLayers}
+        assignments={{}}
+        onAssignmentChange={vi.fn()}
+        onBulkAssign={vi.fn()}
+        {...props}
+      />
+    )
+  }
+
+  it('shows the layer the type rule places it in, marked "by type"', () => {
+    renderTyped()
+    expect(screen.getByTestId('assigned-layer-badge')).toHaveTextContent('Domains')
+    expect(screen.getByTestId('rule-placed-marker')).toHaveTextContent('by type')
+  })
+
+  it('offers no remove button — a rule is overridden, never unassigned', () => {
+    renderTyped()
+    expect(screen.queryByTitle('Remove assignment')).not.toBeInTheDocument()
+  })
+
+  it('lets an explicit assignment override the rule, remove button and all', () => {
+    renderTyped({ assignments: { 'urn:a': { layerId: 'l2', inheritsChildren: true } } })
+    expect(screen.getByTestId('assigned-layer-badge')).toHaveTextContent('Other')
+    expect(screen.queryByTestId('rule-placed-marker')).not.toBeInTheDocument()
+    expect(screen.getByTitle('Remove assignment')).toBeInTheDocument()
+  })
+
+  it('counts a rule-placed entity as placed', () => {
+    renderTyped()
+    expect(screen.getByText(/\/ 1 placed/).parentElement).toHaveTextContent('1 / 1 placed')
+  })
+
+  it('"Unassigned only" hides a rule-placed entity — it IS placed', () => {
+    renderTyped()
+    expect(screen.getByText('Node A')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Unassigned only/i }))
+    expect(screen.queryByText('Node A')).not.toBeInTheDocument()
+  })
+
+  it('leaves an entity unplaced when no layer declares its type', () => {
+    render(
+      <WizardAssignmentTree
+        layers={[{ id: 'l1', name: 'Tables', entityTypes: ['table'], order: 0 }]}
+        assignments={{}}
+        onAssignmentChange={vi.fn()}
+        onBulkAssign={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('assigned-layer-badge')).not.toBeInTheDocument()
+    expect(screen.getByText(/\/ 1 placed/).parentElement).toHaveTextContent('0 / 1 placed')
+  })
+
+  it('does NOT fold case — the canvas would not place it either', () => {
+    render(
+      <WizardAssignmentTree
+        layers={[{ id: 'l1', name: 'Domains', entityTypes: ['Domain'], order: 0 }]}
+        assignments={{}}
+        onAssignmentChange={vi.fn()}
+        onBulkAssign={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('assigned-layer-badge')).not.toBeInTheDocument()
   })
 })

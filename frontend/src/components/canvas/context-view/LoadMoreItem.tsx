@@ -9,15 +9,24 @@
  * failure modes structurally:
  *
  * - LATCH ON PROGRESS, NOT RENDERS: the sentinel fires at most once per
- *   `count` value, held in a ref — prop-identity churn can never re-arm it.
- *   It only re-fires after a page actually LANDS (count changed).
+ *   re-arm key, held in a ref — prop-identity churn can never re-arm it. The
+ *   caller passes `rearmKey`: the row count of the COLUMN the row sits in, so
+ *   it re-fires only after a page grows THIS column. A page whose rows render
+ *   in another column leaves it latched — the row stays and a click still
+ *   works, but nothing pages unattended. Without a key it latches on `count`.
+ * - A FAILED page does not re-arm it either: the row says the page failed and
+ *   waits for a click, rather than hammering a server that is failing.
  * - DWELL BEFORE FIRING (300ms): scrubbing past the row never pages; only
  *   pausing on it does.
  * - CALLER-GATED: LayerColumn passes `autoLoad=false` in Isolate/Hide
  *   filter modes, where loaded children are filtered out of the tree and
  *   the row would otherwise stay pinned in view and drain the parent.
- * - COLUMN-SCOPED: the observer's root is the column scroller, so only
- *   genuine scrolling in THIS column arms it.
+ * - ON-SCREEN ONLY: the observer is rooted in the VIEWPORT. Intersection is
+ *   still clipped by the column's own scroll area (the spec clips through every
+ *   ancestor), so the row arms only when it is genuinely visible — at the foot
+ *   of its column, in a column the canvas is showing. Rooted in the column's
+ *   scroller instead, a column scrolled off the canvas still "saw" its row, and
+ *   every off-screen column on a 56-column view paged itself unasked.
  */
 import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
@@ -32,27 +41,37 @@ export function LoadMoreItem({
   isLoading = false,
   onLoadMore,
   autoLoad = false,
+  rearmKey,
+  failed = false,
 }: {
   parentId?: string
   depth: number
   parentIsLast: boolean[]
-  /** Children not yet loaded for this parent. */
-  count: number
+  /** Children not yet loaded for this parent — `null` when the remainder is
+   *  unknown (a type feed): the row then offers the next page without a number. */
+  count: number | null
   isLoading?: boolean
-  onLoadMore: () => void
+  /** `auto` is true only for the sentinel's one-page-ahead fetch — the caller
+   *  announces the CLICK and stays quiet about the prefetch. */
+  onLoadMore: (auto?: boolean) => void
   /** One-page-ahead auto-load when the row scrolls into view. */
   autoLoad?: boolean
+  /** What re-arms the auto-load once it fired (see the header). */
+  rearmKey?: number
+  /** The last page for this parent failed — offer a retry, don't auto-fire. */
+  failed?: boolean
 }) {
   const indentWidth = depth * 16
-  const nextPage = Math.min(CHILDREN_PAGE_SIZE, count)
+  const nextPage = count === null ? CHILDREN_PAGE_SIZE : Math.min(CHILDREN_PAGE_SIZE, count)
 
   const rowRef = useRef<HTMLDivElement>(null)
-  const lastFiredCountRef = useRef<number | null>(null)
+  const lastFiredKeyRef = useRef<string | null>(null)
+  const latchKey = rearmKey !== undefined ? `k:${rearmKey}` : `c:${count ?? '?'}`
   const onLoadMoreRef = useRef(onLoadMore)
   useEffect(() => { onLoadMoreRef.current = onLoadMore }, [onLoadMore])
 
   useEffect(() => {
-    if (!autoLoad || isLoading) return
+    if (!autoLoad || isLoading || failed) return
     const el = rowRef.current
     if (!el || typeof IntersectionObserver === 'undefined') return
     let dwell: ReturnType<typeof setTimeout> | null = null
@@ -61,19 +80,19 @@ export function LoadMoreItem({
         if (dwell !== null) { clearTimeout(dwell); dwell = null }
         return
       }
-      if (lastFiredCountRef.current === count) return
+      if (lastFiredKeyRef.current === latchKey) return
       dwell = setTimeout(() => {
         dwell = null
-        lastFiredCountRef.current = count
-        onLoadMoreRef.current()
+        lastFiredKeyRef.current = latchKey
+        onLoadMoreRef.current(true)
       }, 300)
-    }, { root: el.closest('.overflow-y-auto'), rootMargin: '120px' })
+    }, { root: null })
     io.observe(el)
     return () => {
       io.disconnect()
       if (dwell !== null) clearTimeout(dwell)
     }
-  }, [autoLoad, count, isLoading])
+  }, [autoLoad, latchKey, isLoading, failed])
 
   return (
     <motion.div
@@ -108,7 +127,11 @@ export function LoadMoreItem({
           if (!isLoading) onLoadMore()
         }}
         disabled={isLoading}
-        aria-label={`Load ${nextPage} more of ${count.toLocaleString()} remaining`}
+        aria-label={failed
+          ? `Couldn't load the next ${nextPage}. Retry`
+          : count === null
+            ? 'Load more'
+            : `Load ${nextPage} more of ${count.toLocaleString()} remaining`}
         className={cn(
           'flex flex-1 items-center justify-center gap-2 py-1.5 rounded-lg border text-[11px] font-medium transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
           'bg-black/[0.02] border-black/[0.08] dark:bg-white/[0.03] dark:border-white/[0.08] text-ink-muted',
@@ -122,15 +145,27 @@ export function LoadMoreItem({
             <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" />
             <span className="tracking-wide">Loading…</span>
           </>
+        ) : failed ? (
+          <>
+            <LucideIcons.RotateCw className="w-3.5 h-3.5" />
+            <span className="tracking-wide">
+              Couldn't load the next {nextPage}
+              <span className="text-ink-muted"> · Retry</span>
+            </span>
+          </>
         ) : (
           <>
             <span className="flex items-center justify-center w-5 h-5 rounded-full bg-black/[0.04] group-hover/item:bg-black/[0.06] dark:bg-white/[0.05] dark:group-hover/item:bg-white/[0.08] transition-colors">
               <LucideIcons.Plus className="w-3.5 h-3.5 text-ink-muted/70" />
             </span>
-            <span className="tracking-wide">
-              Load {nextPage} more
-              <span className="text-ink-muted/50"> · {count.toLocaleString()} remaining</span>
-            </span>
+            {count === null ? (
+              <span className="tracking-wide">Load more</span>
+            ) : (
+              <span className="tracking-wide">
+                Load {nextPage} more
+                <span className="text-ink-muted/50"> · {count.toLocaleString()} remaining</span>
+              </span>
+            )}
           </>
         )}
       </button>

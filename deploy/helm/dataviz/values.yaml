@@ -14,7 +14,12 @@ ingress:
   className: nginx
   host: dataviz.example.com
   annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    # Everything goes to the frontend's nginx, which ends an ordinary API
+    # request at 180s (past the app's slowest tier, 120s, so the app's own
+    # structured JSON 504 wins the race) but lets a streamed export run an
+    # hour, with long gaps while a spreadsheet finds its columns. This
+    # edge must allow that hour too, or it would cut exports short.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-body-size: "32m"
 
 # ── Non-secret config (rendered into a ConfigMap) ─────────────────────
@@ -28,11 +33,13 @@ config:
     host: REPLACE_ME_FALKORDB_HOST
     port: "6379"
     graphName: nexus_lineage
-    # The FalkorDB server's TIMEOUT_MAX (ms). MUST match the TIMEOUT_MAX
-    # in the server's launch args (stores.falkordb.args when in-cluster,
-    # or your managed instance's config) — the backend clamps every
-    # per-query timeout it sends to this value because the server
-    # REJECTS queries requesting more.
+    # The FalkorDB server's TIMEOUT_MAX (ms) — the fallback the backend
+    # clamps per-query timeouts to until it has read a node's own
+    # TIMEOUT_MAX. Keep it equal to the server's launch args
+    # (stores.falkordb.args when in-cluster, or your managed instance's
+    # config): the server REJECTS queries requesting more. TIMEOUT_MAX can
+    # be raised at runtime from Infrastructure → Memory headroom; the
+    # dialog hands over the launch-args fragment that keeps the change.
     serverTimeoutMaxMs: "180000"
   jwt:
     algorithm: HS256
@@ -145,14 +152,44 @@ stores:
   falkordb:
     enabled: false
     image: falkordb/falkordb:v4.18.11
-    args: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
-    # Instance ceiling at 75% of the memory limit; noeviction = writes
-    # fail loudly instead of the pod being OOM-killed by data growth.
-    redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction"
+    # QUERY_MEM_CAPACITY is charged PER CONCURRENT QUERY, on top of
+    # maxmemory, inside limits.memory — the three share one budget:
+    #   limits.memory >= 1.25*maxmemory + concurrent*1.3*QUERY_MEM_CAPACITY + 256Mi
+    # (the 1.3 is the untracked client reply buffer; FalkorDB materializes a
+    # query's whole result set before sending it). Raising QUERY_MEM_CAPACITY
+    # without raising limits.memory trades a caught query error for an
+    # OOM-killed pod. See docs/FALKORDB_DEPLOYMENT.md.
+    args: "THREAD_COUNT 8 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50 EFFECTS_THRESHOLD 0"
+    # noeviction = writes fail loudly instead of the pod being OOM-killed
+    # by data growth.
+    # appendonly/appendfsync/aof-load-truncated: WITHOUT these the pod ran
+    # the Redis defaults — no AOF and no RDB floor at all — so a restart lost
+    # the whole projection and every graph came back empty until something
+    # rebuilt it. FalkorDB is a rebuildable read cache, but "rebuildable" is
+    # hours of re-materialising, not a restart. The base k8s StatefulSet has
+    # carried these since it was written; this chart had not.
+    # save 21600 1: the RDB is a FLOOR, not the recovery path (the AOF is).
+    # Six-hourly because its value does not decay — Cloud SQL masters every
+    # graph — while a shorter interval forks the node on its own schedule,
+    # which a rebuild cannot hold its writes through.
+    # auto-aof-rewrite-min-size 512mb: the 64 MB default rewrites a small AOF
+    # repeatedly for nothing.
+    # replica-lazy-flush: a replica following a promotion or a full resync
+    # flushes its old dataset first, and doing that synchronously is minutes of
+    # a main thread answering nothing on a large graph — long enough to fail a
+    # health probe and be restarted mid-catch-up.
+    redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes --auto-aof-rewrite-min-size 512mb --save 21600 1 --replica-lazy-flush yes --lazyfree-lazy-server-del yes"
     storage: 10Gi
     resources:
       requests: { cpu: "1", memory: 2Gi }
-      limits: { cpu: "4", memory: 8Gi }
+      # cpu 8 because THREAD_COUNT tracks it (see args above): the query
+      # threads are the read tier's real concurrency limit, and at 4 a
+      # handful of heavy reads occupied every one of them while everyone
+      # else queued. memory 14Gi is the same budget line as the comment
+      # above, evaluated at the new concurrency: 6gb*1.25 + 8 concurrent
+      # queries at 512Mi*1.3 + 256Mi ~= 13.1Gi. Raising THREAD_COUNT
+      # without this trades a caught query error for an OOM-killed pod.
+      limits: { cpu: "8", memory: 14Gi }
   redis:
     enabled: false
     image: redis:7-alpine

@@ -22,6 +22,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
+import { overlayOnReplace, type MoveAfter } from '@/store/stagedOverlay'
+import type { LineageEdge, LineageNode } from '@/store/canvas'
+import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
+import { layoutWriter } from '@/store/canvasLayoutBridge'
+import { assignEntities } from '@/components/canvas/context-view/assignmentMutations'
 import {
   clearSnapshot,
   markSnapshotCommitting,
@@ -36,18 +41,36 @@ import {
 const SNAPSHOT_VERSION = 1
 const WRITE_DEBOUNCE_MS = 600
 
-/** Rebuild the per-change discard closure a restored change lost to JSON. The
- *  builder flow is dominated by create_entity/create_edge, whose discard is
- *  exactly "remove the optimistic node/edge"; other types drop their op-log
- *  row on discard (their visual state reverts on the next save / re-hydrate). */
+/** Rebuild the per-change discard closure a restored change lost to JSON — the same undo the
+ *  live change had, so discarding restored work puts the canvas back exactly as it does before a
+ *  refresh (a restored rename used to stay on screen after its discard until the next reload).
+ *  Layer/view changes still drop only their op-log row (their view config reverts on re-hydrate). */
 function rebuildDiscard(change: SerializableChange): (() => void) | undefined {
-  if (change.type === 'create_entity') {
-    return () => useCanvasStore.getState().removeNode(change.targetId)
+  const cs = () => useCanvasStore.getState()
+  switch (change.type) {
+    case 'create_entity':
+      return () => cs().removeNode(change.targetId)
+    case 'create_edge':
+      return () => cs().removeEdge(change.targetId)
+    case 'rename_entity':
+    case 'update_entity': {
+      // `before` is the node's own data as it was (both staging paths record it that way).
+      const before = change.before
+      if (!before || typeof before !== 'object') return undefined
+      return () => cs().updateNode(change.targetId, before as Partial<LineageNode['data']>)
+    }
+    case 'move_entity': {
+      const after = change.after as MoveAfter
+      const before = (change.before ?? {}) as { removedLinks?: LineageEdge[]; layout?: NormalizedReferenceLayout | null }
+      return () => {
+        if (after.edgeId) cs().removeEdge(after.edgeId)
+        if (before.removedLinks?.length) cs().addEdges(before.removedLinks)
+        if (before.layout) layoutWriter()?.persist(before.layout)
+      }
+    }
+    default:
+      return undefined
   }
-  if (change.type === 'create_edge') {
-    return () => useCanvasStore.getState().removeEdge(change.targetId)
-  }
-  return undefined
 }
 
 function hydrateChange(sc: SerializableChange): StagedChange {
@@ -59,6 +82,13 @@ function buildSnapshot(scopeKey: string, branchId: string | null): StagedDraftSn
   const staged = useStagedChangesStore.getState()
   if (staged.changes.length === 0) return null
   const cs = useCanvasStore.getState()
+  // Exactly what the overlay treats as pending: the snapshot carries every canvas copy it would keep.
+  const pending = overlayOnReplace({ nodes: [], edges: [] }, { nodes: cs.nodes, edges: cs.edges }, staged.changes)
+  const assignments = layoutWriter()?.current().assignments ?? {}
+  const pins: Record<string, string> = {}
+  for (const n of pending.nodes) {
+    if (n.data?.isPending === 'create' && assignments[n.id]?.layerId) pins[n.id] = assignments[n.id].layerId
+  }
   return {
     version: SNAPSHOT_VERSION,
     scopeKey,
@@ -66,8 +96,9 @@ function buildSnapshot(scopeKey: string, branchId: string | null): StagedDraftSn
     phase: 'staged',
     savedAt: 0,
     changes: staged.changes.map(toSerializableChange),
-    pendingNodes: cs.nodes.filter((n) => n.data?.isPending),
-    pendingEdges: cs.edges.filter((e) => e.data?.isPending),
+    pendingNodes: pending.nodes,
+    pendingEdges: pending.edges,
+    pins,
   }
 }
 
@@ -96,18 +127,38 @@ export function useStagedDraftPersistence(
     }
     if (verdict === 'noop' || !snapshot) return
 
-    // Append the unsaved delta ON TOP of the hydrated (committed) canvas:
-    // optimistic nodes/edges first (exact positions/badges), then the review
-    // op-log so Save + the review panel see the same changes.
+    // Lay the unsaved work ON TOP of the hydrated (committed) canvas by the same rule every later
+    // load follows (stagedOverlay): the snapshot's copies win for what the work touches (a new node,
+    // an edited one), and what it removed stays removed. Then the review op-log, so Save + the
+    // review panel see the same changes — and every later reload keeps all of it.
+    const changes = snapshot.changes.map(hydrateChange)
     const cs = useCanvasStore.getState()
-    if (snapshot.pendingNodes.length) cs.addNodes(snapshot.pendingNodes)
-    if (snapshot.pendingEdges.length) cs.addEdges(snapshot.pendingEdges)
+    const { nodes, edges } = overlayOnReplace(
+      { nodes: cs.nodes, edges: cs.edges },
+      { nodes: snapshot.pendingNodes, edges: snapshot.pendingEdges },
+      changes,
+    )
+    useCanvasStore.setState({
+      nodes, edges, _nodeIndex: new Set(nodes.map((n) => n.id)), _edgeIndex: new Set(edges.map((e) => e.id)),
+    })
     useStagedChangesStore.setState({
-      changes: snapshot.changes.map(hydrateChange),
+      changes,
       redoStack: [],
       applyStatus: 'idle',
       lastApplyResult: null,
     })
+    // Unsaved top-level entities get their column back (see StagedDraftSnapshot.pins).
+    const writer = layoutWriter()
+    const pins = Object.entries(snapshot.pins ?? {})
+    if (writer && pins.length > 0) {
+      let layout = writer.current()
+      for (const [urn, layerId] of pins) {
+        if (!layout.assignments[urn] && layout.layers.some((l) => l.id === layerId)) {
+          layout = assignEntities(layout, [urn], layerId)
+        }
+      }
+      if (layout !== writer.current()) writer.persist(layout)
+    }
     setRestoredCount(snapshot.changes.length)
   }, [scopeKey, currentBranchId, hydrationComplete])
 

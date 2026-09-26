@@ -12,7 +12,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Compass, Search, LayoutGrid, List, X, TrendingUp, Plus,
+  Compass, Search, LayoutGrid, List, X, TrendingUp, Plus, FileUp,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
@@ -39,14 +39,18 @@ import { ExplorerEmptyState } from '@/components/explorer/ExplorerEmptyState'
 import { ExplorerCardSkeleton, ExplorerListRowSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDrawer'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { useViewFileDrop } from '@/features/view-transfer/useViewFileDrop'
+import { ViewFileDropOverlay } from '@/features/view-transfer/ViewFileDropOverlay'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useCopyViewLink } from '@/lib/viewShareLink'
 import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -102,6 +106,14 @@ export function ExplorerPage() {
   const parsed = parseSearchParams(searchParams)
   const currentUser = useAuthStore(s => s.user)
   const { openViewEditor } = useViewEditorModal()
+  // A view from another environment: the wizard's Import journey, from the button or a file
+  // dropped anywhere on the page.
+  const { canImport: importEnabled, canExport: exportEnabled } = useViewPortability()
+  const openImport = useCallback(
+    (file?: File) => openViewEditor(undefined, { journey: 'import', importFile: file }),
+    [openViewEditor],
+  )
+  const { dragging: fileOverPage, dropProps } = useViewFileDrop(openImport, importEnabled)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   const density = usePreferencesStore(s => s.explorerDensity)
 
@@ -172,6 +184,7 @@ export function ExplorerPage() {
   const openViewDetailsEdit = useCallback((v: View) => { setPreviewEditMode(true); setPreviewView(v) }, [])
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   
@@ -383,7 +396,7 @@ export function ExplorerPage() {
 
   // ─── Handlers ───────────────────────────────────────────────────────
 
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
 
   const copyViewLink = useCopyViewLink()
   const handleShare = useCallback((view: View) => {
@@ -396,7 +409,7 @@ export function ExplorerPage() {
 
   /**
    * The card menu changed a view's tier. Patch it in place rather than
-   * refetching: the menu has already confirmed with a toast naming the
+   * refetching: the menu has already confirmed with a notification naming the
    * new audience, and a round trip during which the card still shows the
    * OLD badge is exactly what made this feel like nothing happened.
    */
@@ -410,7 +423,7 @@ export function ExplorerPage() {
   // BE rule (views.py: can_delete_view): creator OR
   // workspace:view:delete on the view's workspace. Mirror that
   // here so the row/grid/preview Delete affordance disappears for
-  // users who'd just get a 403 toast on click.
+  // users who'd just get a 403 notification on click.
   const canDeleteView = useCallback((view: View): boolean => {
     if (currentUser?.id && view.createdBy === currentUser.id) return true
     return useAuthStore.getState().can('workspace:view:delete', view.workspaceId)
@@ -443,9 +456,9 @@ export function ExplorerPage() {
       next.delete(deletedId)
       return next
     })
-    // Toast
-    showToast('success', `"${deletedName}" has been deleted`)
-  }, [deleteView, removeViewFromList, showToast])
+    // Notification
+    notify('success', `"${deletedName}" has been deleted`)
+  }, [deleteView, removeViewFromList, notify])
 
   const handleBulkDelete = useCallback(() => {
     if (selectedIds.size === 0) return
@@ -470,8 +483,8 @@ export function ExplorerPage() {
     setPreviewView(prev => prev && ids.includes(prev.id) ? null : prev)
     setSelectedIds(new Set())
     setShowBulkDelete(false)
-    showToast('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
-  }, [selectedIds, removeViewFromList, showToast])
+    notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
+  }, [selectedIds, removeViewFromList, notify])
 
   const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
     const ids = Array.from(selectedIds)
@@ -483,7 +496,7 @@ export function ExplorerPage() {
     setSelectedIds(new Set())
     refetch()
     if (failed.length === 0) {
-      showToast('success', `Updated visibility to "${visibility}" for ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
+      notify('success', `Updated visibility to "${visibility}" for ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     } else {
       const reason = failed[0].reason
       const detail = reason instanceof Error ? reason.message : 'unknown error'
@@ -497,12 +510,12 @@ export function ExplorerPage() {
           : detail.includes('workspace:view:publish')
             ? 'publishing those needs approval — open each view to ask'
             : detail
-      showToast(
+      notify(
         'error',
         `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${cause}`,
       )
     }
-  }, [selectedIds, showToast, refetch])
+  }, [selectedIds, notify, refetch])
 
   /**
    * Clicking a tag chip on a card toggles that tag in the tag filter —
@@ -522,17 +535,18 @@ export function ExplorerPage() {
     try {
       await restoreViewApi(view.id)
       refetch()
-      showToast('success', `"${view.name}" has been restored`)
+      notify('success', `"${view.name}" has been restored`)
     } catch {
-      showToast('error', `Failed to restore "${view.name}"`)
+      notify('error', `Failed to restore "${view.name}"`)
     }
-  }, [refetch, showToast])
+  }, [refetch, notify])
 
   // ─── Render ─────────────────────────────────────────────────────────
 
   return (
-    <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar">
+    <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar" {...dropProps}>
       <style>{STAGGER_STYLE}</style>
+      <ViewFileDropOverlay show={fileOverPage} />
       <PageContainer className="pb-28">
 
         {/* ── Header ──────────────────────────────────────────── */}
@@ -547,6 +561,16 @@ export function ExplorerPage() {
               <p className="text-[11px] text-ink-muted">Discover views across workspaces</p>
             </div>
             <TourLaunchButton tourId="explore-lineage" />
+            {importEnabled && (
+              <button
+                onClick={() => openImport()}
+                className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold border border-glass-border text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                title="Import a view exported from another environment (or drop its file on this page)"
+              >
+                <FileUp className="w-4 h-4" />
+                Import view
+              </button>
+            )}
             <button
               data-tour="explorer-new-view"
               onClick={() => openViewEditor()}
@@ -789,7 +813,7 @@ export function ExplorerPage() {
               transition={{ duration: 0.15 }}
             >
               {layout === 'grid' ? (
-                <div className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
+                <div className={cn('grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
                   {Array.from({ length: 8 }).map((_, i) => <ExplorerCardSkeleton key={i} />)}
                 </div>
               ) : (
@@ -823,7 +847,7 @@ export function ExplorerPage() {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.18 }}
             >
-              <div ref={gridRef} className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
+              <div ref={gridRef} className={cn('grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
                 {views.map((v, i) => (
                   <div
                     key={v.id}
@@ -920,7 +944,6 @@ export function ExplorerPage() {
           ? () => handleDeleteRequest(previewView)
           : undefined}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
-        providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
         initialEditMode={previewEditMode}
         onSaved={() => refetch()}
       />
@@ -928,8 +951,16 @@ export function ExplorerPage() {
         selectedCount={selectedIds.size}
         onDelete={canBulkDelete ? handleBulkDelete : undefined}
         onChangeVisibility={handleBulkVisibility}
+        onExport={exportEnabled && parsed.category !== 'deleted'
+          ? () => setExportSelection(Array.from(selectedIds, id => ({
+              id, name: views.find(v => v.id === id)?.name ?? id,
+            })))
+          : undefined}
         onClearSelection={() => setSelectedIds(new Set())}
       />
+      {exportSelection && (
+        <ExportViewDialog views={exportSelection} onClose={() => setExportSelection(null)} />
+      )}
       {shareView && (
         <ShareViewDialog
           viewId={shareView.id}

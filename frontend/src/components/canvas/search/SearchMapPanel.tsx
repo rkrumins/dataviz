@@ -18,6 +18,12 @@
  *     │     int_clean_tickets_t2  DATASET            │
  *     └──────────────────────────────────────────────┘
  *
+ * On a canvas that owns a search session the panel opens RESULTS-FIRST:
+ * the Query card is folded away behind the Refine chip and the sentence
+ * above the match bar states what was asked. The canvases whose only
+ * search is this panel have nowhere else to compose a query, so for them
+ * the card stays at the top.
+ *
  * One Query card holds the entire active query. Rows compose with AND;
  * the Visual ↔ Code toggle switches between row-builder and DSL text.
  * Templates SEED the rows (no opaque "replace + run"). Advanced drawer
@@ -28,7 +34,7 @@
  * the lineage canvas spotlights matches and shows enriched badges.
  */
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, SlidersHorizontal, X } from 'lucide-react'
+import { BookOpen, SlidersHorizontal, Sparkles, X } from 'lucide-react'
 import {
     type FC,
     useCallback,
@@ -40,7 +46,13 @@ import {
 
 import { cn } from '@/lib/utils'
 import { rememberUrnLabels } from '@/lib/urnLabels'
-import { useAdvancedSearch } from '@/hooks/useAdvancedSearch'
+import {
+    useAdvancedSearch,
+    type UseAdvancedSearchResult,
+} from '@/hooks/useAdvancedSearch'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { useFeature } from '@/store/features'
 import {
     DEFAULT_DRAFT_OPTIONS,
     readPersistedCanvasFilterMode,
@@ -51,19 +63,26 @@ import {
     useSearchStore,
     type RecentQueryEntry,
 } from '@/store/searchStore'
+import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
+import type { SavedViewQuery } from '@/services/viewLibraryService'
 import type { AncestorRef } from '@/types/search'
 
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
+import { ExportMatchesDialog } from './panel/ExportMatchesDialog'
 import { LibraryPopover } from './panel/LibraryPopover'
 import { MatchBar } from './panel/MatchBar'
 import { NoViewState } from './panel/NoViewState'
 import { QueryCard } from './panel/QueryCard'
+import { QuerySentence } from './panel/QuerySentence'
 import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
 import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
 import { ScopeModePicker } from './panel/ScopeModePicker'
 import { setScopeCondition } from './panel/predicateComposition'
+import { useLoadAll } from './panel/useLoadAll'
+import { useViewSearchSessionOptional } from './session/ViewSearchSessionContext'
+import { hasReportableView } from './session/useViewSearchSessionController'
 import { usePendingSearchRun } from './usePendingSearchRun'
 import {
     defaultInputs,
@@ -79,11 +98,22 @@ export interface SearchMapPanelProps {
     onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
+    /** The canvas's own search pipeline, when it has one. A canvas that
+     *  owns a search session (ContextViewCanvas) hands it in so the panel
+     *  reports on the query the header box ran instead of running a
+     *  second, identical one of its own. Omitted by the canvases whose
+     *  only search IS this panel — see `OwnedSessionPanel`. */
+    session?: UseAdvancedSearchResult
+    /** What Clear (×) means when a canvas owns the search. The panel's
+     *  own reset reaches everything it can see and nothing the header box
+     *  holds, which would strand the query text with no results and no
+     *  way to re-ask. Omitted alongside `session`. */
+    onClear?: () => void
 }
 
 
 export const SearchMapPanel: FC<SearchMapPanelProps> = ({
-    open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches,
+    open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches, session, onClear,
 }) => {
     const [width, setWidth] = useState<number>(() => readPersistedWidth())
 
@@ -108,13 +138,25 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
                         style={{ width }}
                     >
                         {viewId ? (
-                            <PanelInner
-                                onClose={onClose}
-                                viewId={viewId}
-                                onRevealNode={onRevealNode}
-                                onOpenNode={onOpenNode}
-                                onFrameMatches={onFrameMatches}
-                            />
+                            session ? (
+                                <PanelInner
+                                    onClose={onClose}
+                                    viewId={viewId}
+                                    session={session}
+                                    onClear={onClear}
+                                    onRevealNode={onRevealNode}
+                                    onOpenNode={onOpenNode}
+                                    onFrameMatches={onFrameMatches}
+                                />
+                            ) : (
+                                <OwnedSessionPanel
+                                    onClose={onClose}
+                                    viewId={viewId}
+                                    onRevealNode={onRevealNode}
+                                    onOpenNode={onOpenNode}
+                                    onFrameMatches={onFrameMatches}
+                                />
+                            )
                         ) : (
                             <NoViewState onClose={onClose} />
                         )}
@@ -137,19 +179,45 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
 interface PanelInnerProps {
     onClose: () => void
     viewId: string
+    /** The pipeline to report on — the canvas's session, or the one
+     *  `OwnedSessionPanel` mounts for the canvases that have none. */
+    session: UseAdvancedSearchResult
+    /** The session's own teardown, when there is one. */
+    onClear?: () => void
     onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
 }
 
 
+/** The panel's own pipeline, for the canvases whose only search is this
+ *  panel (GraphCanvas / HierarchyCanvas). A wrapper rather than a
+ *  fallback inside `PanelInner` because a hook cannot be called
+ *  conditionally. */
+function OwnedSessionPanel(props: Omit<PanelInnerProps, 'session' | 'onClear'>) {
+    const session = useAdvancedSearch(props.viewId)
+    return <PanelInner {...props} session={session} />
+}
+
+
 function PanelInner({
-    onClose, viewId, onRevealNode, onOpenNode, onFrameMatches,
+    onClose, viewId, session, onClear, onRevealNode, onOpenNode, onFrameMatches,
 }: PanelInnerProps) {
     const {
         view, runState, runPredicate, cancel,
         resetTemplate, loadMore, isLoadingMore,
-    } = useAdvancedSearch(viewId)
+    } = session
+    // The canvas's session, when there is one. `session` above is only
+    // its PIPELINE; everything the results-first layout needs beyond that
+    // — whether the builder is showing, how a hit maps to a layer column,
+    // the layer names — lives on the session object itself.
+    const viewSession = useViewSearchSessionOptional()
+    // Results-first: on a canvas with a session the panel opens on the
+    // answer and the builder is a mode you ask for. The canvases whose
+    // only search IS this panel have nowhere else to compose a query, so
+    // for them the builder is always the top of the panel.
+    const refineOpen = viewSession ? viewSession.refineOpen : true
+    const { loadAll, isLoadingAll, cancelLoadAll } = useLoadAll(session)
 
     const draftPredicate = useDraftPredicate()
     const draftOptions = useDraftOptions()
@@ -161,6 +229,8 @@ function PanelInner({
     const togglePinRecent = useSearchStore((s) => s.togglePinRecent)
     const removeRecent = useSearchStore((s) => s.removeRecent)
     const promoteToMine = useSearchStore((s) => s.promoteToMine)
+    const saveViewQuery = useViewLibraryStore((s) => s.saveQuery)
+    const canSaveToView = useLibraryCanEdit()
     const stepFocus = useSearchStore((s) => s.stepFocus)
     const setCanvasFilterMode = useSearchStore((s) => s.setCanvasFilterMode)
 
@@ -172,6 +242,9 @@ function PanelInner({
     // see SaveQueryDialog for the framer-motion portal rationale and
     // LibraryPopover for the lifecycle handoff.
     const [saveTarget, setSaveTarget] = useState<RecentQueryEntry | null>(null)
+    const [exportOpen, setExportOpen] = useState(false)
+    const exportEnabled = useFeature('graphExportEnabled')
+    const provider = useGraphProvider()
 
     const openAdvanced = useCallback((tab: DrawerTab = 'options') => {
         setAdvancedTab(tab)
@@ -220,6 +293,17 @@ function PanelInner({
     }, [draftOptions])
 
     const handleClear = useCallback(() => {
+        // On a canvas that owns the search, Clear is the SESSION's
+        // teardown. The three resets below reach everything this panel can
+        // see and nothing the header box holds, so on their own they would
+        // leave the query text in the box with its results, highlights and
+        // status gone — and the debounced lane only dispatches when the
+        // debounced query CHANGES, so unchanged text never asks again.
+        // `clearQuery` does all three and empties the box.
+        if (onClear) {
+            onClear()
+            return
+        }
         // Three resets — each owns a different slice of state and skipping
         // any leaves stale UI behind:
         //   1. cancel()       aborts an in-flight request and clears
@@ -240,7 +324,7 @@ function PanelInner({
         cancel()
         resetTemplate()
         clearStore()
-    }, [cancel, resetTemplate, clearStore])
+    }, [onClear, cancel, resetTemplate, clearStore])
 
     /**
      * Seed-from-template: rather than calling runTemplate (which would
@@ -260,6 +344,11 @@ function PanelInner({
 
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
         commitDraft(entry.predicate)
+        setLibraryOpen(false)
+    }, [commitDraft])
+
+    const handleLoadSaved = useCallback((query: SavedViewQuery) => {
+        commitDraft(query.predicate)
         setLibraryOpen(false)
     }, [commitDraft])
 
@@ -310,19 +399,32 @@ function PanelInner({
         && frameTargetUrns.length > 0
         && Boolean(onFrameMatches)
 
+    // Same order the results list and the canvas header use.
+    // ``totalCount`` is the server's exact size of the match set;
+    // ``candidateCount`` is only what the scan had to consider, and it
+    // stops at the candidate cap — so on any query that hit the cap this
+    // headline disagreed with the list six inches below it.
     const resultsCount = view.kind === 'results'
-        ? (view.result.candidateCount || view.result.hits?.length || 0)
+        ? (view.result.totalCount ?? view.result.candidateCount ?? view.result.hits?.length ?? 0)
         : null
     const elapsedMs = view.kind === 'results' ? view.elapsedMs : null
     const truncated = view.kind === 'results' && view.result.truncated === true
+    // Whether that count is the server's exact size of the match set. The
+    // truncation warning is about the RUN and stands either way; the
+    // trailing plus is about the NUMBER, and there is nothing more than a
+    // total the server counted.
+    const countIsExact = view.kind === 'results' && view.result.totalCount != null
     const deadlineExceeded = view.kind === 'results'
         && view.result.deadlineExceeded === true
     const candidateCount = view.kind === 'results'
         ? (view.result.candidateCount ?? null)
         : null
-    const showResultsSection = view.kind === 'running'
-        || view.kind === 'results'
-        || view.kind === 'error'
+    const showResultsSection = hasReportableView(view)
+    // Every match, to a file — a search's matches, not a path search's routes.
+    const canExport = exportEnabled
+        && provider instanceof RemoteGraphProvider
+        && view.kind === 'results'
+        && !view.result.paths
 
     // Resolve the focused match's ancestor path from the current
     // result page. Stepping (J/K) only updates ``focusedMatchIndex``;
@@ -393,7 +495,7 @@ function PanelInner({
                 onTogglePinRecent={togglePinRecent}
                 onRemoveRecent={removeRecent}
                 onSaveAs={setSaveTarget}
-                viewId={viewId}
+                onLoadSaved={handleLoadSaved}
                 activeDraft={Boolean(draftPredicate)}
             >
                 <div>
@@ -403,6 +505,18 @@ function PanelInner({
                         libraryOpen={libraryOpen}
                         onOpenOptions={() => openAdvanced('options')}
                         optionsDeltaCount={optionsDeltaCount}
+                        refineOpen={refineOpen}
+                        // Offered only when there is something to fall
+                        // back to. With the builder alone on screen the
+                        // chip could not put it away (the session refuses,
+                        // so the rail can't go blank) — a control that
+                        // does nothing is worse than no control.
+                        onToggleRefine={viewSession && showResultsSection
+                            ? () => {
+                                if (viewSession.refineOpen) viewSession.closeRefine()
+                                else viewSession.refine()
+                            }
+                            : undefined}
                     />
                 </div>
             </LibraryPopover>
@@ -410,9 +524,14 @@ function PanelInner({
             {saveTarget && (
                 <SaveQueryDialog
                     entry={saveTarget}
+                    canSaveToView={canSaveToView}
                     onCancel={() => setSaveTarget(null)}
-                    onSave={(name, description) => {
-                        promoteToMine(saveTarget.timestamp, name, description)
+                    onSave={async (name, description, destination) => {
+                        if (destination === 'view') {
+                            await saveViewQuery({ name, description, predicate: saveTarget.predicate })
+                        } else {
+                            promoteToMine(saveTarget.timestamp, name, description)
+                        }
                         setSaveTarget(null)
                     }}
                 />
@@ -430,24 +549,35 @@ function PanelInner({
                         'flex-1 min-h-0 overflow-y-auto custom-scrollbar',
                         'px-3 py-3 flex flex-col gap-3',
                     )}>
-                        <QueryCard
-                            viewId={viewId}
-                            isRunning={view.kind === 'running'}
-                            runState={runState}
-                            onRun={handleRun}
-                            onOpenAdvanced={() => openAdvanced('options')}
-                        />
+                        {refineOpen && (
+                            <QueryCard
+                                viewId={viewId}
+                                isRunning={view.kind === 'running'}
+                                runState={runState}
+                                onRun={handleRun}
+                                onOpenAdvanced={() => openAdvanced('options')}
+                            />
+                        )}
 
                         {showResultsSection && (
                             <div className="flex flex-col gap-2">
+                                {/* With the builder folded away this is the
+                                    only statement of what was asked. */}
+                                <QuerySentence draftPredicate={draftPredicate} />
                                 <MatchBar
                                     count={resultsCount}
                                     elapsedMs={elapsedMs}
                                     isRunning={view.kind === 'running'}
                                     errorMessage={view.kind === 'error' ? view.message : null}
                                     truncated={truncated}
+                                    countIsExact={countIsExact}
                                     deadlineExceeded={deadlineExceeded}
                                     candidateCount={candidateCount}
+                                    scanning={view.kind === 'results'
+                                        && view.result.status === 'running'}
+                                    progress={view.kind === 'results'
+                                        ? view.result.progress ?? null
+                                        : null}
                                     onFrame={canFrame
                                         ? () => onFrameMatches?.(frameTargetUrns)
                                         : undefined}
@@ -457,16 +587,30 @@ function PanelInner({
                                     onClear={view.kind === 'results' || view.kind === 'error'
                                         ? handleClear
                                         : undefined}
+                                    onExport={canExport ? () => setExportOpen(true) : undefined}
+                                    unit={view.kind === 'results' && view.result.paths ? 'path' : 'match'}
                                     viewId={viewId}
                                 />
                                 <ResultsPane
                                     view={view}
+                                    viewId={viewId}
                                     onScopeToGroup={handleScopeToGroup}
                                     onReveal={onRevealNode}
                                     onOpen={onOpenNode}
                                     onLoadMore={loadMore}
                                     isLoadingMore={isLoadingMore}
+                                    onLoadAll={loadAll}
+                                    isLoadingAll={isLoadingAll}
+                                    onCancelLoadAll={cancelLoadAll}
                                 />
+                                {exportOpen && view.kind === 'results' && (
+                                    <ExportMatchesDialog
+                                        viewId={viewId}
+                                        query={view.query}
+                                        matchCount={countIsExact ? resultsCount : null}
+                                        onClose={() => setExportOpen(false)}
+                                    />
+                                )}
                             </div>
                         )}
                     </div>
@@ -495,12 +639,17 @@ function PanelInner({
  */
 function CompactHeader({
     onClose, onOpenLibrary, libraryOpen, onOpenOptions, optionsDeltaCount,
+    refineOpen, onToggleRefine,
 }: {
     onClose: () => void
     onOpenLibrary: () => void
     libraryOpen: boolean
     onOpenOptions: () => void
     optionsDeltaCount: number
+    refineOpen: boolean
+    /** Absent on the canvases whose builder is always showing — there is
+     *  nothing to toggle it to. */
+    onToggleRefine?: () => void
 }) {
     return (
         <div className={cn(
@@ -526,6 +675,17 @@ function CompactHeader({
                 </div>
             </div>
             <div className="ml-auto flex items-center gap-1">
+                {onToggleRefine && (
+                    <ToolbarChip
+                        label="Refine"
+                        title={refineOpen
+                            ? 'Hide the query builder'
+                            : 'Build on this query — more conditions, AND / OR, lineage'}
+                        Icon={Sparkles}
+                        active={refineOpen}
+                        onClick={onToggleRefine}
+                    />
+                )}
                 <ToolbarChip
                     label="Library"
                     title="Saved queries, recent runs, and templates"

@@ -69,6 +69,12 @@ export interface TraceWire {
    *  and residual: ALWAYS false — a coarse wire is a summary of flows nobody
    *  has drilled into, never settled, whatever the ledger says. */
   complete: boolean
+  /** The types the wire carries — empty when the hops name none. Raw: the
+   *  distinct types of the hops it bundles. Rollup/residual: the types of
+   *  the cells authored at its pair. What the Connections panel lists
+   *  mid-trace; NOT a member list, so hiding one type of a multi-type wire
+   *  cannot shrink `edgeCount` (see the panel's row tooltip). */
+  types: string[]
 }
 
 export type PairState = 'complete' | 'partial' | 'none'
@@ -84,17 +90,19 @@ export interface PairLedger {
 }
 
 /** Ancestors of `urn`, nearest first, `urn` itself included. Cycle-guarded:
- *  a containment loop stops at the node that closes it. */
+ *  a containment loop stops at the node that closes it. The guard is the
+ *  chain itself — a few entries long — not a Set per lookup: over a walk
+ *  model of 50,000 nodes, re-derived on every page that lands, one Set per
+ *  urn was a gigabyte of garbage every twenty seconds (measured,
+ *  2026-09-21). */
 function ancestorWalker(parentOf: (urn: string) => string | null): (urn: string) => string[] {
   const cache = new Map<string, string[]>()
   return (urn: string): string[] => {
     const hit = cache.get(urn)
     if (hit) return hit
     const out: string[] = []
-    const guard = new Set<string>()
     let cursor: string | null = urn
-    while (cursor && !guard.has(cursor)) {
-      guard.add(cursor)
+    while (cursor && !out.includes(cursor)) {
       out.push(cursor)
       cursor = parentOf(cursor)
     }
@@ -124,11 +132,20 @@ function ancestorWalker(parentOf: (urn: string) => string | null): (urn: string)
  * `rawEdges` overrides which hops are counted: pass the SUBGRAPH's resolved
  * edges so the ledger and the projection see exactly the same set. Defaults
  * to the model's own raw edges.
+ *
+ * `askedPairs` — the only pairs anyone will ask about, when the caller knows
+ * them (the rollup accounting asks about its cells' pairs and nothing
+ * else). The index then holds just those: an edge contributes only where
+ * its ancestors are a wanted pair's ends, so no key is built for the nine
+ * ancestor pairs of every raw hop that nobody reads. Same counts for every
+ * pair asked about; `rawCount` of any other pair reads 0. The full index
+ * was 2.1 GB allocated in 20 s of a full-flow walk (measured, 2026-09-21).
  */
 export function buildLedger(
   model: LensWalkModel,
   completePairs?: ReadonlySet<string>,
   rawEdges?: ReadonlyArray<LensEdgeLike>,
+  askedPairs?: Iterable<{ source: string; target: string }>,
 ): PairLedger {
   const edges = rawEdges ?? model.lineageEdges.filter(e => e.kind !== 'rollup')
 
@@ -141,11 +158,34 @@ export function buildLedger(
   const ancestorsOrSelf = ancestorWalker(urn => parentOf.get(urn) ?? null)
 
   const cone = new Map<string, number>()
-  for (const e of edges) {
-    for (const a of ancestorsOrSelf(e.sourceUrn)) {
-      for (const b of ancestorsOrSelf(e.targetUrn)) {
-        const key = pairKey(a, b)
-        cone.set(key, (cone.get(key) ?? 0) + 1)
+  if (askedPairs) {
+    const wanted = new Set<string>()
+    const sources = new Set<string>()
+    const targets = new Set<string>()
+    for (const p of askedPairs) {
+      wanted.add(pairKey(p.source, p.target))
+      sources.add(p.source)
+      targets.add(p.target)
+    }
+    for (const e of edges) {
+      const as = ancestorsOrSelf(e.sourceUrn)
+      const bs = ancestorsOrSelf(e.targetUrn)
+      for (const a of as) {
+        if (!sources.has(a)) continue
+        for (const b of bs) {
+          if (!targets.has(b)) continue
+          const key = pairKey(a, b)
+          if (wanted.has(key)) cone.set(key, (cone.get(key) ?? 0) + 1)
+        }
+      }
+    }
+  } else {
+    for (const e of edges) {
+      for (const a of ancestorsOrSelf(e.sourceUrn)) {
+        for (const b of ancestorsOrSelf(e.targetUrn)) {
+          const key = pairKey(a, b)
+          cone.set(key, (cone.get(key) ?? 0) + 1)
+        }
       }
     }
   }
@@ -197,20 +237,31 @@ export function buildTraceWires(i: TraceWireInputs): TraceWire[] {
       isBundled: !bundle.isLeafEdge,
       kind: 'raw',
       complete: ledger.state(source, target) === 'complete',
+      types: [...bundle.edgeTypes],
     })
   }
 
   // ROLLUPS are never re-anchored: a rollup is an authored statement about
   // two specific nodes, so it draws where it was authored or not at all.
   const rollups: RollupCell[] = []
+  // The cells' own types, per pair: the accounting collapses several cells
+  // at one pair into one statement, so the types collapse with them and are
+  // read back by the pair key it emits.
+  const cellTypes = new Map<string, Set<string>>()
   for (const e of model.lineageEdges) {
     if (e.kind !== 'rollup') continue
     if (!visible.has(e.sourceUrn) || !visible.has(e.targetUrn)) continue
     if (nested(e.sourceUrn, e.targetUrn)) continue
     rollups.push({ source: e.sourceUrn, target: e.targetUrn, weight: e.weight ?? 1 })
+    if (e.edgeType) {
+      const key = pairKey(e.sourceUrn, e.targetUrn)
+      const seen = cellTypes.get(key)
+      if (seen) seen.add(e.edgeType)
+      else cellTypes.set(key, new Set([e.edgeType]))
+    }
   }
   for (const [key, w] of accountRollups(rollups, ledger, urn => sg.nodes.get(urn)?.parent ?? null)) {
-    wires.push({ id: `bundle:${key}:${w.kind}`, source: w.source, target: w.target, edgeCount: w.count, isBundled: true, kind: w.kind, complete: false })
+    wires.push({ id: `bundle:${key}:${w.kind}`, source: w.source, target: w.target, edgeCount: w.count, isBundled: true, kind: w.kind, complete: false, types: [...(cellTypes.get(key) ?? [])] })
   }
 
   return wires.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -322,7 +373,8 @@ export function rollupResiduals(model: LensWalkModel, completePairs?: ReadonlySe
     cells.push({ source: e.sourceUrn, target: e.targetUrn, weight: e.weight ?? 1 })
   }
   const out = new Map<string, number>()
-  for (const w of accountRollups(cells, buildLedger(model, completePairs), parentOf, { floor: false }).values()) {
+  // The accounting asks the ledger about its cells' pairs and nothing else.
+  for (const w of accountRollups(cells, buildLedger(model, completePairs, undefined, cells), parentOf, { floor: false }).values()) {
     const far = w.source === model.focusUrn ? w.target : w.source
     out.set(far, (out.get(far) ?? 0) + w.count)
   }

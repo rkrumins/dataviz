@@ -14,9 +14,10 @@ v1 surface (intentionally bounded)
 **Compiled to Cypher natively** — all in a single WHERE fragment:
     TextPredicate    target=name|qualifiedName|description|tags|property
                      match=exact|prefix|substring
-    PropertyPredicate eq|neq|gt|gte|lt|lte|in|notIn|contains|startsWith|endsWith|between
+    PropertyPredicate every search_semantics operator, typed
+                     (falkordb_typed_ops.compile_comparison)
     TagPredicate     has|hasAll|hasAny|notHas  (JSON-substring on n.tags)
-    HasPropertyPredicate  EXISTS(n.<key>)
+    HasPropertyPredicate  EXISTS(n.<key>); keyMatch prefix|contains on keys(n)
     EntityTypePredicate   in|notIn on labels(n)[0]
     LayerPredicate        n.layerAssignment equality
     GroupPredicate        and|or|not, recursive
@@ -56,21 +57,42 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
+from backend.app.providers.falkordb_provider import (
+    _RESERVED_NODE_KEYS,
+    platform_property_names,
+)
+from backend.app.providers.falkordb_search.raw_properties import RawLeaf
+from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
+from backend.common.derived_artifacts import is_derived_label
+from backend.common.search_semantics import (
+    SemanticsError,
+    element_texts,
+    fold_case,
+    resolve_predicate,
+    value_slot,
+)
 from backend.common.models.search import (
     AggregationSpec,
     AncestorRef,
     DegreePredicate,
     EdgeRef,
+    GroupPredicate,
     PathHit,
+    PropertyPredicate,
     SearchAggregateBucket,
+    SearchHighlight,
     SearchHit,
     SearchQuery,
     SearchResultPage,
+    TextPredicate,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,6 +128,20 @@ def __getattr__(name: str):
 # ---------------------------------------------------------------------------
 # Predicate → Cypher compiler
 # ---------------------------------------------------------------------------
+
+_TEXT_MATCH_OPS = {
+    "exact": "eq", "prefix": "startsWith", "suffix": "endsWith",
+    "substring": "contains",
+}
+
+
+def _text_on_property(t: TextPredicate) -> PropertyPredicate:
+    """A ``target='property'`` text match as the property comparison it is."""
+    return PropertyPredicate(
+        key=t.property_key, op=_TEXT_MATCH_OPS[t.match], value=t.value,
+        value_type="string", case_sensitive=t.case_sensitive,
+    )
+
 
 def _safe_property_name(key: str) -> str:
     """Escape a property name for safe interpolation into Cypher.
@@ -164,7 +200,8 @@ class _Compiler:
     State is gathered on the instance:
       * ``params`` — generated parameter values (bound by Cypher ``$name``)
       * ``hoisted_root_urns`` — DescendantOf URN-sets pulled up to scope
-      * ``hoisted_max_depths`` — DescendantOf per-predicate max_depths
+      * ``hoisted_max_depths`` — each hoisted set's own ``maxDepth``, in
+        the same order (None: the scope's depth bounds it)
       * ``hoisted_within_hops`` — WithinHops continuations (compiled
         post-candidate; one MATCH per occurrence)
 
@@ -185,7 +222,7 @@ class _Compiler:
     ):
         self.params: Dict[str, Any] = {}
         self.hoisted_root_urns: List[List[str]] = []
-        self.hoisted_max_depths: List[int] = []
+        self.hoisted_max_depths: List[Optional[int]] = []
         # Each entry: ({"urns": [...], "hops": int, "direction": str,
         #               "edgeTypes": [str] | None})
         self.hoisted_within_hops: List[Dict[str, Any]] = []
@@ -195,6 +232,11 @@ class _Compiler:
         # path queries cleanly.
         self.hoisted_path: Optional[Dict[str, Any]] = None
         self._param_counter = 0
+        # Node property conditions answered for values kept in
+        # ``propertiesRaw`` too (``falkordb_search.raw_properties``): None
+        # compiles them for native values only; a list — set by a caller
+        # whose graph keeps anything raw — collects each one's ``RawLeaf``.
+        self.raw_leaves: Optional[List[RawLeaf]] = None
         # Ontology-resolved edge type sets. ``None`` means the caller
         # didn't inject them — predicates that depend on lineage /
         # containment classification will raise CompileError on visit.
@@ -222,6 +264,8 @@ class _Compiler:
             return self._visit_tag(p)
         if kind == "hasProperty":
             return self._visit_has_property(p)
+        if kind == "all":
+            return "true"
         if kind == "entityType":
             return self._visit_entity_type(p)
         if kind == "layer":
@@ -234,8 +278,7 @@ class _Compiler:
                     "multiple queries."
                 )
             self.hoisted_root_urns.append(list(p.urns))
-            if p.max_depth is not None:
-                self.hoisted_max_depths.append(p.max_depth)
+            self.hoisted_max_depths.append(p.max_depth)
             return "true"  # scope check enforces the constraint
         if kind == "withinHops":
             if in_or or not at_top_and:
@@ -294,21 +337,25 @@ class _Compiler:
             )
         target = t.target
 
-        # ``target='name'`` and ``target='qualifiedName'`` widen to OR
-        # across the canonical name-like fields the storage layer
-        # commits to. Any single field can be null/empty on a given
-        # node (legacy sync, partial ingestion) without blackholing the
+        # ``target='name'`` widens to OR across the canonical name-like
+        # fields the storage layer commits to — displayName and
+        # qualifiedName only. It deliberately does NOT include
+        # n.searchableText: that field also absorbs description and
+        # every string-valued user property, so folding it into 'name'
+        # would make "name is exactly X" / "name ends with X" false —
+        # either false-positiving on a property value or never matching
+        # via the blob. ``target='any'`` is the broad, property-inclusive
+        # target. Any single field can be null/empty on a given node
+        # (legacy sync, partial ingestion) without blackholing the
         # search — the predicate matches if ANY of the listed columns
-        # contains the value. ``COALESCE(..., '')`` guards against
-        # MISSING/null reads so an absent field reads as a non-matching
-        # empty string rather than aborting the comparison.
+        # contains the value.
         #
-        # ``description`` / ``tags`` stay single-field — those are
-        # explicit user targets, not name aliases.
+        # ``description`` / ``tags`` / ``qualifiedName`` stay
+        # single-field — those are explicit, pure user targets.
         if target == "name":
-            cols = ["n.displayName", "n.qualifiedName", "n.searchableText"]
+            cols = ["n.displayName", "n.qualifiedName"]
         elif target == "qualifiedName":
-            cols = ["n.qualifiedName", "n.searchableText"]
+            cols = ["n.qualifiedName"]
         elif target == "description":
             cols = ["n.description"]
         elif target == "tags":
@@ -319,12 +366,24 @@ class _Compiler:
                 raise CompileError(
                     "text target='property' requires propertyKey"
                 )
-            cols = [f"n.{_safe_property_name(t.property_key)}"]
+            # A property holds any kind — ``toString`` on a list aborts the
+            # whole query — so this is the typed TEXT comparison a
+            # PropertyPredicate makes, not a raw column wrap.
+            as_property = _text_on_property(t)
+            return self._raw_value(
+                self._compile_comparison(
+                    f"n.{_safe_property_name(t.property_key)}", as_property),
+                as_property,
+            )
         elif target == "any":
             # n.searchableText is denormalised at write-time (already
-            # lowercased). The toLower on read is defensive in case a
-            # node was written by an older provider that didn't lowercase.
-            cols = ["n.searchableText"]
+            # lowercased, includes description + string-valued user
+            # properties). The toLower on read is defensive in case a
+            # node was written by an older provider that didn't
+            # lowercase. displayName/qualifiedName are ORed in directly
+            # so a node whose searchableText hasn't been backfilled yet
+            # is still found by its name.
+            cols = ["n.searchableText", "n.displayName", "n.qualifiedName"]
         else:
             raise CompileError(f"unknown text target: {target!r}")
 
@@ -366,42 +425,37 @@ class _Compiler:
         return "(" + " OR ".join(clauses) + ")"
 
     def _visit_property(self, p) -> str:
-        col = f"n.{_safe_property_name(p.key)}"
-        op = p.op
-        if op in ("eq", "neq", "gt", "gte", "lt", "lte"):
-            symbol = {"eq": "=", "neq": "<>", "gt": ">",
-                      "gte": ">=", "lt": "<", "lte": "<="}[op]
-            pn = self._next()
-            self.params[pn] = p.value
-            return f"{col} {symbol} ${pn}"
-        if op in ("contains", "startsWith", "endsWith"):
-            pn = self._next()
-            v = "" if p.value is None else str(p.value)
-            if p.case_sensitive:
-                self.params[pn] = v
-                col_expr = col
-            else:
-                self.params[pn] = v.lower()
-                col_expr = f"toLower(toString({col}))"
-            keyword = {"contains": "CONTAINS",
-                       "startsWith": "STARTS WITH",
-                       "endsWith": "ENDS WITH"}[op]
-            return f"{col_expr} {keyword} ${pn}"
-        if op in ("in", "notIn"):
-            pn = self._next()
-            self.params[pn] = list(p.value or [])
-            return (f"NOT ({col} IN ${pn})" if op == "notIn"
-                    else f"{col} IN ${pn}")
-        if op == "between":
-            if not isinstance(p.value, list) or len(p.value) != 2:
-                raise CompileError(
-                    "property op='between' requires value=[lo, hi]"
-                )
-            lo_p, hi_p = self._next(), self._next()
-            self.params[lo_p] = p.value[0]
-            self.params[hi_p] = p.value[1]
-            return f"({col} >= ${lo_p} AND {col} <= ${hi_p})"
-        raise CompileError(f"unknown property op: {op!r}")
+        return self._raw_value(
+            self._compile_comparison(f"n.{_safe_property_name(p.key)}", p), p)
+
+    def _raw_leaf(self, native: str, key: str, cmp, key_match: str) -> str:
+        leaf = RawLeaf(key=key, cmp=cmp, key_match=key_match,
+                       raw_ids=self._next(), true_ids=self._next(), native=native)
+        # Empty until a scan's probe fills them: native values alone.
+        self.params[leaf.raw_ids] = []
+        self.params[leaf.true_ids] = []
+        self.raw_leaves.append(leaf)
+        return leaf.wrapped
+
+    def _raw_value(self, native: str, p) -> str:
+        """A node property comparison, exact for values kept raw too."""
+        if self.raw_leaves is None:
+            return native
+        return self._raw_leaf(native, p.key, resolve_predicate(p), "exact")
+
+    def _compile_comparison(self, col: str, p) -> str:
+        """A typed comparison (``search_semantics``) of the stored value
+        ``col`` — the one path node and edge properties share."""
+        try:
+            cmp = resolve_predicate(p)
+        except SemanticsError as exc:
+            raise CompileError(f"property {p.key!r}: {exc}") from exc
+        return compile_comparison(col, cmp, self._bind)
+
+    def _bind(self, value: Any) -> str:
+        pn = self._next()
+        self.params[pn] = value
+        return f"${pn}"
 
     def _visit_tag(self, t) -> str:
         # tags is currently stored as JSON-stringified list. Each value
@@ -425,7 +479,19 @@ class _Compiler:
         raise CompileError(f"unknown tag op: {t.op!r}")
 
     def _visit_has_property(self, h) -> str:
-        expr = f"EXISTS(n.{_safe_property_name(h.key)})"
+        if h.key_match == "exact":
+            expr = f"EXISTS(n.{_safe_property_name(h.key)})"
+        else:
+            # By name: any USER property whose name starts with / contains
+            # the text — the platform's own fields (urn, displayName,
+            # searchableText, …) are not what a person means by "a
+            # property called …".
+            keyword = "STARTS WITH" if h.key_match == "prefix" else "CONTAINS"
+            platform = self._bind(sorted(platform_property_names()))
+            expr = (f"ANY(_k IN keys(n) WHERE NOT _k IN {platform} "
+                    f"AND toLower(_k) {keyword} {self._bind(fold_case(h.key))})")
+        if self.raw_leaves is not None:
+            expr = self._raw_leaf(expr, h.key, None, h.key_match)
         return f"NOT ({expr})" if h.negate else expr
 
     def _visit_entity_type(self, e) -> str:
@@ -668,37 +734,7 @@ class _Compiler:
         raise CompileError(f"unknown edge predicate kind: {kind!r}")
 
     def _visit_edge_property(self, ep) -> str:
-        col = f"rel.{_safe_property_name(ep.key)}"
-        op = ep.op
-        if op in ("eq", "neq", "gt", "gte", "lt", "lte"):
-            symbol = {"eq": "=", "neq": "<>", "gt": ">",
-                      "gte": ">=", "lt": "<", "lte": "<="}[op]
-            pn = self._next()
-            self.params[pn] = ep.value
-            return f"{col} {symbol} ${pn}"
-        if op in ("contains", "startsWith", "endsWith"):
-            pn = self._next()
-            v = "" if ep.value is None else str(ep.value)
-            self.params[pn] = v
-            keyword = {"contains": "CONTAINS",
-                       "startsWith": "STARTS WITH",
-                       "endsWith": "ENDS WITH"}[op]
-            return f"{col} {keyword} ${pn}"
-        if op in ("in", "notIn"):
-            pn = self._next()
-            self.params[pn] = list(ep.value or [])
-            return (f"NOT ({col} IN ${pn})" if op == "notIn"
-                    else f"{col} IN ${pn}")
-        if op == "between":
-            if not isinstance(ep.value, list) or len(ep.value) != 2:
-                raise CompileError(
-                    "edgeProperty op='between' requires value=[lo, hi]"
-                )
-            lo_p, hi_p = self._next(), self._next()
-            self.params[lo_p] = ep.value[0]
-            self.params[hi_p] = ep.value[1]
-            return f"({col} >= ${lo_p} AND {col} <= ${hi_p})"
-        raise CompileError(f"unknown edge property op: {op!r}")
+        return self._compile_comparison(f"rel.{_safe_property_name(ep.key)}", ep)
 
     def _visit_edge_has_property(self, ep) -> str:
         expr = f"EXISTS(rel.{_safe_property_name(ep.key)})"
@@ -775,7 +811,7 @@ def _build_candidate_cypher(
     *,
     where_fragment: str,
     entity_types_param: bool,
-    candidate_cap: int,
+    candidate_cap: Optional[int],
     scope_continuation: str = "",
     within_hops_continuation: str = "",
     scope_pre_filter: str = "",
@@ -802,6 +838,10 @@ def _build_candidate_cypher(
     when the predicate is broad. When ``scope_pre_filter`` is set,
     ``scope_continuation`` must be empty (the pre-filter already enforces
     the clamp); the two are mutually exclusive.
+
+    ``candidate_cap=None`` emits no ``LIMIT`` at all. That shape is only
+    for ``RETURN count(n)``: an exact total has to see every match, and a
+    count never materialises rows.
     """
     if scope_pre_filter:
         parts: List[str] = [scope_pre_filter]
@@ -830,7 +870,9 @@ def _build_candidate_cypher(
         where_parts.append(where_fragment)
     if where_parts:
         parts.append("WHERE " + " AND ".join(where_parts))
-    parts.append(f"WITH n LIMIT {candidate_cap}")
+    parts.append(
+        "WITH n" if candidate_cap is None else f"WITH n LIMIT {candidate_cap}"
+    )
     if scope_continuation:
         parts.append(scope_continuation)
     if within_hops_continuation:
@@ -1031,6 +1073,7 @@ def _build_scope_continuation_chain(
     provider,
     urn_sets: List[List[str]],
     max_depth: int,
+    depths: Optional[List[int]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """Emit one MATCH continuation per non-empty URN set, AND'd via
     chained ``WITH DISTINCT n``.
@@ -1045,7 +1088,10 @@ def _build_scope_continuation_chain(
     Each MATCH uses an indexed param name (``_scopeRootUrnsK``) and an
     indexed root variable (``rootK``) so the multiple MATCH clauses
     don't collide. Empty input sets are skipped (defensive — the
-    compiler never emits empty hoists in practice).
+    compiler never emits empty hoists in practice). ``depths``, when
+    given, is how far below its roots each set reaches
+    (``_scope_urn_sets_with_depths``); otherwise every set reaches
+    ``max_depth``.
 
     Returns ``('', {})`` when the provider has no configured
     containment edge types (the caller continues without scope
@@ -1067,10 +1113,10 @@ def _build_scope_continuation_chain(
     rel = "|".join(_sanitize_label(t) for t in ctypes)
     fragments: List[str] = []
     params: Dict[str, Any] = {}
-    depth = int(max_depth)
     for i, urns in enumerate(urn_sets):
         if not urns:
             continue
+        depth = int(depths[i] if depths else max_depth)
         param_name = f"_scopeRootUrns{i}"
         root_var = f"root{i}"
         params[param_name] = list(urns)
@@ -1082,9 +1128,9 @@ def _build_scope_continuation_chain(
     return " ".join(fragments), params
 
 
-def _collect_scope_urn_sets(query, compiler) -> List[List[str]]:
-    """Collect the URN sets that should each become a scope-clamp
-    continuation, in display order.
+def _scope_urn_sets_with_depths(query, compiler) -> Tuple[List[List[str]], List[int]]:
+    """The URN sets that should each become a scope-clamp continuation, in
+    display order, and how far below its roots each one reaches.
 
     ``view`` mode contributes ``scope.root_urns`` (the view's
     authorised top-level containers) plus every hoisted DescendantOf
@@ -1093,16 +1139,23 @@ def _collect_scope_urn_sets(query, compiler) -> List[List[str]]:
     (visible uses the URN-equality clause in the WHERE; data_source is
     by definition the whole graph).
 
+    The view's roots reach ``scope.max_depth``; a DescendantOf its own
+    ``maxDepth``, or the scope's when it names none.
+
     Empty sets are dropped — an empty hoisted set would be a compiler
     bug, and ``scope.root_urns`` of ``None`` is the no-clamp case.
     """
+    scope_depth = int(query.scope.max_depth or 12)
     sets: List[List[str]] = []
+    depths: List[int] = []
     if query.scope.scope_mode == "view" and query.scope.root_urns:
         sets.append(list(query.scope.root_urns))
-    for s in compiler.hoisted_root_urns:
+        depths.append(scope_depth)
+    for s, depth in zip(compiler.hoisted_root_urns, compiler.hoisted_max_depths):
         if s:
             sets.append(list(s))
-    return sets
+            depths.append(int(depth) if depth is not None else scope_depth)
+    return sets, depths
 
 
 def _build_scope_pre_filter(
@@ -1223,9 +1276,38 @@ def _build_within_hops_continuation(
 def query_hash(query: SearchQuery) -> str:
     """SHA1 (12 chars) of the canonicalized query JSON.
 
-    Used to invalidate cursors that reference a different query.
+    The identity of a whole request, paging controls included. Cursor
+    invalidation uses ``match_hash`` instead — a page-size change must
+    not strand a walk mid-iteration.
     """
     j = query.model_dump_json(by_alias=True)
+    return hashlib.sha1(j.encode("utf-8")).hexdigest()[:12]
+
+
+def match_hash(query: SearchQuery) -> str:
+    """SHA1 (12 chars) of what determines the query's MATCH SET.
+
+    The identity of a *match set*, as opposed to ``query_hash``'s
+    identity of a whole request: only the predicate, the resolved
+    scope, and the sort / candidate-cap knobs decide which nodes match
+    and in what order. An INCLUDE-list, not an exclude-list — a page-2
+    "load more" request (``useAdvancedSearch.ts``'s ``loadMore``)
+    re-sends page 1's options with ``aggregations`` dropped and
+    ``results`` forced to ``'hits'`` while asking for the SAME walk,
+    so those (plus ``highlights``, ``include_ancestor_path``,
+    ``cursor``, ``page_size``, ``soft_deadline_ms``) must never
+    invalidate a cursor. A new ``SearchOptions`` field starts out
+    excluded by default rather than silently 400ing every open cursor
+    the next time someone changes an unrelated presentation knob.
+    """
+    j = query.model_dump_json(
+        by_alias=True,
+        include={
+            "predicate": True,
+            "scope": True,
+            "options": {"sort", "sort_dir", "sort_property", "candidate_cap"},
+        },
+    )
     return hashlib.sha1(j.encode("utf-8")).hexdigest()[:12]
 
 
@@ -1238,9 +1320,157 @@ def encode_cursor(state: Dict[str, Any]) -> str:
 def decode_cursor(s: str) -> Dict[str, Any]:
     try:
         raw = base64.urlsafe_b64decode(s.encode("ascii")).decode("utf-8")
-        return json.loads(raw)
+        state = json.loads(raw)
     except Exception:
         raise CompileError("invalid cursor encoding")
+    # A hand-edited cursor can carry a syntactically valid envelope
+    # (decodes, right ``q``) with an ``offset`` that isn't int-able.
+    # Both call sites that read it do ``int(state.get("offset", 0))``
+    # unguarded — catch that here, once, instead of at each site, so
+    # a bad offset is a 400 (CompileError) rather than an unhandled
+    # ValueError/TypeError surfacing as a 500.
+    if "offset" in state:
+        try:
+            int(state["offset"])
+        except (TypeError, ValueError):
+            raise CompileError("cursor is malformed")
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Match-set cache. Page 1 stores the SORTED urn list under the query's
+# ``match_hash``, so every later cursor page is a slice plus a batched
+# node fetch instead of a second full candidate scan + re-sort. Keyed
+# under the provider's cache namespace and the RESOLVED scope (the
+# service stamps it before the hash is taken), so one view's match set
+# can never answer another's.
+# ---------------------------------------------------------------------------
+
+# Above this many matches the envelope stops being worth storing: 50k
+# URNs serialise to ~3.5 MB of JSON, and the cache Redis is SHARED with
+# every other provider-level cache (urn→label, ancestor chains, stats).
+# Sits between the default candidate cap (10k, ~0.7 MB) and the
+# per-request maximum (100k, ~7 MB) a caller can opt into; a search
+# above it pages exactly as it did before this cache existed.
+_MATCH_SET_CACHE_MAX_URNS = 50_000
+
+
+def _match_set_key(ns: str, query: SearchQuery) -> str:
+    return f"{ns}:dsearch:{match_hash(query)}"
+
+
+async def _read_match_set(
+    provider, query: SearchQuery,
+) -> Optional[Dict[str, Any]]:
+    """The cached envelope for this query, or ``None``.
+
+    Never raises: an absent, unreachable or corrupt cache degrades to
+    the full scan the first page always runs.
+    """
+    redis = getattr(provider, "_redis", None)
+    ns = getattr(provider, "_cache_ns", None)
+    if redis is None or not ns:
+        return None
+    try:
+        raw = await redis.get(_match_set_key(ns, query))
+        if not raw:
+            return None
+        data = json.loads(raw)
+        # An envelope this build doesn't recognise — a shape change
+        # deployed inside the TTL window — is a miss, not a 500. The
+        # names alone aren't enough: a future ``urns`` that is a dict
+        # would slice into a TypeError.
+        if (not isinstance(data, dict)
+                or not {"urns", "candidate_count", "truncated",
+                        "total_count"} <= data.keys()
+                or not isinstance(data["urns"], list)):
+            return None
+        return data
+    except Exception as exc:
+        logger.debug("deep_search: match-set cache read failed: %r", exc)
+        return None
+
+
+async def _write_match_set(
+    provider, query: SearchQuery, envelope: Dict[str, Any], ttl_s: int,
+) -> None:
+    """Store the sorted match set for ``ttl_s`` seconds. Never raises."""
+    redis = getattr(provider, "_redis", None)
+    ns = getattr(provider, "_cache_ns", None)
+    if redis is None or not ns:
+        return
+    try:
+        await redis.set(
+            _match_set_key(ns, query), json.dumps(envelope), ex=ttl_s,
+        )
+    except Exception as exc:
+        logger.debug("deep_search: match-set cache write failed: %r", exc)
+
+
+async def _hits_from_match_set(
+    provider, query: SearchQuery, urns: List[str], *, timeout_s: float,
+) -> Tuple[List[SearchHit], int, int]:
+    """Build one page of hits from a cached URN list.
+
+    Returns ``(hits, offset_after, total)`` — the same accounting
+    ``_rank_candidate_rows``/``_hydrate_hits`` report, so the caller's
+    cursor logic doesn't care which path produced the page. Scores and
+    highlights are computed by the same ``_score_hit`` the scan path uses.
+
+    ``offset_after`` advances by the SLICE, not by the hits that
+    survived it: a node deleted since the scan must not make the next
+    page repeat this one.
+
+    The node fetch runs under what is LEFT of the request's deadline:
+    ``get_nodes_batch`` carries its own 15s children-query timeout, so
+    unwrapped it would hand a client who asked for 1s a page ~18s
+    later — the very thing ``remaining()`` exists to prevent. A
+    timeout here degrades exactly as a timed-out candidate scan does.
+    """
+    offset = max(0, int(decode_cursor(query.options.cursor).get("offset", 0)))
+    page_urns = urns[offset : offset + query.options.page_size]
+    hits = await _hydrate_hits(provider, query, page_urns, timeout_s=timeout_s)
+    return hits, offset + len(page_urns), len(urns)
+
+
+async def _hydrate_hits(
+    provider, query: SearchQuery, page_urns: List[str], *, timeout_s: float,
+) -> List[SearchHit]:
+    """Fetch one page's real nodes by URN and score them.
+
+    The only place a whole node is built. Both paths that produce a page
+    end here — the cached cursor slice and the candidate scan — so a hit
+    carries the same node, score, provenance and highlights whichever
+    one served it. Scoring happens against the FULL node, so what the
+    caller reads back is exact even though the ranking that chose these
+    URNs ran on a projection.
+
+    Order is the caller's: ``get_nodes_batch`` answers per label bucket,
+    so its own order means nothing. A URN it cannot answer for was
+    deleted between the scan and this page and is dropped — the caller
+    still advances by the whole slice, or a deleted node would make the
+    next page repeat this one.
+    """
+    nodes = []
+    if page_urns:
+        nodes = await asyncio.wait_for(
+            provider.get_nodes_batch(page_urns), timeout=timeout_s,
+        )
+    by_urn = {n.urn: n for n in nodes}
+    leaves = _collect_text_leaves(query.predicate)
+    hits: List[SearchHit] = []
+    for urn in page_urns:
+        node = by_urn.get(urn)
+        if node is None:
+            continue  # deleted between the scan and this page
+        score, matched, highlights = _score_hit(
+            node, leaves, want_highlights=query.options.highlights,
+        )
+        hits.append(SearchHit(
+            node=node, score=score, matched_predicates=matched,
+            highlights=highlights,
+        ))
+    return hits
 
 
 # ---------------------------------------------------------------------------
@@ -1257,7 +1487,10 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
 
         {
           "cypher": str,        # full candidate cypher (ends WITH n)
-          "hits_cypher": str,   # candidate cypher + " RETURN n"
+          "hits_cypher": str,   # candidate cypher + the scan's
+                                # projected RETURN clause
+          "uncapped_cypher": str,  # same prefix without the LIMIT — what
+                                   # the exact-total count runs on
           "params": dict,       # bound parameters that would be sent
           "candidate_cap": int, # the hard cap on candidate rows
           "hoisted_root_urns": list[list[str]],  # scope hoisted from
@@ -1284,7 +1517,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     # used to collapse to ∅. ``_effective_root_urns`` is still computed
     # for the diagnostic field but no longer drives Cypher emission.
     eff_root_urns = _effective_root_urns(compiler, query.scope.root_urns)
-    scope_urn_sets = _collect_scope_urn_sets(query, compiler)
+    scope_urn_sets, scope_depths = _scope_urn_sets_with_depths(query, compiler)
     eff_union: Optional[List[str]] = None
     if scope_urn_sets:
         union: set = set()
@@ -1328,7 +1561,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
 
     if scope_urn_sets:
         scope_chain, scope_params = _build_scope_continuation_chain(
-            provider, scope_urn_sets, query.scope.max_depth or 12,
+            provider, scope_urn_sets, query.scope.max_depth or 12, scope_depths,
         )
         base_params.update(scope_params)
         if not scope_chain:
@@ -1339,9 +1572,31 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
                 "pass without ancestry verification."
             )
 
-    effective_types, et_note = _resolve_entity_types_scope(
-        provider, list(query.scope.entity_types or []),
-    )
+    effective_types: Optional[List[str]] = None
+    et_note: Optional[str] = None
+    if scope_chain:
+        # The containment traversal IS the boundary. Applying the view's
+        # entity types as a label filter on top of it would make every
+        # descendant of another type unreachable — a view whose layers
+        # declare only ``Table`` could never return a ``Column`` nested
+        # three levels below one of its roots.
+        notes.append(
+            "entity-type filter not applied: the containment traversal "
+            "from the resolved roots is the search boundary"
+        )
+    elif visible_clause_added:
+        # Same rule, cheaper boundary: an explicit URN allow-list is as
+        # bounding as a traversal, and the FE has already resolved which
+        # nodes are in play — a label filter could only subtract from a
+        # set the user is looking at.
+        notes.append(
+            "entity-type filter not applied: the visible-URN list is "
+            "the search boundary"
+        )
+    else:
+        effective_types, et_note = _resolve_entity_types_scope(
+            provider, list(query.scope.entity_types or []),
+        )
     use_entity_types = effective_types is not None
     if use_entity_types:
         # Lowercased to pair with the case-insensitive ``toLower(l)``
@@ -1371,6 +1626,13 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         candidate_cap=effective_candidate_cap,
         within_hops_continuation=wh_continuation,
     )
+    uncapped_cypher = _build_candidate_cypher(
+        where_fragment=where_fragment,
+        entity_types_param=use_entity_types,
+        scope_pre_filter=scope_chain,
+        candidate_cap=None,
+        within_hops_continuation=wh_continuation,
+    )
 
     if query.options.results == "aggregates" and not query.options.aggregations:
         notes.append(
@@ -1381,7 +1643,13 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
 
     return {
         "cypher": cand_cypher,
-        "hits_cypher": cand_cypher + " RETURN n",
+        # The projection the scan really runs — explain exists to show
+        # what search would do, and "RETURN n" stopped being true when
+        # ranking moved onto a projection.
+        "hits_cypher": cand_cypher + " " + _hit_projection(
+            provider, query,
+        ).clause,
+        "uncapped_cypher": uncapped_cypher,
         "params": base_params,
         "candidate_cap": effective_candidate_cap,
         "hoisted_root_urns": [list(s) for s in compiler.hoisted_root_urns],
@@ -1408,21 +1676,129 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
 
 # Reserved keys are the provider-owned top-level fields. The discover
 # scan strips them from the per-label key list so the response only
-# contains user-supplied property names. Kept in sync with
-# `falkordb_provider._RESERVED_NODE_KEYS`.
-_DISCOVER_RESERVED_KEYS = frozenset({
-    "urn", "entityType", "displayName", "qualifiedName", "description",
-    "tags", "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt",
-    "level", "levelDigest",
-    "properties",      # legacy blob
-    "propertiesRaw",   # native escape hatch
-})
+# contains user-supplied property names.
+#
+# Bound to the provider's own set rather than restated beside it: a
+# restatement that says it is "kept in sync" drifts silently, and this
+# one had — it was four keys behind (`entityId`, `searchableText`, and
+# the conformance stamp's `urnSource` / `nameSource`), so every one of
+# them was offered to the user as a property somebody had written.
+_DISCOVER_RESERVED_KEYS = _RESERVED_NODE_KEYS
 
 
 # Discovery caps (per-key value samples, value keys per label, tag-value
 # cap, edge-sample cap) live in ``DeepSearchSettings``. The PEP 562
 # ``__getattr__`` above exposes the old constant names for back-compat
 # with test imports; internal call sites read settings directly.
+
+
+async def _searchable_labels(provider, *, timeout_s: float) -> List[str]:
+    """The labels a user's entities live under.
+
+    ``db.labels()`` lists every label the graph has ever had, including the
+    platform's own bookkeeping labels (``_GVRollupMeta``, ``_AggMeta``,
+    ``_Projection``, ``_PropReserve``) — they sit in the catalogue for good,
+    because it walks the schema, not the rows — and their keys (``id``,
+    ``seq``, …) were offered as properties somebody had written. The
+    underscore prefix is the platform's naming for all of them, so a future
+    one is excluded before it is added to ``DERIVED_LABELS`` — unless the
+    live ontology declares it, which no platform label ever is (a source
+    type whose id sanitised to a leading "_" stays searchable).
+    """
+    try:
+        lbl_result = await provider._ro_query(
+            "CALL db.labels() YIELD label RETURN label",
+            params={}, timeout=timeout_s,
+        )
+        labels = [row[0] for row in (lbl_result.result_set or [])
+                  if row and row[0]]
+    except Exception as exc:
+        logger.warning("search: CALL db.labels() failed: %s", exc)
+        return []
+    declared = set(getattr(provider, "_entity_type_levels", None) or {})
+    return [
+        lbl for lbl in labels
+        if not is_derived_label(lbl)
+        and (not str(lbl).startswith("_") or lbl in declared)
+    ]
+
+
+async def suggest_property_values(
+    provider,
+    *,
+    key: str,
+    entity_types: Optional[List[str]] = None,
+    q: str = "",
+    limit: int = 25,
+    budget_s: float = 1.5,
+) -> Dict[str, Any]:
+    """The most common values of one property — a value picker's list.
+
+    Discovery reads 200 nodes per label, so on a large graph it shows a
+    property's values by accident: the report was "I only ever see two
+    distinct values". This counts values over EVERY node of the view's
+    types that has the property — a list one element at a time — optionally
+    only those whose text contains ``q`` (case-insensitive, as a text
+    comparison reads it), and returns the most common ``limit`` with their
+    counts, in their stored kinds: a 19-digit id comes back as that exact
+    integer, "15" stays text.
+
+    Suggestions, not statistics. The scan stops at ``budget_s``
+    (``complete`` is false when a type was skipped or timed out) and each
+    type contributes its own top ``limit`` (``truncated`` when one had more),
+    so a count may be an undercount. What a user picks is still compared
+    exactly — only the list is bounded, never a search.
+    """
+    t0 = time.monotonic()
+    labels = await _searchable_labels(provider, timeout_s=min(budget_s, 1.0))
+    if entity_types:
+        wanted = {str(t).lower() for t in entity_types}
+        # Types match labels case-insensitively, as the compiler's
+        # ``toLower(labels(n)[0]) IN $types`` does.
+        labels = [lbl for lbl in labels if str(lbl).lower() in wanted]
+    col = f"n.{_safe_property_name(key)}"
+    params: Dict[str, Any] = {"lim": int(limit)}
+    narrow = ""
+    if q.strip():
+        params["q"] = fold_case(q.strip())
+        narrow = f" AND toLower({text_of('_v')}) CONTAINS $q"
+    counts: Dict[Tuple[str, Any], int] = {}
+    complete, truncated = True, False
+    for label in labels:
+        remaining = budget_s - (time.monotonic() - t0)
+        if remaining < 0.2:
+            complete = False
+            break
+        cypher = (
+            f"MATCH (n:`{_sanitize_label(label)}`) WHERE {col} IS NOT NULL "
+            f"UNWIND CASE WHEN typeOf({col}) = 'List' THEN {col} ELSE [{col}] END AS _v "
+            f"WITH _v WHERE typeOf(_v) IN ['String', 'Integer', 'Float', 'Boolean']{narrow} "
+            # ORDER BY on the WITH: FalkorDB drops it on a RETURN that
+            # follows an aggregation.
+            "WITH _v, count(*) AS _c ORDER BY _c DESC LIMIT $lim "
+            "RETURN _v, _c"
+        )
+        try:
+            res = await provider._ro_query(
+                cypher, params=params, timeout=max(remaining, 0.5),
+            )
+        except Exception as exc:
+            logger.info("search.values label=%s key=%s stopped: %s", label, key, exc)
+            complete = False
+            continue
+        rows = res.result_set or []
+        truncated = truncated or len(rows) >= limit
+        for value, count in rows:
+            slot = value_slot(value)
+            counts[slot] = counts.get(slot, 0) + int(count)
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0][1])))[:limit]
+    return {
+        "key": key,
+        "values": [{"value": value, "count": count} for (_, value), count in ordered],
+        "complete": complete,
+        "truncated": truncated,
+        "elapsedMs": int((time.monotonic() - t0) * 1000),
+    }
 
 
 async def discover_native_property_keys(
@@ -1456,6 +1832,7 @@ async def discover_native_property_keys(
           "blobOnlyLabels": ["domain", ...],
           "missingContainment": bool,
           "tagValues": {"PII": 482, "GDPR": 39, "deprecated": 12, ...},
+          "missingSearchableText": int,
           "edges": {
             "TRANSFORMS":  {"keys": ["confidence","discoveredBy"], "sampled": 1240,
                             "valueSamplesByKey": {"discoveredBy": ["manual","auto"]}},
@@ -1467,6 +1844,23 @@ async def discover_native_property_keys(
     ``valueSamplesByKey``, ``tagValues``, and ``edges`` are added for the
     UI's autocomplete pickers. They can be skipped via the
     ``include_*`` flags when only the legacy key list is needed.
+
+    ``blobOnlyLabels`` names the labels with at least one sampled node
+    still carrying the pre-W1 ``n.properties`` JSON blob — values a
+    property predicate cannot see until the migration lifts them into
+    native fields. It is NOT "labels with no native keys": a label whose
+    nodes simply have no user properties has nothing to migrate, and a
+    half-migrated label (native keys AND a blob) is exactly the one that
+    matters.
+
+    ``missingSearchableText`` counts the SAMPLED nodes (same sample as
+    everything else here, not the whole graph) that carry no
+    ``n.searchableText``. That blob is the only column a
+    ``text(target='any')`` search reads, so on a graph the backfill
+    never touched "search everything" returns nothing at all, silently
+    — the count is what lets the caller name
+    ``python -m backend.scripts.migrate_native_properties
+    --searchable-text`` instead of shrugging.
     """
     _s = get_deep_search_settings()
     t0 = time.monotonic()
@@ -1477,19 +1871,10 @@ async def discover_native_property_keys(
     # we parse them in Python here rather than relying on FalkorDB's
     # JSON-string handling at query time.
     tag_value_counts: Dict[str, int] = {}
+    missing_searchable_text = 0
 
-    # Step 1: list labels (FalkorDB supports CALL db.labels())
-    try:
-        lbl_result = await provider._ro_query(
-            "CALL db.labels() YIELD label RETURN label",
-            params={}, timeout=timeout_s,
-        )
-        labels = [row[0] for row in (lbl_result.result_set or [])
-                  if row and row[0]]
-    except Exception as exc:
-        logger.warning("discover: CALL db.labels() failed: %s", exc)
-        labels = []
-    labels = labels[:max_labels]
+    # Step 1: the labels a user's entities live under
+    labels = (await _searchable_labels(provider, timeout_s=timeout_s))[:max_labels]
 
     # Step 2: per label, sample nodes + extract native keys + values
     for label in labels:
@@ -1518,6 +1903,7 @@ async def discover_native_property_keys(
         # Pathological schemas (1000+ properties on one label) would
         # otherwise blow up the response payload.
         key_counts: Counter = Counter()
+        has_legacy_blob = False
         value_samples: Dict[str, list] = {}
         # Track seen values per key as a set when hashable; lists when
         # not. We never let a per-key sample grow past the cap.
@@ -1526,12 +1912,24 @@ async def discover_native_property_keys(
         for row in rows:
             node = row[0] if row else None
             props = getattr(node, "properties", None) or {}
+            if not props.get("searchableText"):
+                # Absent OR empty — an empty blob matches nothing, so
+                # it is just as unsearchable as a missing one.
+                missing_searchable_text += 1
+            legacy_blob = props.get("properties")
+            if isinstance(legacy_blob, str) \
+               and legacy_blob.strip() not in ("", "{}"):
+                # A pre-W1 node with no user properties still serialises
+                # its blob as "{}" — present, but nothing to migrate.
+                has_legacy_blob = True
             for k, v in props.items():
-                if k in _DISCOVER_RESERVED_KEYS and k != "tags":
+                if k in _DISCOVER_RESERVED_KEYS:
                     # Reserved keys are stripped from the user-facing
                     # key list — except ``tags`` which we still mine
                     # for distinct values via the top-level tagValues
-                    # block.
+                    # block. (The exclusion used to sit in this
+                    # condition, which made the mining below
+                    # unreachable AND listed ``tags`` as a property.)
                     if k == "tags" and include_tag_values:
                         _accumulate_tag_values(v, tag_value_counts)
                     continue
@@ -1580,7 +1978,7 @@ async def discover_native_property_keys(
                 k: sorted(value_samples[k], key=lambda x: (str(type(x)), str(x)))
                 for k in sorted(value_samples.keys() & top_keys)
             }
-        if sampled_count > 0 and not top_keys:
+        if has_legacy_blob:
             blob_only.append(label)
 
     missing_containment = False
@@ -1607,6 +2005,7 @@ async def discover_native_property_keys(
         "blobOnlyLabels": sorted(blob_only),
         "missingContainment": missing_containment,
         "tagValues": tag_values_payload,
+        "missingSearchableText": missing_searchable_text,
         "edges": edges_payload,
         "elapsedMs": int((time.monotonic() - t0) * 1000),
     }
@@ -1825,6 +2224,85 @@ async def _run_path_query(
     return paths, truncated
 
 
+def _candidate_prefixes(
+    provider, query: SearchQuery, compiler: _Compiler, where_fragment: str,
+    base_params: Dict[str, Any], effective_candidate_cap: int,
+) -> Tuple[str, str]:
+    """The candidate-selection prefix a search's scope implies — capped at
+    ``effective_candidate_cap``, and the same without the cap — binding the
+    scope's parameters into ``base_params``.
+
+    Shared by the capped engine and by the uncapped one, whose facets
+    still pivot on these prefixes.
+    """
+    # 2. Effective scope — collect the URN sets each becoming its own
+    #    scope-clamp MATCH (see explain_deep_search for the rationale).
+    scope_urn_sets, scope_depths = _scope_urn_sets_with_depths(query, compiler)
+
+    # 3. Scope mode resolution (mirrors explain_deep_search).
+    scope_mode = query.scope.scope_mode
+    visible_urns_list = list(query.scope.visible_urns or [])
+    where_fragment, visible_clause_added = _maybe_add_visible_urns_clause(
+        where_fragment, scope_mode, visible_urns_list, base_params,
+    )
+    scope_chain = ""
+    if scope_urn_sets:
+        scope_chain, scope_params = _build_scope_continuation_chain(
+            provider, scope_urn_sets, query.scope.max_depth or 12, scope_depths,
+        )
+        base_params.update(scope_params)
+
+    # 4. WithinHops continuation (each anchor → reachable-within-N-hops set)
+    wh_continuation, wh_params, _ = _build_within_hops_continuation(
+        compiler.hoisted_within_hops, compiler._param_counter,
+    )
+    base_params.update(wh_params)
+
+    # 5. Build the candidate prefix. When a containment traversal or a
+    #    visible-URN allow-list already bounds the scan, the entity types
+    #    must not gate it as well — see the parallel branch in
+    #    explain_deep_search, which surfaces the same decision as a note.
+    effective_types: Optional[List[str]] = None
+    et_note: Optional[str] = None
+    if not scope_chain and not visible_clause_added:
+        effective_types, et_note = _resolve_entity_types_scope(
+            provider, list(query.scope.entity_types or []),
+        )
+    use_entity_types = effective_types is not None
+    if use_entity_types:
+        # Lowercased to pair with the case-insensitive ``toLower(l)``
+        # check in the candidate WHERE — see ``_build_candidate_cypher``.
+        base_params["_scopeEntityTypes"] = [t.lower() for t in effective_types]
+    if et_note:
+        # execute_deep_search has no diagnostic-notes channel
+        # (explain_deep_search does — see the parallel branch). Log at
+        # WARNING so operators can spot stale view-scope configs in
+        # production and so /search/explain can be re-issued to surface
+        # the same note to the UI.
+        logger.warning("deep_search: %s", et_note)
+    # Scope-first shape: anchor the candidate scan on the scope subtree so the
+    # candidate cap applies to IN-SCOPE nodes (see explain_deep_search + the
+    # _build_candidate_cypher docstring). Post-filter would drop in-scope
+    # matches for broad predicates by capping the graph-wide set first.
+    cand_cypher = _build_candidate_cypher(
+        where_fragment=where_fragment,
+        entity_types_param=use_entity_types,
+        scope_pre_filter=scope_chain,
+        candidate_cap=effective_candidate_cap,
+        within_hops_continuation=wh_continuation,
+    )
+    # The same prefix without the cap — the only shape that can answer
+    # "how many matches are there really?" once the cap has fired.
+    uncapped_cypher = _build_candidate_cypher(
+        where_fragment=where_fragment,
+        entity_types_param=use_entity_types,
+        scope_pre_filter=scope_chain,
+        candidate_cap=None,
+        within_hops_continuation=wh_continuation,
+    )
+    return cand_cypher, uncapped_cypher
+
+
 async def execute_deep_search(
     provider,
     query: SearchQuery,
@@ -1838,10 +2316,32 @@ async def execute_deep_search(
     cache (``provider._get_ancestor_chain``). This function only sees
     the public-ish provider surface.
     """
+    # A cursor's offset indexes ONE match set. Spending it against a
+    # different query would page silently through the wrong rows, so
+    # the cursor carries that match set's identity and a mismatch is
+    # rejected here — before any query is sent.
+    if query.options.cursor:
+        if decode_cursor(query.options.cursor).get("q") != match_hash(query):
+            raise CompileError(
+                "cursor was issued for a different query — restart from "
+                "the first page"
+            )
     _s = get_deep_search_settings()
     effective_candidate_cap = _resolve_candidate_cap(query, _s)
     start = time.monotonic()
     timeout_s = (deadline_ms or query.options.soft_deadline_ms) / 1000.0
+
+    def remaining() -> float:
+        """What is LEFT of the request's deadline.
+
+        Every follow-up query (count, aggregations, ancestor hydration)
+        shares the one budget the client was told about — handing each
+        of them a fresh ``timeout_s`` is how a ``results='both'``
+        request ends up taking k× the deadline it promised. The 0.2s
+        floor keeps an already-spent budget from cancelling a query
+        before it is even sent.
+        """
+        return max(0.2, timeout_s - (time.monotonic() - start))
 
     # 1. Compile predicate → Cypher WHERE fragment + scope/withinHops hoisting
     compiler = _build_compiler_for_provider(provider)
@@ -1876,61 +2376,18 @@ async def execute_deep_search(
                 cache_hit=False,
             )
 
-    # 2. Effective scope — collect the URN sets each becoming its own
-    #    scope-clamp MATCH (see explain_deep_search for the rationale).
-    scope_urn_sets = _collect_scope_urn_sets(query, compiler)
-
-    # 3. Scope mode resolution (mirrors explain_deep_search).
-    scope_mode = query.scope.scope_mode
-    visible_urns_list = list(query.scope.visible_urns or [])
-    where_fragment, _visible_clause_added = _maybe_add_visible_urns_clause(
-        where_fragment, scope_mode, visible_urns_list, base_params,
-    )
-    scope_chain = ""
-    if scope_urn_sets:
-        scope_chain, scope_params = _build_scope_continuation_chain(
-            provider, scope_urn_sets, query.scope.max_depth or 12,
-        )
-        base_params.update(scope_params)
-
-    # 4. WithinHops continuation (each anchor → reachable-within-N-hops set)
-    wh_continuation, wh_params, _ = _build_within_hops_continuation(
-        compiler.hoisted_within_hops, compiler._param_counter,
-    )
-    base_params.update(wh_params)
-
-    # 5. Build the candidate prefix
-    effective_types, et_note = _resolve_entity_types_scope(
-        provider, list(query.scope.entity_types or []),
-    )
-    use_entity_types = effective_types is not None
-    if use_entity_types:
-        # Lowercased to pair with the case-insensitive ``toLower(l)``
-        # check in the candidate WHERE — see ``_build_candidate_cypher``.
-        base_params["_scopeEntityTypes"] = [t.lower() for t in effective_types]
-    if et_note:
-        # execute_deep_search has no diagnostic-notes channel
-        # (explain_deep_search does — see the parallel branch). Log at
-        # WARNING so operators can spot stale view-scope configs in
-        # production and so /search/explain can be re-issued to surface
-        # the same note to the UI.
-        logger.warning("deep_search: %s", et_note)
-    # Scope-first shape: anchor the candidate scan on the scope subtree so the
-    # candidate cap applies to IN-SCOPE nodes (see explain_deep_search + the
-    # _build_candidate_cypher docstring). Post-filter would drop in-scope
-    # matches for broad predicates by capping the graph-wide set first.
-    cand_cypher = _build_candidate_cypher(
-        where_fragment=where_fragment,
-        entity_types_param=use_entity_types,
-        scope_pre_filter=scope_chain,
-        candidate_cap=effective_candidate_cap,
-        within_hops_continuation=wh_continuation,
+    # 2.–5. The candidate prefix, capped and uncapped (see
+    #       ``_candidate_prefixes``).
+    cand_cypher, uncapped_cypher = _candidate_prefixes(
+        provider, query, compiler, where_fragment, base_params,
+        effective_candidate_cap,
     )
 
     # 5. Execute according to requested result shape
     aggregates: Optional[List[List[SearchAggregateBucket]]] = None
     hits: Optional[List[SearchHit]] = None
     candidate_count = 0
+    total_count: Optional[int] = None
     truncated = False
     deadline_exceeded = False
     # Hits-pagination accounting — only populated by the hits branch
@@ -1938,6 +2395,10 @@ async def execute_deep_search(
     # stays safe on aggregates-only / timeout paths.
     hits_offset_after = 0
     hits_total_sorted = 0
+    # The full sorted URN list, kept so the page just built can be
+    # cached for the cursor pages that follow it.
+    sorted_urns: List[str] = []
+    cache_hit = False
 
     shape = query.options.results
     aggs = query.options.aggregations or []
@@ -1951,36 +2412,182 @@ async def execute_deep_search(
             for spec in aggs:
                 buckets = await _run_aggregation(
                     provider, cand_cypher, base_params, spec,
-                    query=query, timeout_s=timeout_s,
+                    query=query, timeout_s=remaining(),
+                    uncapped_cypher=uncapped_cypher,
                 )
                 aggregates.append(buckets)
-            candidate_count, truncated_count = await _run_count(
-                provider, cand_cypher, base_params,
-                timeout_s=timeout_s,
-                candidate_cap=effective_candidate_cap,
+            # Counted uncapped: with no hit list to compare against, the
+            # count is the ONLY signal for how much the aggregations
+            # missed, so it has to see past the cap. ``candidate_count``
+            # keeps the meaning it has in every other shape — the size
+            # of the CAPPED set the aggregations actually ran over.
+            total_count = await _run_count(
+                provider, uncapped_cypher, base_params,
+                timeout_s=remaining(),
             )
-            truncated = truncated_count
+            candidate_count = min(total_count, effective_candidate_cap)
+            truncated = total_count > effective_candidate_cap
         else:
-            # Hits requested (and maybe aggregates too). Materialise the
-            # candidate set once; build hits from it, optionally aggregate.
-            result = await provider._ro_query(
-                cand_cypher + " RETURN n",
-                params=base_params, timeout=timeout_s,
+            # Hits requested (and maybe aggregates too). A cursor page
+            # slices the match set page 1 cached, when one is still
+            # warm; otherwise materialise the candidate set once, build
+            # hits from it, and optionally aggregate.
+            cached = (
+                await _read_match_set(provider, query)
+                if query.options.cursor else None
             )
-            rows = result.result_set or []
-            candidate_count = len(rows)
-            truncated = candidate_count >= effective_candidate_cap
-            hits, hits_offset_after, hits_total_sorted = _build_hits_from_rows(
-                provider, rows, query,
-            )
-            if shape == "both" and aggs:
+
+            async def _hits_branch() -> None:
+                nonlocal hits, hits_offset_after, hits_total_sorted
+                nonlocal sorted_urns, candidate_count, truncated
+                nonlocal total_count, cache_hit, deadline_exceeded
+                if cached is not None:
+                    (
+                        hits, hits_offset_after, hits_total_sorted,
+                    ) = await _hits_from_match_set(
+                        provider, query, cached["urns"],
+                        timeout_s=remaining(),
+                    )
+                    # The page reports the numbers the scan that filled
+                    # the cache measured, so page 2 can't contradict
+                    # page 1.
+                    candidate_count = cached["candidate_count"]
+                    truncated = cached["truncated"]
+                    total_count = cached["total_count"]
+                    cache_hit = True
+                    return
+                projection = _hit_projection(provider, query)
+                result = await provider._ro_query(
+                    cand_cypher + " " + projection.clause,
+                    params=base_params, timeout=timeout_s,
+                )
+                rows = result.result_set or []
+                candidate_count = len(rows)
+                truncated = candidate_count >= effective_candidate_cap
+                candidates = _rows_to_candidates(
+                    rows,
+                    columns=projection.columns,
+                    property_keys=projection.property_keys,
+                    identity_key=projection.identity_key,
+                    name_key=projection.name_key,
+                )
+                (
+                    page_urns, page_offset_after, page_total_sorted,
+                    page_sorted_urns,
+                ) = _rank_candidate_rows(candidates, query)
+                # The page — and only the page — gets real nodes.
+                #
+                # Ranking and hydration are two steps, and the pagination
+                # the first one computes describes a page the second one
+                # may not deliver: ``get_nodes_batch`` carries its own 15s
+                # children-query timeout, so it is held to what is left of
+                # the request's budget and can time out. Publishing the
+                # offsets before that returned left a next-cursor pointing
+                # PAST a page the caller never got — follow it and the rows
+                # this page owed them are skipped for good. So they are
+                # assigned only once the hits are in hand, which is how
+                # the cached path has always behaved (its tuple unpack
+                # simply never runs when the fetch raises).
+                hits = await _hydrate_hits(
+                    provider, query, page_urns, timeout_s=remaining(),
+                )
+                hits_offset_after = page_offset_after
+                hits_total_sorted = page_total_sorted
+                sorted_urns = page_sorted_urns
+                if not truncated:
+                    # The scan returned every match, so the exact total is
+                    # already in hand — no second query.
+                    total_count = candidate_count
+                else:
+                    # The cap fired, so ``candidate_count`` is a floor. Pay
+                    # for one uncapped count; if it doesn't fit in what's
+                    # left of the budget, the page still returns its hits
+                    # and the FE renders "N+" instead of an exact total.
+                    try:
+                        total_count = await _run_count(
+                            provider, uncapped_cypher, base_params,
+                            timeout_s=remaining(),
+                        )
+                        # The exact total can also DISPROVE the cap
+                        # heuristic: ``candidate_count >= cap`` only ever
+                        # meant "the cap fired", and the set may turn out to
+                        # be exactly that size. Without this the wire says
+                        # truncated with totalCount == candidateCount, which
+                        # the UI renders as a phantom "N+".
+                        truncated = total_count > candidate_count
+                    except asyncio.TimeoutError:
+                        deadline_exceeded = True
+                        logger.info(
+                            "deep_search: exact count exceeded the remaining "
+                            "budget; returning hits without a total",
+                        )
+                    except Exception as exc:
+                        # The hits are built and correct — nothing the count
+                        # raises may cost the caller that page. This is the
+                        # ORDINARY failure path, not an exotic one: the
+                        # engine cancels a query ~500ms before the asyncio
+                        # net (see ``_db_timeout_ms``), so an over-budget
+                        # count surfaces as a provider error rather than an
+                        # asyncio.TimeoutError, and the service maps anything
+                        # unrecognised to a 500. Degrade to "no exact total"
+                        # and leave ``truncated`` on the cap heuristic; only
+                        # a spent budget makes it a deadline. (CancelledError
+                        # is a BaseException, so a real client disconnect
+                        # still propagates.)
+                        elapsed_ms = int((time.monotonic() - start) * 1000)
+                        if elapsed_ms >= timeout_s * 1000 * 0.95:
+                            deadline_exceeded = True
+                        logger.warning(
+                            "deep_search: exact count failed after %sms; "
+                            "returning hits without a total: %r",
+                            elapsed_ms, exc,
+                        )
+
+            async def _aggs_branch() -> None:
+                nonlocal aggregates
                 aggregates = []
                 for spec in aggs:
                     buckets = await _run_aggregation(
                         provider, cand_cypher, base_params, spec,
-                        query=query, timeout_s=timeout_s,
+                        query=query, timeout_s=remaining(),
+                        uncapped_cypher=uncapped_cypher,
                     )
                     aggregates.append(buckets)
+
+            if shape == "both" and aggs:
+                # The two branches read the same candidate set through
+                # two independent queries and neither needs the other's
+                # answer, so running them one after the other charged
+                # every ``both`` request the SUM of two latencies where
+                # the max would do. FalkorDB executes reads in parallel
+                # and the provider's pool (24, capped to 20 in flight)
+                # has room for both. It is also where the win is largest:
+                # most of the hits branch's cost is Python — decoding the
+                # rows and scoring them — which now runs while FalkorDB
+                # is busy with the aggregation instead of after it.
+                #
+                # Each branch opens on what is LEFT of the one deadline
+                # at the moment it starts, so neither is charged for the
+                # other's wall time.
+                hits_outcome, aggs_outcome = await asyncio.gather(
+                    _hits_branch(), _aggs_branch(), return_exceptions=True,
+                )
+                # Hits first, and only then the aggregation's failure:
+                # ``_hits_branch`` has already published its page through
+                # the enclosing scope, so re-raising here lands in the
+                # handler below with the hits intact — the degrade this
+                # path has always had. What that buys is one-directional:
+                # an aggregation can never cost the caller a page that is
+                # already built. It does NOT mean a page always survives —
+                # the hits branch has its own failures (the scan, the page
+                # hydration), and those forfeit the page, and the cursor
+                # with it.
+                if isinstance(hits_outcome, BaseException):
+                    raise hits_outcome
+                if isinstance(aggs_outcome, BaseException):
+                    raise aggs_outcome
+            else:
+                await _hits_branch()
     except asyncio.TimeoutError:
         deadline_exceeded = True
         truncated = True
@@ -2002,18 +2609,52 @@ async def execute_deep_search(
         else:
             raise
 
-    # 6. Optional ancestor hydration for hits
+    # Remember the sorted match set so the next cursor page is a slice
+    # rather than a second full scan. Only worth storing when a page
+    # actually follows this one — a result that fits in one page mints
+    # no cursor, so its entry could only ever be dead weight. A page
+    # cut short by the deadline holds a PARTIAL match set; caching it
+    # would freeze that truncation in for the whole TTL. Nothing here
+    # may cost the caller their page (see ``_write_match_set``), and a
+    # match set past ``_MATCH_SET_CACHE_MAX_URNS`` isn't stored at all.
+    if (hits is not None and not cache_hit and not deadline_exceeded
+            and hits_offset_after < hits_total_sorted
+            and len(sorted_urns) <= _MATCH_SET_CACHE_MAX_URNS):
+        await _write_match_set(
+            provider, query,
+            {
+                "urns": sorted_urns,
+                "candidate_count": candidate_count,
+                "truncated": truncated,
+                "total_count": total_count,
+            },
+            _s.cache_ttl_seconds,
+        )
+
+    # 6. Optional ancestor hydration for hits — inside the same budget,
+    # so a slow ancestor cache can't stretch the request past the
+    # deadline the client was given. Hydration already degrades to an
+    # empty ancestor_path on failure; a timeout is one more such case.
     if hits and query.options.include_ancestor_path:
-        await _hydrate_ancestors(provider, hits)
+        try:
+            await asyncio.wait_for(
+                _hydrate_ancestors(provider, hits), timeout=remaining(),
+            )
+        except asyncio.TimeoutError:
+            deadline_exceeded = True
+            logger.info(
+                "deep_search: ancestor hydration exceeded the remaining "
+                "budget; ancestor_path left empty on this page",
+            )
 
     # Emit a next-cursor whenever the page didn't exhaust the sorted
-    # candidate set. The cursor embeds ``query_hash(query)`` so a future
-    # iteration can reject cursors issued against a different query
-    # (not enforced this turn — codec carries the hash for the follow-up).
+    # candidate set. The cursor embeds ``match_hash(query)`` — the
+    # identity of the match set the offset indexes into — which the top
+    # of this function checks before spending it.
     next_cursor: Optional[str] = None
     if hits_offset_after < hits_total_sorted:
         next_cursor = encode_cursor(
-            {"offset": hits_offset_after, "q": query_hash(query)}
+            {"offset": hits_offset_after, "q": match_hash(query)}
         )
 
     return SearchResultPage(
@@ -2022,9 +2663,10 @@ async def execute_deep_search(
         cursor=next_cursor,
         truncated=truncated,
         candidate_count=candidate_count,
+        total_count=total_count,
         deadline_exceeded=deadline_exceeded,
         elapsed_ms=int((time.monotonic() - start) * 1000),
-        cache_hit=False,
+        cache_hit=cache_hit,
     )
 
 
@@ -2035,6 +2677,7 @@ def _empty_result(shape, start) -> SearchResultPage:
         cursor=None,
         truncated=False,
         candidate_count=0,
+        total_count=0,
         deadline_exceeded=False,
         elapsed_ms=int((time.monotonic() - start) * 1000),
         cache_hit=False,
@@ -2043,17 +2686,14 @@ def _empty_result(shape, start) -> SearchResultPage:
 
 async def _run_count(
     provider, cand_cypher: str, params: Dict[str, Any], *,
-    timeout_s: float, candidate_cap: Optional[int] = None,
-) -> Tuple[int, bool]:
+    timeout_s: float,
+) -> int:
     result = await provider._ro_query(
         cand_cypher + " RETURN count(n) AS c",
         params=params, timeout=timeout_s,
     )
     rs = result.result_set or []
-    n = int(rs[0][0]) if rs and rs[0] else 0
-    cap = candidate_cap if candidate_cap is not None \
-        else get_deep_search_settings().candidate_cap
-    return n, (n >= cap)
+    return int(rs[0][0]) if rs and rs[0] else 0
 
 
 async def _run_aggregation(
@@ -2064,8 +2704,17 @@ async def _run_aggregation(
     *,
     query: SearchQuery,
     timeout_s: float,
+    uncapped_cypher: str,
 ) -> List[SearchAggregateBucket]:
-    """Run one aggregation pivoted on the candidate set ``n``."""
+    """Run one aggregation pivoted on the candidate set ``n``.
+
+    ``uncapped_cypher`` is the same candidate prefix without the
+    ``LIMIT``; most kinds below pivot on the capped set, so only an
+    aggregation that must see every match reaches for it. Required
+    rather than defaulted: an omitted one would leave ``by='ancestor'``
+    prefixing its pivot with nothing, and ``MATCH (anc)-[…]->(n)`` with
+    both ends unbound is a whole-graph walk.
+    """
     if spec.by == "ancestorType":
         return await _run_aggregation_ancestor_type(
             provider, cand_cypher, cand_params, spec,
@@ -2096,11 +2745,16 @@ async def _run_aggregation(
             provider, cand_cypher, cand_params, spec,
             query=query, timeout_s=timeout_s,
         )
+    if spec.by == "ancestor":
+        return await _run_aggregation_ancestor(
+            provider, uncapped_cypher, cand_params, spec,
+            query=query, timeout_s=timeout_s,
+        )
     raise CompileError(
         f"aggregation by={spec.by!r} is not yet supported in v1. "
         "Use 'ancestorType', 'entityType', 'property', 'layer', "
-        "'parent', or 'ancestorLevel'. ('tag' deferred until tags are a "
-        "native array field.)"
+        "'parent', 'ancestorLevel', or 'ancestor'. ('tag' deferred "
+        "until tags are a native array field.)"
     )
 
 
@@ -2131,9 +2785,9 @@ async def _run_aggregation_ancestor_type(
         f"WHERE labels(anc)[0] IN $_aggTypes "
         f"WITH anc, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
         f"RETURN anc.urn AS urn, anc.displayName AS name, "
-        f"labels(anc)[0] AS etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        f"labels(anc)[0] AS etype, mc, samples"
     )
     params = dict(cand_params)
     params["_aggTypes"] = list(spec.ancestor_entity_types)
@@ -2152,8 +2806,8 @@ async def _run_aggregation_entity_type(
         f"WITH labels(n)[0] AS etype, n "
         f"WITH etype, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
-        f"RETURN '' AS urn, etype AS name, etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
+        f"RETURN '' AS urn, etype AS name, etype, mc, samples"
     )
     result = await provider._ro_query(
         agg_cypher, params=cand_params, timeout=timeout_s,
@@ -2186,12 +2840,17 @@ async def _run_aggregation_property(
         f"WITH n.{key} AS pkey, n "
         f"WITH pkey, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
         f"RETURN '' AS urn, toString(pkey) AS name, "
-        f"'{key}' AS etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        f"$_aggPropertyKey AS etype, mc, samples"
     )
+    # The key rides in as a parameter: interpolated into a quoted literal,
+    # a key with an apostrophe ("owner's team") broke the query and every
+    # other key came back wrapped in its Cypher backticks.
     result = await provider._ro_query(
-        agg_cypher, params=cand_params, timeout=timeout_s,
+        agg_cypher,
+        params={**cand_params, "_aggPropertyKey": spec.property_key},
+        timeout=timeout_s,
     )
     return _rows_to_buckets(provider, result.result_set or [])
 
@@ -2213,9 +2872,9 @@ async def _run_aggregation_layer(
         "WITH n.layerAssignment AS layer, n "
         "WITH layer, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
         "RETURN '' AS urn, toString(layer) AS name, "
-        "'layer' AS etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        "'layer' AS etype, mc, samples"
     )
     result = await provider._ro_query(
         agg_cypher, params=cand_params, timeout=timeout_s,
@@ -2251,9 +2910,9 @@ async def _run_aggregation_parent(
         f"MATCH (parent)-[:{rel}]->(n) "
         "WITH parent, count(DISTINCT n) AS mc, "
         f"collect(DISTINCT n)[..{k}] AS samples "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
         "RETURN parent.urn AS urn, parent.displayName AS name, "
-        "labels(parent)[0] AS etype, mc, samples "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        "labels(parent)[0] AS etype, mc, samples"
     )
     result = await provider._ro_query(
         agg_cypher, params=cand_params, timeout=timeout_s,
@@ -2302,9 +2961,9 @@ async def _run_aggregation_ancestor_level(
             "WITH n AS anc, n "
             "WITH anc, count(DISTINCT n) AS mc, "
             f"collect(DISTINCT n)[..{k}] AS samples "
+            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
             "RETURN anc.urn AS urn, anc.displayName AS name, "
-            "labels(anc)[0] AS etype, mc, samples "
-            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+            "labels(anc)[0] AS etype, mc, samples"
         )
     else:
         rel = "|".join(_sanitize_label(t) for t in ctypes)
@@ -2315,9 +2974,9 @@ async def _run_aggregation_ancestor_level(
             f"MATCH (anc)-[:{rel}*{level}..{level}]->(n) "
             "WITH anc, count(DISTINCT n) AS mc, "
             f"collect(DISTINCT n)[..{k}] AS samples "
+            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
             "RETURN anc.urn AS urn, anc.displayName AS name, "
-            "labels(anc)[0] AS etype, mc, samples "
-            f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+            "labels(anc)[0] AS etype, mc, samples"
         )
     result = await provider._ro_query(
         agg_cypher, params=cand_params, timeout=timeout_s,
@@ -2325,7 +2984,96 @@ async def _run_aggregation_ancestor_level(
     return _rows_to_buckets(provider, result.result_set or [])
 
 
+async def _run_aggregation_ancestor(
+    provider, uncapped_cypher, cand_params, spec, *, query, timeout_s,
+):
+    """Credit EVERY containment ancestor of every match, exactly.
+
+    ``ancestorType`` credits only ancestors whose type the caller named
+    and ``parent`` only the immediate one; a collapsed container on the
+    canvas has to show the count for ITSELF, whatever its type and
+    however deep below it the match sits.
+
+    This is also the one kind that pivots on ``uncapped_cypher``: "N
+    matches inside" is a number the user counts against, and the
+    candidate cap would silently turn it into a lower bound.
+
+    Two-stage aggregation — per (ancestor, entity type) first, then the
+    per-ancestor roll-up — so ``max_buckets`` bounds ancestors rather
+    than (ancestor, type) rows. There is no samples column, so
+    ``sample_hits_per_bucket`` is ignored. The shape is::
+
+        <uncapped> MATCH (anc)-[:REL*1..D]->(n)
+        WITH anc, labels(n)[0] AS et, count(DISTINCT n) AS c
+        WITH anc, sum(c) AS mc, collect([et, c]) AS breakdown
+          ORDER BY mc DESC LIMIT <maxBuckets>
+        RETURN anc.urn, anc.displayName, labels(anc)[0], mc, breakdown
+
+    The ``ORDER BY … LIMIT`` rides the ``WITH`` and NOT the trailing
+    ``RETURN``: this engine silently discards an ORDER BY attached to a
+    ``RETURN`` that follows an aggregation (see
+    falkordb-orderby-aggregation-gotcha). Silently, and this pivot is
+    uncapped — so the wrong shape returns an arbitrary ``maxBuckets``
+    containers instead of the fullest ones, with nothing in the
+    response to say the ranking was dropped.
+
+    Empty containment-edge-type set short-circuits (consistent with
+    ancestorType / parent).
+    """
+    try:
+        ctypes = list(provider._get_containment_edge_types())
+    except Exception:
+        ctypes = []
+    if not ctypes:
+        logger.warning(
+            "deep_search: ancestor aggregation requested but containment "
+            "edge types are not configured; returning empty buckets",
+        )
+        return []
+    rel = "|".join(_sanitize_label(t) for t in ctypes)
+    max_depth = query.scope.max_depth or 12
+
+    agg_cypher = (
+        uncapped_cypher + " "
+        f"MATCH (anc)-[:{rel}*1..{int(max_depth)}]->(n) "
+        "WITH anc, labels(n)[0] AS et, count(DISTINCT n) AS c "
+        "WITH anc, sum(c) AS mc, collect([et, c]) AS breakdown "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
+        "RETURN anc.urn AS urn, anc.displayName AS name, "
+        "labels(anc)[0] AS etype, mc, breakdown"
+    )
+    result = await provider._ro_query(
+        agg_cypher, params=cand_params, timeout=timeout_s,
+    )
+    buckets: List[SearchAggregateBucket] = []
+    for row in result.result_set or []:
+        urn, name, etype, mc, breakdown = (
+            row[0], row[1], row[2], row[3], row[4],
+        )
+        buckets.append(SearchAggregateBucket(
+            ancestor_urn=urn or "",
+            ancestor_display_name=name or "",
+            ancestor_entity_type=etype or "",
+            ancestor_depth_from_scope_root=0,  # v1: not computed
+            match_count=int(mc),
+            # ``et or ""`` for the same reason the three fields above
+            # coerce: a node with no label makes ``labels(n)[0]`` null,
+            # and a null key fails Dict[str, int] validation — which
+            # would cost the whole page over one unlabelled node.
+            type_counts={(et or ""): int(c) for et, c in (breakdown or [])},
+        ))
+    return buckets
+
+
 def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:
+    """Rows → buckets, fullest first.
+
+    The Cypher already orders on the aggregating ``WITH`` (FalkorDB drops an
+    ``ORDER BY`` on a ``RETURN`` that follows an aggregation — see
+    :func:`_run_aggregation_ancestor`); the sort here makes the order a
+    property of this function rather than of the engine's plan, and breaks
+    ties by name so two runs of the same query agree.
+    """
     buckets: List[SearchAggregateBucket] = []
     for row in rows:
         urn, name, etype, mc, samples_raw = (
@@ -2344,21 +3092,529 @@ def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:
             match_count=int(mc),
             sample_hits=sample_hits,
         ))
+    buckets.sort(key=lambda b: (-b.match_count, b.ancestor_display_name, b.ancestor_urn))
     return buckets
 
 
-def _build_hits_from_rows(
-    provider, rows, query: SearchQuery,
-) -> Tuple[List[SearchHit], int, int]:
-    """Convert candidate rows to SearchHits, applying sort + cursor-paged
-    slicing in-memory.
+# ---------------------------------------------------------------------------
+# Hit provenance — score, matchedPredicates, highlights
+# ---------------------------------------------------------------------------
 
-    Returns ``(hits, offset_after, total_sorted)`` where:
-      * ``hits`` — the page's SearchHits (sliced ``[offset : offset+page_size]``)
-      * ``offset_after`` — the next-cursor offset (offset + len(hits))
+# Per-field relevance weights, applied to the match tier. A hit on the
+# node's own name is worth more than the same hit buried in a long
+# description, so "exact name" outranks "substring description" no
+# matter how the two fields compare in length.
+_FIELD_WEIGHTS: Dict[str, float] = {
+    "displayName": 1.0,
+    "qualifiedName": 0.5,
+    "tags": 0.6,
+    "property": 0.5,
+    "description": 0.4,
+}
+
+# Match tiers, best first. Gated by the predicate's match mode — an
+# ``exact`` predicate can only ever earn the exact tier, so a hit never
+# claims a closer match than the query asked for.
+_TIER_EXACT = 100
+_TIER_PREFIX = 60
+_TIER_WORD = 40
+_TIER_SUBSTRING = 20
+
+# Context kept either side of the match in a highlight snippet.
+_SNIPPET_PAD = 40
+
+# What a ``target='any'`` leaf earns on a projected row that matches none
+# of the projected columns: the tier a property value is worth when the
+# needle merely sits inside it — the floor of the range a real property
+# hit spans (10 or 20).
+#
+# "Under-credit" is the ordinary case, not a guarantee. The scan proves
+# the row matched ``searchableText``, and two things can put a needle
+# there that no single property holds: the blob joins its parts, so a
+# needle spanning a join boundary matches it and nothing else; and the
+# blob is lower-cased, so a ``case_sensitive`` leaf can match it while
+# the property it came from differs in case. Either way the row is
+# credited 10 for a property hit that is not there. Both are bounded to
+# the smallest non-zero score in the system, and neither reaches the
+# wire — the page is re-scored from its hydrated nodes.
+_UNATTRIBUTED_MATCH_SCORE = _TIER_SUBSTRING * _FIELD_WEIGHTS["property"]
+
+
+def _is_unattributable(pred) -> bool:
+    """Whether an unmatched leaf could still have matched off-projection.
+
+    Only ``target='any'`` can: it is the one target whose compiled
+    column (``searchableText``) reaches text the projection does not
+    carry. Every other leaf compares a column the projection has, so an
+    unmatched one really did not match.
+    """
+    return (isinstance(pred, TextPredicate) and pred.target == "any")
+
+
+_ELLIPSIS = "…"
+
+# Property ops that read as text. Everything else (ordering, ranges,
+# set-exclusion) has no textual provenance to report.
+_PROPERTY_OP_MODES = {
+    "eq": "exact",
+    "in": "exact",
+    "containsAll": "exact",
+    "contains": "substring",
+    "startsWith": "prefix",
+    "endsWith": "suffix",
+}
+
+
+@lru_cache(maxsize=512)
+def _word_boundary_re(needle: str) -> re.Pattern:
+    """``(?<!\\w)<needle>`` matcher, compiled once per distinct needle.
+
+    ``_score_hit`` runs once per candidate row — up to the candidate cap
+    — so a leaf's pattern has to be compiled once for the whole page,
+    never once per row.
+    """
+    return re.compile(r"(?<!\w)" + re.escape(needle))
+
+
+def _collect_text_leaves(predicate) -> List[Tuple[int, Any]]:
+    """Number every leaf of the predicate tree; keep the textual ones.
+
+    ``SearchHit.matched_predicates`` indices are a 0-based DFS over
+    *all* leaves — the caller maps them back onto the tree it sent — so
+    the counter advances for every leaf kind, not only the ones that
+    carry text. Recursion follows ``GroupPredicate.children`` alone;
+    a ``PathPredicate``'s edge predicate scores against edges, not the
+    node, and is a single leaf here.
+    """
+    leaves: List[Tuple[int, Any]] = []
+    index = 0
+
+    def walk(p) -> None:
+        nonlocal index
+        if isinstance(p, GroupPredicate):
+            for child in p.children:
+                walk(child)
+            return
+        if isinstance(p, (TextPredicate, PropertyPredicate)):
+            leaves.append((index, p))
+        index += 1
+
+    walk(predicate)
+    return leaves
+
+
+def _leaf_needles(pred) -> Tuple[List[str], str]:
+    """The literal(s) a leaf searches for, and the mode to score under.
+
+    A ``PropertyPredicate`` only has textual provenance when it compares
+    as TEXT (``search_semantics``): a number, boolean or date compared as
+    one is not a substring of anything, so it returns no needles and
+    contributes nothing to the score.
+    """
+    if isinstance(pred, PropertyPredicate):
+        mode = _PROPERTY_OP_MODES.get(pred.op)
+        if mode is None:
+            return [], "substring"
+        try:
+            cmp = resolve_predicate(pred)
+        except SemanticsError:
+            return [], mode
+        if cmp.type != "string":
+            return [], mode
+        # An empty needle is satisfied by every field trivially — it would
+        # score the whole result set at the prefix tier and highlight
+        # nothing. Drop it.
+        return [v for v in cmp.values if v], mode
+    return [pred.value], pred.match
+
+
+def _scored_fields(node, pred) -> List[Tuple[str, str, float]]:
+    """The ``(field, text, weight)`` triples one leaf scores against.
+
+    Mirrors the columns ``_visit_text`` ORs into that leaf's WHERE
+    fragment, so provenance can never name a field the query didn't
+    read. ``any`` expands to what feeds ``n.searchableText`` — name,
+    qualifiedName, description, tags and string-valued properties; the
+    blob itself is not a field a reader can be pointed at.
+
+    Naming the field is only half of it: ``any`` and ``tags`` reach
+    most of these fields through a *different* column, so how well
+    they matched is capped separately — see ``_tier_ceiling``.
+    """
+    if isinstance(pred, PropertyPredicate):
+        # A text comparison reads the text of every stored kind — a
+        # ``version: 3`` really does satisfy ``op='eq', value='3'`` — and
+        # each element of a list on its own. Score the same texts, so a
+        # highlight points at what the query actually matched.
+        value = (node.properties or {}).get(pred.key)
+        return [(f"property:{pred.key}", text, _FIELD_WEIGHTS["property"])
+                for text in element_texts(value) if text]
+
+    fields: List[Tuple[str, str, float]] = []
+
+    def add(field: str, text, weight_key: Optional[str] = None) -> None:
+        if isinstance(text, str) and text:
+            fields.append((field, text, _FIELD_WEIGHTS[weight_key or field]))
+
+    target = pred.target
+    if target in ("name", "any"):
+        add("displayName", node.display_name)
+    if target in ("name", "qualifiedName", "any"):
+        add("qualifiedName", node.qualified_name)
+    if target in ("description", "any"):
+        add("description", node.description)
+    if target in ("tags", "any"):
+        for tag in node.tags or []:
+            add("tags", tag)
+    if target == "property" and pred.property_key:
+        # Compiled as a typed text comparison, which reads every stored
+        # kind as text and each list element on its own — score the same.
+        value = (node.properties or {}).get(pred.property_key)
+        for text in element_texts(value):
+            add(f"property:{pred.property_key}", text, "property")
+    if target == "any":
+        for key, value in (node.properties or {}).items():
+            if isinstance(value, str):
+                add(f"property:{key}", value, "property")
+    return fields
+
+
+def _tier_ceiling(pred, field: str) -> int:
+    """The best tier a hit on this field is allowed to claim.
+
+    A tier above the substring floor is a claim about *where in a
+    column* the value sat, and it is only honest when the compiler
+    compared that column. Two targets don't:
+
+      * ``any`` compares ``searchableText``, ``displayName`` and
+        ``qualifiedName`` — a description, tag or property hit rode in
+        on the blob, not on its own column;
+      * ``tags`` compares the JSON-stringified array, in which an
+        individual tag is by construction a fragment (which is why
+        ``target='tags', match='exact'`` can essentially never be true
+        in Cypher, yet used to be scored 100 here).
+
+    So under those two targets a non-name field may never report exact
+    or prefix. Under ``substring`` the compiler did prove containment
+    in text that holds the field verbatim, so the word-boundary tier is
+    still re-derivable from the field itself; under ``exact`` /
+    ``prefix`` / ``suffix`` it compared a different string entirely and
+    all that is honestly known is that the value is in there.
+
+    Every other target — and every ``PropertyPredicate`` — compares its
+    own column directly and keeps the full range.
+    """
+    if isinstance(pred, PropertyPredicate):
+        return _TIER_EXACT
+    if field in ("displayName", "qualifiedName"):
+        return _TIER_EXACT
+    if pred.target not in ("any", "tags"):
+        return _TIER_EXACT
+    return _TIER_WORD if pred.match == "substring" else _TIER_SUBSTRING
+
+
+def _match_tier(haystack: str, needle: str, mode: str) -> Tuple[int, int]:
+    """Best tier this needle earns in this haystack, plus the offset of
+    the occurrence a highlight should point at. ``(0, -1)`` = no match.
+
+    Both arguments arrive already case-normalised. The mode gates which
+    tiers are reachable: ``exact`` reaches only the exact tier,
+    ``prefix`` exact or prefix, ``suffix`` exact or the substring floor
+    (a tail match carries no positional strength), and ``substring``
+    reaches every tier. The row is already known to satisfy the
+    predicate *somewhere*, but a leaf fans out over several fields —
+    this decides which of them actually matched.
+    """
+    if haystack == needle:
+        return _TIER_EXACT, 0
+    if mode == "exact":
+        return 0, -1
+    if mode == "prefix":
+        return (_TIER_PREFIX, 0) if haystack.startswith(needle) else (0, -1)
+    if mode == "suffix":
+        if not haystack.endswith(needle):
+            return 0, -1
+        return _TIER_SUBSTRING, len(haystack) - len(needle)
+    # substring — every tier is reachable.
+    if haystack.startswith(needle):
+        return _TIER_PREFIX, 0
+    boundary = _word_boundary_re(needle).search(haystack)
+    if boundary is not None:
+        return _TIER_WORD, boundary.start()
+    position = haystack.find(needle)
+    return (_TIER_SUBSTRING, position) if position >= 0 else (0, -1)
+
+
+def _build_highlight(
+    field: str, text: str, position: int, length: int, score: float,
+) -> SearchHighlight:
+    """±40 characters of context around the match, with the match's
+    offsets *within the snippet* — the reader marks the range it is
+    handed, so the ellipsis we prepend has to be counted into it."""
+    start = max(0, position - _SNIPPET_PAD)
+    end = min(len(text), position + length + _SNIPPET_PAD)
+    lead = _ELLIPSIS if start > 0 else ""
+    trail = _ELLIPSIS if end < len(text) else ""
+    snippet = lead + text[start:end] + trail
+    range_start = len(lead) + (position - start)
+    return SearchHighlight(
+        field=field, snippet=snippet, score=score,
+        ranges=[[range_start, min(range_start + length, len(snippet))]],
+    )
+
+
+def _score_hit(
+    node, leaves, *, want_highlights: bool, projected: bool = False,
+) -> Tuple[float, List[int], List[SearchHighlight]]:
+    """Score one node against the request's textual leaves.
+
+    Returns ``(score, matched_predicate_indices, highlights)``. The
+    score is ``max(tier × field weight)`` across every leaf and field —
+    a max, not a sum, so a node can't out-rank a closer match by
+    repeating a weak one. Highlights are one per matched field (that
+    field's best match) and are built only when asked: the caller
+    scores every candidate row but needs snippets only for the page it
+    returns.
+
+    ``projected`` says the row carries only the columns the candidate
+    scan asked for, not every property. A ``target='any'`` leaf that
+    matches none of them still matched the query — the scan compares
+    ``searchableText``, which also covers string PROPERTY values — so
+    the needle can only be living in a property this row didn't bring
+    back, and the leaf is credited the substring-tier property score
+    (``_UNATTRIBUTED_MATCH_SCORE``) rather than being read as a
+    non-match. Usually that under-credits — a property hit worth the
+    word-boundary tier is scored at the substring tier — but not always:
+    see ``_UNATTRIBUTED_MATCH_SCORE`` for the two ways the blob can hold
+    a needle no single property does. Either way the difference is the
+    smallest non-zero score in the system, and provenance never rests on
+    the inference: the page is re-scored from its hydrated nodes.
+    """
+    score = 0.0
+    matched: List[int] = []
+    best: Dict[str, Tuple[float, str, int, int]] = {}
+
+    for index, pred in leaves:
+        needles, mode = _leaf_needles(pred)
+        if not needles:
+            continue
+        if not pred.case_sensitive:
+            needles = [n.lower() for n in needles]
+        matched_leaf = False
+        for field, text, weight in _scored_fields(node, pred):
+            haystack = text if pred.case_sensitive else text.lower()
+            ceiling = _tier_ceiling(pred, field)
+            for needle in needles:
+                tier, position = _match_tier(haystack, needle, mode)
+                tier = min(tier, ceiling)
+                if not tier:
+                    continue
+                matched_leaf = True
+                field_score = tier * weight
+                if field_score > score:
+                    score = field_score
+                if want_highlights:
+                    previous = best.get(field)
+                    if previous is None or field_score > previous[0]:
+                        best[field] = (field_score, text, position, len(needle))
+        if not matched_leaf and projected and _is_unattributable(pred):
+            # The row matched, but not through anything it carries.
+            if _UNATTRIBUTED_MATCH_SCORE > score:
+                score = _UNATTRIBUTED_MATCH_SCORE
+            matched_leaf = True
+        if matched_leaf:
+            matched.append(index)
+
+    highlights = [
+        _build_highlight(field, text, position, length, field_score)
+        for field, (field_score, text, position, length)
+        in sorted(best.items(), key=lambda kv: (-kv[1][0], kv[0]))
+    ]
+    return score, matched, highlights
+
+
+# The columns every candidate needs, whatever the predicate asks. They are
+# what ``_node_from_props`` reads to reconstruct identity, name, and the
+# text ``_scored_fields`` ranks on — ``name``/``title``/``label`` included,
+# because they are the displayName a source without one falls back to.
+_PROJECTION_CORE: Tuple[str, ...] = (
+    "urn", "displayName", "qualifiedName", "description", "tags",
+    "name", "title", "label",
+)
+
+
+class _HitProjection(NamedTuple):
+    """The RETURN clause the candidate scan uses, and how to read it back."""
+    clause: str
+    columns: Tuple[str, ...]
+    property_keys: Tuple[str, ...]
+    identity_key: Optional[str]
+    name_key: Optional[str]
+
+
+@dataclass(slots=True)
+class _CandidateRow:
+    """One scanned candidate, carrying only what ranking reads.
+
+    Named for the attributes ``_score_hit`` and the sorts already look
+    for on a ``GraphNode``, so both work against either without knowing
+    which they were handed.
+    """
+    urn: str
+    display_name: str
+    qualified_name: Optional[str]
+    description: Optional[str]
+    tags: List[str]
+    properties: Dict[str, Any]
+
+
+def _hit_projection(provider, query: SearchQuery) -> _HitProjection:
+    """What to RETURN from the candidate scan.
+
+    ``RETURN n`` handed back every property of every candidate — up to
+    the cap — so that one page of them could be returned. The client
+    decodes each of those values, which on an estate whose nodes carry
+    a dozen properties is most of the scan's cost and all of it wasted:
+    ranking reads six fields, and the page gets its real nodes from
+    ``get_nodes_batch`` afterwards.
+
+    So the scan asks for the core columns plus whatever THIS query
+    ranks on — the key behind every property leaf, and the sort
+    property. A key the predicate can't name is a key the compiler
+    could not have matched on either (``_visit_property`` compares the
+    native column ``n.<key>``), which is why the residual
+    ``propertiesRaw`` blob is not projected: it is invisible to the
+    WHERE clause that selected these rows.
+    """
+    keys: List[str] = []
+
+    def add(key: Optional[str]) -> None:
+        if key and key not in keys:
+            keys.append(key)
+
+    for core in _PROJECTION_CORE:
+        add(core)
+    identity_key = getattr(provider, "_node_identity_property", None)
+    name_key = getattr(provider, "_name_property", None)
+    add(identity_key)
+    add(name_key)
+
+    property_keys: List[str] = []
+
+    def add_property(key: Optional[str]) -> None:
+        if key and key not in property_keys:
+            property_keys.append(key)
+        add(key)
+
+    for _index, leaf in _collect_text_leaves(query.predicate):
+        if isinstance(leaf, PropertyPredicate):
+            add_property(leaf.key)
+        elif getattr(leaf, "target", None) == "property":
+            add_property(leaf.property_key)
+    add_property(query.options.sort_property)
+
+    clause = "RETURN " + ", ".join(
+        f"n.{_safe_property_name(key)}" for key in keys
+    )
+    return _HitProjection(
+        clause=clause,
+        columns=tuple(keys),
+        property_keys=tuple(property_keys),
+        identity_key=identity_key if identity_key != "urn" else None,
+        name_key=name_key,
+    )
+
+
+def _rows_to_candidates(
+    rows,
+    *,
+    columns: Tuple[str, ...],
+    property_keys: Tuple[str, ...],
+    identity_key: Optional[str] = None,
+    name_key: Optional[str] = None,
+) -> List[_CandidateRow]:
+    """Projected rows → rankable candidates.
+
+    Mirrors ``_node_from_props``: the same identity fallback, the same
+    displayName precedence, the same tolerance for ``tags`` arriving as
+    a JSON string. A row with no identity is dropped exactly as an
+    un-hydratable node was.
+
+    FalkorDB answers NULL for a property the node hasn't got, so every
+    absent column arrives as ``None`` and has to stay absent — a
+    stringified ``"None"`` would match needles the node does not
+    contain.
+    """
+    index = {key: i for i, key in enumerate(columns)}
+
+    def cell(row, key: Optional[str]):
+        if not key:
+            return None
+        position = index.get(key)
+        if position is None or position >= len(row):
+            return None
+        return row[position]
+
+    candidates: List[_CandidateRow] = []
+    for row in rows:
+        # ``identity_key`` mirrors ``_node_from_props``, but it cannot
+        # actually fire here: the page is hydrated by ``get_nodes_batch``,
+        # which matches on ``n.urn``, so a graph whose nodes carry only an
+        # alternative identity property would rank rows it could never
+        # fetch. An id-keyed source is not a supported configuration for
+        # deep search; the fallback is kept only so this reader and node
+        # hydration cannot disagree about what identity means.
+        urn = cell(row, "urn") or cell(row, identity_key)
+        if not urn:
+            continue
+        raw_tags = cell(row, "tags")
+        if isinstance(raw_tags, str):
+            try:
+                tags = json.loads(raw_tags)
+            except (json.JSONDecodeError, TypeError):
+                tags = []
+        else:
+            tags = raw_tags or []
+        properties = {}
+        for key in property_keys:
+            if key in _RESERVED_NODE_KEYS:
+                # A reserved key is not a user property on a hydrated
+                # node either, so scoring must not see one here.
+                continue
+            value = cell(row, key)
+            if value is not None:
+                properties[key] = value
+        candidates.append(_CandidateRow(
+            urn=str(urn),
+            display_name=(
+                cell(row, "displayName")
+                or cell(row, name_key)
+                or cell(row, "name")
+                or cell(row, "title")
+                or cell(row, "label")
+                or ""
+            ),
+            qualified_name=cell(row, "qualifiedName"),
+            description=cell(row, "description"),
+            tags=list(tags) if isinstance(tags, list) else [],
+            properties=properties,
+        ))
+    return candidates
+
+
+def _rank_candidate_rows(
+    candidates: List[_CandidateRow], query: SearchQuery,
+) -> Tuple[List[str], int, int, List[str]]:
+    """Sort the candidate set and slice the requested page out of it.
+
+    Returns ``(page_urns, offset_after, total_sorted, sorted_urns)``:
+      * ``page_urns`` — the URNs this page will hydrate, in page order
+      * ``offset_after`` — the next-cursor offset (offset + page length)
       * ``total_sorted`` — the size of the full sorted candidate set,
-        so the caller can decide whether there are more pages to emit
-        a next-cursor.
+        so the caller can decide whether more pages follow
+      * ``sorted_urns`` — every match in sort order, which the caller
+        caches so the cursor pages after this one are a slice rather
+        than a second scan.
 
     The candidate Cypher deliberately doesn't ORDER BY — sorting in
     Cypher forces a materialisation barrier that thwarts the candidate
@@ -2368,54 +3624,83 @@ def _build_hits_from_rows(
       1. `options.sort_property` (an arbitrary native node property
          like 'rowCount' or 'createdAt') wins if set — powers
          "biggest first" / "newest first" UX.
-      2. `options.sort` ('displayName' / 'qualifiedName' / 'relevance'
-         falls back to displayName until fulltext lands).
+      2. `options.sort` ('displayName' / 'qualifiedName' / 'relevance',
+         the last ranking on the provenance score).
       'depth' is deferred — currently silently coerces to displayName.
+
+    Every candidate is scored, because relevance sorts the whole set
+    before it is sliced. Highlights are not built here at all: they
+    belong to the page, and the page is scored again from its real
+    nodes once hydrated.
     """
-    hits: List[SearchHit] = []
-    for row in rows:
-        node = provider._extract_node_from_result(row)
-        if node:
-            hits.append(SearchHit(node=node))
+    leaves = _collect_text_leaves(query.predicate)
+    scored: List[Tuple[_CandidateRow, float]] = [
+        (row, _score_hit(
+            row, leaves, want_highlights=False, projected=True,
+        )[0])
+        for row in candidates
+    ]
+
+    # THE TIE-BREAK, and it has to come first.
+    #
+    # Pagination here is an OFFSET into this list, and the list is rebuilt
+    # whenever the match-set cache misses (no cache Redis, a TTL that expired
+    # mid-"Load all", or a match set past the cache ceiling). None of the
+    # three sorts below distinguished rows whose key was equal, so a rebuild
+    # could order them differently and the next offset would then repeat some
+    # rows and skip others — reported as results disappearing while paging
+    # through a thousand identically-named columns, where score AND name are
+    # identical for every row.
+    #
+    # `urn` is unique, and every sort below is STABLE, so one ascending pass
+    # here survives underneath all of them as the final tie-break — including
+    # the reversed ones, where stability keeps ties in urn order rather than
+    # flipping them.
+    scored.sort(key=lambda e: e[0].urn or "")
 
     sort_dir = query.options.sort_dir
     reverse = (sort_dir == "desc")
 
     if query.options.sort_property:
-        # Reach into node.properties; missing → sort as if value were ""
+        # Reach into properties; missing → sort as if value were ""
         # so absent rows clump consistently at one end.
         prop = query.options.sort_property
 
-        def prop_key(h: SearchHit):
-            v = (h.node.properties or {}).get(prop)
+        def prop_key(entry):
+            v = (entry[0].properties or {}).get(prop)
             # Sort numerics naturally; coerce everything else through str
             if isinstance(v, (int, float, bool)):
                 return (0, v)
             return (1, str(v).lower() if v is not None else "")
 
-        hits.sort(key=prop_key, reverse=reverse)
+        scored.sort(key=prop_key, reverse=reverse)
     else:
         sort_field = query.options.sort
         if sort_field in ("displayName", "qualifiedName"):
-            def key(h: SearchHit):
-                v = (getattr(h.node, "display_name" if sort_field == "displayName"
-                             else "qualified_name") or "")
+            def key(entry):
+                row = entry[0]
+                v = (row.display_name if sort_field == "displayName"
+                     else row.qualified_name) or ""
                 return v.lower()
-            hits.sort(key=key, reverse=reverse)
+            scored.sort(key=key, reverse=reverse)
         elif sort_field == "relevance":
-            # No relevance signal in v1 (no fulltext). Fall back to displayName.
-            hits.sort(
-                key=lambda h: (h.node.display_name or "").lower(),
-                reverse=reverse,
-            )
+            # Score first, name second. The name pass is always
+            # ascending (A→Z), never `sort_dir` — a business user
+            # reading two equally-relevant hits expects alphabetical
+            # order, not its reversal; `sort_dir` keeps its ordinary
+            # meaning for the plain name/property sorts above. Two
+            # passes, leaning on Python's stable sort, so the name
+            # order survives underneath the score order.
+            scored.sort(key=lambda e: (e[0].display_name or "").lower())
+            scored.sort(key=lambda e: -e[1])
 
-    total_sorted = len(hits)
+    sorted_urns = [row.urn for row, _score in scored]
     offset = 0
     if query.options.cursor:
         state = decode_cursor(query.options.cursor)
         offset = max(0, int(state.get("offset", 0)))
-    page = hits[offset : offset + query.options.page_size]
-    return page, offset + len(page), total_sorted
+    page_urns = sorted_urns[offset : offset + query.options.page_size]
+    return page_urns, offset + len(page_urns), len(sorted_urns), sorted_urns
 
 
 async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
@@ -2445,11 +3730,23 @@ async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
             chain = []
         return h.node.urn, chain
 
-    # 1. Parallel-fetch every hit's ancestor chain.
-    chain_results = await asyncio.gather(
-        *(_safe_chain(h) for h in hits), return_exceptions=False,
-    )
-    chains: Dict[str, List[str]] = dict(chain_results)
+    # 1. Every hit's ancestor chain: in one pass where the provider reads
+    # them in bulk (one pipelined cache read, one Cypher for the misses) —
+    # a chain per hit is a query per hit on a cold cache, and a page holds
+    # up to a thousand hits.
+    bulk = getattr(provider, "get_ancestor_chains", None)
+    chains: Dict[str, List[str]] = {}
+    if bulk is not None:
+        try:
+            chains = await bulk([h.node.urn for h in hits])
+        except Exception:
+            logger.warning("deep_search: bulk ancestor chains failed; "
+                           "ancestor_path will be empty on this page")
+    else:
+        chain_results = await asyncio.gather(
+            *(_safe_chain(h) for h in hits), return_exceptions=False,
+        )
+        chains = dict(chain_results)
     needed_urns: set = set()
     for urns in chains.values():
         needed_urns.update(urns)

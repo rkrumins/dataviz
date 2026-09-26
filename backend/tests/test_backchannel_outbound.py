@@ -329,3 +329,122 @@ async def test_fetch_jwks_goes_through_the_destination_guard(monkeypatch):
     with pytest.raises(BlockedOutboundRequest):
         await outbound.fetch_jwks("https://169.254.169.254/jwks", timeout=2.0)
     assert sent == []
+
+
+# ── outbound TLS trust ───────────────────────────────────────────────
+#
+# ``resolve_outbound_verify`` decides what ``verify=`` every outbound
+# client gets: an explicit per-call override, else the deployment CA
+# bundle named by SSO_OUTBOUND_TLS_CA_CERTS, else full verification
+# against the system store. A bundle that cannot be loaded FAILS
+# CLOSED to True — the strictest posture — with an ERROR naming the
+# fix; never to False.
+
+import ssl as _ssl
+
+import certifi
+
+from backend.auth_service.providers.outbound import resolve_outbound_verify
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_bundle(monkeypatch):
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS", raising=False)
+
+
+def test_verify_defaults_to_full_verification():
+    assert resolve_outbound_verify() is True
+
+
+def test_the_env_bundle_becomes_an_ssl_context(monkeypatch):
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", certifi.where())
+    assert isinstance(resolve_outbound_verify(), _ssl.SSLContext)
+
+
+def test_a_file_uri_is_tolerated(monkeypatch):
+    # GCP tooling hands paths around as file: URIs; this bit the Redis
+    # TLS family once already, and the same normaliser is reused here.
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", "file://" + certifi.where())
+    assert isinstance(resolve_outbound_verify(), _ssl.SSLContext)
+
+
+def test_a_missing_bundle_fails_closed_to_true(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", str(tmp_path / "nope.pem"))
+    with caplog.at_level("ERROR"):
+        assert resolve_outbound_verify() is True
+    assert "SSO_OUTBOUND_TLS_CA_CERTS" in caplog.text
+    assert "nope.pem" in caplog.text
+
+
+def test_an_unparseable_bundle_fails_closed_to_true(monkeypatch, tmp_path, caplog):
+    bad = tmp_path / "bad.pem"
+    bad.write_bytes(b"not a pem")
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", str(bad))
+    with caplog.at_level("ERROR"):
+        assert resolve_outbound_verify() is True
+
+
+def test_an_explicit_override_wins_over_the_env(monkeypatch):
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", certifi.where())
+    assert resolve_outbound_verify(False) is False
+    assert resolve_outbound_verify(True) is True
+
+
+def test_the_context_is_cached_per_path(monkeypatch):
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", certifi.where())
+    assert resolve_outbound_verify() is resolve_outbound_verify()
+
+
+@pytest.mark.asyncio
+async def test_the_client_is_constructed_with_the_resolved_verify(monkeypatch):
+    captured: dict = {}
+
+    def handler(request):
+        return httpx.Response(200, json={"ok": True})
+
+    def _make(**kwargs):
+        captured.update(kwargs)
+        kwargs.pop("verify", None)
+        return _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(handler), **kwargs,
+        )
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _make)
+
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", certifi.where())
+    await request_json(URL, method="GET", timeout=2.0)
+    assert isinstance(captured["verify"], _ssl.SSLContext)
+
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS")
+    await request_json(URL, method="GET", timeout=2.0)
+    assert captured["verify"] is True
+
+
+# ── naming a TLS trust failure ───────────────────────────────────────
+
+from backend.auth_service.providers.outbound import is_tls_verification_failure
+
+
+def test_a_wrapped_ssl_verification_error_is_recognised():
+    inner = _ssl.SSLCertVerificationError(1, "certificate verify failed")
+    try:
+        try:
+            raise inner
+        except _ssl.SSLCertVerificationError as caught:
+            raise httpx.ConnectError("boom") from caught
+    except httpx.ConnectError as wrapped:
+        assert is_tls_verification_failure(wrapped) is True
+
+
+def test_a_message_only_form_is_recognised():
+    assert is_tls_verification_failure(
+        httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+                           "verify failed: unable to get local issuer "
+                           "certificate"),
+    ) is True
+
+
+def test_an_unrelated_error_is_not():
+    assert is_tls_verification_failure(
+        httpx.ConnectError("connection refused"),
+    ) is False

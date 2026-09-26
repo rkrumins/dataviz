@@ -11,6 +11,7 @@ The live socket is covered by the real-FalkorDB module (CI / ``dev.sh infra``).
 """
 import asyncio
 import os
+import re
 
 import pytest
 
@@ -40,6 +41,9 @@ class FakeGraph:
     def __init__(self):
         self.nodes: dict = {}   # urn -> item dict (carries entityId)
         self.edges: dict = {}   # eid -> {src, tgt, ...}
+        self._ids: dict = {}    # urn -> internal node id (FalkorDB's id(n)), never reused
+        self._property_keys: set = set()   # db.propertyKeys() — registered, never freed
+        self._next_id = 0
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
@@ -47,12 +51,39 @@ class FakeGraph:
         # (a trivial read that never touches the graph); a reachable instance answers it.
         if cypher == "RETURN 1":
             return _Result([[1]])
-        # projection verify (Part 1E) — mirrors _falkor_counts: exclude rollup-derived artifacts
-        # (the :AGGREGATED layer and its _GVRollupMeta marker) the same way FalkorDB's WHERE does.
-        if cypher == "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c":
-            return _Result([[sum(1 for n in self.nodes.values() if n.get("_label") != "_GVRollupMeta")]])
-        if cypher == "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c":
-            return _Result([[sum(1 for e in self.edges.values() if e.get("type") != "AGGREGATED")]])
+        # Projection verify (Part 1E) — mirrors `reconcile.falkor_counts`: exclude the
+        # rollup-derived artifacts (the :AGGREGATED layer and the DERIVED_LABELS markers)
+        # the same way FalkorDB's WHERE does.
+        #
+        # EVALUATED, never string-matched. A literal `cypher == "…"` here is a booby trap:
+        # `falkor_counts` grew two more DERIVED_LABELS into its WHERE clause, this fake
+        # stopped recognising the query, and `_verify_and_heal` catches ANY count failure
+        # as "verify skipped -> publish". Four e2e tests that exist to prove the projector
+        # HOLDS BACK on a mismatch were therefore testing nothing, in the exact machinery
+        # that wedged a projection for 14 hours. Parse the exclusions out of the clause so
+        # the fake tracks the real cypher instead of a snapshot of it.
+        m = re.fullmatch(
+            r"MATCH \(n\)(?: WHERE (.+?))? RETURN count\(n\) AS c", cypher.strip()
+        )
+        if m:
+            excluded = set(re.findall(r"NOT '([^']+)' IN labels\(n\)", m.group(1) or ""))
+            if m.group(1) and not excluded:
+                raise AssertionError(
+                    f"node-count WHERE clause is no longer label exclusions: {cypher!r}"
+                )
+            return _Result([[sum(1 for n in self.nodes.values()
+                                 if n.get("_label") not in excluded)]])
+        m = re.fullmatch(
+            r"MATCH \(\)-\[r\]->\(\)(?: WHERE (.+?))? RETURN count\(r\) AS c", cypher.strip()
+        )
+        if m:
+            excluded = set(re.findall(r"type\(r\) <> '([^']+)'", m.group(1) or ""))
+            if m.group(1) and not excluded:
+                raise AssertionError(
+                    f"edge-count WHERE clause is no longer type exclusions: {cypher!r}"
+                )
+            return _Result([[sum(1 for e in self.edges.values()
+                                 if e.get("type") not in excluded)]])
         # Content-verify scans (reconciler primitives the full-seed verify now runs): the sorted
         # id-set streams + the deep urn fetch, over the same in-memory graph. entityId IS NOT NULL
         # / rollup exclusion mirror the real scan's guards.
@@ -71,10 +102,48 @@ class FakeGraph:
                            if e.get("type") != "AGGREGATED" and eid is not None),
                           key=lambda r: r[0])
             return _Result(rows[params["s"]: params["s"] + params["l"]])
+        # The native-property budget and the platform's property-name reserve that every
+        # node pass runs first (``_registered_property_names`` /
+        # ``reserve_platform_property_names``): names registered so far, and the
+        # create-then-delete carrier that registers the platform's own.
+        if cypher == "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey":
+            return _Result([[k] for k in sorted(self._property_keys)])
+        if cypher == "CREATE (r:_PropReserve) SET r += $names":
+            self._property_keys.update(params["names"])
+            return None
+        if cypher == "MATCH (r:_PropReserve) DELETE r":
+            return None
+        # In-place reconcile scans (``FalkorProjector._scan_projection``): the internal-id
+        # high-water mark, then node and edge pages by internal-id range.
+        if cypher == "MATCH (n) RETURN max(id(n))":
+            ids = [self._id_of(u) for u in self.nodes]
+            return _Result([[max(ids) if ids else None]])
+        if cypher.startswith("MATCH (n) WHERE id(n) >= $lo AND id(n) < $hi RETURN"):
+            return _Result([[self._id_of(u), [n.get("_label")], u, n.get("gvHash")]
+                            for u, n in self.nodes.items()
+                            if params["lo"] <= self._id_of(u) < params["hi"]])
+        if cypher.startswith("MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi"):
+            return _Result([[self._id_of(e["src"]), e["type"], self._id_of(e["tgt"]), e.get("gvHash")]
+                            for e in self.edges.values()
+                            if e["src"] in self.nodes and e["tgt"] in self.nodes
+                            and e["type"] != "AGGREGATED"
+                            and params["lo"] <= self._id_of(e["src"]) < params["hi"]])
+        # The node merge's removed-property read: the keys each node still holds.
+        if cypher.startswith("UNWIND $urns AS u MATCH (n:") and cypher.endswith("RETURN u, keys(n)"):
+            return _Result([[u, [k for k in self.nodes[u] if not k.startswith("_")]]
+                            for u in params["urns"] if u in self.nodes])
+        # A retype, in place: the node keeps its edges.
+        if cypher.startswith("UNWIND $urns AS u MATCH (n:") and " SET n:" in cypher and " REMOVE n:" in cypher:
+            new = cypher.split(" SET n:", 1)[1].split(" REMOVE", 1)[0]
+            for u in params["urns"]:
+                if u in self.nodes:
+                    self.nodes[u]["_label"] = new
+            return None
         # Node upsert: UNWIND $batch AS item MERGE (n:{label} {urn: item.urn}) SET ... REMOVE ...
         if cypher.startswith("UNWIND $batch AS item MERGE (n:"):
             label = cypher[len("UNWIND $batch AS item MERGE (n:"):].split(" {urn:", 1)[0]
             for it in params["batch"]:
+                self._id_of(it["urn"])
                 self.nodes[it["urn"]] = {**it, "_label": label}
             return None
         # Edge upsert (LABEL-ANCHORED): UNWIND $batch AS item MATCH (a:{slb} {urn: item.src})
@@ -96,7 +165,18 @@ class FakeGraph:
                                if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel]:
                         self.edges.pop(_k, None)
                     self.edges[it["eid"]] = {"src": it["src"], "tgt": it["tgt"], "type": rel,
-                                             "props": it.get("props"), "conf": it.get("conf")}
+                                             "props": it.get("props"), "conf": it.get("conf"),
+                                             "gvHash": it.get("gvHash")}
+            return None
+        # Reconcile's edge delete by triple (no id): ...(a:{slb} {urn: item.src})-[r:{rel}]->
+        #   (b:{tlb} {urn: item.tgt}) DELETE r
+        if cypher.startswith("UNWIND $batch AS item MATCH (a:") and cypher.endswith("DELETE r") \
+                and "{id: item.eid}" not in cypher:
+            rel = cypher.split("-[r:", 1)[1].split("]->", 1)[0]
+            for it in params["batch"]:
+                for _k in [k for k, e in self.edges.items()
+                           if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel]:
+                    self.edges.pop(_k, None)
             return None
         # Typed + anchored edge delete: ...-[r:{rel} {id: item.eid}]->... DELETE r
         if "DELETE r" in cypher and "$batch" in cypher and "{id: item.eid}" in cypher:
@@ -123,8 +203,16 @@ class FakeGraph:
             return None
         raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
 
+    def _id_of(self, urn: str) -> int:
+        """FalkorDB's internal id for a node — minted on first sight, never reused."""
+        if urn not in self._ids:
+            self._ids[urn] = self._next_id
+            self._next_id += 1
+        return self._ids[urn]
+
     def _drop_node(self, urn: str) -> None:
         self.nodes.pop(urn, None)
+        self._ids.pop(urn, None)
         for k in [k for k, e in self.edges.items() if e["src"] == urn or e["tgt"] == urn]:
             self.edges.pop(k, None)
 
@@ -132,6 +220,7 @@ class FakeGraph:
         """GRAPH.DELETE — drops the whole graph key (used by the clean-rebuild seed)."""
         self.nodes.clear()
         self.edges.clear()
+        self._ids.clear()
 
     def entity_ids(self) -> set:
         return {n["entityId"] for n in self.nodes.values()}
@@ -342,10 +431,9 @@ def test_versioning_projection_target_resolver_e2e():
 # ── Non-destructive rebuild: probe before the full-seed drop; abort on a drop failure ──────────
 #
 # A full seed DROPs the FalkorDB graph key and re-MERGEs it from Postgres. If the resolved client
-# is unreachable/misrouted, the drop must NOT run (it would wipe the read cache with no way to
-# re-seed it) and a drop that FAILS on an existing graph must NOT fall through to the MERGE
-# (which cannot repair a partial/failed wipe). These fakes make the probe / the drop fail on
-# demand and assert: nothing dropped, MERGE never runs, existing cache intact, watermark unmoved.
+# is unreachable/misrouted, nothing may be written and the existing cache must survive; and a full
+# replay never drops the graph at all. These fakes make the probe fail on demand, and make any
+# drop fail loudly so a test proves it never happened.
 
 class _ProbeFailGraph(FakeGraph):
     """A reachable-check that fails: the connectivity probe (``RETURN 1``) raises, as an
@@ -431,50 +519,50 @@ async def _run_probe_fails_no_drop() -> None:
     await db.dispose_engine()
 
 
-async def _run_drop_failure_aborts() -> None:
-    """A drop that FAILS on an existing graph (non-``empty key``) aborts: ``project_graph``
-    RAISES and the MERGE apply NEVER runs, so a failed wipe can't be papered over by a merge."""
+async def _run_full_seed_never_drops() -> None:
+    """A full replay reconciles IN PLACE: it never drops the graph key (dropping renumbered every
+    label / type / property id under every long-lived reader and took the indexes and rollups
+    with it), yet the cache still ends up equal to committed main — content main does not hold
+    is removed by the reconcile's diff, not by a wipe."""
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
     fake = FakeFalkor()
     name = "gvt_" + os.urandom(3).hex()
-    g = _DropFailGraph(RuntimeError("WRONGTYPE Operation against a key holding the wrong kind of value"))
+    g = _DropFailGraph(AssertionError("a full replay must never drop the graph"))
     g.nodes["gv:OLD"] = {"urn": "gv:OLD", "entityId": "OLD", "_label": "Dataset", "displayName": "old"}
     fake.graphs[name] = g
     gid = await _seed_pinned_graph(svc, name)
 
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
-    raised = False
-    try:
-        await proj.project_graph(gid)
-    except RuntimeError:
-        raised = True
-    assert raised, "a non-'empty key' drop failure must RAISE (never proceed to MERGE)"
-    assert not g.apply_ran, "the MERGE apply must NOT run after a failed drop"
-    assert "OLD" in g.entity_ids(), "the existing read cache must be left intact"
-
+    r = await proj.project_graph(gid)
+    assert not r["noop"] and r["projected"] == 2, r
+    assert g.entity_ids() == {"A", "B"}, g.entity_ids()   # OLD reconciled away, A/B written
     status, last_error, projected = await _projection_state(gid)
-    assert status == "idle", status
-    assert last_error, "last_error must record the surfaced failure"
-    assert projected == 0, projected
+    assert status == "idle" and projected == 2 and not last_error, (status, projected, last_error)
+
+    # Nothing differs any more, so a second full replay writes nothing at all.
+    assert await svc.request_projection_rebuild(gid) is True
+    g.apply_ran = False
+    r = await proj.project_graph(gid)
+    assert r["projected"] == 2 and r["applied"] == 0, r
+    assert not g.apply_ran, "an up-to-date cache must not be rewritten"
     await db.dispose_engine()
 
 
-async def _run_empty_key_proceeds() -> None:
-    """The benign fresh-graph case: ``delete`` raises "empty key" (no graph yet) → the seed
-    PROCEEDS and MERGEs committed main, exactly as before (a normal first projection)."""
+async def _run_first_seed_into_a_fresh_key() -> None:
+    """A never-projected graph (no key yet) is the same code path: the diff is "everything"."""
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
     fake = FakeFalkor()
     name = "gvt_" + os.urandom(3).hex()
-    g = _DropFailGraph(RuntimeError("Invalid graph operation on empty key"))
+    g = _DropFailGraph(AssertionError("a first seed must never drop the graph"))
     fake.graphs[name] = g
     gid = await _seed_pinned_graph(svc, name)
 
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
     r = await proj.project_graph(gid)
     assert not r["noop"], r
-    assert g.apply_ran, "the fresh-graph seed must proceed to the MERGE apply"
+    assert g.apply_ran, "the fresh-graph seed must write committed main"
     assert g.entity_ids() == {"A", "B"}, g.entity_ids()
     status, _, projected = await _projection_state(gid)
     assert status == "idle" and projected == 2, (status, projected)
@@ -505,13 +593,13 @@ def test_versioning_projection_probe_fails_no_drop_e2e():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_projection_drop_failure_aborts_e2e():
-    asyncio.run(_run_drop_failure_aborts())
+def test_versioning_projection_full_seed_never_drops_e2e():
+    asyncio.run(_run_full_seed_never_drops())
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_projection_empty_key_proceeds_e2e():
-    asyncio.run(_run_empty_key_proceeds())
+def test_versioning_projection_first_seed_into_a_fresh_key_e2e():
+    asyncio.run(_run_first_seed_into_a_fresh_key())
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
@@ -522,7 +610,7 @@ def test_versioning_projection_healthy_full_seed_e2e():
 if __name__ == "__main__":
     asyncio.run(_run())
     asyncio.run(_run_probe_fails_no_drop())
-    asyncio.run(_run_drop_failure_aborts())
-    asyncio.run(_run_empty_key_proceeds())
+    asyncio.run(_run_full_seed_never_drops())
+    asyncio.run(_run_first_seed_into_a_fresh_key())
     asyncio.run(_run_healthy_full_seed())
     print("versioning FalkorDB projection e2e: OK")

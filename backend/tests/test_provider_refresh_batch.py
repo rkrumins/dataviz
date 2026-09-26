@@ -566,3 +566,50 @@ def test_batch_item_defaults_stay_well_formed_for_the_error_branch():
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ── operator holds: a batch SKIPS a held source and REPORTS it ───────────
+
+
+class _HoldingSvc(_AllSucceedSvc):
+    """One source is held; the rest refresh. ``hold_for_source`` is the
+    capability the batch checks for — the real AggregationService exposes
+    it, and a service without it (the other doubles here) holds nothing."""
+
+    def __init__(self, held_id: str):
+        super().__init__()
+        self._held_id = held_id
+
+    async def hold_for_source(self, ds_id, session):
+        from backend.app.services.aggregation.holds import Hold
+        if ds_id == self._held_id:
+            return Hold("provider", "paused", until="2999-01-01T00:00:00+00:00", scope_id="prov-1")
+        return None
+
+
+def test_batch_skips_a_held_source_and_reports_it_without_shrinking_total():
+    """A provider-wide refresh over N sources is not a deliberate per-source
+    override of the ones somebody paused (that is the single-source Rebuild,
+    which warns and proceeds). The held source is skipped and reported —
+    per ITEM, so ``total`` stays honest rather than the enumerator quietly
+    reporting 5 sources as 4."""
+    svc = _HoldingSvc(held_id="ds-2")
+    redis = _FakeRedis()
+    ds_ids = [f"ds-{i}" for i in range(5)]
+    _run(cp._run_provider_batch(
+        "batch-h", "prov-1", [(d, None) for d in ds_ids], _req(),
+        svc=svc, session_factory=_session_factory, redis=redis,
+    ))
+    hash_ = redis.hashes["refreshbatch:batch-h"]
+    assert hash_["state"] == "done"
+    assert hash_["total"] == "5"
+    assert hash_["done"] == "5"
+    held = json.loads(hash_["ds:ds-2"])
+    assert held["outcome"] == "held"
+    assert held["jobId"] is None
+    assert held["heldBy"] == "provider" and held["heldKind"] == "paused"
+    assert held["heldUntil"] == "2999-01-01T00:00:00+00:00"
+    for ds_id in ds_ids:
+        if ds_id != "ds-2":
+            assert json.loads(hash_[f"ds:{ds_id}"])["outcome"] == "done"
+    assert sorted(svc.calls) == sorted(d for d in ds_ids if d != "ds-2")

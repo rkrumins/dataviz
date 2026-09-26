@@ -32,7 +32,8 @@ async def _snap(session: AsyncSession, *, at: str, nodes: int,
                 provider_id: str = "prov_a1", graph_name: str = "alert-graph",
                 edges: int = 0, edge_delta: int | None = None,
                 entity_types: dict | None = None,
-                edge_types: dict | None = None):
+                edge_types: dict | None = None,
+                edge_type_deltas: dict | None = None):
     session.add(DataSourceCountSnapshotORM(
         id=f"snp_{ds_id}_{at}",
         data_source_id=ds_id,
@@ -53,7 +54,7 @@ async def _snap(session: AsyncSession, *, at: str, nodes: int,
         node_delta=delta,
         type_deltas=json.dumps({
             "nodes": {"added": {}, "removed": {}, "changed": {}},
-            "edges": {"added": {}, "removed": {}, "changed": {}},
+            "edges": edge_type_deltas or {"added": {}, "removed": {}, "changed": {}},
         }) if delta is not None else None,
     ))
     await session.flush()
@@ -1106,3 +1107,307 @@ async def test_silence_does_not_re_alert_inside_the_cooldown(
     assert await count_alerts_repo.evaluate_silent_sources(
         db_session, _policy(),
     ) == [], "an outage must ring once, not once per tick"
+
+
+# ── derived bookkeeping never raises a finding ───────────────────────
+#
+# `_AggMeta` is MERGEd into the graph by the aggregation pipeline itself, and
+# wiped by projection seeds, rebuilds and purges — so it toggles 1 -> 0 -> 1
+# forever. Every dip used to raise a SEVERE `type_gone` finding, plus a bell
+# notification reading "<source>: _AggMeta is gone", about the platform's own
+# node. Snapshots captured before the providers stopped recording it stay
+# readable for the whole retention window, so the exclusion has to hold on the
+# READ side too — which is what these fixtures exercise.
+
+
+async def test_a_vanished_derived_label_raises_nothing(db_session: AsyncSession):
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_001, delta=0,
+            entity_types={"Table": 10_000, "_AggMeta": 1},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=10_000, delta=-1,
+        entity_types={"Table": 10_000},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    assert not [n for n in notices if n.finding == "type_gone"]
+
+
+async def test_a_real_type_still_reports_when_a_derived_one_also_vanishes(
+    db_session: AsyncSession,
+):
+    """The exclusion must be surgical: a genuine disappearance in the same
+    observation is exactly the signal this alerter exists for."""
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_201, delta=0,
+            entity_types={"Table": 10_000, "Column": 200, "_AggMeta": 1},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=10_000, delta=-201,
+        entity_types={"Table": 10_000},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    gone = [n for n in notices if n.finding == "type_gone"]
+    assert [n.subject_type for n in gone] == ["Column"]
+
+
+async def test_a_customer_label_starting_with_underscore_still_reports(
+    db_session: AsyncSession,
+):
+    """Membership is the explicit list, never a "_" prefix rule — a customer's
+    own `_internal` type disappearing is their data going missing."""
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_200, delta=0,
+            entity_types={"Table": 10_000, "_internal": 200},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=10_000, delta=-200,
+        entity_types={"Table": 10_000},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    gone = [n for n in notices if n.finding == "type_gone"]
+    assert [n.subject_type for n in gone] == ["_internal"]
+
+
+async def test_a_vanished_aggregated_edge_type_raises_nothing(
+    db_session: AsyncSession,
+):
+    """A purge drops every AGGREGATED edge by design. That is the platform
+    rebuilding its own overlay, not a source losing relationships."""
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=100, delta=0,
+            edges=9_000, edge_delta=0,
+            edge_types={"LINKS": 4_000, "AGGREGATED": 5_000},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=100, delta=0,
+        edges=4_000, edge_delta=-5_000,
+        edge_types={"LINKS": 4_000},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    assert not [n for n in notices if n.finding == "type_gone"]
+
+
+# ── the platform's own rebuild is not the source losing data ─────────
+
+
+async def _steady_edges_then(db_session, *rows):
+    """Ten ordinary observations with a SMALL raw churn, then the rows given.
+
+    The small churn is the point: ``change_baseline`` is the median non-zero
+    delta, so a window whose only movement is the event under test makes the
+    baseline equal the event and nothing is ever unusual. Ten deltas of 10
+    give a baseline of 10, against which the movements below are enormous.
+    """
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_000, delta=0,
+            edges=3_500_000, edge_delta=10,
+            edge_types={"LINKS": 1_500_000, "AGGREGATED": 2_000_000},
+        )
+    for row in rows:
+        await _snap(db_session, nodes=10_000, delta=0, **row)
+
+
+async def test_a_rebuild_of_the_overlay_raises_no_movement(db_session: AsyncSession):
+    """THE REGRESSION. A rebuild wipes and rewrites every :AGGREGATED edge,
+    and ``edge_count`` includes them by design, so judging movement on the
+    total reported the platform's own work as a CRITICAL loss of the
+    customer's relationships — a finding plus a bell notification, on every
+    rebuild of every source.
+
+    The strip that landed in f89b679d only ever covered ``type_gone``. This
+    is the same noise arriving under a different finding kind, and it is on
+    screen today as "~5.6M relationships · critical".
+    """
+    await _steady_edges_then(
+        db_session,
+        # The overlay is wiped: 2M relationships vanish, none of them the
+        # source's. Against a baseline of 10 this is 200,000x — the old code
+        # called it critical.
+        dict(at=_iso(3), edges=1_500_000, edge_delta=-2_000_000,
+             edge_types={"LINKS": 1_500_000},
+             edge_type_deltas={"added": {}, "changed": {},
+                               "removed": {"AGGREGATED": 2_000_000}}),
+        # ...and rebuilt, slightly bigger than before.
+        dict(at=_iso(2), edges=3_600_000, edge_delta=2_100_000,
+             edge_types={"LINKS": 1_500_000, "AGGREGATED": 2_100_000},
+             edge_type_deltas={"added": {"AGGREGATED": 2_100_000},
+                               "removed": {}, "changed": {}}),
+    )
+
+    notices = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    assert [n for n in notices if n.finding == "movement"] == [], (
+        "a rebuild of the platform's own overlay was reported as source movement"
+    )
+    # Not under the other kind either — the overlay is stripped there.
+    assert [n for n in notices if n.finding == "type_gone"] == []
+
+
+async def test_a_real_loss_still_alerts_while_the_overlay_swings(
+    db_session: AsyncSession,
+):
+    """The other half: taking the overlay out must not blind the detector.
+
+    The source loses two thirds of its own relationships in the same window
+    the overlay rebuilds, and the TOTAL barely moves — 3.5M to 3.6M. That is
+    precisely the failure the overlay's noise used to bury.
+    """
+    await _steady_edges_then(
+        db_session,
+        dict(at=_iso(2), edges=3_600_000, edge_delta=100_000,
+             edge_types={"LINKS": 500_000, "AGGREGATED": 3_100_000},
+             edge_type_deltas={"added": {}, "removed": {}, "changed": {
+                 "LINKS": [1_500_000, 500_000],
+                 "AGGREGATED": [2_000_000, 3_100_000],
+             }}),
+    )
+
+    notices = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    movement = [n for n in notices if n.finding == "movement"]
+    assert movement, (
+        "a 1M-relationship loss hidden behind an overlay rebuild went unreported"
+    )
+    assert movement[0].metric == "edges"
+    assert movement[0].direction == "drop"
+    # The finding reports the SOURCE's numbers, not the totals it hid behind
+    # — the field is named node_delta/node_count but carries whichever metric
+    # the notice is about (see PendingNotice.metric).
+    assert movement[0].node_delta == -1_000_000
+    assert movement[0].node_count == 500_000
+
+
+def test_the_overlay_split_reads_the_row_not_its_neighbours():
+    """``overlay_delta_of`` comes off the row's OWN type_deltas, so the first
+    row of a window keeps the real movement it was stored with. Differencing
+    neighbours would discard it."""
+    import types
+
+    from backend.app.db.repositories import stats_history_repo as shr
+
+    row = types.SimpleNamespace(
+        edge_count=3_600_000,
+        edge_delta=2_100_000,
+        edge_type_counts=json.dumps({"LINKS": 1_500_000, "AGGREGATED": 2_100_000}),
+        type_deltas=json.dumps({
+            "edges": {"added": {"AGGREGATED": 2_100_000}, "removed": {}, "changed": {}},
+        }),
+    )
+    assert shr.overlay_count_of(row) == 2_100_000
+    assert shr.overlay_delta_of(row) == 2_100_000
+    assert shr.source_count_of(row, "edges") == 1_500_000
+    assert shr.source_delta_of(row, "edges") == 0
+    # Nodes are untouched: the derived LABELS never reach the store.
+    assert shr.source_count_of(row, "nodes") == shr.count_of(row, "nodes")
+
+    # Casing is not ours to assume — the type arrives via type(r) from a scan
+    # of a graph an external system may have loaded.
+    lower = types.SimpleNamespace(
+        edge_count=10, edge_delta=None,
+        edge_type_counts=json.dumps({"aggregated": 4}), type_deltas=None,
+    )
+    assert shr.overlay_count_of(lower) == 4
+    # "We cannot say" must never become "nothing moved".
+    assert shr.source_delta_of(lower, "edges") is None
+
+    # A corrupt column degrades to "we knew nothing", never blows up.
+    junk = types.SimpleNamespace(
+        edge_count=10, edge_delta=5,
+        edge_type_counts="not json", type_deltas="not json",
+    )
+    assert shr.overlay_count_of(junk) == 0 and shr.overlay_delta_of(junk) == 0
+
+
+# ── the findings already stuck on screen ─────────────────────────────
+
+
+def _overlay_migration_source() -> str:
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic" / "versions" / "20260915_1000_overlay_findings.py"
+    )
+    assert path.exists(), "the overlay-findings cleanup migration is missing"
+    return path.read_text()
+
+
+def test_the_overlay_cleanup_narrows_to_edge_type_gone_findings():
+    """`20260902_1000_derived_artifacts` filtered on DERIVED_LABELS — the node
+    labels — and so acknowledged the `_AggMeta` findings and left every
+    `AGGREGATED` one standing. `purge_alerts` only deletes ACKNOWLEDGED rows,
+    so they never aged out: months later the band still reads
+    "AGGREGATED gone · severe" about a rebuild that worked.
+
+    Narrower than its sibling on purpose. These are EDGE types, and a
+    customer entity label spelled AGGREGATED is their data — its findings
+    are theirs to keep."""
+    src = _overlay_migration_source()
+    assert "finding = 'type_gone'" in src
+    assert "metric = 'edges'" in src
+    assert "UPPER(subject_type) IN :types" in src, (
+        "a case-sensitive match misses a graph an external system loaded with "
+        "different casing — is_derived_edge_type upper-cases for that reason"
+    )
+
+
+def test_the_overlay_cleanup_acknowledges_rather_than_deletes():
+    """The audit trail has to survive a wrong exclusion list."""
+    src = _overlay_migration_source()
+    assert "acknowledged_by = 'system'" in src
+    assert "acknowledged_at IS NULL" in src, "re-stamping a human's ack"
+    assert "DELETE FROM" not in src.upper(), "the cleanup destroys the trail"
+
+
+def test_the_overlay_cleanup_does_not_reseed_the_drift_baselines():
+    """THE trap in copying the sibling. It nulled every `raw_fingerprint`
+    because `raw_fingerprint_from_counts` had CHANGED under it. That function
+    has excluded AGGREGATED since it was written, so nothing here invalidates
+    a baseline — and nulling the fleet's fingerprints with nothing to fix
+    queues a rebuild per source."""
+    src = _overlay_migration_source()
+    assert "raw_fingerprint = NULL" not in src
+    assert "raw_fingerprint" in src, (
+        "the decision not to re-seed is load-bearing and must be stated, not "
+        "merely absent"
+    )
+
+
+def test_the_overlay_cleanup_reads_the_one_definition():
+    """One definition of the derived types, imported — not a second copy of
+    the list, which is the exact failure `common/derived_artifacts` exists to
+    stop."""
+    src = _overlay_migration_source()
+    assert "from backend.common.derived_artifacts import DERIVED_EDGE_TYPES" in src
+    # Bound, not interpolated, and taken from the import rather than a second
+    # copy of the list spelled into the SQL.
+    assert "value=types, expanding=True" in src
+    assert "[t.upper() for t in DERIVED_EDGE_TYPES]" in src
+
+
+def test_the_overlay_cleanup_silences_the_bell_too():
+    """`20260902_1000_derived_artifacts` records why: the bell has to agree
+    with the band, and there is no FK from a notification to its alert, so
+    the match is kind-first plus the title phrase."""
+    src = _overlay_migration_source()
+    assert "kind = 'insights.counts_anomaly'" in src
+    assert "IS GONE%" in src
+    assert src.index("kind = 'insights.counts_anomaly'") < src.index("IS GONE%"), (
+        "narrow by kind before the title, or a user-authored title is swept up"
+    )

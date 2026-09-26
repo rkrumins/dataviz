@@ -21,13 +21,14 @@ import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useFeature } from '@/store/features'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { TraceDepthControl } from '../TraceDepthControl'
 import { PropertyManagerButton } from '../../property-manager/PropertyManagerButton'
 import { DisplayMenu } from './DisplayMenu'
-import { ImportExportMenu } from './ImportExportMenu'
+import { ImportExportMenu, type ViewFileActions } from './ImportExportMenu'
 import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
+import { HoverTip } from '@/components/ui/HoverTip'
 
 export interface ComprehensionToolsProps {
   // Lineage flow
@@ -55,12 +56,21 @@ export interface ComprehensionToolsProps {
   // per-node trace buttons remain for granular up/down/full control.
   traceActive: boolean
   canTrace: boolean
+  /** How many entities a press of Trace would walk. 1 for an ordinary trace;
+   *  more for a bulk trace of a multi-selection. */
+  traceSeedCount?: number
+  /** Multi-select armed from the UI (plain clicks add to the selection). */
+  multiSelectArmed?: boolean
+  onToggleMultiSelect?: () => void
+  /** The Focus Lens is single-focal by construction, so it stays gated on a
+   *  selection of exactly one rather than quietly focusing the first of five. */
+  canOpenLens?: boolean
   onStartTrace: () => void
   onExitTrace: () => void
   /** True once the canvas finishes hydrating (entities + edges). When
    *  false, Trace is unsafe to fire — the backend hasn't fully loaded the
    *  lineage graph yet and the trace would return nothing. Surfaced as a
-   *  distinct "loading" button state with a toast on attempted click. */
+   *  distinct "loading" button state with a notification on attempted click. */
   lineageReady: boolean
   traceUpstreamDepth: number
   traceDownstreamDepth: number
@@ -89,7 +99,13 @@ export interface ComprehensionToolsProps {
   onImport?: () => void
   onExport?: () => void
   isDraft: boolean
+  /** The same menu's "This view" section: export the view, with or without its data, or update it
+   *  from a file. */
+  thisView?: ViewFileActions
 }
+
+/** Trace and the Focus Lens walk the published graph, drafts included (see ContextViewCanvas). */
+const DRAFT_WALK_NOTE = 'Shows the published graph. New items and links in this draft appear once it’s published.'
 
 export function ComprehensionTools({
   showLineageFlow,
@@ -110,6 +126,10 @@ export function ComprehensionTools({
   onToggleEdgeDirection,
   traceActive,
   canTrace,
+  traceSeedCount = 1,
+  multiSelectArmed = false,
+  onToggleMultiSelect,
+  canOpenLens,
   onStartTrace,
   onExitTrace,
   lineageReady,
@@ -121,16 +141,20 @@ export function ComprehensionTools({
   onImport,
   onExport,
   isDraft,
+  thisView,
   traceHistory = [],
   onResumeTraceHistory,
   onClearTraceHistory,
   onCopyTraceHistoryLink,
   onOpenLens,
 }: ComprehensionToolsProps) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
   const traceLauncherRef = useRef<HTMLDivElement>(null)
   const hasTraceHistory = traceHistory.length > 0 && !!onResumeTraceHistory
+  // The Lens focuses ONE entity by construction; Trace can take a whole
+  // selection. Defaults to canTrace so a caller that never sets it is unchanged.
+  const lensAllowed = canOpenLens ?? canTrace
 
   // The server now REFUSES POST /graph/trace* when this is off (feature_gate.py), so leaving
   // the button here would hand the user an action that 403s. HIDDEN, not disabled: a greyed-out
@@ -140,9 +164,9 @@ export function ComprehensionTools({
 
   // Warn the user when they try to trace before the lineage data has
   // finished hydrating. Keyed so rapid repeat clicks coalesce instead of
-  // stacking dozens of identical toasts.
+  // stacking dozens of identical notifications.
   const warnLineageNotReady = () => {
-    showToast(
+    notify(
       'warning',
       'Trace is unavailable until lineage finishes loading. Please wait a moment.',
     )
@@ -153,10 +177,16 @@ export function ComprehensionTools({
       {/* Lineage Flow Toggle — single stable label. State is conveyed
           through the colored dot + active gradient. Trace state lives
           on its own button below; this label no longer encodes it. */}
+      <HoverTip
+        className="inline-flex"
+        label={showLineageFlow
+          ? 'Hide the lineage mesh on the canvas'
+          : 'Show the lineage mesh on the canvas'}
+        detail="The lines between entities, not the entities themselves"
+      >
       <button
         data-tour="canvas-lineage-toggle"
         onClick={onToggleLineageFlow}
-        title={showLineageFlow ? 'Hide the lineage mesh on the canvas' : 'Show the lineage mesh on the canvas'}
         className={cn(
           "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
           showLineageFlow
@@ -164,7 +194,7 @@ export function ComprehensionTools({
             : "bg-black/[0.04] border border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08] dark:hover:bg-white/[0.08]"
         )}
       >
-        <motion.div animate={{ rotate: showLineageFlow ? 0 : -180 }} transition={{ duration: 0.3 }}>
+        <motion.div animate={{ rotate: showLineageFlow ? 0 : -180 }} transition={{ duration: 0.18 }}>
           <LucideIcons.GitBranch className="w-4 h-4" />
         </motion.div>
         <span>Lineage</span>
@@ -173,6 +203,7 @@ export function ComprehensionTools({
           showLineageFlow ? "bg-green-500 dark:bg-green-400 dark:shadow-lg dark:shadow-green-400/50" : "bg-ink-muted/30"
         )} />
       </button>
+      </HoverTip>
 
       {/* Display menu — consolidates canvas display settings (zoom,
           density, type-badge, subtle lines) and lineage appearance
@@ -201,7 +232,7 @@ export function ComprehensionTools({
       {/* Trace toggle — three visual states:
           1. `traceActive` → Exit Trace (rose, pulsing dot)
           2. `!lineageReady` → "Loading lineage…" (indigo pulse + spinner).
-             Stays clickable to fire a warning toast, so the affordance
+             Stays clickable to fire a warning notification, so the affordance
              reads as "not yet" rather than "broken".
           3. ready → Trace Lineage (existing indigo gradient). Hard-
              disabled when no entity selected.
@@ -211,16 +242,45 @@ export function ComprehensionTools({
           trace: open the Lens on the selection and walk its connections
           hop by hop. Same gating as Trace (single non-logical entity);
           same feature flag (the lens rides the same trace backend). */}
+      {onToggleMultiSelect && !traceActive && (
+        <HoverTip
+          className="inline-flex"
+          label={multiSelectArmed
+            ? 'Clicking a row adds it to the selection'
+            : 'Pick several entities, then trace or focus all of them'}
+          detail={multiSelectArmed ? 'Turn off to go back to single select' : 'Cmd-click does the same thing'}
+        >
+          <button
+            type="button"
+            onClick={onToggleMultiSelect}
+            aria-pressed={multiSelectArmed}
+            className={cn(
+              'flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300',
+              multiSelectArmed
+                ? 'bg-accent-lineage/20 text-accent-lineage border border-accent-lineage/50 hover:bg-accent-lineage/30'
+                : 'bg-black/[0.03] border border-black/[0.06] text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:bg-white/[0.03] dark:border-white/[0.06] dark:hover:bg-white/[0.08]',
+            )}
+          >
+            <LucideIcons.SquareCheckBig className="w-4 h-4" strokeWidth={2.2} />
+            {multiSelectArmed ? 'Selecting' : 'Select'}
+          </button>
+        </HoverTip>
+      )}
+
       {traceEnabled && onOpenLens && !traceActive && (
-        <button
-          onClick={canTrace ? onOpenLens : undefined}
-          disabled={!canTrace}
-          title={canTrace
-            ? 'Open the Lineage Lens — walk this entity’s connections hop by hop'
+        <HoverTip
+          className="inline-flex"
+          label={lensAllowed
+            ? 'Walk this entity’s connections one hop at a time'
             : 'Select a single entity to focus its connections'}
+          detail={lensAllowed ? (isDraft ? DRAFT_WALK_NOTE : 'Opens the Lineage Lens over the canvas') : undefined}
+        >
+        <button
+          onClick={lensAllowed ? onOpenLens : undefined}
+          disabled={!lensAllowed}
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
-            canTrace
+            lensAllowed
               ? "bg-gradient-to-r from-teal-500/15 to-accent-lineage/10 text-teal-700 dark:text-teal-300 border border-teal-500/40 hover:from-teal-500/25 hover:to-accent-lineage/20 hover:border-teal-400/60 dark:hover:shadow-lg dark:hover:shadow-teal-500/20"
               : "bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed"
           )}
@@ -228,13 +288,16 @@ export function ComprehensionTools({
           <LucideIcons.Focus className="w-4 h-4" strokeWidth={2.2} />
           <span>Focus Lens</span>
         </button>
+        </HoverTip>
       )}
 
       {!traceEnabled ? null : traceActive ? (
+        // No tooltip: "Exit trace mode" is what the button already says, and a
+        // tip that repeats its own label is what teaches people the rest are
+        // not worth hovering.
         <button
           data-tour="canvas-trace"
           onClick={onExitTrace}
-          title="Exit trace mode"
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-gradient-to-r from-rose-500/20 to-rose-500/10 text-rose-700 border border-rose-400/50 hover:from-rose-500/30 hover:to-rose-500/20 hover:border-rose-400/70 dark:text-rose-200 dark:border-rose-400/40 dark:hover:border-rose-300/60 dark:hover:shadow-lg dark:hover:shadow-rose-500/20 transition-all duration-300"
         >
           <LucideIcons.X className="w-4 h-4" strokeWidth={2.4} />
@@ -242,11 +305,15 @@ export function ComprehensionTools({
           <span className="w-2 h-2 rounded-full bg-rose-500 dark:bg-rose-300 dark:shadow-lg dark:shadow-rose-300/60 animate-pulse" />
         </button>
       ) : !lineageReady ? (
+        <HoverTip
+          className="inline-flex"
+          label="Lineage data is still loading"
+          detail="Trace becomes available the moment it finishes"
+        >
         <button
           data-tour="canvas-trace"
           onClick={warnLineageNotReady}
           aria-busy="true"
-          title="Lineage data is still loading — Trace will become available once it finishes"
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 cursor-wait",
             "bg-gradient-to-r from-accent-lineage/12 to-purple-500/[0.06] text-accent-lineage/85 border border-accent-lineage/30",
@@ -261,6 +328,7 @@ export function ComprehensionTools({
             aria-hidden
           />
         </button>
+        </HoverTip>
       ) : (
         // Split control. Main zone: traces the selection; with NOTHING
         // selected it opens the trail launcher instead of being a dead
@@ -268,6 +336,19 @@ export function ComprehensionTools({
         // hard-disabled only when there is nothing to trace AND no trail
         // to resume. Chevron zone: the launcher, any time trails exist.
         <div ref={traceLauncherRef} className="relative flex items-stretch">
+          <HoverTip
+            className="inline-flex"
+            label={
+              canTrace
+                ? traceSeedCount > 1
+                  ? `Map everything upstream and downstream of all ${traceSeedCount} selected entities`
+                  : 'Map everything upstream and downstream of the selected entity'
+                : hasTraceHistory
+                  ? 'Pick up a trace you ran earlier in this view'
+                  : 'Select an entity to trace its lineage'
+            }
+            detail={canTrace && isDraft ? DRAFT_WALK_NOTE : undefined}
+          >
           <button
             data-tour="canvas-trace"
             onClick={
@@ -278,13 +359,6 @@ export function ComprehensionTools({
                   : undefined
             }
             disabled={!canTrace && !hasTraceHistory}
-            title={
-              canTrace
-                ? 'Trace lineage of selected entity'
-                : hasTraceHistory
-                  ? 'Resume a previous trace'
-                  : 'Select a single entity to trace its lineage'
-            }
             className={cn(
               "flex items-center gap-2 px-4 py-2 text-sm font-medium transition-all duration-300",
               hasTraceHistory ? "rounded-l-xl border-r-0" : "rounded-xl",
@@ -294,16 +368,17 @@ export function ComprehensionTools({
             )}
           >
             <LucideIcons.Workflow className="w-4 h-4" strokeWidth={2.2} />
-            <span>Trace Lineage</span>
+            <span>{traceSeedCount > 1 ? `Trace ${traceSeedCount} Entities` : 'Trace Lineage'}</span>
           </button>
+          </HoverTip>
           {hasTraceHistory && (
+            <HoverTip className="inline-flex" label="Pick up a trace you ran earlier in this view">
             <button
               type="button"
               aria-label="Trace history"
               aria-haspopup="menu"
               aria-expanded={traceHistoryOpen}
               onClick={() => setTraceHistoryOpen(v => !v)}
-              title="Pick up where you left off"
               className={cn(
                 "flex items-center px-1.5 rounded-r-xl border border-l-accent-lineage/20 text-sm transition-all duration-300",
                 "bg-gradient-to-r from-accent-lineage/20 to-purple-500/10 text-accent-lineage border-accent-lineage/40 hover:from-accent-lineage/30 hover:to-purple-500/20 hover:border-accent-lineage/60",
@@ -311,6 +386,7 @@ export function ComprehensionTools({
             >
               <LucideIcons.ChevronDown className={cn('w-3.5 h-3.5 transition-transform', traceHistoryOpen && 'rotate-180')} />
             </button>
+            </HoverTip>
           )}
           {traceHistoryOpen && (
             <TraceHistoryPanel
@@ -350,7 +426,7 @@ export function ComprehensionTools({
 
       {/* Import / Export — one dropdown, both modes. Import is disabled with an explainer outside
           Edit mode; Export is always available (published state is a valid, re-importable backup). */}
-      <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} />
+      <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} thisView={thisView} />
     </>
   )
 }
@@ -378,12 +454,16 @@ export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }
       {canManage && versioningEnabled && (
         <>
           <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
+          <HoverTip
+            className="inline-flex"
+            label={canEnterEdit
+              ? 'Make changes in a private draft'
+              : "Version control isn't set up for this data source yet"}
+            detail={canEnterEdit ? 'The published version stays untouched until you publish' : undefined}
+          >
           <button
             onClick={canEnterEdit ? onEnterEdit : undefined}
             disabled={!canEnterEdit}
-            title={canEnterEdit
-              ? 'Make changes in a private draft — the published version stays untouched'
-              : "Version control isn't set up for this data source yet"}
             className={cn(
               "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
               canEnterEdit
@@ -394,6 +474,7 @@ export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }
             <LucideIcons.PenLine className="w-4 h-4" strokeWidth={2.2} />
             <span>Edit</span>
           </button>
+          </HoverTip>
         </>
       )}
     </>

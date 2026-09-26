@@ -17,7 +17,7 @@ import { restoreVersionAsDraft } from '../../lib/restoreVersion'
 import { OntologyStatusBadge } from '../OntologyStatusBadge'
 import { VersionDiffDialog } from '../dialogs/VersionDiffDialog'
 import { formatDate } from '../../lib/ontology-parsers'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { TablePagination } from '@/components/ui/TablePagination'
 
 interface VersionHistoryPanelProps {
@@ -80,7 +80,7 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
   const navigate = useNavigate()
   const access = useSemanticLayerAccess()
   const mutations = useOntologyMutations()
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
 
   const [compareTarget, setCompareTarget] = useState<OntologyDefinitionResponse | null>(null)
   const [restoreTarget, setRestoreTarget] = useState<OntologyDefinitionResponse | null>(null)
@@ -102,12 +102,12 @@ export function VersionHistoryPanel({ ontology }: VersionHistoryPanelProps) {
         update: (id, req) => mutations.update.mutateAsync({ id, req }),
         listVersions: id => ontologyDefinitionService.listVersions(id),
       })
-      showToast('success', `v${restoreTarget.version}'s content restored into draft v${draft.version}`)
+      notify('success', `v${restoreTarget.version}'s content restored into draft v${draft.version}`)
       setRestoreTarget(null)
       setCompareTarget(null)
       navigate(`/schema/${draft.id}`)
     } catch (err) {
-      showToast('error', `Restore failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Restore failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
       setIsRestoring(false)
     }

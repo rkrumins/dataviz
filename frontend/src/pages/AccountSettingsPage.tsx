@@ -31,7 +31,7 @@ import {
 
 import { AccountCard, AccountShell, EmptyState, useAccountIdentity } from '@/components/account/AccountShell'
 import { pageGeometry } from '@/components/layout/PageContainer'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import {
     STRENGTH_COLORS, STRENGTH_LABELS, MIN_STRENGTH_SCORE, usePasswordStrength,
 } from '@/lib/passwordStrength'
@@ -77,7 +77,7 @@ export function AccountSettingsPage() {
  */
 function AccountSettingsContent() {
     const navigate = useNavigate()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const user = useAuthStore((s) => s.user)
     const applyProfile = useAuthStore((s) => s.applyProfile)
     const logout = useAuthStore((s) => s.logout)
@@ -115,7 +115,7 @@ function AccountSettingsContent() {
             await authService.forgotPassword(user.email)
             setPasswordRequested(true)
         } catch {
-            showToast('error', 'Could not send the request. Try again.')
+            notify('error', 'Could not send the request. Try again.')
         } finally {
             setRequestingPassword(false)
         }
@@ -194,9 +194,9 @@ function AccountSettingsContent() {
                 lastName: updated.lastName,
                 displayName: updated.displayName,
             })
-            showToast('success', 'Profile updated')
+            notify('success', 'Profile updated')
         } catch (err) {
-            showToast('error', (err as Error).message)
+            notify('error', (err as Error).message)
         } finally {
             setSavingProfile(false)
         }
@@ -215,12 +215,12 @@ function AccountSettingsContent() {
         setPasswordError(null)
         try {
             await accountService.changePassword(currentPassword, newPassword)
-            showToast('success', 'Password changed. Sign in again.')
+            notify('success', 'Password changed. Sign in again.')
             // Same teardown as the sign-out-everywhere button above, and
             // for the same reason: changing your password revokes every
             // session, this one included, so a tab that keeps believing
             // it is signed in lands on "You're already signed in as …"
-            // instead of the login form the toast just promised.
+            // instead of the login form the notification just promised.
             // ``PasswordChangeRequired`` always did this; this caller
             // did not.
             await logout()
@@ -237,7 +237,7 @@ function AccountSettingsContent() {
         try {
             await accountService.revokeAllSessions()
         } catch (err) {
-            showToast('error', (err as Error).message)
+            notify('error', (err as Error).message)
             setRevoking(false)
             return
         }

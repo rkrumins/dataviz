@@ -137,5 +137,8 @@ describe('risks that only the world can tell you', () => {
         const r = riskChecks(cfg(), [provider()])
             .find(x => x.field === 'allowLocalLogin')
         expect(r?.message).toMatch(/refused if any active admin/i)
+        // The carve-out is part of the expectation: a system account
+        // neither blocks the switch nor is locked out by it.
+        expect(r?.message).toMatch(/system account/i)
     })
 })

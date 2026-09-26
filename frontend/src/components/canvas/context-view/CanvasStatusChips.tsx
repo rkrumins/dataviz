@@ -5,27 +5,53 @@
  * explains why in its tooltip, and offers an action where one exists.
  *
  * Chips (each hidden when its count is zero):
- *  - "N connections not on canvas" — projected edges whose endpoints
- *    resolve to no rendered entity (unloaded or unassigned).
+ *  - "N flows not on canvas" — projected edges whose endpoints resolve to
+ *    no rendered entity (unloaded or unassigned).
  *  - "N entities not in any layer" — loaded nodes that matched no layer;
  *    popover lists them with click-through to the entity drawer.
- *  - "Showing X of Y connections" — expanded aggregated edges whose
+ *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
  *    underlying detail is truncated; button pages more in.
+ *  - "N placements not found here" — entities placed in the view that this
+ *    graph doesn't hold (typically a view brought in from another
+ *    environment); popover lists them and says what to do.
+ *
+ * Adaptive's "strongest N of M lines" is not here: it is the lineage guide at
+ * the end of the layer strip (LineageGuide).
+ *
+ * Every relationship counted here is a FLOW (the placements chip counts
+ * placements, not relationships): every one of these numbers
+ * comes from `useEdgeProjection`, which drops containment edges in all
+ * three of its sections, or from `useExternalDegrees`, which asks the
+ * server for lineage types only. Nothing structural can reach a chip.
+ *
+ * Every count here names its unit too; the words come from
+ * `connections/connectionUnits.ts` so no two chips can drift apart. The one
+ * exception is the unresolved chip: its number is mixed-granularity (one
+ * per collapsed rollup in section A, one per raw edge in B and C), so it
+ * names the kind and deliberately claims no unit.
  *
  * Visual language matches the column overflow chips: rounded-full glass,
  * backdrop blur, soft border, quiet colors.
  */
 import { useState } from 'react'
 import * as PopoverPrimitive from '@radix-ui/react-popover'
-import { Unlink, Layers, ListPlus, GitBranch, Focus } from 'lucide-react'
+import { Unlink, Layers, ListPlus, Focus, SearchX } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
+import { unitMeaning, unitNoun } from './connections/connectionUnits'
 
 const CHIP_CLASS =
   'pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md ' +
   'border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink-muted bg-canvas-elevated/80'
 
 const UNASSIGNED_LIST_CAP = 50
+
+/** A placement in the view whose entity this graph doesn't hold. */
+export interface NotFoundPlacement {
+  urn: string
+  label: string
+  layerName?: string
+}
 
 export interface UnassignedEntity {
   id: string
@@ -41,9 +67,7 @@ export function CanvasStatusChips({
   aggDetailTotal,
   onLoadMoreDetail,
   viewScope = 'all',
-  adaptiveShown,
-  adaptiveTotal,
-  onShowAllEdges,
+
   focusShown,
   focusTotal,
   onOpenFocusLens,
@@ -52,6 +76,7 @@ export function CanvasStatusChips({
   onLoadMoreRoots,
   selectedExternal,
   onPreviewExternal,
+  notFoundPlacements = [],
 }: {
   /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
   unresolvedEdgeCount: number
@@ -69,10 +94,7 @@ export function CanvasStatusChips({
    * instead of implying something is missing or broken.
    */
   viewScope?: 'all' | 'curated'
-  /** Adaptive ambient budget: strongest flows shown / total projected. */
-  adaptiveShown?: number
-  adaptiveTotal?: number
-  onShowAllEdges?: () => void
+
   /** Focus fan cap: strongest incident edges shown / node's full fan. */
   focusShown?: number
   focusTotal?: number
@@ -87,26 +109,40 @@ export function CanvasStatusChips({
   selectedExternal?: { in: number; out: number } | null
   /** Feature-flagged: fetch + show the out-of-view partners in the Lens. */
   onPreviewExternal?: () => void
+  /** Placements the load asked the graph for and didn't get: kept in the view, marked not found. */
+  notFoundPlacements?: NotFoundPlacement[]
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
+  const [notFoundOpen, setNotFoundOpen] = useState(false)
 
   const showUnresolved = unresolvedEdgeCount > 0
   const showUnassigned = unassignedEntities.length > 0
   const showAggDetail = aggDetailTotal > aggDetailShown && aggDetailShown > 0
-  const showAdaptive = (adaptiveTotal ?? 0) > (adaptiveShown ?? 0) && (adaptiveShown ?? 0) > 0
   const showFocus = (focusTotal ?? 0) > (focusShown ?? 0) && (focusShown ?? 0) > 0
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
   const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
+  const showNotFound = notFoundPlacements.length > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus && !showRoots && !showExternal) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showRoots && !showExternal && !showNotFound) return null
 
   return (
-    // Bottom-RIGHT, beneath the Edge Legend — the bottom-left corner
-    // belongs to the first layer column's cards, and a status surface
-    // must never occlude data.
+    // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
+    // to the LEFT of the dock's own column — the bottom-left corner belongs
+    // to the first layer column's cards, and a status surface must never
+    // occlude data.
+    //
+    // Clear of the dock horizontally, not merely under it: the dock is w-80
+    // at right:1rem (16px–336px from the edge) and paints an opaque body at
+    // z-40, so a cluster right-aligned at right-3 was covered chip-for-chip
+    // — 'Load more' and the unassigned-entities popover both dead — whenever
+    // a panel was open. z-50 would not fix it; the chips would then paint
+    // over the panel's own rows. 1rem dock offset + 20rem width + 0.5rem gap.
     <div
-      className="absolute right-3 z-30 flex flex-col items-end gap-1.5 pointer-events-none"
-      style={{ bottom: 'calc(1rem + var(--trace-dock-height, 0px))' }}
+      className="absolute z-30 flex flex-col items-end gap-1.5 pointer-events-none"
+      style={{
+        bottom: 'calc(0.5rem + var(--edge-legend-height, 0px) + var(--trace-dock-height, 0px) + var(--selection-bar-height, 0px))',
+        right: 'calc(1rem + 20rem + 0.5rem)',
+      }}
       data-canvas-interactive
     >
       {showExternal && (
@@ -117,8 +153,8 @@ export function CanvasStatusChips({
               <p className="font-semibold mb-1">This entity has lineage beyond this view</p>
               <p className="text-ink-muted">
                 {selectedExternal!.in.toLocaleString()} upstream and{' '}
-                {selectedExternal!.out.toLocaleString()} downstream connection
-                {selectedExternal!.in + selectedExternal!.out === 1 ? '' : 's'} exist in the
+                {selectedExternal!.out.toLocaleString()} downstream{' '}
+                {unitNoun(selectedExternal!.in + selectedExternal!.out, 'flows')} exist in the
                 data source but lead to entities outside this view&apos;s scope.
                 That&apos;s expected for a curated view — it is NOT missing data.
                 Add those entities to the view, or run a Trace, to see them.
@@ -177,51 +213,19 @@ export function CanvasStatusChips({
         </InfoTooltip>
       )}
 
-      {showAdaptive && (
-        <InfoTooltip
-          side="right"
-          content={
-            <div>
-              <p className="font-semibold mb-1">Adaptive edge density</p>
-              <p className="text-ink-muted">
-                Showing the {adaptiveShown!.toLocaleString()} strongest flows of{' '}
-                {adaptiveTotal!.toLocaleString()} on this canvas. The in/out markers on
-                each entity summarize the rest — hover or select an entity to focus its
-                connections, or show everything.
-              </p>
-            </div>
-          }
-        >
-          <div className={CHIP_CLASS}>
-            <GitBranch className="w-3 h-3 text-accent-lineage/80" />
-            <span>
-              Top <span className="tabular-nums">{adaptiveShown!.toLocaleString()}</span> of{' '}
-              <span className="tabular-nums">{adaptiveTotal!.toLocaleString()}</span> flows
-            </span>
-            {onShowAllEdges && (
-              <button
-                type="button"
-                className="ml-1 px-1.5 py-0.5 rounded-md text-accent-lineage hover:bg-accent-lineage/10 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                onClick={onShowAllEdges}
-              >
-                Show all
-              </button>
-            )}
-          </div>
-        </InfoTooltip>
-      )}
-
       {showFocus && (
         <InfoTooltip
           side="right"
           content={
             <div>
-              <p className="font-semibold mb-1">Large connection fan</p>
+              <p className="font-semibold mb-1">Large flow fan</p>
               <p className="text-ink-muted">
-                This entity has {focusTotal!.toLocaleString()} connections — showing the{' '}
+                This entity touches {focusTotal!.toLocaleString()}{' '}
+                {unitNoun(focusTotal!, 'lines')} — showing the{' '}
                 {focusShown!.toLocaleString()} strongest on canvas. The Lens lists every
-                connection, grouped and searchable.
+                one, grouped and searchable.
               </p>
+              <p className="text-ink-muted/70 mt-1">{unitMeaning('lines')}</p>
             </div>
           }
         >
@@ -229,7 +233,8 @@ export function CanvasStatusChips({
             <Focus className="w-3 h-3 text-accent-lineage/80" />
             <span>
               Strongest <span className="tabular-nums">{focusShown!.toLocaleString()}</span> of{' '}
-              <span className="tabular-nums">{focusTotal!.toLocaleString()}</span>
+              <span className="tabular-nums">{focusTotal!.toLocaleString()}</span>{' '}
+              {unitNoun(focusTotal!, 'lines')}
             </span>
             {onOpenFocusLens && (
               <button
@@ -250,7 +255,7 @@ export function CanvasStatusChips({
           content={
             <div>
               <p className="font-semibold mb-1">
-                {unresolvedEdgeCount.toLocaleString()} connection{unresolvedEdgeCount === 1 ? '' : 's'}{' '}
+                {unresolvedEdgeCount.toLocaleString()} flow{unresolvedEdgeCount === 1 ? '' : 's'}{' '}
                 {viewScope === 'curated' ? 'lead outside this view' : 'not shown'}
               </p>
               {viewScope === 'curated' ? (
@@ -258,13 +263,13 @@ export function CanvasStatusChips({
                   This view is a curated subset of the data source — these links
                   reference entities that aren&apos;t part of the view&apos;s
                   assignments. That&apos;s expected; add those entities to the
-                  view to see the connections.
+                  view to see the flows.
                 </p>
               ) : (
                 <p className="text-ink-muted">
                   These edges reference entities that aren&apos;t loaded on the canvas
                   or aren&apos;t assigned to any layer. Load or assign those entities
-                  to see the connections.
+                  to see the flows.
                 </p>
               )}
             </div>
@@ -274,7 +279,7 @@ export function CanvasStatusChips({
             <Unlink className={cn('w-3 h-3', viewScope === 'curated' ? 'text-sky-400/80' : 'text-amber-500/80')} />
             <span className="tabular-nums">{unresolvedEdgeCount.toLocaleString()}</span>
             <span className="text-ink-muted/70">
-              {viewScope === 'curated' ? 'connections outside this view' : 'connections not on canvas'}
+              {viewScope === 'curated' ? 'flows outside this view' : 'flows not on canvas'}
             </span>
           </div>
         </InfoTooltip>
@@ -326,12 +331,53 @@ export function CanvasStatusChips({
         </PopoverPrimitive.Root>
       )}
 
+      {showNotFound && (
+        <PopoverPrimitive.Root open={notFoundOpen} onOpenChange={setNotFoundOpen}>
+          <PopoverPrimitive.Trigger asChild>
+            <button type="button" className={`${CHIP_CLASS} cursor-pointer hover:scale-105 active:scale-95 transition-transform`}>
+              <SearchX className="w-3 h-3 text-amber-500" />
+              {/* The space is for screen readers: the flex gap separates them on screen. */}
+              <span className="tabular-nums">{notFoundPlacements.length.toLocaleString()}</span>{' '}
+              <span>{notFoundPlacements.length === 1 ? 'placement' : 'placements'} not found here</span>
+            </button>
+          </PopoverPrimitive.Trigger>
+          <PopoverPrimitive.Portal>
+            <PopoverPrimitive.Content
+              side="top"
+              align="start"
+              sideOffset={6}
+              className="z-[9999] w-80 rounded-lg border border-glass-border bg-canvas-elevated shadow-xl shadow-black/40 p-2"
+            >
+              <p className="px-1.5 text-[11.5px] font-semibold text-ink">Placed in this view, but not in this graph</p>
+              <p className="px-1.5 pt-0.5 pb-2 text-[11px] text-ink-muted leading-relaxed">
+                Usually a view brought in from another environment. They’re kept, and appear as soon as the entity
+                arrives here. To remove them, edit the view and see Assignments.
+              </p>
+              <div className="max-h-64 overflow-y-auto custom-scrollbar">
+                {notFoundPlacements.slice(0, UNASSIGNED_LIST_CAP).map(p => (
+                  <div key={p.urn} className="px-1.5 py-1 flex items-center gap-2 min-w-0" title={p.urn}>
+                    <span className="truncate text-[11.5px] text-ink">{p.label}</span>
+                    {p.layerName && <span className="ml-auto flex-shrink-0 text-[10px] text-ink-muted">{p.layerName}</span>}
+                  </div>
+                ))}
+              </div>
+              {notFoundPlacements.length > UNASSIGNED_LIST_CAP && (
+                <p className="px-1.5 pt-1.5 text-[10px] text-ink-muted">
+                  +{(notFoundPlacements.length - UNASSIGNED_LIST_CAP).toLocaleString()} more
+                </p>
+              )}
+            </PopoverPrimitive.Content>
+          </PopoverPrimitive.Portal>
+        </PopoverPrimitive.Root>
+      )}
+
       {showAggDetail && (
         <div className={CHIP_CLASS}>
           <ListPlus className="w-3 h-3 text-sky-500/80" />
           <span>
             Showing <span className="tabular-nums">{aggDetailShown.toLocaleString()}</span> of{' '}
-            <span className="tabular-nums">{aggDetailTotal.toLocaleString()}</span> connections
+            <span className="tabular-nums">{aggDetailTotal.toLocaleString()}</span>{' '}
+            {unitNoun(aggDetailTotal, 'flows')}
           </span>
           {onLoadMoreDetail && (
             <button

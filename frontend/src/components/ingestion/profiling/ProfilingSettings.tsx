@@ -22,7 +22,7 @@ import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
-    BellRing, Database, Info, Loader2, Timer, TriangleAlert, X,
+    BellRing, Database, Info, Layers, Loader2, Timer, TriangleAlert, X,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -32,6 +32,7 @@ import { PROFILING_KEY, useProfilingPolicy } from '@/hooks/useProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import { Segmented } from './BoardFilters'
 import { INHERIT_DEFAULT, type ProfilingPolicy } from '@/types/profiling'
+import { MOTION } from '@/lib/motion'
 import {
     RetentionSummary, RetentionTimeline, StorageEstimate, type Tiers,
 } from './RetentionTimeline'
@@ -105,6 +106,8 @@ export function ProfilingSettings({
 
     const [draft, setDraft] = useState<Draft>({})
     const [alerts, setAlerts] = useState<{ enabled: boolean; severity: string } | null>(null)
+    //: null = untouched, so a save sends nothing for it.
+    const [rollups, setRollups] = useState<boolean | null>(null)
     const [saving, setSaving] = useState(false)
     const [saveError, setSaveError] = useState<string | null>(null)
 
@@ -127,8 +130,8 @@ export function ProfilingSettings({
     const editable = Boolean(policy?.editable)
 
     const patch = useMemo(
-        () => (policy ? buildPatch(draft, policy, alerts) : {}),
-        [draft, policy, alerts],
+        () => (policy ? buildPatch(draft, policy, alerts, rollups) : {}),
+        [draft, policy, alerts, rollups],
     )
     const dirty = Object.keys(patch).length > 0
 
@@ -229,7 +232,7 @@ export function ProfilingSettings({
                 aria-label="Profiling policy"
                 initial={{ x: '100%' }}
                 animate={{ x: 0 }}
-                transition={{ type: 'spring', stiffness: 400, damping: 40 }}
+                transition={MOTION.modalSpring}
                 className={cn(
                     'fixed right-0 top-0 z-50 h-full w-full max-w-lg',
                     'flex flex-col bg-canvas border-l border-glass-border shadow-2xl',
@@ -336,6 +339,13 @@ export function ProfilingSettings({
                             ))}
                         </PolicyCard>
 
+                        <RollupSection
+                            policy={policy}
+                            value={rollups}
+                            setValue={setRollups}
+                            editable={editable}
+                        />
+
                         <AlertSection
                             policy={policy}
                             draft={draft}
@@ -366,6 +376,7 @@ export function ProfilingSettings({
                                     enabled: policy.alertsEnabled,
                                     severity: policy.alertMinSeverity,
                                 })
+                                setRollups(policy.includeDerivedEdges)
                             }}
                             className="text-xs font-semibold text-ink-muted hover:text-ink"
                         >
@@ -668,12 +679,82 @@ function seed(policy: ProfilingPolicy): Draft {
 /** What changed, in the shape the API takes. A field cleared to blank sends
  *  the inherit sentinel rather than being omitted — omitting it would leave
  *  the old override in place, which is the opposite of what clearing means. */
+function RollupSection({
+    policy, value, setValue, editable,
+}: {
+    policy: ProfilingPolicy
+    value: boolean | null
+    setValue: (next: boolean) => void
+    editable: boolean
+}) {
+    const on = value ?? policy.includeDerivedEdges
+
+    return (
+        <PolicyCard
+            icon={Layers}
+            accent="text-violet-600 dark:text-violet-400 bg-violet-500/10"
+            title="What the breakdowns show"
+            note="A display choice, not a retention one: nothing here changes what is captured or kept, so switching it either way needs no backfill."
+        >
+            <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-ink">
+                        Rolled-up lineage
+                    </p>
+                    <p className="text-[11px] text-ink-muted mt-0.5 max-w-md leading-relaxed">
+                        The <code>AGGREGATED</code> relationships this platform
+                        builds and every view draws from. Shown, so a
+                        relationship-type breakdown adds up to what the graph
+                        store actually holds. Turn it off to see only the types
+                        you ingested — the total then reads lower than the store
+                        by the size of the rollup.
+                    </p>
+                </div>
+                {editable ? (
+                    <button
+                        type="button"
+                        role="switch"
+                        aria-checked={on}
+                        aria-label="Rolled-up lineage"
+                        onClick={() => setValue(!on)}
+                        className={cn(
+                            'relative h-5 w-9 shrink-0 rounded-full transition-colors',
+                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500',
+                            on ? 'bg-indigo-600' : 'bg-glass-border',
+                        )}
+                    >
+                        <span className={cn(
+                            'absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform',
+                            on ? 'translate-x-[1.125rem]' : 'translate-x-0.5',
+                        )} />
+                    </button>
+                ) : (
+                    <span className="shrink-0 text-sm font-bold text-ink">
+                        {on ? 'Shown' : 'Hidden'}
+                    </span>
+                )}
+            </div>
+            <p className="text-[11px] text-ink-muted leading-relaxed">
+                The platform's bookkeeping ENTITIES stay hidden either way.
+                Those are singletons written per run and wiped by purges —
+                nobody asked to see them, and nothing is lost by leaving them
+                out.
+            </p>
+        </PolicyCard>
+    )
+}
+
+
 function buildPatch(
     draft: Draft,
     policy: ProfilingPolicy,
     alerts: { enabled: boolean; severity: string } | null,
+    rollups: boolean | null,
 ): Record<string, number | boolean | string> {
     const patch: Record<string, number | boolean | string> = {}
+    if (rollups !== null && rollups !== policy.includeDerivedEdges) {
+        patch.includeDerivedEdges = rollups
+    }
     if (alerts) {
         if (alerts.enabled !== policy.alertsEnabled) patch.alertsEnabled = alerts.enabled
         if (alerts.severity !== policy.alertMinSeverity) {

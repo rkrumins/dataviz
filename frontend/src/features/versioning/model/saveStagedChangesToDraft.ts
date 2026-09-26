@@ -15,7 +15,7 @@ import { applyGraphChanges, type GraphChangeOp } from '@/services/versioningApiS
 import type { StagedChange } from '@/store/stagedChangesStore'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { useCanvasStore } from '@/store/canvas'
-import { stagedChangesToOps } from './stagedChangesToOps'
+import { stagedChangesToOps, unsavedNodeFields } from './stagedChangesToOps'
 
 export interface DraftSaveTarget {
   wsId: string
@@ -38,7 +38,12 @@ export interface DraftSaveTarget {
 export async function saveStagedChangesToDraft(
   changes: StagedChange[],
   target: DraftSaveTarget,
-): Promise<{ commitId?: string | null }> {
+): Promise<{ commitId?: string | null; unsaved: string[] }> {
+  // Node fields the op mapper cannot carry (see `unsavedNodeFields`). Returned rather than
+  // dropped: an edit made only of these produces ZERO ops, and a zero-op save resolves exactly
+  // like a commit — which is how a green "Saved to draft." came to stand over a save that never
+  // left the browser. The caller says what actually happened.
+  const unsaved = [...new Set(changes.flatMap(unsavedNodeFields))].sort()
   // ── Build ONE op batch ──────────────────────────────────────────────────────────────────────
   // Layer placement (assign_layer / move_to_layer / reorder_nodes) is VIEW config, not graph data — it produces
   // ZERO graph ops. It persists to the view's referenceLayout.assignments via persistReferenceLayout;
@@ -49,7 +54,7 @@ export async function saveStagedChangesToDraft(
     // No graph ops (e.g. a layer-only save), but a discarded create may still have left an inert
     // temp-urn placement in the view config — prune it so it doesn't accumulate.
     target.pruneTempAssignments?.()
-    return { commitId: null }
+    return { commitId: null, unsaved }
   }
 
   // ── One atomic commit ───────────────────────────────────────────────────────────────────────
@@ -64,9 +69,11 @@ export async function saveStagedChangesToDraft(
   // touching the node), so an edge between two fresh nodes would otherwise be silently dropped.
   const cs = useCanvasStore.getState()
   const userEdges = changes.flatMap((c) => {
-    if (c.type !== 'create_edge') return []
-    const opt = cs.edges.find((e) => e.id === c.targetId)
-    return opt ? [{ c, opt }] : []
+    // A user-drawn edge, or the new parent link of a move (its pending id rode as the op's `ref`).
+    const pendingId = c.type === 'create_edge' ? c.targetId
+      : c.type === 'move_entity' ? (c.after as { edgeId?: string | null }).edgeId : null
+    const opt = pendingId ? cs.edges.find((e) => e.id === pendingId) : undefined
+    return opt && pendingId ? [{ c: { ...c, targetId: pendingId }, opt }] : []
   })
 
   for (const c of changes) {
@@ -87,6 +94,10 @@ export async function saveStagedChangesToDraft(
   // Re-add user-drawn edges with the real edge id + resolved endpoints (the swapped nodes now carry
   // their real urns).
   if (userEdges.length > 0) {
+    // Swap, never duplicate: the pending copy goes before the real one is added.
+    for (const { c, opt } of userEdges) {
+      if (resolveRef(c.targetId) !== opt.id) useCanvasStore.getState().removeEdge(opt.id)
+    }
     useCanvasStore.getState().addEdges(userEdges.map(({ c, opt }) => ({
       ...opt,
       id: resolveRef(c.targetId),
@@ -96,7 +107,7 @@ export async function saveStagedChangesToDraft(
     })))
   }
 
-  return { commitId: res.commitId ?? null }
+  return { commitId: res.commitId ?? null, unsaved }
 }
 
 /** Swap a just-created entity's optimistic temp node for its real minted id — generic over how the

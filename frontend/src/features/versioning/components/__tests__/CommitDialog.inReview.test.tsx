@@ -18,9 +18,10 @@ vi.mock('../../hooks/useVersioning', () => ({
   usePublishBranch: () => ({ mutate: publishMutate, isPending: false }),
   useOpenMergeRequest: () => ({ mutate: openMrMutate, isPending: false }),
   useLivePrForBranch: () => ({ livePr, pending: false }),
+  useBranchViewChanges: () => ({ data: undefined, isLoading: false }),
 }))
 vi.mock('@/store/auth', () => ({ usePermission: () => true }))
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast: vi.fn() }) }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
 vi.mock('@/store/branchStore', () => ({
   useBranchStore: (sel: (s: unknown) => unknown) => sel({ switchToMain: vi.fn() }),
 }))

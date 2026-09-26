@@ -53,6 +53,7 @@ import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { patchEdge, deleteEdge as apiDeleteEdge } from '@/services/edgeApi'
 import { useFeature } from '@/store/features'
 import { cn } from '@/lib/utils'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { MOTION } from '@/lib/motion'
 
 // ============================================
@@ -794,7 +795,7 @@ function EdgeCard({
                         className="text-xs font-medium uppercase tracking-wider"
                         style={{ color }}
                     >
-                        {edgeType}
+                        {edgeTypeCopy(edgeType)?.label ?? edgeType}
                     </span>
                     {label && (
                         <div className="text-2xs text-ink-muted truncate">{label}</div>

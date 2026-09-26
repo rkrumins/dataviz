@@ -276,7 +276,10 @@ describe('LineageNeighbors — counts', () => {
     const consumersCard = screen.getByText('Data Consumers').closest('button')!
     expect(within(sourcesCard).getByText('2')).toBeInTheDocument()
     expect(within(consumersCard).getByText('1')).toBeInTheDocument()
-    expect(screen.getByText(/3 connections/)).toBeInTheDocument()
+    // The header states its unit: these are connected entities (one per
+    // neighbor and kind of relationship), NOT the canvas's lines and NOT
+    // the underlying relationship total.
+    expect(screen.getByText(/3 connected entities/)).toBeInTheDocument()
   })
 
   it('excludes containment edges from the lineage counts', () => {
@@ -610,7 +613,498 @@ describe('on-demand source fetch', () => {
       render(<LineageNeighbors nodeId="focal-x" />)
       // The store alone has NO edges for this node — the count must come
       // from the source fetch, merged exactly like the Lens does it.
-      await waitFor(() => expect(screen.getByText('1 connection')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('1 connected entity')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Headline counts come from the closure walk — the Lens's own source
+// ---------------------------------------------------------------------------
+
+/** A closure response shaped like the wire, with the partners it found. */
+function closure(upstream: string[], downstream: string[], extra: Record<string, unknown> = {}) {
+  return {
+    nodes: [],
+    edges: [],
+    containmentEdges: [],
+    upstreamUrns: new Set(upstream),
+    downstreamUrns: new Set(downstream),
+    focus: { urn: FOCAL, level: 1, entityType: 'table' },
+    effectiveLevel: 1,
+    isInherited: false,
+    truncated: false,
+    frontierUp: [],
+    frontierDown: [],
+    seedTruncated: false,
+    ...extra,
+  }
+}
+
+const countIn = (label: string) =>
+  within(screen.getByText(label).closest('button')!)
+
+describe('LineageNeighbors — counts agree with the Focus Lens', () => {
+  it('shows the server walk counts, not the locally-held edge count', async () => {
+    // The store holds ONE upstream edge; the walk found three partners.
+    // The drawer must report the walk — that is what the Lens shows.
+    seedCanvas([makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO')])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async () => closure(['u1', 'u2', 'u3'], ['d1']),
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('3')).toBeInTheDocument())
+      expect(countIn('Data Consumers').getByText('1')).toBeInTheDocument()
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('does not count a synthetic AGGREGATED rollup the walk strips', async () => {
+    // Locally this reads as two connections; the closure strips its own
+    // materialised rollups and reports the one real flow.
+    seedCanvas([
+      makeEdge('real', UPSTREAM_A, FOCAL, 'FLOWS_TO'),
+      makeEdge('rollup', PARENT, FOCAL, 'AGGREGATED'),
+    ])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async () => closure(['u1'], []),
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('1')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('counts what a container reaches through its contents', async () => {
+    // A container carries no edges of its own — its columns do. The store
+    // sees nothing on the focal; the walk seeds from its contents.
+    seedCanvas([])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async () => closure(['via-a-column'], []),
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('1')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('says the count is a floor while the walk is still counting', async () => {
+    seedCanvas([])
+    let fine = 0
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      // The first page owes the rest of the focal's contents (a seed
+      // cursor, as the server sends it); the rest has not landed.
+      traceClosure: (req: { grain?: string }) => {
+        if (req.grain === 'coarse') return Promise.resolve(closure([], [], { grain: 'coarse' }))
+        fine++
+        return fine === 1
+          ? Promise.resolve(closure(['u1'], [], { truncated: true, seedTruncated: true, seedCursor: 's:next' }))
+          : new Promise(() => {})
+      },
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(screen.getByText(/at least/i)).toBeInTheDocument())
+      expect(countIn('Data Sources').getByText('1+')).toBeInTheDocument()
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('falls back to the locally-derived count when the provider cannot walk', async () => {
+    seedCanvas([makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO')])
+    // No traceClosure on this provider at all.
+    mockProviderHolder.current = { getEdges: async () => [], getNodes: async () => [] }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('1')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Jumping to a partner the canvas has never loaded
+// ---------------------------------------------------------------------------
+
+/**
+ * `useLensLineage` fetches partners lens-locally and deliberately writes
+ * nothing to the canvas store, so a partner inside a container that was never
+ * expanded exists in this panel and nowhere else. The drawer resolves its
+ * entity FROM THE STORE and closes when it cannot — so clicking such a row
+ * looked like nothing happened at all.
+ */
+describe('LineageNeighbors — clicking a partner that is not on the canvas', () => {
+  it('reveals it first, then opens the drawer on it', async () => {
+    const user = userEvent.setup()
+    useCanvasStore.setState({
+      nodes: [makeNode('focal-y', 'dataset', 'Focal Y')],
+      edges: [],
+      visibleEdges: [],
+      drawerNodeId: null,
+    } as never)
+    mockProviderHolder.current = {
+      getEdges: async (q: { sourceUrns?: string[] }) =>
+        q.sourceUrns?.length
+          ? [{ id: 'sy1', sourceUrn: 'focal-y', targetUrn: 'far-away', edgeType: 'FLOWS_TO' }]
+          : [],
+      getNodes: async () => [
+        { urn: 'far-away', entityType: 'dataset', displayName: 'Far Away', properties: {} },
+      ],
+    }
+    try {
+      const onFocusNode = vi.fn()
+      render(<LineageNeighbors nodeId="focal-y" onFocusNode={onFocusNode} />)
+
+      // The partner arrives from the fetch, not from the store.
+      await waitFor(() => expect(screen.getByText('1 connected entity')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Consumers'))
+      const row = await screen.findByText('Far Away')
+      await user.click(row)
+
+      // The REVEAL is what loads it — the panel must not seed a lean copy,
+      // because addGraph keeps the first version of a node id it is given and
+      // a copy without childCount would permanently shadow the real one,
+      // leaving the container with no children and no way to expand.
+      await waitFor(() => expect(onFocusNode).toHaveBeenCalledWith('far-away'))
+      expect(useCanvasStore.getState().nodes.some(n => n.id === 'far-away')).toBe(false)
+      // And the drawer still swaps, once the reveal has had its turn.
+      await waitFor(() => expect(useCanvasStore.getState().drawerNodeId).toBe('far-away'))
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+})
+
+describe('LineageNeighbors — show all on canvas', () => {
+  it('reveals every partner in a direction in one click', async () => {
+    const user = userEvent.setup()
+    seedCanvas([
+      makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO'),
+      makeEdge('e2', UPSTREAM_B, FOCAL, 'FLOWS_TO'),
+    ])
+    const onLocateMany = vi.fn()
+    render(<LineageNeighbors nodeId={FOCAL} onLocateMany={onLocateMany} />)
+
+    await user.click(screen.getByRole('button', { name: /show all 2 on canvas/i }))
+    expect(onLocateMany).toHaveBeenCalledWith([UPSTREAM_A, UPSTREAM_B])
+  })
+
+  it('offers nothing to reveal when a direction is empty', () => {
+    seedCanvas([makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO')])
+    render(<LineageNeighbors nodeId={FOCAL} onLocateMany={vi.fn()} />)
+
+    // One direction has a partner, the other has none.
+    expect(screen.getAllByRole('button', { name: /show all \d+ on canvas/i })).toHaveLength(1)
+  })
+
+  it('is absent when the canvas cannot reveal', () => {
+    seedCanvas([makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO')])
+    render(<LineageNeighbors nodeId={FOCAL} />)
+
+    expect(screen.queryByRole('button', { name: /show all/i })).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The list is the walk's too — grouped by system, opened in place
+// ---------------------------------------------------------------------------
+
+/**
+ * The reported bug: "747 Data Sources" over "No flows in this direction".
+ * The count came from the walk and the list from the canvas's own edges, so
+ * a table whose partners were not loaded listed nothing — and one whose
+ * partners sat under a collapsed root listed that root alone. The list now
+ * comes from the same walk as the count, whatever the canvas holds.
+ */
+describe('LineageNeighbors — partners from the walk, by system', () => {
+  const gnode = (urn: string, displayName: string) => ({ urn, entityType: 'table', displayName, properties: {} })
+  // Focal FOCAL ⊃ f1, f2. Web Analytics ⊃ Customers ⊃ c1, c2 ; Web Analytics ⊃ Orders ⊃ o1.
+  const walkPage = () => closure(['c1', 'c2', 'o1'], [], {
+    nodes: [
+      gnode(FOCAL, 'Focal Table'), gnode('f1', 'account_id'), gnode('f2', 'amount'),
+      gnode('wa', 'Web Analytics'), gnode('customers', 'Customers'), gnode('orders', 'Orders'),
+      gnode('c1', 'customer_id'), gnode('c2', 'customer_name'), gnode('o1', 'order_total'),
+    ],
+    containmentEdges: [
+      { sourceUrn: FOCAL, targetUrn: 'f1' }, { sourceUrn: FOCAL, targetUrn: 'f2' },
+      { sourceUrn: 'wa', targetUrn: 'customers' }, { sourceUrn: 'wa', targetUrn: 'orders' },
+      { sourceUrn: 'customers', targetUrn: 'c1' }, { sourceUrn: 'customers', targetUrn: 'c2' },
+      { sourceUrn: 'orders', targetUrn: 'o1' },
+    ],
+    edges: [
+      { id: 'x1', sourceUrn: 'c1', targetUrn: 'f1', edgeType: 'FLOWS_TO' },
+      { id: 'x2', sourceUrn: 'c2', targetUrn: 'f1', edgeType: 'FLOWS_TO' },
+      { id: 'x3', sourceUrn: 'o1', targetUrn: 'f2', edgeType: 'FLOWS_TO' },
+    ],
+  })
+
+  function installWalk() {
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async (req: { grain?: string }) =>
+        req.grain === 'coarse' ? closure([], [], { grain: 'coarse' }) : walkPage(),
+    }
+  }
+
+  it('lists every partner the count counts, though the canvas holds none of them', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    installWalk()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      // The drawer counts the ENTITIES that feed it — Customers and Orders.
+      await waitFor(() => expect(countIn('Data Sources').getByText('2')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Sources'))
+
+      // The one system opens by itself; its entities are listed with how
+      // many flows each carries.
+      expect(screen.queryByText('No flows in this direction')).not.toBeInTheDocument()
+      expect(screen.getByText('Web Analytics')).toBeInTheDocument()
+      expect(screen.getByText('Customers')).toBeInTheDocument()
+      expect(screen.getByText('Orders')).toBeInTheDocument()
+
+      // An entity opens in place, down to the fields a flow joins — and
+      // which of the focal's own fields each one feeds.
+      await user.click(screen.getByRole('button', { name: 'Expand Customers' }))
+      expect(screen.getByText('customer_id')).toBeInTheDocument()
+      expect(screen.getByText('customer_name')).toBeInTheDocument()
+      expect(screen.getAllByText('feeds account_id')).toHaveLength(2)
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('names the flows and the system under the count', async () => {
+    seedCanvas([])
+    installWalk()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(screen.getByText('Upstream · 3 underlying flows in Web Analytics')).toBeInTheDocument())
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('"Show on canvas" brings in the entities beside this one, not every field', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    installWalk()
+    const onLocateMany = vi.fn()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} onLocateMany={onLocateMany} />)
+      const button = await screen.findByText('Show all 2 on canvas')
+      await user.click(button)
+      expect(onLocateMany).toHaveBeenCalledTimes(1)
+      expect([...onLocateMany.mock.calls[0][0]].sort()).toEqual(['customers', 'orders'])
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('a search finds a field inside a closed entity and opens the way to it', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    installWalk()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('2')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Sources'))
+      await user.type(screen.getByLabelText('Search data sources'), 'order_t')
+      expect(screen.getByText('order_total')).toBeInTheDocument()
+      expect(screen.queryByText('Customers')).not.toBeInTheDocument()
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A level at a time — nothing loads until it is asked for
+// ---------------------------------------------------------------------------
+
+describe('LineageNeighbors — lineage loads a level at a time', () => {
+  const gnode = (urn: string, displayName: string) => ({ urn, entityType: 'table', displayName, properties: {} })
+  const coarsePage = () => closure(['customers', 'orders'], [], {
+    grain: 'coarse',
+    nodes: [gnode(FOCAL, 'Focal Table'), gnode('wa', 'Web Analytics'), gnode('customers', 'Customers'), gnode('orders', 'Orders')],
+    containmentEdges: [{ sourceUrn: 'wa', targetUrn: 'customers' }, { sourceUrn: 'wa', targetUrn: 'orders' }],
+    edges: [
+      { id: 'agg1', sourceUrn: 'customers', targetUrn: FOCAL, edgeType: 'AGGREGATED', properties: { weight: 2 } },
+      { id: 'agg2', sourceUrn: 'orders', targetUrn: FOCAL, edgeType: 'AGGREGATED', properties: { weight: 1 } },
+    ],
+  })
+  const walkPage = () => closure(['c1', 'c2', 'o1'], [], {
+    nodes: [
+      gnode(FOCAL, 'Focal Table'), gnode('f1', 'account_id'), gnode('f2', 'amount'),
+      gnode('wa', 'Web Analytics'), gnode('customers', 'Customers'), gnode('orders', 'Orders'),
+      gnode('c1', 'customer_id'), gnode('c2', 'customer_name'), gnode('o1', 'order_total'),
+    ],
+    containmentEdges: [
+      { sourceUrn: FOCAL, targetUrn: 'f1' }, { sourceUrn: FOCAL, targetUrn: 'f2' },
+      { sourceUrn: 'wa', targetUrn: 'customers' }, { sourceUrn: 'wa', targetUrn: 'orders' },
+      { sourceUrn: 'customers', targetUrn: 'c1' }, { sourceUrn: 'customers', targetUrn: 'c2' },
+      { sourceUrn: 'orders', targetUrn: 'o1' },
+    ],
+    edges: [
+      { id: 'x1', sourceUrn: 'c1', targetUrn: 'f1', edgeType: 'FLOWS_TO' },
+      { id: 'x2', sourceUrn: 'c2', targetUrn: 'f1', edgeType: 'FLOWS_TO' },
+      { id: 'x3', sourceUrn: 'o1', targetUrn: 'f2', edgeType: 'FLOWS_TO' },
+    ],
+  })
+
+  function install() {
+    const calls = { coarse: 0, fine: 0 }
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async (req: { grain?: string }) => {
+        if (req.grain === 'coarse') { calls.coarse++; return coarsePage() }
+        calls.fine++
+        return walkPage()
+      },
+    }
+    return calls
+  }
+
+  it('opens with the rollups alone — which entities feed it, and how many flows', async () => {
+    seedCanvas([])
+    const calls = install()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('2')).toBeInTheDocument())
+      expect(screen.getByText('Upstream · 3 underlying flows in Web Analytics')).toBeInTheDocument()
+      // Not one column was fetched to say so.
+      expect(calls.coarse).toBe(1)
+      expect(calls.fine).toBe(0)
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('opening an entity fetches the columns — once; the next entity opens without a request', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    const calls = install()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('2')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Sources'))
+      expect(screen.getByText('Customers')).toBeInTheDocument()
+      expect(calls.fine).toBe(0)
+
+      await user.click(screen.getByRole('button', { name: 'Expand Customers' }))
+      expect(await screen.findByText('customer_id')).toBeInTheDocument()
+      expect(screen.getAllByText('feeds account_id')).toHaveLength(2)
+      const walked = calls.fine
+      expect(walked).toBeGreaterThan(0)
+
+      await user.click(screen.getByRole('button', { name: 'Expand Orders' }))
+      expect(await screen.findByText('order_total')).toBeInTheDocument()
+      expect(calls.fine).toBe(walked)
+      // The count never moved while the columns landed.
+      expect(countIn('Data Sources').getByText('2')).toBeInTheDocument()
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('a column — a leaf — walks at once: its own flows are its lineage', async () => {
+    seedCanvas([], { nodes: [makeNode(FOCAL, 'column', 'order_id', { childCount: 0 })] })
+    const calls = install()
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(calls.fine).toBeGreaterThan(0))
+      // The drawer asks no rollup page of its own for a leaf — the one
+      // coarse request here is the walk's own first-paint leg.
+      expect(calls.coarse).toBeLessThanOrEqual(1)
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Clicking a partner opens the canvas down ITS path — at any depth
+// ---------------------------------------------------------------------------
+
+describe('LineageNeighbors — a partner opens down its own path', () => {
+  const gnode = (urn: string, displayName: string) => ({ urn, entityType: 'table', displayName, properties: {} })
+  // Five levels: Web Analytics › Warehouse › Sales › Customers › customer_id.
+  const deepWalk = () => closure(['c1'], [], {
+    nodes: [
+      gnode(FOCAL, 'Focal Table'), gnode('f1', 'account_id'),
+      gnode('wa', 'Web Analytics'), gnode('wh', 'Warehouse'), gnode('sales', 'Sales'), gnode('customers', 'Customers'), gnode('c1', 'customer_id'),
+    ],
+    containmentEdges: [
+      { sourceUrn: FOCAL, targetUrn: 'f1' },
+      { sourceUrn: 'wa', targetUrn: 'wh' }, { sourceUrn: 'wh', targetUrn: 'sales' },
+      { sourceUrn: 'sales', targetUrn: 'customers' }, { sourceUrn: 'customers', targetUrn: 'c1' },
+    ],
+    edges: [{ id: 'x1', sourceUrn: 'c1', targetUrn: 'f1', edgeType: 'FLOWS_TO' }],
+  })
+
+  it('hands the reveal the column\'s whole spine, outermost first', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async (req: { grain?: string }) => (req.grain === 'coarse' ? closure([], [], { grain: 'coarse' }) : deepWalk()),
+    }
+    const onRevealPath = vi.fn(async (urn: string) => ({ landedOn: 'hit' as const, urn, displayName: urn }))
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} onRevealPath={onRevealPath} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('1')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Sources'))
+      // The system opens by itself; open the levels down to the column.
+      for (const name of ['Warehouse', 'Sales', 'Customers']) {
+        const expand = screen.queryByRole('button', { name: `Expand ${name}` })
+        if (expand) await user.click(expand)
+      }
+      await user.click(await screen.findByText('customer_id'))
+      await waitFor(() => expect(onRevealPath).toHaveBeenCalledTimes(1))
+      const [urn, path] = onRevealPath.mock.calls[0] as unknown as [string, Array<{ urn: string }>]
+      expect(urn).toBe('c1')
+      expect(path.map((a) => a.urn)).toEqual(['wa', 'wh', 'sales', 'customers'])
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('a reveal that reaches nothing says so in place, and the drawer stays', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async (req: { grain?: string }) => (req.grain === 'coarse' ? closure([], [], { grain: 'coarse' }) : deepWalk()),
+    }
+    const onRevealPath = vi.fn(async () => ({ landedOn: 'ancestor' as const, urn: '', displayName: '' }))
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} onRevealPath={onRevealPath} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('1')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Sources'))
+      await user.click(screen.getByText('Web Analytics'))
+      expect(await screen.findByText(/doesn.t hold that entity/)).toBeInTheDocument()
     } finally {
       mockProviderHolder.current = null
     }

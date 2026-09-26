@@ -26,13 +26,30 @@ import { useCanvasStore } from '@/store/canvas'
 import { toCanvasNode } from '@/hooks/useGraphHydration'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 
+/**
+ * What a reveal actually achieved.
+ *
+ * Reported rather than thrown: every existing caller ignores the return
+ * value, and turning a routine "this view does not hold that entity" into a
+ * rejection would surface as an unhandled error in all of them. A caller that
+ * cares — the drawer, which is about to open a panel on this id — checks it.
+ */
+export type RevealOutcome =
+  /** On the canvas and focused (or focus deliberately skipped). */
+  | 'revealed'
+  /** The walk finished and it is still not there: a view that does not hold
+   *  it, a chain that could not be completed, or a synthetic rollup endpoint. */
+  | 'unavailable'
+
 export interface UseRevealNodeOptions {
   /** Map of childId → parentId (containment). Built by useContainmentHierarchy. */
   parentMap: Map<string, string>
   /** Setter for the canvas's local `expandedNodes` state. */
   setExpandedNodes: React.Dispatch<React.SetStateAction<Set<string>>>
   /** Fetch a single parent's children + containment edges into the store. */
-  loadChildren: (parentId: string) => Promise<void>
+  /** Resolves when the page has landed; its summary (ContextViewCanvas's
+   *  announced variant returns one) is not this walk's to report. */
+  loadChildren: (parentId: string) => Promise<unknown>
   /** Canvas-specific pan/scroll adapter. */
   focus: (nodeId: string) => void
   /** Backend lookup for the deep-hidden case. */
@@ -48,7 +65,7 @@ export interface RevealOptions {
 
 export function useRevealNode(
   opts: UseRevealNodeOptions,
-): (nodeId: string, revealOpts?: RevealOptions) => Promise<void> {
+): (nodeId: string, revealOpts?: RevealOptions) => Promise<RevealOutcome> {
   // Stash latest opts in a ref so the returned reveal function has a stable
   // identity yet always sees the current parentMap / setters. Without this
   // the callback would re-create every time the parent canvas re-runs the
@@ -56,7 +73,7 @@ export function useRevealNode(
   const optsRef = useRef(opts)
   optsRef.current = opts
 
-  return useCallback(async (nodeId: string, revealOpts?: RevealOptions) => {
+  return useCallback(async (nodeId: string, revealOpts?: RevealOptions): Promise<RevealOutcome> => {
     const { setExpandedNodes, loadChildren, focus, provider } = optsRef.current
 
     // ── 1. Make sure the target node exists in the store ──────────────────
@@ -65,21 +82,20 @@ export function useRevealNode(
 
     if (!inStore(nodeId)) {
       try {
-        const ancestors = await provider.getAncestors(nodeId) // root → target.parent
+        const ancestors = await provider.getAncestors(nodeId)
+        // Order-agnostic: the server answers NEAREST-FIRST, the name here once
+        // promised root-first, and neither matters — `loadChildren` fetches a
+        // level's page by urn and needs nothing above it to be settled first.
+        // What DID matter was that an ancestor arrives with `childCount: null`
+        // (the /ancestors read cannot count), which the hydrator used to read
+        // as "childless" and skip. See useGraphHydration.
         for (const a of ancestors) {
-          if (!inStore(a.urn)) {
-            // Drop the ancestor in with a placeholder position so it's
-            // available for the containment-edge wiring on the loadChildren
-            // call below. Layout will reposition it.
-            useCanvasStore.getState().addNodes([toCanvasNode(a)])
-          }
-          // Fetch this level's children — pulls in the next ancestor (or
-          // the target itself, at the deepest call) plus the containment
-          // edges that populate parentMap.
+          const node = toCanvasNode(a)
+          if (!inStore(node.id)) useCanvasStore.getState().addNodes([node])
           try {
-            await loadChildren(a.urn)
+            await loadChildren(node.id)
           } catch (err) {
-            console.warn('[useRevealNode] loadChildren failed for', a.urn, err)
+            console.warn('[useRevealNode] loadChildren failed for', node.id, err)
           }
         }
       } catch (err) {
@@ -87,10 +103,11 @@ export function useRevealNode(
       }
     }
 
-    // If the target STILL isn't in the store, the chain fetch failed or
-    // the id is synthetic (aggregated-edge endpoint). Bail before focus —
-    // the drawer-swap already fired, that's the useful side effect.
-    if (!inStore(nodeId)) return
+    // If the target STILL isn't in the store, the chain fetch failed or the
+    // id is synthetic (an aggregated-edge endpoint). SAY SO rather than
+    // returning quietly: the caller opens a panel on this id, and a panel
+    // pointed at an entity nobody loaded renders nothing at all.
+    if (!inStore(nodeId)) return 'unavailable'
 
     // ── 2. Expand every collapsed ancestor in one update ──────────────────
     // Re-read the freshly-updated parentMap from optsRef in case loadChildren
@@ -140,5 +157,6 @@ export function useRevealNode(
     // node; for batch reveals it marks each one in place so users can
     // spot them after the trailing fitView/scrollTo settles.
     useCanvasStore.getState().pulseNode(nodeId)
+    return 'revealed'
   }, [])
 }

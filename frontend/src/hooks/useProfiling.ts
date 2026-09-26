@@ -14,7 +14,9 @@
  * open could never pick up a newer snapshot. A token is stable across renders
  * AND moves with time, because the server resolves it.
  */
-import { useQuery, type UseQueryResult } from '@tanstack/react-query'
+import {
+    useMutation, useQuery, useQueryClient, type UseQueryResult,
+} from '@tanstack/react-query'
 
 import { profilingService, type SeriesQuery } from '@/services/profilingService'
 import type {
@@ -141,6 +143,33 @@ export function useProfilingFindings(
         refetchOnWindowFocus: true,
         retry: 1,
         retryDelay: 800,
+    })
+}
+
+export function useAcknowledgeFindings() {
+    const queryClient = useQueryClient()
+    return useMutation({
+        mutationFn: profilingService.acknowledgeMany,
+        onSuccess: (data, variables) => {
+            // Seed the caller's OWN key before invalidating, the way the
+            // inbox bell does: the response is the post-mutation listing for
+            // exactly these params, so the count stops flickering back to the
+            // number it just cleared.
+            queryClient.setQueryData(
+                [
+                    PROFILING_KEY, 'findings', variables.dataSourceId ?? null,
+                    variables.openOnly ?? false,
+                    variables.limit ?? null, variables.offset ?? 0,
+                ],
+                data,
+            )
+            // ...then the prefix, because the drawer fetches findings TWICE —
+            // once for the band and once for the chart's markers — on
+            // different keys.
+            queryClient.invalidateQueries({
+                queryKey: [PROFILING_KEY, 'findings'],
+            })
+        },
     })
 }
 

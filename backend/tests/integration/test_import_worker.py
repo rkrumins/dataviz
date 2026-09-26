@@ -86,6 +86,19 @@ async def _run() -> None:
             import_format="ndjson", source_uri=key, branch_id=branch_id)
         summary2 = await ie.run_import(job2["job_id"])
         assert summary2 == {"new": 0, "updated": 0, "unchanged": 3, "deleted": 0, "invalid": 0}, summary2
+
+        # the same rows as ONE JSON array but declared ndjson (a client's format mix-up): the worker
+        # sniffs the leading '[' and parses it as json — still the idempotent no-op, not a failure.
+        key3 = storage_key("ws1", G["graph_id"], "job", "source.json")
+
+        async def _array():
+            yield json.dumps(lines).encode()
+        await store.put_stream(key3, _array())
+        job3 = await ie.create_import_job(
+            workspace_id="ws1", data_source_id=G["graph_id"], graph_id=gid, actor="u",
+            import_format="ndjson", source_uri=key3, branch_id=branch_id)
+        summary3 = await ie.run_import(job3["job_id"])
+        assert summary3 == {"new": 0, "updated": 0, "unchanged": 3, "deleted": 0, "invalid": 0}, summary3
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

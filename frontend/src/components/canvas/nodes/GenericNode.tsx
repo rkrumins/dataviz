@@ -5,6 +5,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useSchemaStore } from '@/store/schema'
 import { useViewEntityType, useViewEntityVisual } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
+import { usePersonaMode } from '@/store/persona'
+import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { cn } from '@/lib/utils'
 import { generateColorFromType, generateIconFallback } from '@/lib/type-visuals'
 import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
@@ -35,8 +37,6 @@ interface GenericNodeData extends EntityInstance {
   isUpstream?: boolean
   isDownstream?: boolean
   isFocus?: boolean
-  // Persona (business | technical display mode)
-  persona?: 'business' | 'technical'
   // Ghost state (unknown/placeholder node)
   isGhost?: boolean
   // Canvas-agnostic callbacks (injected by the canvas host)
@@ -70,7 +70,7 @@ export const GenericNode = memo(function GenericNode({
     ? (rawData.data as GenericNodeData)
     : (rawData as unknown as GenericNodeData)
 
-  const { isTraced, isDimmed, isUpstream, isDownstream, isFocus, persona = 'business' } = entityData
+  const { isTraced, isDimmed, isUpstream, isDownstream, isFocus } = entityData
 
   // Canvas-agnostic callbacks — injected via data props by the host canvas
   const onLoadMore = entityData.onLoadMore
@@ -108,17 +108,29 @@ export const GenericNode = memo(function GenericNode({
       .sort((a, b) => a.displayOrder - b.displayOrder)
   }, [entityType])
 
-  // Get the primary label - handle both nested and flat structures
+  // Name + secondary line — handle both nested and flat structures.
+  // The persona comes from the store: `data.persona` was a prop no canvas ever
+  // set, so the technical branch below could never run.
   const entityFields = (entityData.data || entityData) as Record<string, unknown>
-  const primaryLabel = entityFields['name'] as string ||
-    entityFields['label'] as string ||
-    entityFields['businessLabel'] as string ||
-    entityData.id || 'Unknown'
+  const persona = usePersonaMode()
+  const primaryLabel = resolveEntityName(entityFields, persona, entityData.id || 'Unknown')
 
-  // Secondary label based on persona
-  const secondaryLabel: string | undefined = persona === 'technical'
-    ? (entityFields['urn'] as string) || (entityFields['qualified_name'] as string)
-    : (entityFields['description'] as string)
+  // Technical mode REVEALS the technical identity — it must not swallow the
+  // description. Computing it "in place of" the description hid the
+  // description on every card the moment the toggle went on (a populated URN
+  // that differs from the name is near-universal: 200,000 of 200,000 nodes on
+  // `perf-load-test-solidatus`), which is the opposite of what the toggle
+  // promises. Cards from `md` up already have room for a second `text-2xs`
+  // line, so they show both; `sm` has room for one, so there — and only
+  // there — the technical identity substitutes.
+  const description = typeof entityFields['description'] === 'string'
+    ? entityFields['description']
+    : undefined
+  const technicalLine = technicalSubtitle(entityFields, persona)
+  const showsBothLines = visual.size !== 'xs' && visual.size !== 'sm'
+  const secondaryLabel: string | undefined = showsBothLines
+    ? description
+    : (technicalLine ?? description)
 
   // Size classes
   const sizeClasses = {
@@ -376,10 +388,26 @@ export const GenericNode = memo(function GenericNode({
               )}
             </div>
 
-            {/* Secondary Label (persona-driven) */}
+            {/* Secondary Label — the description (or, on a one-line `sm` card,
+                whichever of the two the persona asks for) */}
             {secondaryLabel && visual.size !== 'xs' && (
-              <p className="text-2xs text-ink-muted truncate mt-0.5">
+              <p className="text-2xs text-ink-muted truncate mt-0.5" title={secondaryLabel}>
                 {secondaryLabel}
+              </p>
+            )}
+
+            {/* Technical identity (Business/Technical toggle), revealed UNDER
+                the description wherever the card has room for two lines.
+                Head-truncated for the same reason the context-view row is:
+                sibling URNs share a long prefix, so an end ellipsis would cut
+                the only part that differs. */}
+            {showsBothLines && technicalLine && (
+              <p
+                className="text-2xs font-mono text-ink-muted/70 truncate mt-0.5"
+                style={{ direction: 'rtl', textAlign: 'left' }}
+                title={technicalLine}
+              >
+                {technicalLine}
               </p>
             )}
           </div>
@@ -525,7 +553,6 @@ export const GenericNode = memo(function GenericNode({
     prevD.isFocus === nextD.isFocus &&
     prevD.isGhost === nextD.isGhost &&
     prevD.childCount === nextD.childCount &&
-    prevD.persona === nextD.persona &&
     prevD._hiddenCount === nextD._hiddenCount &&
     prevD.onLoadMore === nextD.onLoadMore &&
     prevD.onToggleExpanded === nextD.onToggleExpanded

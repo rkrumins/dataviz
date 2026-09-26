@@ -327,13 +327,20 @@ describe('silent sign-in', () => {
             at: Date.now(), reason: 'Your session there has ended.',
         }))
         renderLogin()
-        expect(await screen.findByText(/could not be renewed automatically/i))
-            .toBeInTheDocument()
-        expect(screen.queryByText(/try signing in again/i))
-            .not.toBeInTheDocument()
+        // Wait on the Retry button, not on the banner. The banner's first
+        // sentence is rendered by BOTH branches (LoginPage.tsx:1102-1120)
+        // — it is the " Try signing in again." tail and the Retry button
+        // that differ, on `portalHasAffordance`, which is false only once
+        // the awaited login context lands. So awaiting the shared sentence
+        // let the absence assertion run against the pre-context render,
+        // where local login is still assumed on.
         expect(
             await screen.findByRole('button', { name: /^retry$/i }),
         ).toBeInTheDocument()
+        expect(screen.getByText(/could not be renewed automatically/i))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/try signing in again/i))
+            .not.toBeInTheDocument()
     })
 })
 
@@ -416,6 +423,47 @@ describe('email-first with a gateway connection', () => {
         expect(navigate).not.toHaveBeenCalledWith(
             expect.stringContaining('login'), expect.anything(),
         )
+    })
+
+    it('a miss says so and reveals the ways in, instead of doing nothing', async () => {
+        // The domain matches no connection (none configured, or a typo).
+        // This used to be a silent return — with the password form and
+        // the button row tucked behind disclosures, Enter did nothing
+        // at all, which reads as a broken page.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        resolveEmailDomain.mockResolvedValue({ provider: null })
+        renderLogin()
+        const emailInput = await screen.findByLabelText(/^email$/i)
+        await userEvent.type(emailInput, 'ada@personal.example{enter}')
+
+        expect(await screen.findByText(
+            /don't recognise that email's domain/i,
+        )).toBeInTheDocument()
+        // Every way in is on the table now: the password form opens…
+        expect(await screen.findByLabelText(/password/i)).toBeInTheDocument()
+        // …the gateway button stands, and nothing signed in silently.
+        expect(screen.getByRole('button', { name: /corporate gateway/i }))
+            .toBeInTheDocument()
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+
+    it('a failed resolve is a miss, not a crash', async () => {
+        // The endpoint is rate-limited like /login; a 429 (or outage)
+        // lands in the same spoken miss rather than a silent return.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        resolveEmailDomain.mockRejectedValue(new Error('429'))
+        renderLogin()
+        const emailInput = await screen.findByLabelText(/^email$/i)
+        await userEvent.type(emailInput, 'ada@corp.example{enter}')
+
+        expect(await screen.findByText(
+            /don't recognise that email's domain/i,
+        )).toBeInTheDocument()
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
     })
 })
 

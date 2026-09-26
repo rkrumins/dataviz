@@ -114,10 +114,15 @@ def _wire_collector(monkeypatch, events: list[str], *, stored_row=None):
     async def fake_prime(payload):
         primes.append(payload)
 
+    async def fake_property_key_count():
+        events.append("io:property_key_count")
+        return 41
+
     provider = SimpleNamespace(
         get_schema_stats=fake_get_schema_stats,
         get_stats=fake_get_stats,
         prime_stats_cache=fake_prime,
+        property_key_count=fake_property_key_count,
     )
 
     async def fake_graph_schema(stats=None, ontology=None):
@@ -202,11 +207,15 @@ async def test_deep_facet_one_fetch_and_session_discipline(monkeypatch) -> None:
     _assert_session_discipline(events, expected_opens=3)
 
     # Derived counts flow to the provider-cache prime and the full upsert.
+    # propertyKeyCount rides along: the primed payload OVERWRITES the shared
+    # provider stats cache verbatim, so a key missing here reads as "not
+    # measured" for every later get_stats caller.
     expected_payload = {
         "nodeCount": 5,
         "edgeCount": 3,
         "entityTypeCounts": {"dataset": 5},
         "edgeTypeCounts": {"CONTAINS": 3},
+        "propertyKeyCount": 41,
     }
     assert primes == [expected_payload]
     assert upserts_counts == []

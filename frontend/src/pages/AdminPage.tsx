@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
     Activity, BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
-    UserCog, Users2, KeyRound, Network, History, Palette, Database, LineChart,
+    UserCog, Users2, KeyRound, Network, History, Palette, Database, LineChart, HardDrive,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavPermission, usePermissionsReady } from '@/store/auth'
@@ -37,6 +37,7 @@ const adminGroups = [
             { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
             { path: 'infrastructure', label: 'Infrastructure', icon: Activity, description: 'Service health & data-plane status' },
             { path: 'redis', label: 'Redis & Graph Store', icon: Database, description: 'Streams, cache & default graph endpoints — auth, TLS, provenance' },
+            { path: 'graph-store', label: 'Graph store', icon: HardDrive, description: 'Shards, replicas, memory and where every graph lives' },
             { path: 'branding', label: 'Branding', icon: Palette, description: 'App name, logo & theme' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
             { path: 'telemetry', label: 'Telemetry', icon: LineChart, description: 'Product usage & content gaps' },
@@ -78,6 +79,7 @@ export function AdminPage() {
     const overviewVisible       = useNavPermission(useAdminSectionSpec('overview'))
     const infrastructureVisible = useNavPermission(useAdminSectionSpec('infrastructure'))
     const redisVisible = useNavPermission(useAdminSectionSpec('redis'))
+    const graphStoreVisible = useNavPermission(useAdminSectionSpec('graph-store'))
     const brandingVisible      = useNavPermission(useAdminSectionSpec('branding'))
     const featuresVisible      = useNavPermission(useAdminSectionSpec('features'))
     const telemetryVisible     = useNavPermission(useAdminSectionSpec('telemetry'))
@@ -92,6 +94,7 @@ export function AdminPage() {
         overview:       overviewVisible,
         infrastructure: infrastructureVisible,
         redis:         redisVisible,
+        'graph-store': graphStoreVisible,
         branding:      brandingVisible,
         features:      featuresVisible,
         telemetry:     telemetryVisible,

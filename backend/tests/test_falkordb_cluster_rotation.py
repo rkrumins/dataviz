@@ -21,6 +21,8 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+
+from backend.common.adapters import ProviderFailingOver
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from backend.app.providers.falkordb_connection import FalkorDBConnConfig
@@ -85,8 +87,18 @@ async def test_cluster_silent_node_death_reresolves_topology(monkeypatch):
 @pytest.mark.asyncio
 async def test_cluster_dark_node_keeps_rebuilding_until_budget(monkeypatch):
     """Whole shard still failing over: every post-redial retry re-resolves,
-    and the final failure still propagates (breaker opens; the half-open
-    probe repeats this sequence and recovers once failover completes)."""
+    and the exhausted attempt reports a PAUSE rather than a raw connection
+    error.
+
+    A refused connection was already classified this way; a reset was not, and
+    the difference mattered because one provider spans two graphs — its source
+    and its projection — which keyslot to two different shards. A SIGTERM'd pod
+    resets every established connection at once, so three of them from ONE
+    shard opened the breaker for the whole provider, taking down reads of its
+    other graph on a shard that never stopped answering. ProviderFailingOver is
+    registered as a logical exception, so the breaker does not count it, the
+    replicas keep serving, and the client gets a Retry-After instead of a 503
+    that says the store is gone."""
     p = _cluster_provider()
     counts = _instrument(p, monkeypatch)
 
@@ -96,7 +108,7 @@ async def test_cluster_dark_node_keeps_rebuilding_until_budget(monkeypatch):
         calls["n"] += 1
         raise RedisConnectionError("Timeout connecting to server")
 
-    with pytest.raises(RedisConnectionError):
+    with pytest.raises(ProviderFailingOver):
         await p._run_guarded(call)
     assert calls["n"] == 4          # initial + 3 bounded retries
     assert counts["ensure"] == 1

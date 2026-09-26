@@ -95,7 +95,17 @@ class TextPredicate(_Base):
 PropertyOp = Literal[
     "eq", "neq", "gt", "gte", "lt", "lte",
     "in", "notIn", "contains", "startsWith", "endsWith", "between",
+    "notContains", "containsAll", "withinLast",
+    "isSet", "isNotSet", "isEmpty", "isNotEmpty",
 ]
+"""Every operator a property comparison takes. What each one means — its
+value shape, the types it compares as, how a missing key and a list value
+are treated — is ``backend/common/search_semantics.OPERATOR_TABLE``."""
+
+ValueType = Literal["auto", "string", "number", "boolean", "date"]
+"""How a comparison reads stored values (``search_semantics``). ``auto``
+lets the value decide: text compares as text, numbers as numbers — the
+behaviour every predicate written before types existed was built on."""
 
 EdgeClass = Literal["lineage", "containment", "any"]
 """Edge-class selector shared by DegreePredicate, WithinHopsPredicate,
@@ -106,16 +116,26 @@ via the active ontology — never hardcoded relationship names."""
 class PropertyPredicate(_Base):
     """Typed comparison against a single user-property.
 
-    After the storage refactor, user properties are native FalkorDB
-    fields, so these compile to indexed ``WHERE n.<key> <op> $val`` —
-    no Python post-filter. ``between`` expects ``value`` to be a
-    two-element list ``[lo, hi]``.
+    ``value_type`` says how stored values are read — under ``number`` a
+    stored "15" is 15, under ``string`` a stored 15 is "15" — and the
+    comparison holds for any stored kind, a list included (it matches when
+    an element does). ``value`` is shaped by ``op``: one value, a list
+    (``in`` / ``notIn`` / ``containsAll``), ``[lo, hi]`` (``between``), an
+    ISO duration such as ``"P30D"`` (``withinLast``) or nothing (``isSet``,
+    ``isEmpty`` and their negations). An integer beyond 2^53 is best sent
+    as its digits in a string with ``value_type='number'``: it is compared
+    exactly. Text comparisons are case-insensitive unless
+    ``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /
+    ``notContains`` match entities without the key. The full contract is
+    ``backend/common/search_semantics``.
     """
     kind: Literal["property"] = "property"
     key: str = Field(min_length=1, max_length=128)
     op: PropertyOp = "eq"
     value: Any = None
+    value_type: ValueType = Field("auto", alias="valueType")
     case_sensitive: bool = Field(False, alias="caseSensitive")
+    include_missing: bool = Field(False, alias="includeMissing")
 
 
 class TagPredicate(_Base):
@@ -136,10 +156,26 @@ class HasPropertyPredicate(_Base):
     Compiles to ``EXISTS(n.<key>)`` (or ``NOT EXISTS`` when ``negate``).
     Native-property storage makes this cheap; pre-refactor this required
     parsing the blob in Python for every node.
+
+    ``key_match`` searches by the NAME instead: ``prefix`` / ``contains``
+    match any user property whose name starts with / contains ``key``,
+    case-insensitively ("a property whose name contains 'owner'").
     """
     kind: Literal["hasProperty"] = "hasProperty"
     key: str = Field(min_length=1, max_length=128)
     negate: bool = False
+    key_match: Literal["exact", "prefix", "contains"] = Field(
+        "exact", alias="keyMatch")
+
+
+class MatchAllPredicate(_Base):
+    """Every entity in scope — "all in this view", "count everything".
+
+    An ``and`` group with no children would mean the same, and the model
+    refuses one on purpose: a client bug that dropped every condition must
+    not quietly match the whole view. Asking for everything is spelled out.
+    """
+    kind: Literal["all"] = "all"
 
 
 class DescendantOfPredicate(_Base):
@@ -159,15 +195,17 @@ class EdgePropertyPredicate(_Base):
     """Typed comparison against a single edge property.
 
     Evaluated against each traversed relationship inside a
-    ``PathPredicate`` or ``WithinHopsPredicate``. Compiles to
-    ``rel.<key> <op> $val`` inside an ``ALL(rel IN relationships(p) …)``
-    block. ``between`` expects ``value`` to be a two-element list
-    ``[lo, hi]``.
+    ``PathPredicate`` or ``WithinHopsPredicate``, inside an
+    ``ALL(rel IN relationships(p) …)`` block. The comparison itself is
+    ``PropertyPredicate``'s — same operators, value shapes and types.
     """
     kind: Literal["edgeProperty"] = "edgeProperty"
     key: str = Field(min_length=1, max_length=128)
     op: PropertyOp = "eq"
     value: Any = None
+    value_type: ValueType = Field("auto", alias="valueType")
+    case_sensitive: bool = Field(False, alias="caseSensitive")
+    include_missing: bool = Field(False, alias="includeMissing")
 
 
 class EdgeHasPropertyPredicate(_Base):
@@ -428,6 +466,7 @@ Predicate = Annotated[
         HasIncomingPredicate,
         HasOutgoingPredicate,
         PathPredicate,
+        MatchAllPredicate,
         GroupPredicate,
     ],
     Field(discriminator="kind"),
@@ -443,6 +482,7 @@ GroupPredicate.model_rebuild()
 AggregationKind = Literal[
     "ancestorType",   # group by the closest ancestor whose type ∈ ancestor_entity_types
     "ancestorLevel",  # group by the ancestor at a given hierarchy depth from scope root
+    "ancestor",       # credit EVERY containment ancestor of every match, uncapped
     "parent",         # group by direct parent (containment edge)
     "tag",            # group by tag value
     "entityType",     # group by the hit's own entity type
@@ -474,7 +514,12 @@ class AggregationSpec(_Base):
                     "property whose values become the bucket keys "
                     "(e.g. 'layer' → one bucket per layer value).",
     )
-    max_buckets: int = Field(50, alias="maxBuckets", ge=1, le=500)
+    max_buckets: int = Field(
+        50, alias="maxBuckets", ge=1, le=20000,
+        description="Bucket ceiling. The headroom above a facet-sized "
+                    "list is for by='ancestor', which needs one bucket "
+                    "per container the canvas can collapse.",
+    )
     sample_hits_per_bucket: int = Field(
         3, alias="sampleHitsPerBucket", ge=0, le=20,
         description="Tiny preview list shown next to each bucket — for the UI's "
@@ -498,6 +543,13 @@ ResultShape = Literal["aggregates", "hits", "both", "paths"]
 
 
 ScopeMode = Literal["visible", "view", "data_source"]
+
+
+# Client-input cap on ``SearchScope.entity_types``. Raised from 32 to
+# 512 (a view's own resolved ontology allow-list can legitimately
+# exceed 32 labels — see ``_stamp_resolved_scope``, which falls back
+# to an unfiltered ``None`` rather than ever raising over this cap).
+SEARCH_SCOPE_ENTITY_TYPES_MAX = 512
 
 
 class SearchScope(_Base):
@@ -555,7 +607,7 @@ class SearchScope(_Base):
             "Optional narrowing hint. Each URN must be a descendant of "
             "(or equal to) one of the view's allowed roots; URNs that "
             "fail validation are dropped server-side. Capped at "
-            "DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 256). The "
+            "DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 5000). The "
             "cap exists to bound the Cypher IN-list size + containment "
             "expansion fanout on multi-domain views with many top-level "
             "containers."
@@ -566,7 +618,7 @@ class SearchScope(_Base):
         description="Clamped to min(client, view.maxDepth) by the resolver.",
     )
     entity_types: Optional[List[str]] = Field(
-        None, alias="entityTypes", max_length=32,
+        None, alias="entityTypes", max_length=SEARCH_SCOPE_ENTITY_TYPES_MAX,
         description=(
             "Optional. Must be ⊆ view's visibleEntityTypes; out-of-set "
             "values cause the request to be rejected with 400."
@@ -672,7 +724,30 @@ class SearchOptions(_Base):
             "(default 10000). Requests can raise this up to "
             "``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the "
             "user explicitly opts into a larger scan. The service "
-            "validator rejects values above the deployment max."
+            "validator rejects values above the deployment max. The "
+            "uncapped engine (``DEEP_SEARCH_ENGINE=v2``) never caps hits or "
+            "counts; it applies only to the facets that still pivot on a "
+            "capped candidate set."
+        ),
+    )
+    wait_ms: Optional[int] = Field(
+        None, alias="waitMs", ge=0, le=120000,
+        description=(
+            "Progressive mode (uncapped engine). Answer after this long "
+            "with what the scan has found so far — ``status: 'running'``, "
+            "provisional hits in their final order, a ``progress`` "
+            "block — and send the SAME request again with ``sessionId`` "
+            "to continue it. Omitted, the request waits up to "
+            "``softDeadlineMs`` for the complete answer."
+        ),
+    )
+    session_id: Optional[str] = Field(
+        None, alias="sessionId", max_length=64,
+        description=(
+            "Continue this search session (from a ``running`` response) "
+            "rather than start a new one. It finishes on the data it "
+            "started on even if the graph changes meanwhile, and says so "
+            "(``stale``). Ignored when it doesn't belong to this query."
         ),
     )
 
@@ -714,6 +789,12 @@ class SearchHighlight(_Base):
     field: str
     snippet: str
     score: float = 0.0
+    ranges: List[List[int]] = Field(
+        default_factory=list,
+        description="``[start, end]`` offsets within ``snippet`` (not "
+                    "within the original field) — the snippet's leading "
+                    "ellipsis is already counted.",
+    )
 
 
 class AncestorRef(_Base):
@@ -779,6 +860,13 @@ class SearchAggregateBucket(_Base):
     ancestor_entity_type: str = Field(alias="ancestorEntityType")
     ancestor_depth_from_scope_root: int = Field(alias="ancestorDepthFromScopeRoot")
     match_count: int = Field(alias="matchCount")
+    type_counts: Optional[Dict[str, int]] = Field(
+        None, alias="typeCounts",
+        description="Per-entity-type breakdown of ``match_count`` — e.g. "
+                    "``{'Column': 12, 'Table': 3}``. Populated by "
+                    "by='ancestor'; None for the kinds that don't "
+                    "compute one.",
+    )
     sample_hits: List[SearchHit] = Field(
         default_factory=list, alias="sampleHits",
     )
@@ -860,11 +948,27 @@ class ScopeDiagnostics(_Base):
     )
 
 
+class SearchProgress(_Base):
+    """How far a running search has got. Node counts are the scan's
+    estimate of what each part of the graph holds, so ``scanned / total``
+    is a fraction to draw, not a count to report."""
+    scanned: int = Field(description="Nodes in the parts already scanned.")
+    total: int = Field(description="Nodes in every part the search scans.")
+    matched: int = Field(description="Matches found so far — exact for the "
+                                     "parts scanned.")
+
+
 class SearchResultPage(_Base):
     """Provider + service response. One inner list in ``aggregates`` per
     requested AggregationSpec."""
     aggregates: Optional[List[List[SearchAggregateBucket]]] = None
-    hits: Optional[List[SearchHit]] = None
+    hits: Optional[List[SearchHit]] = Field(
+        None,
+        description="Ordered by server relevance; do not re-sort by "
+                    "`score`. Ranking runs over the whole candidate set "
+                    "before this page is sliced from it, so `score` is a "
+                    "per-hit annotation, not the key the list is in.",
+    )
     paths: Optional[List[PathHit]] = Field(
         None,
         description="Populated when the request's predicate contains a "
@@ -883,6 +987,12 @@ class SearchResultPage(_Base):
                     "scope check and aggregation/limit. Useful for showing "
                     "'searching X nodes…' captions in the FE.",
     )
+    total_count: Optional[int] = Field(
+        None, alias="totalCount",
+        description="Exact number of matches in scope, independent of the "
+                    "candidate cap; null when the count timed out (UI "
+                    "shows N+).",
+    )
     deadline_exceeded: bool = Field(False, alias="deadlineExceeded")
     elapsed_ms: int = Field(alias="elapsedMs")
     cache_hit: bool = Field(False, alias="cacheHit")
@@ -892,6 +1002,34 @@ class SearchResultPage(_Base):
         description="Resolved-scope + ontology diagnostics. Surfaced on "
                     "every response so the FE can interpret 0-result "
                     "cases without round-tripping to /search/explain.",
+    )
+    # --- Uncapped engine (``DEEP_SEARCH_ENGINE=v2``); null otherwise ---
+    session_id: Optional[str] = Field(
+        None, alias="sessionId",
+        description="The search session this page came from. Send it back "
+                    "as ``options.sessionId`` to continue a running one.",
+    )
+    status: Optional[Literal["running", "complete"]] = Field(
+        None,
+        description="``running``: the scan is not finished — the hits are "
+                    "the best found so far, already in their final order, "
+                    "and ``totalCount`` is null. ``complete``: every match "
+                    "was counted and ranked.",
+    )
+    count_status: Optional[Literal["exact", "lowerBound"]] = Field(
+        None, alias="countStatus",
+        description="Whether ``candidateCount`` is the exact number of "
+                    "matches or only those found so far.",
+    )
+    progress: Optional[SearchProgress] = None
+    data_version: Optional[str] = Field(
+        None, alias="dataVersion",
+        description="The graph data the session read. Opaque.",
+    )
+    stale: bool = Field(
+        False,
+        description="The graph changed after this session started; run "
+                    "the search again for an answer on the current data.",
     )
 
 
@@ -968,7 +1106,7 @@ class SearchDiscoverResult(_Base):
     Used to populate every autocomplete picker in the visual builder.
     """
     labels: Dict[str, SearchDiscoverLabelInfo] = Field(default_factory=dict)
-    blob_only_labels: List[str] = Field(default_factory=list, alias="blobOnlyLabels", description="Labels whose sampled nodes have no native keys (still on pre-W1 blob storage; need migration).")
+    blob_only_labels: List[str] = Field(default_factory=list, alias="blobOnlyLabels", description="Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.")
     missing_containment: bool = Field(False, alias="missingContainment", description="True when the provider has no containment edge types configured — ancestor-based queries will return empty.")
     tag_values: Dict[str, int] = Field(
         default_factory=dict,
@@ -991,7 +1129,257 @@ class SearchDiscoverResult(_Base):
             "edge-aware path-query value pickers."
         ),
     )
+    missing_searchable_text: int = Field(
+        0,
+        alias="missingSearchableText",
+        description=(
+            "Sampled nodes with no n.searchableText — run "
+            "`python -m backend.scripts.migrate_native_properties "
+            "--searchable-text`."
+        ),
+    )
     elapsed_ms: int = Field(0, alias="elapsedMs", description="Discovery query duration in milliseconds.")
+
+
+class SearchValueSuggestion(_Base):
+    """One distinct value of a property and how many times it is stored.
+    ``value`` keeps its stored kind — a 19-digit id is that integer."""
+    value: Any = None
+    count: int = 0
+
+
+class SearchValuesResult(_Base):
+    """Response shape for ``GET /search/values``: a property's most common
+    values across the view's entity types — the value picker's list.
+
+    Suggestions, not statistics: the scan is time-bounded, so ``complete``
+    says whether every type was read and ``truncated`` whether a type had
+    more distinct values than listed (a count may then be an undercount).
+    """
+    key: str
+    values: List[SearchValueSuggestion] = Field(default_factory=list)
+    complete: bool = Field(
+        True, description="Every entity type was read within the time budget.")
+    truncated: bool = Field(
+        False, description="A type had more distinct values than listed.")
+    elapsed_ms: int = Field(0, alias="elapsedMs")
+
+
+# ---------------------------------------------------------------------------
+# Rules: which on-screen entities match, and how many match in all
+# ---------------------------------------------------------------------------
+
+SEARCH_RULE_ITEMS_MAX = 32
+SEARCH_MEMBERSHIP_URNS_MAX = 1000
+
+
+class SearchRuleItem(_Base):
+    """One rule (or saved query) to evaluate: an id the caller chose, and
+    its predicate."""
+    id: str = Field(min_length=1, max_length=128)
+    predicate: Predicate
+
+
+class SearchMembershipRequest(_Base):
+    """``POST /search/membership``: which of these entities — the ones on
+    screen — match which rules. Answers only for entities inside the view's
+    scope; one outside it never matches, whatever it holds."""
+    scope: SearchScope
+    items: List[SearchRuleItem] = Field(min_length=1, max_length=SEARCH_RULE_ITEMS_MAX)
+    urns: List[str] = Field(max_length=SEARCH_MEMBERSHIP_URNS_MAX)
+
+
+class SearchMembershipResult(_Base):
+    matches: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Rule id → the requested urns it matches (in scope).",
+    )
+    errors: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Rule id → why it could not be evaluated. Such a rule "
+                    "matches nothing here.",
+    )
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    elapsed_ms: int = Field(0, alias="elapsedMs")
+
+
+class SearchCountsRequest(_Base):
+    """``POST /search/counts``: how many entities in the view match each
+    rule — exactly, however many. A count over a large view takes more than
+    one request: send the same request again with the returned ``sessions``
+    until every count is complete."""
+    scope: SearchScope
+    items: List[SearchRuleItem] = Field(min_length=1, max_length=SEARCH_RULE_ITEMS_MAX)
+    wait_ms: int = Field(1000, alias="waitMs", ge=0, le=60000)
+    sessions: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Rule id → the session a previous answer returned.",
+    )
+
+
+class SearchRuleCount(_Base):
+    count: int = Field(description="Matches found so far — exact once complete.")
+    status: Literal["running", "complete"]
+    session_id: Optional[str] = Field(None, alias="sessionId")
+    progress: Optional[SearchProgress] = None
+    error: Optional[str] = None
+
+
+class SearchCountsResult(_Base):
+    counts: Dict[str, SearchRuleCount] = Field(default_factory=dict)
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    elapsed_ms: int = Field(0, alias="elapsedMs")
+
+
+# ---------------------------------------------------------------------------
+# Containers: how many matches each one holds
+# ---------------------------------------------------------------------------
+
+SEARCH_ANCESTOR_URNS_MAX = 2000
+
+
+class SearchAncestorCountsRequest(_Base):
+    """``POST /search/ancestor-counts``: how many of a search's matches each
+    of these containers holds, below it at any depth — from the session the
+    search returned. The search's ``ancestor`` facet lists the fullest
+    containers; this answers for any container, e.g. the ones on screen."""
+    scope: SearchScope
+    session_id: str = Field(alias="sessionId", min_length=1, max_length=64)
+    urns: List[str] = Field(max_length=SEARCH_ANCESTOR_URNS_MAX)
+
+
+class SearchAncestorCount(_Base):
+    count: int = Field(description="Matches below this container, at any depth.")
+    type_counts: Dict[str, int] = Field(
+        default_factory=dict, alias="typeCounts",
+        description="The same matches by entity type.")
+    display_name: str = Field("", alias="displayName")
+    entity_type: str = Field("", alias="entityType")
+
+
+class SearchAncestorCountsResult(_Base):
+    counts: Dict[str, SearchAncestorCount] = Field(
+        default_factory=dict, description="Every requested urn → its count (0: none).")
+    status: Literal["complete", "running", "expired"] = Field(
+        description="``complete``: exact. ``running``: the search is still "
+                    "scanning; counts so far. ``expired``: the session is "
+                    "gone — run the search again.")
+
+
+# ---------------------------------------------------------------------------
+# The view's properties, exactly
+# ---------------------------------------------------------------------------
+
+class SearchCatalogRequest(_Base):
+    """``POST /search/catalog``: every property the view's entities carry —
+    on how many, stored as which kinds, with which values — read from every
+    entity in its scope, not a sample. A large view takes more than one
+    request: send it again with the returned ``sessionId`` until ``status``
+    is ``complete``."""
+    scope: SearchScope
+    wait_ms: int = Field(800, alias="waitMs", ge=0, le=60000)
+    session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
+    refresh: bool = Field(
+        False, description="Read the view again, even when a recent catalog of it is at hand.")
+
+
+class SearchCatalogValue(_Base):
+    value: Any = Field(description="As stored — a list's elements count one by one.")
+    kind: str = Field(description="Integer, Float, String, Boolean or List.")
+    count: int = Field(description="Entities holding it.")
+
+
+class SearchCatalogProperty(_Base):
+    key: str
+    count: int = Field(description="Entities carrying the key.")
+    by_entity_type: Dict[str, int] = Field(default_factory=dict, alias="byEntityType")
+    kinds: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Entities per kind the value is stored as. Two kinds compare as two.")
+    min: Optional[Union[int, float]] = Field(None, description="Least numeric value, exact.")
+    max: Optional[Union[int, float]] = Field(None, description="Greatest numeric value, exact.")
+    distinct: int = Field(description="Distinct values — a floor unless ``distinctExact``.")
+    distinct_exact: bool = Field(alias="distinctExact")
+    values: List[SearchCatalogValue] = Field(
+        default_factory=list,
+        description="The values most held, with their exact counts — while the key has at "
+                    "most 1,000 distinct values; past that it is high-cardinality and none "
+                    "are listed.")
+    residual: int = Field(
+        0, description="Entities holding it in propertiesRaw, past the native-key budget.")
+
+
+class SearchCatalogEntityType(_Base):
+    type: str
+    count: int
+
+
+class SearchCatalogTag(_Base):
+    tag: str
+    count: int = Field(description="Entities carrying the tag.")
+
+
+class SearchCatalogResult(_Base):
+    session_id: str = Field(alias="sessionId")
+    status: Literal["running", "complete"]
+    progress: Optional[SearchProgress] = None
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    stale: bool = Field(
+        False, description="Read before the data last changed — see ``asOf``.")
+    as_of: Optional[str] = Field(None, alias="asOf", description="When the read began (UTC).")
+    entities: int = Field(0, description="Entities in the view's scope read so far.")
+    entity_types: List[SearchCatalogEntityType] = Field(default_factory=list, alias="entityTypes")
+    properties: List[SearchCatalogProperty] = Field(default_factory=list)
+    tags: List[SearchCatalogTag] = Field(
+        default_factory=list, description="Every tag, with the entities carrying it.")
+    tagged: Optional[int] = Field(
+        None, description="Entities carrying any tag — null when a unit held too many "
+                          "distinct tag sets to count them.")
+    notes: List[str] = Field(default_factory=list)
+
+
+#: The columns every export row starts with, before the chosen properties.
+SEARCH_EXPORT_BASE_COLUMNS = ("urn", "displayName", "entityType", "qualifiedName")
+SEARCH_EXPORT_COLUMNS_MAX = 200
+
+
+def export_columns(columns: List[str]) -> List[str]:
+    """Every column of an export: the base ones, then the properties asked
+    for, each once."""
+    return list(dict.fromkeys([*SEARCH_EXPORT_BASE_COLUMNS, *(c for c in columns if c)]))
+
+
+class SearchExportRequest(_Base):
+    """``POST /search/exports``: every entity in the view that matches
+    ``predicate``, written to a file — exactly, however many. A large export
+    takes more than one request: send the same request again with the
+    returned ``sessionId`` until ``status`` is ``complete``, then download
+    it from ``GET /search/exports/{sessionId}/download``."""
+    scope: SearchScope
+    predicate: Predicate
+    format: Literal["csv", "ndjson"] = "csv"
+    columns: List[str] = Field(
+        default_factory=list, max_length=SEARCH_EXPORT_COLUMNS_MAX,
+        description="Properties to add to each row, after its urn, name, type and "
+                    "qualified name — ``description`` and ``tags`` included.")
+    wait_ms: int = Field(2000, alias="waitMs", ge=0, le=60000)
+    session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
+
+
+class SearchExportResult(_Base):
+    session_id: str = Field(alias="sessionId")
+    status: Literal["running", "complete"]
+    rows: int = Field(0, description="Rows written so far — every match, once "
+                                     "complete.")
+    progress: Optional[SearchProgress] = None
+    format: Literal["csv", "ndjson"] = "csv"
+    columns: List[str] = Field(default_factory=list, description="Every column, in order.")
+    data_version: Optional[str] = Field(None, alias="dataVersion")
+    filename: Optional[str] = Field(None, description="What the download is saved as.")
+    download_token: Optional[str] = Field(
+        None, alias="downloadToken",
+        description="Once complete: ``GET /search/exports/{sessionId}/download?token=…`` "
+                    "for an hour, for whoever ran the export.")
 
 
 class SearchApiContract(_Base):
@@ -1011,6 +1399,25 @@ class SearchApiContract(_Base):
     search_result_page: Optional[SearchResultPage] = Field(None, alias="searchResultPage")
     search_explain_result: Optional[SearchExplainResult] = Field(None, alias="searchExplainResult")
     search_discover_result: Optional[SearchDiscoverResult] = Field(None, alias="searchDiscoverResult")
+    search_values_result: Optional[SearchValuesResult] = Field(None, alias="searchValuesResult")
+    search_membership_request: Optional[SearchMembershipRequest] = Field(
+        None, alias="searchMembershipRequest")
+    search_membership_result: Optional[SearchMembershipResult] = Field(
+        None, alias="searchMembershipResult")
+    search_counts_request: Optional[SearchCountsRequest] = Field(None, alias="searchCountsRequest")
+    search_counts_result: Optional[SearchCountsResult] = Field(None, alias="searchCountsResult")
+    search_ancestor_counts_request: Optional[SearchAncestorCountsRequest] = Field(
+        None, alias="searchAncestorCountsRequest")
+    search_ancestor_counts_result: Optional[SearchAncestorCountsResult] = Field(
+        None, alias="searchAncestorCountsResult")
+    search_catalog_request: Optional[SearchCatalogRequest] = Field(
+        None, alias="searchCatalogRequest")
+    search_catalog_result: Optional[SearchCatalogResult] = Field(
+        None, alias="searchCatalogResult")
+    search_export_request: Optional[SearchExportRequest] = Field(
+        None, alias="searchExportRequest")
+    search_export_result: Optional[SearchExportResult] = Field(
+        None, alias="searchExportResult")
     # ``ScopeDiagnostics`` is referenced from ``SearchResultPage`` and so
     # already lives in the schema's $defs. Explicitly mentioning it here
     # surfaces it as a top-level codegen target too, so the FE can

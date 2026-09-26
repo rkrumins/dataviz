@@ -474,13 +474,26 @@ async def _maybe_trigger_reaggregation(job: AggregationJobORM) -> None:
             base_url=base, timeout=httpx.Timeout(10.0, connect=3.0),
             headers=internal_auth_headers(),
         ) as client:
+            # The overrides the operator chose in the dialog that asked for
+            # this purge, if any. A bare body silently dropped every one of
+            # them, so a source that only survives at a narrowed scan width
+            # got the purge it asked for and then a rebuild that could not
+            # finish. The projection mode stays ours: it comes off the row,
+            # which is the authority for where this source's graph lives.
+            requested = opts.get("reaggregate")
+            body = {
+                "projectionMode": job.projection_mode or "in_source",
+                "batchSize": 1000,
+            }
+            if isinstance(requested, dict):
+                body.update({
+                    k: v for k, v in requested.items()
+                    if k != "projectionMode" and v is not None
+                })
             resp = await client.post(
                 f"/aggregation/data-sources/{job.data_source_id}/jobs",
                 params={"triggerSource": "post_purge"},
-                json={
-                    "projectionMode": job.projection_mode or "in_source",
-                    "batchSize": 1000,
-                },
+                json=body,
             )
         if resp.status_code in (200, 202):
             logger.info(

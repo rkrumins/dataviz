@@ -4,9 +4,11 @@ import json
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, RootModel
 
 logger = logging.getLogger(__name__)
@@ -19,22 +21,42 @@ from backend.app.models.graph import (
     CreateNodeRequest, CreateNodeResult,
     CreateEdgeRequest, UpdateEdgeRequest, EdgeMutationResult,
     BatchCommandRequest, BatchCommandResult, BatchResponse,
-    ChildrenWithEdgesResult, TopLevelNodesResult,
+    ChildrenWithEdgesResult, NodePage, TopLevelNodesResult,
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import TraceClosureRequest, TraceClosureResult
 from backend.common.interfaces.provider import ProviderConfigurationError
-from backend.app.providers.falkordb_provider import CursorMismatchError
-from backend.common.models.search import SearchQuery
+from backend.app.providers.falkordb_provider import (
+    _FAILOVER_RETRY_AFTER_S,
+    CursorMismatchError,
+)
+from backend.common.models.search import (
+    SearchAncestorCountsRequest,
+    SearchCatalogRequest,
+    SearchCountsRequest,
+    SearchExportRequest,
+    SearchMembershipRequest,
+    SearchQuery,
+)
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.deep_search import (
+    CompileError,
+    SearchRunContext,
+    get_deep_search_settings,
+)
+from backend.common.adapters import ProviderFailingOver
 from backend.app.services.fair_share import get_fair_share
+from backend.app.config import resilience
 from backend.app.services.graph_cache import (
     CacheScope,
     ENDPOINT_AGGREGATED,
+    ENDPOINT_CANVAS_BOOTSTRAP,
+    ENDPOINT_CANVAS_EXPAND,
     ENDPOINT_CHILDREN,
     ENDPOINT_EDGES_BETWEEN,
+    ENDPOINT_NODES_DEGREE,
     ENDPOINT_NODES_QUERY,
     ENDPOINT_TOP_LEVEL,
     ENDPOINT_TRACE,
@@ -43,6 +65,7 @@ from backend.app.services.graph_cache import (
     get_graph_cache,
     get_source_stale_reason,
     graph_ns_hash,
+    invalidate_aggregated_reads,
 )
 from backend.app.services.stats_cache import (
     CacheMiss, SYNTHETIC_SCHEMA_MISSING_FIELDS,
@@ -61,7 +84,11 @@ from backend.insights_service.enqueue import (
 )
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
-router = APIRouter()
+from backend.app.api.raw_path_route import RawPathSegmentRoute
+
+# Graph routes take URNs as path segments, and URNs carry '/': match on the RAW
+# path so an encoded slash stays inside its parameter (see RawPathSegmentRoute).
+router = APIRouter(route_class=RawPathSegmentRoute)
 
 # Workspace-scoped mutation gate. The router-level dependency in api.py
 # already enforces ``workspace:datasource:read`` for every graph route;
@@ -74,18 +101,48 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 # feature. Both fail OPEN (a database hiccup must not black out a product area); only the
 # SECURITY flag (signupEnabled, in auth.py) fails closed.
 require_trace = require_feature("traceEnabled")        # POST /trace*
+require_lineage_rollup = require_feature("canvasLineageRollupEnabled")  # POST /nodes/ancestor-chains
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
+require_export = require_feature("graphExportEnabled")  # /search/exports*
 
 
 # ------------------------------------------------------------------ #
 # Dependency: resolve ContextEngine for the active connection         #
 # ------------------------------------------------------------------ #
 
+async def _admit_graph_request(
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, include_in_schema=False),
+    connectionId: Optional[str] = Query(None, include_in_schema=False),
+):
+    """Per-data-source admission, ahead of the GRAPH_READ session.
+
+    Declared BEFORE the session dependency below because dependencies resolve
+    in declaration order: a request shed here never checks out a session, so
+    one slow data source cannot occupy the pool every OTHER data source also
+    reads through. Each source keeps a reserved share it is never refused —
+    see ``providers/manager.py::admit_graph_request``.
+
+    Keyed on the scope the URL already carries, so nothing has to be looked up
+    before the gate: two data sources in one workspace count apart, and many
+    workspaces on one shared source count together (the direction that errs
+    safe — it can shed earlier, never later).
+    """
+    source_key = f"{ws_id or ''}/{dataSourceId or connectionId or ''}"
+    provider_manager.admit_graph_request(source_key)
+    try:
+        yield
+    finally:
+        provider_manager.release_graph_request(source_key)
+
+
 async def get_context_engine(
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID. Prefer workspace-scoped routes."),
     branchId: Optional[str] = Query(None, description="Opaque draft id (br_...) or 'main'. Omit to target main. Reads and writes both honor it."),
+    # Admission FIRST — before the session, deliberately. See above.
+    _admission: None = Depends(_admit_graph_request),
     # WS0.2 bulkhead: the ContextEngine holds this session for the whole
     # request, including the outbound FalkorDB call. Use the isolated
     # GRAPH_READ pool so a slow/down provider can't starve the WEB pool that
@@ -123,6 +180,23 @@ async def get_context_engine(
         status_code=400,
         detail="scope_required: workspace_id or connection_id is required",
     )
+
+
+async def get_engine_session(
+    engine: ContextEngine = Depends(get_context_engine),
+) -> AsyncSession:
+    """The GRAPH_READ session the engine already holds.
+
+    Endpoints that need a session of their own alongside the engine used to
+    ``Depends(get_graph_read_db_session)`` for it, which checked out a SECOND
+    connection from a pool of 20 for one request — halving the pool's depth
+    for exactly the hottest canvas calls, and breaking the accounting the
+    admission gate rests on (one admission is meant to mean one session).
+    FastAPI caches ``get_context_engine`` per request, so this hands back the
+    same session the engine is using. The two reads are always sequential, so
+    sharing it is safe; an AsyncSession is only unsafe under CONCURRENT use.
+    """
+    return engine._db_session
 
 
 @router.post("/bootstrap", status_code=202)
@@ -418,9 +492,57 @@ async def get_alignment_analysis(
             last_aggregated_at = state.last_aggregated_at
     except Exception:  # aggregation schema absent (test contexts)
         pass
+    # ── Projection watermark, read ONCE and used twice ───────────────────
+    # ``aggregation_status == 'ready'`` records that the batch aggregation job
+    # succeeded — nothing more. For a versioned source the rolled-up
+    # connections are served out of a graph the projector maintains, and while
+    # ``projected_commit_seq`` trails ``main_head_commit_seq`` every main read
+    # falls back to the version log, which holds none of them. Read here rather
+    # than in the findings block below so the ``aggregation`` block itself —
+    # which the unprofiled early return also serves — cannot claim a
+    # canonicalized read path that is not actually being used.
+    proj_behind: Optional[int] = None
+    proj_error: Optional[str] = None
+    proj_checked_at: Optional[str] = None
+    try:
+        from sqlalchemy import select as _select
+        from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+        _proj_row = (await session.execute(
+            _select(ProjectionStateORM.projected_commit_seq,
+                   GraphORM.main_head_commit_seq,
+                   ProjectionStateORM.last_error)
+            .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+            .where(GraphORM.data_source_id == ds_id,
+                   ProjectionStateORM.falkor_graph_name.isnot(None))
+        )).first()
+        if _proj_row is not None:
+            proj_checked_at = datetime.now(timezone.utc).isoformat()
+            proj_error = _proj_row[2] or None
+            if _proj_row[0] is not None and _proj_row[1] is not None:
+                proj_behind = max(0, int(_proj_row[1]) - int(_proj_row[0]))
+    except Exception:  # versioning schema absent (test contexts) — never break Data health
+        _proj_row = None
+    # None means UNKNOWN (not versioned, unpinned, or the store could not be
+    # read) — never "up to date". Only an affirmative reading may set False.
+    projector_current: Optional[bool] = (
+        None if proj_checked_at is None
+        else not (bool(proj_error) or bool(proj_behind))
+    )
+
     # Only a READY aggregation serves reads through the canonicalized
-    # (declared-spelling, index-aligned) graph.
-    canonicalized = agg_status == "ready"
+    # (declared-spelling, index-aligned) graph — AND only while the projection
+    # is current. Behind it, reads come from the version log instead, so
+    # claiming canonicalized here is simply false.
+    canonicalized = agg_status == "ready" and projector_current is not False
+    aggregation_block = {
+        "status": agg_status,
+        "lastAggregatedAt": last_aggregated_at,
+        "canonicalized": canonicalized,
+        "projectorCurrent": projector_current,
+        "projectionCommitsBehind": proj_behind,
+        "projectionLastError": proj_error,
+        "projectionCheckedAt": proj_checked_at,
+    }
 
     if not profiled:
         return {
@@ -429,8 +551,7 @@ async def get_alignment_analysis(
             "ontology": ontology,
             "adoption": None,
             "indexCoverage": None,
-            "aggregation": {"status": agg_status, "lastAggregatedAt": last_aggregated_at,
-                            "canonicalized": canonicalized},
+            "aggregation": aggregation_block,
             "grade": None,
             "findings": [{
                 "severity": "info", "code": "NOT_PROFILED",
@@ -467,6 +588,28 @@ async def get_alignment_analysis(
 
     # ── Findings (predictive — derived from cached data, not observed) ───
     findings = []
+
+    # A STALE PROJECTION IS THE LOUDEST THING THIS PAGE CAN SAY, and until now it
+    # said nothing. When `projected_commit_seq < main_head_commit_seq` the engine
+    # routes EVERY main read through the Postgres branch provider, which holds no
+    # rollups — so aggregated lineage silently disappears from the canvas while
+    # `aggregation_status` still reads "ready" from a cache written before the
+    # projection fell behind. That combination hid a wedged projection for 14
+    # hours: the board drew no lineage on drill-down and every surface claimed
+    # to be healthy.
+    row = _proj_row
+    if row is not None and row[0] is not None and row[1] is not None and row[0] < row[1]:
+        findings.append({
+            "severity": "critical",
+            "code": "PROJECTION_STALE",
+            "message": (
+                f"This source's graph is {row[1] - row[0]} commit(s) behind what has been "
+                f"published (projected {row[0]}, published {row[1]}). Until it catches up, "
+                f"reads are served from the version log, which holds no aggregated lineage — "
+                f"so rolled-up connections will not appear on a canvas."
+                + (f" Last error: {row[2]}" if row[2] else "")
+            ),
+        })
     drift_instances = adopt.nodes.drift_instances + adopt.edges.drift_instances
     for entry in unindexed_physical:
         if entry["reason"] != "case_drift":
@@ -544,8 +687,7 @@ async def get_alignment_analysis(
             "indexedProps": list(INDEXED_NODE_PROPS),
             "unindexedPhysical": unindexed_physical,
         },
-        "aggregation": {"status": agg_status, "lastAggregatedAt": last_aggregated_at,
-                        "canonicalized": canonicalized},
+        "aggregation": aggregation_block,
         "grade": grade,
         "findings": findings,
     }
@@ -581,6 +723,15 @@ async def confirm_vocab_variant(
     # process-wide resolution cache so every pod re-derives on next read.
     from backend.app.services.resolved_ontology_cache import bump_ontology_generation
     await bump_ontology_generation(ws_id, dataSourceId)
+    # Those same alias maps decide the containment/lineage split every cached
+    # read embeds in its answer, so re-deriving the ontology is only half the
+    # invalidation: without this the reads keep serving the pre-decision split
+    # from Redis for a full TTL. Content counter — the split is in every
+    # endpoint's answer, not just the rollup's.
+    if ws_id:
+        await get_graph_cache().bump_generation(
+            CacheScope(workspace_id=ws_id, data_source_id=dataSourceId)
+        )
     return {"declared": declared, "keepMerged": keepMerged, "hasDrift": bool(row.has_drift)}
 
 
@@ -649,6 +800,43 @@ def _cache_scope(engine: ContextEngine) -> Optional[CacheScope]:
     return CacheScope(workspace_id=ws, data_source_id=ds, branch_id=branch, graph_ns=graph_ns)
 
 
+def _compute_budget(endpoint: str) -> float:
+    """The wall clock a cold compute on ``endpoint`` is budgeted for.
+
+    Passed to ``get_or_compute`` as ``expected_compute_s``, where it sizes how
+    long a follower in another pod watches the elected leader before giving up
+    and computing its own. The flat 10s it replaced was shorter than every
+    compute it guarded, which made the election a pure latency tax: eleven of
+    twelve pod-leaders waited, gave up, and issued the same query 10s late —
+    onto a shard still running the leader's.
+
+    Read live off the resilience module (not copied at import) so an operator
+    override of a query budget moves the wait that derives from it.
+    """
+    if endpoint in (
+        ENDPOINT_AGGREGATED, ENDPOINT_CANVAS_BOOTSTRAP, ENDPOINT_CANVAS_EXPAND,
+    ):
+        # The whole aggregated read, ladder and all — canvas bootstrap/expand
+        # compose one into their answer, so they cost at least as much.
+        return resilience.FALKORDB_AGGREGATED_READ_BUDGET_SECS
+    if endpoint in (ENDPOINT_TRACE, ENDPOINT_TRACE_EXPAND, ENDPOINT_TRACE_CLOSURE):
+        # The engine's own outer budget, which is what a trace is allowed to
+        # spend before it truncates.
+        return max(
+            5.0,
+            resilience.TRACE_TIMEOUT_SECS - resilience.TRACE_ENGINE_HEADROOM_SECS,
+        )
+    if endpoint == ENDPOINT_CHILDREN:
+        return resilience.FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+    if endpoint == ENDPOINT_TOP_LEVEL:
+        return resilience.FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
+    if endpoint == ENDPOINT_EDGES_BETWEEN:
+        return resilience.FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS
+    if endpoint == ENDPOINT_NODES_QUERY:
+        return resilience.FALKORDB_NODES_QUERY_TIMEOUT_SECS
+    return resilience.FALKORDB_QUERY_TIMEOUT_SECS
+
+
 def _provider_health_header(engine: ContextEngine) -> str:
     """Map the engine's CircuitBreakerProxy state to the same string set
     used by the stats_cache envelope's ``provider_health`` field.
@@ -687,17 +875,27 @@ async def _invalidate_cache(engine: ContextEngine) -> None:
 
 
 def _bounded_compute(engine: ContextEngine, compute):
-    """Wrap a GraphCache ``compute`` callable in the per-(provider, graph)
-    concurrency slot (``ProviderManager.acquire_provider_slot``, cap
-    ``PROVIDER_MAX_CONCURRENCY``, default 8). Saturation raises
+    """Wrap a GraphCache ``compute`` callable in TWO per-(provider, graph)
+    concurrency bounds: this process's semaphore
+    (``ProviderManager.acquire_provider_slot``, cap
+    ``PROVIDER_MAX_CONCURRENCY``, default 8) and then the fleet's shared
+    count (``ProviderManager.fleet_slot``). Saturation of either raises
     ``ProviderBusy`` → 429 + Retry-After via the handler in main.py, so
     a burst of cache misses sheds load instead of pegging FalkorDB's
-    single Cypher thread.
+    query threads.
 
-    Cache hits never touch the semaphore — only singleflight-leader
-    misses do actual provider work. Engines whose provider doesn't
-    expose ``manager_cache_key`` (draft/versioned wrappers that don't
-    delegate attributes) degrade to unbounded — those paths are
+    Both, because only the second one is a real ceiling: the semaphore is
+    per process and the deployed shape runs twelve of them, so its "cap 8"
+    was 96 concurrent calls against a shard with THREAD_COUNT 6. The
+    semaphore still earns its place ahead of the fleet count — it answers
+    without a round trip and its waiter queue is what keeps a burst off the
+    GRAPH_READ pool — but the number that protects the store is the shared
+    one.
+
+    Cache hits never touch either — only singleflight-leader misses do
+    actual provider work. Engines whose provider doesn't expose
+    ``manager_cache_key`` (draft/versioned wrappers that don't delegate
+    attributes) degrade to unbounded — those paths are
     Postgres-overlay-heavy, not FalkorDB fan-out.
     """
     key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
@@ -707,11 +905,53 @@ def _bounded_compute(engine: ContextEngine, compute):
     async def _run():
         sem = await provider_manager.acquire_provider_slot(*key)
         try:
-            return await compute()
+            async with provider_manager.fleet_slot(*key):
+                return await compute()
         finally:
             sem.release()
 
     return _run
+
+
+def watch_for_failover(compute, seen: dict):
+    """Wrap a compute so a node being replaced is remembered, not just raised.
+
+    ``get_or_compute`` already serves the last good answer when the provider
+    cannot answer — the caller just never learned WHY, so a canvas that went
+    quietly stale during a failover looked no different from one that was
+    merely old. The route reads ``seen`` afterwards and labels the response.
+    """
+    async def _run():
+        try:
+            return await compute()
+        except ProviderFailingOver as exc:
+            seen["endpoint"] = exc.endpoint or ""
+            raise
+
+    return _run
+
+
+def label_failover(response: Response, target, seen: dict) -> None:
+    """Say that this answer is the last good one and the node is coming back.
+
+    ``target`` is anything carrying ``stale``/``stale_reason`` (the aggregated
+    result, a canvas freshness block). Only fires when the cache actually
+    stood in for the provider: a failover the retries absorbed changed
+    nothing the user can see, and does not deserve a banner.
+    """
+    if not seen or response.headers.get("X-Cache-Status") != "stale-fallback":
+        return
+    target.stale = True
+    if not getattr(target, "stale_reason", None):
+        target.stale_reason = "failing_over"
+    # The same figure the provider puts on a 429 during a failover, derived
+    # from the cluster's own node timeout. A flat 3 s here sent the client
+    # back before the cluster had begun to promote anything, so the retry
+    # was spent on a node still not there — and then the two halves of the
+    # same outage told the client two different numbers.
+    response.headers["Retry-After"] = str(_FAILOVER_RETRY_AFTER_S)
+    if seen.get("endpoint"):
+        response.headers["X-Provider-Failing-Over"] = seen["endpoint"]
 
 
 async def _enforce_fair_share(engine: ContextEngine, endpoint: str) -> None:
@@ -849,6 +1089,7 @@ async def trace_v2(
         compute=_bounded_compute(engine, compute),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_TRACE),
     )
 
 
@@ -956,6 +1197,7 @@ async def trace_closure(
             compute=_bounded_compute(engine, compute),
             model_cls=TraceClosureResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_TRACE_CLOSURE),
         )
     except NotImplementedError as exc:
         raise HTTPException(status_code=501, detail={"code": "trace_closure_unsupported", "message": str(exc)})
@@ -990,6 +1232,7 @@ async def trace_expand(
         compute=_bounded_compute(engine, compute),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_TRACE_EXPAND),
     )
 
 
@@ -1084,6 +1327,7 @@ async def trace_expand_batch(
         compute=_bounded_compute(engine, compute_batch),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_TRACE_EXPAND),
     )
 
 
@@ -1166,7 +1410,8 @@ async def get_top_level_nodes(
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across the materialized-serve miss → FalkorDB read;
     # isolate from the WEB pool so a slow provider can't starve auth/nav.
-    session: AsyncSession = Depends(get_graph_read_db_session),
+    # The ENGINE's session, not a second checkout — see get_engine_session.
+    session: AsyncSession = Depends(get_engine_session),
 ):
     """Return instances that have no incoming containment edge.
 
@@ -1271,6 +1516,7 @@ async def get_top_level_nodes(
             compute=_bounded_compute(engine, compute),
             model_cls=TopLevelNodesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_TOP_LEVEL),
         )
     except CursorMismatchError as exc:
         # Cursor/direction mismatch from the provider (client bug).
@@ -1351,6 +1597,14 @@ async def get_children_with_edges(
         "asc", alias="sortDirection", pattern="^(asc|desc)$",
         description="Sort direction on sortProperty. Cursors are direction-bound.",
     ),
+    lineage_scope: str = Query(
+        "page", alias="lineageScope", pattern="^(page|siblings)$",
+        description=(
+            "Far end of the lineage leg. 'page': lineage among the parent and this page. "
+            "'siblings': lineage between this page and the parent or ANY of its children, "
+            "so a client paging a large container gets cross-page edges per page."
+        ),
+    ),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Get children with containment and lineage edges in a single round-trip."""
@@ -1364,6 +1618,7 @@ async def get_children_with_edges(
             include_lineage_edges=include_lineage_edges,
             sort_property=sort_property, cursor=cursor,
             sort_direction=sort_direction,
+            lineage_scope=lineage_scope,
         )
 
     scope = _cache_scope(engine)
@@ -1385,10 +1640,17 @@ async def get_children_with_edges(
                 "cursor": cursor,
                 "includeLineageEdges": include_lineage_edges,
                 "sortDirection": sort_direction,
+                # A cached page-scope answer must never be served to a
+                # siblings-scope request (it would drop edges) — so a widened
+                # scope is part of the key. Only when widened: every existing
+                # key stays byte-identical, so a deploy doesn't cold-miss the
+                # whole children cache at once.
+                **({"lineageScope": lineage_scope} if lineage_scope != "page" else {}),
             },
             compute=_bounded_compute(engine, compute),
             model_cls=ChildrenWithEdgesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_CHILDREN),
         )
     except CursorMismatchError as exc:
         # Cursor/direction mismatch from the provider (client bug) — 400, not 500.
@@ -1419,19 +1681,78 @@ def _map_validation_error(detail: str) -> HTTPException:
     return HTTPException(status_code=400, detail=detail)
 
 
+def _map_not_implemented(
+    engine: ContextEngine, exc: NotImplementedError,
+) -> HTTPException:
+    """Map a provider's deep-search refusal to 501.
+
+    A provider that refuses WITH a message means it for the caller — the
+    branch/stale-main reader's "the published graph is catching up" is
+    product copy, and swallowing it would leave the user reading about
+    FalkorDB. A bare ``NotImplementedError`` (a provider that simply has
+    no deep-search implementation) keeps the developer-facing fallback
+    naming the provider.
+    """
+    return HTTPException(
+        status_code=501,
+        detail=str(exc) or (
+            f"deep_search not implemented on the active provider "
+            f"({type(engine.provider).__name__}). Only FalkorDB is "
+            f"supported in this workstream."
+        ),
+    )
+
+
+def _guard_capability_scope(
+    request: Request, query: Optional[SearchQuery] = None,
+) -> None:
+    """Keep a share-link identity inside the view it was granted.
+
+    ``capability_gate`` stamps ``request.state.view_capability`` when the
+    caller reached this route through a view capability rather than
+    ``workspace:datasource:read`` membership. For that identity the view
+    IS the RBAC boundary, and three things escape it: ``data_source``
+    drops the view's root clamp outright, ``visible``'s only clamp is
+    the CLIENT-supplied ``visibleUrns`` list, and — because the capability
+    is authorised via the ``?viewId=`` query param while the search body
+    carries its OWN ``scope.viewId`` — a caller could otherwise name a
+    DIFFERENT view in the body and have it resolved as if the capability
+    covered it. ``view`` mode against the capability's OWN view resolves
+    against the view's own authorised roots, so that alone stays open.
+    Membership callers are unaffected.
+
+    ``query=None`` is ``/search/discover``, which takes no query at all:
+    it reports the whole graph's labels, property keys and tag values,
+    and nothing narrows that to the granted view — so every capability
+    identity is refused there.
+    """
+    cap_view_id = getattr(request.state, "view_capability", None)
+    if not cap_view_id:
+        return
+    if (query is None
+            or query.scope.scope_mode in ("data_source", "visible")
+            or query.scope.view_id != cap_view_id):
+        raise HTTPException(
+            status_code=403,
+            detail="This link can only search inside its view.",
+        )
+
+
 @router.post(
     "/search/advanced",
     response_model_by_alias=True,
 )
 async def search_advanced(
     query: SearchQuery,
+    request: Request,
     response: Response,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across svc.search() → FalkorDB; isolate from WEB.
-    session: AsyncSession = Depends(get_graph_read_db_session),
+    # The ENGINE's session, not a second checkout — see get_engine_session.
+    session: AsyncSession = Depends(get_engine_session),
 ):
     """Advanced server-side search, strictly scoped to ``scope.viewId``.
 
@@ -1450,15 +1771,19 @@ async def search_advanced(
     ``X-Search-Dropped-URNs`` response header so the FE can log /
     diagnose.
 
-    See ``backend/common/models/search.py`` for the full contract and
-    ``docs/api/advanced-search.md`` for the AI-agent iterative-drill
-    pattern.
+    The search itself runs inside the per-(provider, graph) concurrency
+    slot, so a search-as-you-type keystroke storm sheds load with 429 +
+    Retry-After instead of pegging the graph's single Cypher thread.
+
+    See ``backend/common/models/search.py`` for the full contract,
+    including the AI-agent iterative-drill / facet-discovery pattern.
     """
     if not ws_id:
         raise HTTPException(
             status_code=400,
             detail="workspace_id is required (path param ws_id)",
         )
+    _guard_capability_scope(request, query)
     # Lazy imports keep this route free of overhead when feature isn't used.
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
@@ -1471,18 +1796,21 @@ async def search_advanced(
         branch_id=branchId,
     )
     try:
-        page, eff_scope = await svc.search(query)
+        if get_deep_search_settings().engine == "v2":
+            # The uncapped engine runs many statements per request, so it is
+            # admitted per statement, not once around the whole search.
+            page, eff_scope = await svc.search(query, run_context=SearchRunContext(
+                data_version=await _search_data_version(engine),
+                admit=_statement_admission(engine),
+            ))
+        else:
+            page, eff_scope = await _bounded_compute(
+                engine, lambda: svc.search(query),
+            )()
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                f"deep_search not implemented on the active provider "
-                f"({type(engine.provider).__name__}). Only FalkorDB is "
-                f"supported in this workstream."
-            ),
-        ) from exc
+        raise _map_not_implemented(engine, exc) from exc
 
     if eff_scope.dropped_urns:
         response.headers["X-Search-Dropped-URNs"] = str(len(eff_scope.dropped_urns))
@@ -1490,15 +1818,49 @@ async def search_advanced(
     return page
 
 
+def _statement_admission(engine: ContextEngine):
+    """``_bounded_compute``'s two slots — this process's and the fleet's —
+    as a context manager held for ONE statement, or None when the engine's
+    provider has no slot key (``_bounded_compute`` degrades the same way)."""
+    key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
+    if key is None:
+        return None
+
+    @asynccontextmanager
+    async def admit():
+        sem = await provider_manager.acquire_provider_slot(*key)
+        try:
+            async with provider_manager.fleet_slot(*key):
+                yield
+        finally:
+            sem.release()
+
+    return admit
+
+
+async def _search_data_version(engine: ContextEngine) -> str:
+    """The graph data a search reads: the published graph's content
+    generation (a draft searches the graph it is a draft of) and the
+    physical graph behind it. Never raises; "" when unknown."""
+    scope = _cache_scope(engine)
+    if scope is None:
+        return ""
+    published = replace(scope, branch_id="")
+    generation = await get_graph_cache().content_generation(published)
+    return f"{generation}.{published.graph_ns}"
+
+
 @router.post("/search/explain")
 async def search_explain(
     query: SearchQuery,
+    request: Request,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
     branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across svc.explain() → FalkorDB; isolate from WEB.
-    session: AsyncSession = Depends(get_graph_read_db_session),
+    # The ENGINE's session, not a second checkout — see get_engine_session.
+    session: AsyncSession = Depends(get_engine_session),
 ):
     """Compile a SearchQuery without executing it.
 
@@ -1518,6 +1880,7 @@ async def search_explain(
             status_code=400,
             detail="workspace_id is required (path param ws_id)",
         )
+    _guard_capability_scope(request, query)
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
     )
@@ -1532,10 +1895,15 @@ async def search_explain(
         return await svc.explain(query)
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        # Same refusal as search_advanced's — a draft over a stale main
+        # reaches this route too, and without this arm it escaped as 500.
+        raise _map_not_implemented(engine, exc) from exc
 
 
 @router.get("/search/discover")
 async def search_discover(
+    request: Request,
     samplePerLabel: int = Query(
         200, ge=1, le=2000,
         description="How many nodes to sample per label before "
@@ -1552,17 +1920,301 @@ async def search_discover(
     predicates returning 0 results (the user picks a key that doesn't
     exist on natively-stored nodes).
 
-    A label with sampled > 0 nodes but zero user-keys appears in
-    ``blobOnlyLabels`` — strong signal that those nodes are still on
-    pre-W1 blob storage and need the migration script
-    (``python -m backend.scripts.migrate_native_properties``) to be
-    queryable by property.
+    A label with a sampled node still carrying the pre-W1
+    ``n.properties`` JSON blob appears in ``blobOnlyLabels`` — those
+    values stay invisible to property predicates until the migration
+    script (``python -m backend.scripts.migrate_native_properties``)
+    lifts them into native fields.
+
+    ``missingSearchableText`` is the same signal for the *text* path:
+    sampled nodes with no ``n.searchableText``, the only column a
+    "search everything" query reads.
+
+    Whole-graph diagnostics, so a share-link identity is refused — see
+    ``_guard_capability_scope``.
     """
+    _guard_capability_scope(request)
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService,
     )
     svc = AdvancedSearchService.for_diagnostics(engine)
-    return await svc.discover(sample_per_label=samplePerLabel)
+    try:
+        return await svc.discover(sample_per_label=samplePerLabel)
+    except NotImplementedError as exc:
+        # Same refusal arm as the other two search routes: a branch /
+        # stale-main provider means its message for the caller.
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.get("/search/values")
+async def search_values(
+    request: Request,
+    viewId: str = Query(..., min_length=1),
+    key: str = Query(..., min_length=1, max_length=128),
+    q: str = Query("", max_length=256,
+                   description="Only values whose text contains this "
+                               "(case-insensitive)."),
+    limit: int = Query(25, ge=1, le=50),
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """The most common values of one property in a view — the value
+    picker's suggestions, counted over every entity of the view's types.
+    ``/search/discover`` reads 200 nodes per type, so on a large graph it
+    showed a property's values by accident ("I only ever see two").
+
+    Bounded to about 1.5 s: ``complete`` says whether every type was read,
+    ``truncated`` whether there were more distinct values than listed. What
+    a user picks is still compared exactly; only the list is bounded.
+
+    The values come from the view's entity TYPES, which for a view scoped
+    to a subtree is wider than the view — so, like ``/search/discover``, a
+    share-link identity is refused (``_guard_capability_scope``).
+    """
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
+    _guard_capability_scope(request)
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    svc = AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=dataSourceId,
+        branch_id=branchId,
+    )
+    try:
+        return await _bounded_compute(
+            engine, lambda: svc.values(view_id=viewId, key=key, q=q, limit=limit),
+        )()
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/membership", response_model_by_alias=True)
+async def search_membership(
+    body: SearchMembershipRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """Which of the entities on screen (at most 1,000 urns) match which
+    rules (at most 32) — what display rules paint, without downloading every
+    entity a rule matches. Only entities inside the view's scope ever match;
+    the scope is resolved here from ``scope.viewId``, like a search's.
+
+    A rule using ``withinHops`` or a path is refused in ``errors``: those
+    describe a route, not an entity.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.membership(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/counts", response_model_by_alias=True)
+async def search_counts(
+    body: SearchCountsRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """How many entities in the view match each rule — exactly, however
+    many. A count over a large view takes more than one request: send the
+    same body again with the returned ``sessions`` (rule id → sessionId)
+    until every count reads ``complete``. Each request runs about
+    ``waitMs``, sharing it among the counts that have got least far.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.counts(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/catalog", response_model_by_alias=True)
+async def search_catalog(
+    body: SearchCatalogRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """Every property the view's entities carry — on how many, stored as
+    which kinds, with which values — read from every entity in the view's
+    scope rather than a sample. A large view takes more than one request:
+    send the same body with the returned ``sessionId`` until ``status`` is
+    ``complete``. A complete catalog is kept, and served for a while after
+    the data changes (``stale`` + ``asOf``); ``refresh`` reads the view
+    again.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.catalog(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/exports", response_model_by_alias=True,
+             dependencies=[Depends(require_export)])
+async def search_export(
+    body: SearchExportRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+    user=Depends(get_optional_user),
+):
+    """Every entity in the view matching ``predicate``, written to a CSV or
+    NDJSON file — exactly, however many, each value as stored (a 64-bit
+    integer keeps its digits). A large export takes more than one request:
+    send the same body with the returned ``sessionId`` until ``status`` is
+    ``complete``; that answer carries a ``downloadToken`` for
+    ``GET /search/exports/{sessionId}/download``.
+    """
+    from backend.app.services.advanced_search_service import ValidationError
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.export(body, principal=_principal(user), run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except (ValidationError, CompileError) as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.get("/search/exports/{session_id}/download", dependencies=[Depends(require_export)])
+async def search_export_download(
+    session_id: str,
+    token: str = Query(..., max_length=2048),
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    # Function-scoped: given back before the body streams. The file streams from the object
+    # store alone, for as long as it takes, and holds no graph-read connection or admission.
+    _admission: None = Depends(_admit_graph_request, scope="function"),
+    session: AsyncSession = Depends(get_graph_read_db_session, scope="function"),
+    # The session the route's gate read the data source with (the same one, per request).
+    gate: AsyncSession = Depends(get_db_session),
+    user=Depends(get_optional_user),
+):
+    """A complete export, streamed as the file it is — for the person it
+    was exported for, for an hour after (``downloadToken``)."""
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.search_downloads import read_download_token
+    from backend.auth_service.core import config as auth_config
+
+    vouched = read_download_token(token, _principal(user),
+                                  [key for _kid, key in auth_config.JWT_VERIFICATION_KEYS])
+    if vouched is None or vouched[0] != session_id:
+        raise HTTPException(status_code=403,
+                            detail="This download link has expired — export the matches again.")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
+    engine = await get_context_engine(ws_id=ws_id, dataSourceId=dataSourceId, connectionId=None,
+                                      branchId=branchId, _admission=None, session=session,
+                                      user=user)
+    svc = AdvancedSearchService(engine, session=session, workspace_id=ws_id,
+                                data_source_id=dataSourceId, branch_id=branchId)
+    try:
+        opened = await svc.open_export(session_id, vouched[1])
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+    if opened is None:
+        raise HTTPException(status_code=404,
+                            detail="This export is no longer kept — export the matches again.")
+    # The gate's read is done: give its connection back now, not when the download ends.
+    await gate.commit()
+    answer, body = opened
+    media = "text/csv; charset=utf-8" if answer.format == "csv" else "application/x-ndjson"
+    return StreamingResponse(body, media_type=media, headers={
+        "Content-Disposition": f'attachment; filename="{answer.filename}"',
+        "Cache-Control": "no-store"})
+
+
+def _principal(user) -> str:
+    """Whose request this is, as a download token names them."""
+    return str(getattr(user, "id", "") or "anonymous")
+
+
+@router.post("/search/ancestor-counts", response_model_by_alias=True)
+async def search_ancestor_counts(
+    body: SearchAncestorCountsRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """How many of a search's matches each of these containers (at most
+    2,000 urns) holds, below it at any depth — read from the session the
+    search returned (``sessionId``), so any container on screen gets its
+    exact count, not only the fullest ones the ``ancestor`` facet lists.
+    The session must be this view's; ``expired`` when it is gone.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.ancestor_counts(body)
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+def _rule_service(body, request: Request, ws_id, data_source_id, branch_id,
+                  engine: ContextEngine, session: AsyncSession):
+    """The search service for a rules request, after the checks a search
+    makes: a workspace, and a share link kept inside its own view."""
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
+    _guard_capability_scope(request, body)
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    return AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=data_source_id,
+        branch_id=branch_id,
+    )
 
 
 # Process-level cache of the SearchQuery JSON Schema. It's static
@@ -1659,6 +2311,232 @@ async def get_neighborhood_map(
     return result
 
 
+class _SyncRevision(BaseModel):
+    commit_id: str = Field(alias="commitId")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    actor: Optional[str] = None
+    actor_name: Optional[str] = Field(None, alias="actorName")
+    message: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncVersioned(BaseModel):
+    """A managed (versioned) graph: the system of record's head vs what the graph holds."""
+    graph_id: str = Field(alias="graphId")
+    committed: int
+    projected: int
+    fresh: bool
+    status: str
+    last_error: Optional[str] = Field(None, alias="lastError")
+    last_projected_at: Optional[str] = Field(None, alias="lastProjectedAt")
+    progress_done: Optional[int] = Field(None, alias="progressDone")
+    progress_total: Optional[int] = Field(None, alias="progressTotal")
+    committed_revision: Optional[_SyncRevision] = Field(None, alias="committedRevision")
+    projected_revision: Optional[_SyncRevision] = Field(None, alias="projectedRevision")
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncSummaries(BaseModel):
+    """The derived lineage summaries (rollups) and the automation that keeps them current —
+    the same row the Freshness cockpit reads, trimmed to what a viewer needs."""
+    aggregation_status: Optional[str] = Field(None, alias="aggregationStatus")
+    last_built_at: Optional[str] = Field(None, alias="lastBuiltAt")
+    job_id: Optional[str] = Field(None, alias="jobId")
+    job_status: Optional[str] = Field(None, alias="jobStatus")          # pending | running
+    job_progress: Optional[int] = Field(None, alias="jobProgress")      # 0-100
+    job_phase: Optional[str] = Field(None, alias="jobPhase")
+    job_started_at: Optional[str] = Field(None, alias="jobStartedAt")
+    drift_state: Optional[str] = Field(None, alias="driftState")
+    auto_refresh: Optional[bool] = Field(None, alias="autoRefresh")
+    cooldown_until: Optional[str] = Field(None, alias="cooldownUntil")
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
+    # The newest job, whatever its outcome — so a failure is shown WITH its date (a two-month-old
+    # failure must not read as current), and the last success is a real completion time.
+    # An operator hold (fleet / provider / this source, or drift auto-rebuild switched off) —
+    # when set, the automation evaluates but does NOT act, so the UI must not promise it will.
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
+    last_job_status: Optional[str] = Field(None, alias="lastJobStatus")
+    last_job_at: Optional[str] = Field(None, alias="lastJobAt")
+    last_success_at: Optional[str] = Field(None, alias="lastSuccessAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncCounts(BaseModel):
+    """What the graph held the last time the stats service actually read it."""
+    nodes: int
+    edges: int                                   # raw connections (rollups excluded)
+    read_at: Optional[str] = Field(None, alias="readAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncSource(BaseModel):
+    """An externally hosted graph: when this app last checked it, and last caught up with it."""
+    last_checked_at: Optional[str] = Field(None, alias="lastCheckedAt")
+    last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
+    last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
+    check_interval_secs: Optional[int] = Field(None, alias="checkIntervalSecs")
+    stale_since: Optional[str] = Field(None, alias="staleSince")
+    stale_reason: Optional[str] = Field(None, alias="staleReason")
+    # Computed NOW from the latest counts against the baseline the last refresh adopted — the
+    # stored drift verdict survives skipped evaluations and can be weeks old. None = can't tell
+    # (no baseline yet, or no counts read).
+    changed_since_refresh: Optional[bool] = Field(None, alias="changedSinceRefresh")
+
+    class Config:
+        populate_by_name = True
+
+
+class SyncStatusResponse(BaseModel):
+    kind: str                                   # "versioned" | "external"
+    data_source_id: str = Field(alias="dataSourceId")
+    checked_at: str = Field(alias="checkedAt")
+    versioned: Optional[_SyncVersioned] = None
+    source: Optional[_SyncSource] = None
+    summaries: Optional[_SyncSummaries] = None
+    counts: Optional[_SyncCounts] = None
+
+    class Config:
+        populate_by_name = True
+
+
+@router.get("/sync-status", response_model=SyncStatusResponse, response_model_by_alias=True)
+async def get_sync_status(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="The data source whose sync to report."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Is what this view reads in sync with where it comes from? For a VERSIONED graph: the
+    system of record's published head vs the version the graph holds (with both revisions). For
+    an EXTERNAL graph: when the app last checked the source and last caught up with it. Both: the
+    lineage summaries and the automation keeping them current (queued / running / cooling down).
+
+    Cheap by construction — Postgres rows and the freshness row the cockpit already serves; no
+    FalkorDB or provider call — so the view header can show it to everyone who can open the view."""
+    from backend.app.services.aggregation.models import AggregationJobORM
+    from backend.app.services.aggregation.service import assemble_fleet_freshness
+    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.app.db.repositories.view_repo import resolve_user_ids
+
+    row = None
+    try:
+        fleet = await assemble_fleet_freshness(
+            session, workspace_id=ws_id, data_source_id=dataSourceId, page_size=1)
+        row = fleet.rows[0] if fleet.rows else None
+    except Exception:                                   # pragma: no cover - degrade, never 500
+        logger.warning("sync-status: freshness row unavailable for %s", dataSourceId, exc_info=True)
+
+    # Evidence the stored verdicts can't be trusted to carry: the latest counts actually read from
+    # the graph, the baseline the last refresh adopted, and the newest job's real outcome + time.
+    from sqlalchemy import select as _select
+    from backend.app.db.models import DataSourceStatsORM
+    from backend.app.services.aggregation.fingerprint import raw_fingerprint_from_counts
+    from backend.app.services.aggregation.models import AggregationDataSourceStateORM
+
+    counts = None
+    live_fp = None
+    try:
+        st = (await session.execute(_select(DataSourceStatsORM).where(
+            DataSourceStatsORM.data_source_id == dataSourceId))).scalar_one_or_none()
+        if st is not None:
+            live_fp, _agg, raw_edges = raw_fingerprint_from_counts(
+                json.loads(st.entity_type_counts or "{}"), json.loads(st.edge_type_counts or "{}"))
+            counts = _SyncCounts(nodes=int(st.node_count or 0), edges=int(raw_edges), read_at=st.updated_at)
+    except Exception:                                   # pragma: no cover - degrade, never 500
+        logger.warning("sync-status: stats unreadable for %s", dataSourceId, exc_info=True)
+    state = await session.get(AggregationDataSourceStateORM, dataSourceId)
+    changed = (None if live_fp is None or state is None or not state.raw_fingerprint
+               else live_fp != state.raw_fingerprint)
+    newest = (await session.execute(
+        _select(AggregationJobORM).where(AggregationJobORM.data_source_id == dataSourceId)
+        .order_by(AggregationJobORM.created_at.desc()).limit(1))).scalar_one_or_none()
+    last_success = (await session.execute(
+        _select(AggregationJobORM.completed_at).where(
+            AggregationJobORM.data_source_id == dataSourceId, AggregationJobORM.status == "completed")
+        .order_by(AggregationJobORM.completed_at.desc().nullslast()).limit(1))).scalar_one_or_none()
+
+    summaries = None
+    if row is not None:
+        job = None
+        if row.running_job_id:
+            job = await session.get(AggregationJobORM, row.running_job_id)
+        summaries = _SyncSummaries(
+            aggregation_status=row.aggregation_status,
+            last_built_at=row.last_aggregated_at,
+            job_id=row.running_job_id,
+            job_status=job.status if job else None,
+            job_progress=job.progress if job else None,
+            job_phase=job.current_phase if job else None,
+            job_started_at=job.started_at if job else None,
+            drift_state=row.drift_state,
+            auto_refresh=row.auto_reconcile,
+            cooldown_until=row.cooldown_until,
+            paused_until=row.paused_until,
+            last_failure_reason=getattr(row, "last_failure_reason", None),
+            held_kind=getattr(row, "held_kind", None),
+            held_by=getattr(row, "held_by", None),
+            held_until=getattr(row, "held_until", None),
+            last_job_status=newest.status if newest else None,
+            last_job_at=(newest.completed_at or newest.updated_at or newest.created_at) if newest else None,
+            last_success_at=last_success,
+        )
+
+    svc = GraphVersioningService()
+    graph = await svc.get_graph_by_data_source(dataSourceId)
+    if graph and str(graph.get("workspace_id")) == str(ws_id):
+        wm = await svc.projection_watermark(str(graph["graph_id"]))
+        revs = [r for r in (wm.get("committed_revision"), wm.get("projected_revision")) if r]
+        actors = {r["actor"] for r in revs if r.get("actor")}
+        names = {}
+        if actors:
+            resolved = await resolve_user_ids(session, actors)
+            names = {uid: disp for uid, (disp, _email) in resolved.items() if disp}
+
+        def _rev(r):
+            return None if not r else _SyncRevision(
+                commit_id=r["commit_id"], created_at=r.get("created_at"), actor=r.get("actor"),
+                actor_name=names.get(r.get("actor")), message=r.get("message"))
+        return SyncStatusResponse(
+            kind="versioned", data_source_id=dataSourceId,
+            checked_at=datetime.now(timezone.utc).isoformat(),
+            versioned=_SyncVersioned(
+                graph_id=str(graph["graph_id"]),
+                committed=int(wm["committed"]), projected=int(wm["projected"]),
+                fresh=bool(wm["fresh"]), status=str(wm["status"]),
+                last_error=wm.get("last_error"), last_projected_at=wm.get("last_projected_at"),
+                progress_done=wm.get("progress_done"), progress_total=wm.get("progress_total"),
+                committed_revision=_rev(wm.get("committed_revision")),
+                projected_revision=_rev(wm.get("projected_revision")),
+            ),
+            summaries=summaries, counts=counts,
+        )
+
+    source = None if row is None else _SyncSource(
+        last_checked_at=row.last_checked_at,
+        last_reconciled_at=row.last_reconciled_at,
+        last_reconcile_reason=row.last_reconcile_reason,
+        check_interval_secs=getattr(row, "resolved_probe_interval_secs", None),
+        stale_since=row.stale_since,
+        stale_reason=row.stale_reason,
+        changed_since_refresh=changed,
+    )
+    return SyncStatusResponse(
+        kind="external", data_source_id=dataSourceId,
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        source=source, summaries=summaries, counts=counts,
+    )
+
+
 @router.get("/stats", deprecated=True)
 async def get_graph_stats(
     ws_id: Optional[str] = None,
@@ -1725,6 +2603,43 @@ async def get_node_ancestors(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     return await engine.get_ancestors(urn, limit=limit, offset=offset)
+
+
+class AncestorChainsRequest(BaseModel):
+    """Up to 1,000 urns: the canvas sends the lineage endpoints it holds but
+    never loaded, a few hundred at a time."""
+    urns: List[str] = Field(..., min_length=1, max_length=1000)
+
+
+@router.post(
+    "/nodes/ancestor-chains",
+    response_model=Dict[str, Dict[str, List[str]]],
+    dependencies=[Depends(require_lineage_rollup)],
+)
+async def get_node_ancestor_chains(
+    body: AncestorChainsRequest,
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Containment chains for many urns: ``{"chains": {urn: [parent, …, root]}}``.
+
+    The canvas holds lineage edges whose far end it never loaded — a partner
+    inside a collapsed container. Without that end's chain it cannot draw the
+    line to the container the reader CAN see, and counts the flow as
+    "outside this view" when it is not. Urns only; nothing is loaded.
+
+    An urn absent from ``chains`` is UNKNOWN — the provider could not answer
+    — never a root; a root maps to ``[]``. The same containment the
+    single-urn ``/nodes/{urn}/ancestors`` already serves, batched and
+    slot-bounded like ``/nodes/degree``.
+    """
+    async def compute() -> Dict[str, List[str]]:
+        return await engine.get_ancestor_chains(body.urns)
+
+    try:
+        chains = await _bounded_compute(engine, compute)()
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    return {"chains": chains}
 
 
 @router.get("/nodes/{urn}/descendants", response_model=List[GraphNode], response_model_by_alias=True)
@@ -1839,6 +2754,7 @@ async def get_edges_between(
         compute=_bounded_compute(engine, compute),
         model_cls=_EdgeListResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_EDGES_BETWEEN),
     )
     return result.root
 
@@ -1861,6 +2777,11 @@ async def get_node_degrees(
     omits URNs whose bucket query failed. Response-cached (gen-bump
     invalidated) and slot-bounded like /edges/between; degree totals
     tolerate cache staleness because they are advisory cues.
+
+    The endpoint key is the REGISTERED ``nodes-degree``. It read
+    ``nodes_degree``, which is not a registered key, so ``is_enabled``
+    answered False and every call bypassed the cache the docstring above
+    promised — silently, since a bypass is a legal outcome.
     """
     async def compute() -> _DegreesResult:
         return _DegreesResult(await engine.get_node_degrees(query.urns, query.edge_types))
@@ -1870,7 +2791,7 @@ async def get_node_degrees(
         return (await _bounded_compute(engine, compute)()).root
     result = await get_graph_cache().get_or_compute(
         scope=scope,
-        endpoint="nodes_degree",
+        endpoint=ENDPOINT_NODES_DEGREE,
         params={
             "urns": sorted(query.urns),
             "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
@@ -1878,6 +2799,7 @@ async def get_node_degrees(
         compute=_bounded_compute(engine, compute),
         model_cls=_DegreesResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
     )
     return result.root
 
@@ -1904,17 +2826,78 @@ async def query_nodes(
         return _NodeListResult(await engine.get_nodes_query(query))
 
     scope = _cache_scope(engine)
+    # (params built below — see _node_query_cache_params)
     if scope is None:
         return (await _bounded_compute(engine, compute)()).root
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_NODES_QUERY,
-        params=query.model_dump(mode="json", by_alias=True, exclude_none=True),
+        params=_node_query_cache_params(query),
         compute=_bounded_compute(engine, compute),
         model_cls=_NodeListResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_NODES_QUERY),
     )
     return result.root
+
+
+@router.post("/nodes/page", response_model=NodePage, response_model_by_alias=True)
+async def query_nodes_page(
+    response: Response,
+    query: NodeQuery = Body(..., embed=True),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """One page of an advanced node query, with `hasMore` and `nextOffset` — for
+    a client paging a whole entity type. The provider says where the next page
+    starts: a draft overlay adds and drops rows around the page it read, so a
+    count of the rows returned would skip or repeat rows.
+
+    Only what pages losslessly is accepted: entity types (optionally a search).
+    Property / tag / name filters are applied AFTER the database's SKIP/LIMIT, so
+    a filtered page's length says nothing about what follows; a URN lookup is not
+    a feed. Those stay on /nodes/query."""
+    if not query.entity_types or query.urns or query.property_filters or query.tag_filters or query.name_filter:
+        raise HTTPException(
+            status_code=422,
+            detail="/nodes/page pages by entity type only; use /nodes/query for URN lookups and filtered queries",
+        )
+
+    async def compute() -> NodePage:
+        return await engine.get_nodes_page(query)
+
+    scope = _cache_scope(engine)
+    if scope is None:
+        return await _bounded_compute(engine, compute)()
+    return await get_graph_cache().get_or_compute(
+        scope=scope,
+        endpoint=ENDPOINT_NODES_QUERY,
+        # Same namespace as /nodes/query, never the same key: the answers differ.
+        params={**_node_query_cache_params(query), "paged": True},
+        compute=_bounded_compute(engine, compute),
+        model_cls=NodePage,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_NODES_QUERY),
+    )
+
+
+def _node_query_cache_params(query) -> dict:
+    """Cache params for /nodes/query, with the list filters normalised.
+
+    The query is a SET of URNs, entity types and tags — the answer does not
+    depend on the order they arrived in, and the canvas builds them by
+    expansion order. Hashing the raw dump therefore gave two users who
+    reached the identical view by different routes two different entries for
+    one compute. Every neighbouring endpoint already sorts; this one did not.
+
+    Only the cache key is normalised — the query handed to the engine is
+    untouched, in case any filter is ever order-sensitive.
+    """
+    dumped = query.model_dump(mode="json", by_alias=True, exclude_none=True)
+    for field in ("urns", "entityTypes", "tags"):
+        value = dumped.get(field)
+        if isinstance(value, list):
+            dumped[field] = sorted(value)
+    return dumped
 
 
 @router.get("/metadata/entity-types", response_model=List[str])
@@ -2311,6 +3294,7 @@ async def get_aggregated_edges(
     # Sort URN lists so two semantically identical requests with differing
     # input order map to the same cache key — the frontend's chunked
     # fan-out frequently produces equivalent batches in different orders.
+    failing_over: dict = {}
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_AGGREGATED,
@@ -2322,10 +3306,12 @@ async def get_aggregated_edges(
             "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
             "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
         },
-        compute=_bounded_compute(engine, compute),
+        compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+        expected_compute_s=_compute_budget(ENDPOINT_AGGREGATED),
     )
+    label_failover(response, result, failing_over)
 
     # Post-cache staleness overlay (Task 6): the source-changed marker is
     # set/cleared independently of the cache entry, so a cache hit (or a
@@ -2361,6 +3347,14 @@ async def materialize_aggregated_edges(
         )
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
+    # This rewrites the entire :AGGREGATED layer, which is precisely what the
+    # aggregation worker's terminal events invalidate through — and it was the
+    # one writer of that layer that invalidated nothing at all. Every cached
+    # aggregated/canvas/trace read kept serving pre-materialization answers
+    # until its TTL, which is now an hour.
+    scope = _cache_scope(engine)
+    if scope is not None and scope.data_source_id:
+        await invalidate_aggregated_reads(scope.workspace_id, scope.data_source_id)
     return JSONResponse(content=stats)
 
 
@@ -2480,7 +3474,9 @@ class GraphChangeOp(BaseModel):
     """One typed change in a draft save. ``update`` payloads are *partial* — the
     server merges them onto the entity's current state, so the client never has to
     reload (and risk clobbering) fields it didn't edit."""
-    op: str = Field(description="create | update | delete")
+    op: str = Field(description="create | update | delete | move — a node `move` carries "
+                    "`{parentEntityId, edgeType}` (no parent = to the top level); the server "
+                    "replaces whatever containment the node has")
     kind: str = Field(description="node | edge")
     id: Optional[str] = Field(default=None, description="entity id / urn (update/delete, or an explicit create id)")
     ref: Optional[str] = Field(default=None, description="client temp ref → echoed back in `assigned` for creates")
@@ -2534,7 +3530,13 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             assigned.setdefault(eid, eid)
 
     def _ref(x):                               # temp ref → real id; pass real ids / non-strings through
-        return assigned.get(x, x) if isinstance(x, str) else x
+        if not isinstance(x, str):
+            return x
+        x = assigned.get(x, x)
+        # A reader shows an entity with no urn under the stand-in id "gv:<entity id>"; an edit the
+        # client addresses to that id means the entity itself (it used to read as an edit of nothing
+        # — a creation from a partial payload — and fail as "a node needs an entity type").
+        return x[3:] if x.startswith("gv:") else x
 
     ops: List[dict] = []
     for i, o in enumerate(request_ops):
@@ -2543,6 +3545,18 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             if not o.id:
                 continue
             ops.append({"op": "delete", "entity_kind": kind, "entity_id": _ref(o.id), "payload": None})
+        elif o.op == "move":                   # the service resolves the node's CURRENT containment
+            if not o.id:
+                continue
+            p = o.payload or {}
+            edge_id = mint_id("ent")
+            if o.ref:                          # the client's optimistic link → the real one
+                assigned[o.ref] = edge_id
+            ops.append({"op": "move", "entity_kind": "node", "entity_id": _ref(o.id), "payload": {
+                "parentEntityId": _ref(p.get("parentEntityId")) if p.get("parentEntityId") else None,
+                "edgeType": p.get("edgeType"),
+                "edgeId": edge_id,
+            }})
         elif o.op == "create":
             eid = create_eid[i]
             payload = dict(o.payload or {})

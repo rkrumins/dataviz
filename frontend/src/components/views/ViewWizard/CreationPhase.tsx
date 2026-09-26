@@ -23,7 +23,7 @@ import { DynamicIcon } from '@/lib/viewUtils'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type CreationStageId = 'provision' | 'create' | 'layout'
+export type CreationStageId = 'provision' | 'create' | 'layout' | 'import' | 'publication'
 export type CreationStageState = 'pending' | 'active' | 'done' | 'failed'
 
 export interface CreationStage {

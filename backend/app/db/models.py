@@ -12,8 +12,10 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Text,
     UniqueConstraint,
+    and_,
     text,
 )
 from sqlalchemy.orm import relationship
@@ -239,6 +241,12 @@ class PlatformSettingsORM(Base):
     # non-null default because "the operator turned this off" and "nobody has
     # ever touched it" are different states, and only the first should
     # override the deployment default.
+    #: Whether the profiling breakdowns SHOW the platform's own rolled-up
+    #: relationship types. Default on (see `resolve_retention_policy`): the
+    #: rollup is the lineage every view draws and a large share of the graph,
+    #: so hiding it made the chart disagree with the store. NULL = unset.
+    #: Governs EDGE types only — derived NODE labels stay hidden always.
+    profiling_include_derived_edges = Column(Boolean, nullable=True)
     history_alerts_enabled = Column(Boolean, nullable=True)
     history_alert_min_severity = Column(Text, nullable=True)
     history_alert_cooldown_secs = Column(Integer, nullable=True)
@@ -884,6 +892,19 @@ class ViewORM(Base):
     data_updated_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
+    # The identity that travels with a view between environments. `id` is minted
+    # per environment; this one is copied into an exported file and adopted by the
+    # import, so dev's view and prod's copy of it can recognise each other and a
+    # second import updates the first instead of duplicating it. Not unique: a
+    # workspace may legitimately hold a view and a separate copy of it. NULL only
+    # on rows that predate the column and escaped its backfill.
+    portable_id = Column(Text, nullable=True, default=lambda: f"pv_{uuid.uuid4().hex}")
+    # Set while the view exists only in a draft: an import staged for review. It goes live,
+    # and this clears, when that draft is published or its review merges; abandoning the draft
+    # discards the view. Until then it is in no list, count or metric (``view_is_live``) and
+    # stays private. A logical ref to a graph-versioning branch, with no cross-schema FK (as
+    # ``view_layout_overlays.branch_id``).
+    draft_branch_id = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -900,6 +921,8 @@ class ViewORM(Base):
         Index("idx_view_publish_requested", "publish_requested_at"),
         Index("idx_view_data_source", "data_source_id"),
         Index("idx_view_deleted_at", "deleted_at"),
+        Index("idx_view_portable", "portable_id"),
+        Index("idx_view_draft_branch", "draft_branch_id"),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_views_visibility",
@@ -908,6 +931,15 @@ class ViewORM(Base):
 
     def __repr__(self) -> str:
         return f"<View id={self.id!r} name={self.name!r} type={self.view_type!r}>"
+
+
+def view_is_live():
+    """The views there are: not deleted, and not waiting in a draft to go live.
+
+    Every query that lists, counts or measures views filters on this rather than on
+    ``deleted_at`` alone, so a view staged in a draft shows up nowhere until the draft is
+    published (tests/test_view_live_filter.py keeps new queries from missing it)."""
+    return and_(ViewORM.deleted_at.is_(None), ViewORM.draft_branch_id.is_(None))
 
 
 # ------------------------------------------------------------------ #
@@ -943,7 +975,8 @@ class ViewActivityLogORM(Base):
             "action IN ('created', 'updated', 'visibility_changed', 'shared', "
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
             "'data_changed', 'publish_requested', 'publish_denied', "
-            "'admin_viewed')",
+            "'admin_viewed', 'imported', 'exported', 'version_saved', "
+            "'version_restored')",
             name="ck_val_action_enum",
         ),
     )
@@ -1021,6 +1054,17 @@ class ViewLayoutOverlayORM(Base):
     # JSON: base bare referenceLayout snapshot captured at draft open.
     fork_base_layout = Column(Text, nullable=False, default="{}")
     fork_base_entity_scope = Column(Text, nullable=True)
+    # A draft that imports a file into the view proposes more than a layout: the rest of its
+    # design (``definition``: the portable definition minus the layout and scope above) and its
+    # label (name, description, icon, tags, view type), each beside the published value it
+    # replaces, so publishing merges them 3-way as it does the layout. NULL when the draft only
+    # edited layers. ``staged_provenance`` is the import's record (where the file came from,
+    # how it matched, its request id), written into the view's history when the draft goes live.
+    definition = Column(Text, nullable=True)
+    fork_base_definition = Column(Text, nullable=True)
+    label = Column(Text, nullable=True)
+    fork_base_label = Column(Text, nullable=True)
+    staged_provenance = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -1030,6 +1074,147 @@ class ViewLayoutOverlayORM(Base):
 
     def __repr__(self) -> str:
         return f"<ViewLayoutOverlay view_id={self.view_id!r} branch_id={self.branch_id!r}>"
+
+
+# ------------------------------------------------------------------ #
+# view_versions (the history of a view's design)                       #
+# ------------------------------------------------------------------ #
+class ViewVersionORM(Base):
+    """One immutable, content-addressed checkpoint of a view's design.
+
+    ``definition`` is the portable definition (``view_transfer.canonical``) as canonical JSON,
+    and ``content_hash`` is its SHA-256. The same design hashes the same in every
+    environment, which is how an imported view proves nothing was lost and how a later import
+    finds the version the two sides last agreed on.
+
+    This is NOT graph version control. Drafts, commits and pull requests version the graph's
+    DATA; this table versions the view's layers, assignments and settings, for every view
+    whether or not its data source is version-controlled.
+
+    Checkpoints are taken at deliberate moments (create, wizard save, import, restore, draft
+    promote, export, "Save version"), never per canvas autosave, so history stays readable and
+    bounded. ``name``/``description``/``icon``/``tags``/``view_type`` snapshot the label at that
+    moment; ``provenance`` records where an imported or restored version came from.
+    """
+    __tablename__ = "view_versions"
+
+    id = Column(Text, primary_key=True, default=lambda: f"vv_{uuid.uuid4().hex[:12]}")
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version = Column(Integer, nullable=False)
+    content_hash = Column(Text, nullable=False)
+    definition = Column(Text, nullable=False)                 # canonical JSON
+    # Import versions only, when what was stored differs from the file (entities remapped or
+    # dropped, a merge, edits in the wizard): the FILE's design hash. A later file from the
+    # same lineage carries that hash in its history, so this version is still its merge base;
+    # the file's design itself is kept in ``provenance["originDefinition"]``.
+    origin_hash = Column(Text, nullable=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    icon = Column(Text, nullable=True)
+    tags = Column(Text, nullable=True)                        # JSON array
+    view_type = Column(Text, nullable=False)
+    # baseline | create | wizard | import | restore | promote | export | manual | snapshot
+    source = Column(Text, nullable=False)
+    message = Column(Text, nullable=True)
+    parent_version = Column(Integer, nullable=True)
+    stats = Column(Text, nullable=True)                       # JSON: headline counts
+    provenance = Column(Text, nullable=True)                  # JSON: origin / restoredFrom / report
+    ontology_digest = Column(Text, nullable=True)
+    # Client-supplied idempotency key: a retried import returns the version its first
+    # attempt wrote instead of writing a second one.
+    request_id = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("view_id", "version", name="uq_view_versions_view_version"),
+        Index("idx_vv_view_created", "view_id", "created_at"),
+        # Partial on both dialects: a bare postgresql_where is silently dropped on SQLite,
+        # where the repo tests run (see the uq_ds_* indexes above for the same trap).
+        Index("uq_vv_request_id", "request_id",
+              unique=True,
+              postgresql_where=text("request_id IS NOT NULL"),
+              sqlite_where=text("request_id IS NOT NULL")),
+        CheckConstraint(
+            "source IN ('baseline', 'create', 'wizard', 'import', 'restore', "
+            "'promote', 'export', 'manual', 'snapshot')",
+            name="ck_view_versions_source",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewVersion view_id={self.view_id!r} v{self.version} {self.content_hash[:15]!r}>"
+
+
+# ------------------------------------------------------------------ #
+# object_store_objects / object_store_chunks (import/export artifacts) #
+# ------------------------------------------------------------------ #
+
+class ObjectStoreObjectORM(Base):
+    """One import/export artifact (an upload, an export, a view package) in the shared store.
+
+    Every API pod reads and writes these rows, so a file stored by one pod is there for the
+    next request whichever pod serves it. The bytes are ``object_store_chunks`` rows of
+    ``blob_id``. An overwrite writes a new blob and repoints this row in one transaction, so a
+    reader never sees half an object (``services/storage/object_store.DatabaseObjectStore``).
+    """
+    __tablename__ = "object_store_objects"
+
+    key = Column(Text, primary_key=True)                      # {ws}/{ds}/{graph}/{job}/{name}
+    blob_id = Column(Text, nullable=False)
+    size = Column(BigInteger, nullable=False)
+    chunk_count = Column(Integer, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+
+class ObjectStoreChunkORM(Base):
+    """Chunk ``seq`` of blob ``blob_id``: 1 MiB of an artifact's bytes (the last may be shorter)."""
+    __tablename__ = "object_store_chunks"
+
+    blob_id = Column(Text, primary_key=True)
+    seq = Column(Integer, primary_key=True)
+    data = Column(LargeBinary, nullable=False)
+    created_at = Column(Text, nullable=False, default=_now)
+
+
+# ------------------------------------------------------------------ #
+# view_saved_queries (a view's library)                                #
+# ------------------------------------------------------------------ #
+class ViewSavedQueryORM(Base):
+    """A search kept under a name in a view's library, for everyone who can
+    open the view. Saved queries belong to the view, not to a branch.
+
+    ``predicate`` is the search predicate as the client wrote it (JSON),
+    validated as a search's is. ``position`` orders the library's list."""
+    __tablename__ = "view_saved_queries"
+
+    id = Column(Text, primary_key=True)
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position = Column(Integer, nullable=False, default=0)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    predicate = Column(Text, nullable=False)                  # JSON
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    # Stamped by the service when the query itself changes — not by a
+    # reorder, which moves every row's position.
+    updated_by = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_vsq_view", "view_id", "position"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewSavedQuery id={self.id!r} view_id={self.view_id!r}>"
 
 
 # ------------------------------------------------------------------ #
@@ -1048,6 +1233,14 @@ class DataSourceStatsORM(Base):
     edge_count = Column(Integer, nullable=False, default=0)
     entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON
     edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON
+    #: How many distinct property NAMES the graph had registered. FalkorDB
+    #: numbers them with a 16-bit id per graph and never frees one, so this
+    #: only ever goes up and a graph that reaches the ceiling can only be
+    #: recreated — which makes the TREND the thing worth keeping, not the
+    #: value. NULL is "not measured": a provider that could not answer, a
+    #: store that is not FalkorDB, or a row written before this was
+    #: collected. Never read it as zero.
+    property_key_count = Column(Integer, nullable=True)
     schema_stats = Column(Text, nullable=False, default="{}")        # JSON
     ontology_metadata = Column(Text, nullable=False, default="{}")   # JSON
     graph_schema = Column(Text, nullable=False, default="{}")        # JSON
@@ -1140,6 +1333,14 @@ class DataSourceCountSnapshotORM(Base):
     edge_count = Column(Integer, nullable=False, default=0)
     entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON {label: n}
     edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON {type: n}
+    #: How many distinct property NAMES the graph had registered. FalkorDB
+    #: numbers them with a 16-bit id per graph and never frees one, so this
+    #: only ever goes up and a graph that reaches the ceiling can only be
+    #: recreated — which makes the TREND the thing worth keeping, not the
+    #: value. NULL is "not measured": a provider that could not answer, a
+    #: store that is not FalkorDB, or a row written before this was
+    #: collected. Never read it as zero.
+    property_key_count = Column(Integer, nullable=True)
     # The same digest ``data_source_stats.counts_digest`` carries, stored beside
     # the counts it describes so "did this observation differ from the last
     # one" stays answerable from this table alone.
@@ -1259,6 +1460,14 @@ class DataSourceCountRollupORM(Base):
     edge_count = Column(Integer, nullable=False, default=0)
     entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON {label: n}
     edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON {type: n}
+    #: How many distinct property NAMES the graph had registered. FalkorDB
+    #: numbers them with a 16-bit id per graph and never frees one, so this
+    #: only ever goes up and a graph that reaches the ceiling can only be
+    #: recreated — which makes the TREND the thing worth keeping, not the
+    #: value. NULL is "not measured": a provider that could not answer, a
+    #: store that is not FalkorDB, or a row written before this was
+    #: collected. Never read it as zero.
+    property_key_count = Column(Integer, nullable=True)
 
     # Intra-bucket extremes, so a downsample cannot hide a dip that recovered.
     node_min = Column(Integer, nullable=True)
@@ -1628,6 +1837,14 @@ class UserORM(Base):
     must_change_password = Column(
         Boolean, nullable=False, default=False, server_default="false",
     )
+    # Break-glass. A system account is out of scope for the SSO
+    # enforcement machinery: it keeps password sign-in while
+    # ``allow_local_login`` is off, forced sign-out sweeps skip it, and
+    # the admin-lockout guard does not count it. Set on the seeded
+    # bootstrap admin; toggled per user in Admin → Users.
+    is_system_account = Column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
     # Chosen avatar illustration. Was a browser-local preference, so it
     # reset on a new machine and nobody else ever saw it.
     avatar_id = Column(Text, nullable=True)
@@ -1799,6 +2016,13 @@ class SsoBackchannelHostORM(Base):
         Text, primary_key=True,
         default=lambda: f"bch_{uuid.uuid4().hex[:12]}",
     )
+    #: Which outbound flow the entry serves. ``gateway`` rows relax the
+    #: private-address refusal for the back-channel legs; ``avatar`` rows
+    #: name the external image hosts in-app avatars may be fetched from
+    #: (with the avatar list empty, external avatar hosts are refused —
+    #: the list is the on-switch, not a narrowing).
+    purpose = Column(Text, nullable=False, default="gateway",
+                     server_default="gateway")
     #: Lowercased, trailing root dot stripped — normalised by the repo so
     #: one destination is one row rather than three spellings.
     host = Column(Text, nullable=False)
@@ -1810,14 +2034,15 @@ class SsoBackchannelHostORM(Base):
     created_by = Column(Text, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("host", "port", name="uq_sso_backchannel_host_port"),
+        UniqueConstraint("purpose", "host", "port",
+                         name="uq_sso_backchannel_purpose_host_port"),
         CheckConstraint(
             "port > 0 AND port <= 65535", name="ck_sso_backchannel_port",
         ),
     )
 
     def __repr__(self) -> str:
-        return f"<SsoBackchannelHost {self.host}:{self.port}>"
+        return f"<SsoBackchannelHost {self.purpose}:{self.host}:{self.port}>"
 
 
 # ------------------------------------------------------------------ #

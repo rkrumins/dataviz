@@ -33,6 +33,7 @@ import {
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { roleVisualFor } from '@/lib/roleVisual'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { privilegedRuleBlock } from './privilegedRule'
 import { RuleTarget, providerLabel } from './MappingGroupCard'
 import type { IdpGroupMapping } from '@/services/ssoAdminService'
@@ -81,22 +82,34 @@ function Slot({
 }
 
 export function MappingComposer({
-    providers, onCreated, onError,
+    providers, onCreated, editing = null, onCancel,
 }: {
     providers: IdpProvider[]
     onCreated: () => void | Promise<void>
-    onError: (m: string) => void
+    /** A live rule to edit in place. The slots open pre-filled with its
+     *  sentence, the preview shows what will be SAVED, and submit
+     *  replaces the rule instead of creating one. Mount with
+     *  ``key={rule.id}`` so the seeds below are the whole story. */
+    editing?: IdpGroupMapping | null
+    /** Edit mode only: close without saving (also wired to Escape). */
+    onCancel?: () => void
 }) {
+    const { notify } = useAppNotifications()
     const [roles, setRoles] = useState<RoleDefinitionResponse[]>([])
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([])
     const [groups, setGroups] = useState<GroupResponse[]>([])
 
-    const [kind, setKind] = useState<TargetKind>('role_binding')
-    const [providerId, setProviderId] = useState('')
-    const [idpGroup, setIdpGroup] = useState('')
-    const [roleName, setRoleName] = useState('')
-    const [workspaceId, setWorkspaceId] = useState('')
-    const [targetGroupId, setTargetGroupId] = useState('')
+    const [kind, setKind] = useState<TargetKind>(
+        editing?.targetType === 'group_membership'
+            ? 'group_membership' : 'role_binding',
+    )
+    const [providerId, setProviderId] = useState(editing?.providerId ?? '')
+    const [idpGroup, setIdpGroup] = useState(editing?.idpGroup ?? '')
+    const [roleName, setRoleName] = useState(editing?.roleName ?? '')
+    const [workspaceId, setWorkspaceId] = useState(editing?.scopeId ?? '')
+    const [targetGroupId, setTargetGroupId] = useState(
+        editing?.targetGroupId ?? '',
+    )
     const [busy, setBusy] = useState(false)
 
     useEffect(() => {
@@ -115,10 +128,15 @@ export function MappingComposer({
         () => roles.find(r => r.name === roleName), [roles, roleName],
     )
 
-    const needsWorkspace = Boolean(
-        role && (role.scopeType === 'workspace'
-            || role.permissions.some(p => p.startsWith('workspace:'))),
-    )
+    const needsWorkspace = role
+        ? Boolean(role.scopeType === 'workspace'
+            || role.permissions.some(p => p.startsWith('workspace:')))
+        // The roles list is still loading: trust the stored rule's own
+        // scope so an edit does not flash "across the organization" at
+        // a workspace rule.
+        : Boolean(editing && kind === 'role_binding'
+            && roleName === (editing.roleName ?? '')
+            && editing.scopeType === 'workspace')
 
     /** The server refuses these two shapes outright; catching them here
      *  turns a 400-after-composing into a sentence beside the control. */
@@ -172,11 +190,64 @@ export function MappingComposer({
         groups, targetGroupId, providers, providerId,
     })
 
+    /** Edit mode: whether anything actually changed. A pristine rule has
+     *  nothing to save, and the "was" line only earns its place once the
+     *  sentence differs. Normalised the way the server stores it. */
+    const dirty = useMemo(() => {
+        if (!editing) return true
+        const norm = (r: {
+            providerId?: string | null; idpGroup: string; targetType: string
+            roleName?: string | null; scopeType?: string | null
+            scopeId?: string | null; targetGroupId?: string | null
+        }) => JSON.stringify([
+            r.providerId || null, r.idpGroup.trim(), r.targetType,
+            r.roleName || null, r.scopeType || null, r.scopeId || null,
+            r.targetGroupId || null,
+        ])
+        return draftRow ? norm(draftRow) !== norm(editing) : true
+    }, [editing, draftRow])
+
+    /** What the rule says TODAY, for the "was" line beside an edit. */
+    const originalSentence = editing
+        ? sentence({
+            idpGroup: editing.idpGroup,
+            kind: editing.targetType === 'group_membership'
+                ? 'group_membership' : 'role_binding',
+            role: roles.find(r => r.name === (editing.roleName ?? '')),
+            workspaces, workspaceId: editing.scopeId ?? '',
+            groups, targetGroupId: editing.targetGroupId ?? '',
+            providers, providerId: editing.providerId ?? '',
+        })
+        : null
+
     async function submit(e: React.FormEvent) {
         e.preventDefault()
-        if (!ready) return
+        if (!ready || (editing !== null && !dirty)) return
+        // Read before the fields are cleared: the sentence under the row
+        // is already the plain-language statement of what was saved, so
+        // the confirmation says the same thing rather than "Created".
+        const summary = draftSentence
         setBusy(true)
         try {
+            if (editing) {
+                await ssoAdminService.updateGroupMapping(editing.id, {
+                    providerId: providerId || null,
+                    idpGroup: idpGroup.trim(),
+                    targetType: kind,
+                    roleName: kind === 'role_binding' ? roleName : null,
+                    scopeType: kind === 'role_binding'
+                        ? (needsWorkspace ? 'workspace' : 'global') : null,
+                    scopeId: kind === 'role_binding' && needsWorkspace
+                        ? workspaceId : null,
+                    targetGroupId: kind === 'group_membership'
+                        ? targetGroupId : null,
+                })
+                await onCreated()
+                notify('success',
+                    `Rule updated — it applies as sessions refresh. ${summary}`)
+                onCancel?.()
+                return
+            }
             if (kind === 'role_binding') {
                 await ssoAdminService.createRoleBindingMapping({
                     providerId: providerId || null,
@@ -197,15 +268,28 @@ export function MappingComposer({
             setWorkspaceId('')
             setTargetGroupId('')
             await onCreated()
+            notify('success', `Rule created. ${summary}`)
         } catch (err) {
-            onError((err as Error).message)
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : editing
+                    ? 'Could not save the rule.'
+                    : 'Could not create the rule.')
         } finally {
             setBusy(false)
         }
     }
 
     return (
-        <form onSubmit={submit}>
+        <form
+            onSubmit={submit}
+            onKeyDown={e => {
+                if (editing && e.key === 'Escape') {
+                    e.preventDefault()
+                    onCancel?.()
+                }
+            }}
+        >
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <Slot label="Anyone in" filled={Boolean(idpGroup.trim())}>
                     <input
@@ -354,15 +438,31 @@ export function MappingComposer({
             )}>
                 <div className="flex items-center justify-between gap-2 px-4 pt-3">
                     <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
-                        {ready ? 'Will be created as' : 'Preview'}
+                        {ready
+                            ? (editing ? 'Will be saved as' : 'Will be created as')
+                            : 'Preview'}
                     </span>
                     <span className={cn(
                         'text-[10px] font-medium',
                         ready ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-muted',
                     )}>
-                        {ready ? 'Ready' : `${answered} of ${needed} chosen`}
+                        {ready
+                            ? (editing && !dirty ? 'Unchanged' : 'Ready')
+                            : `${answered} of ${needed} chosen`}
                     </span>
                 </div>
+
+                {/* Editing only, and only once the sentence differs: what
+                    the rule says today, so the change reads as a diff
+                    rather than a replacement from memory. */}
+                {editing && dirty && originalSentence && (
+                    <p className="px-4 pt-2 text-[11px] text-ink-muted">
+                        <span className="font-semibold uppercase tracking-wider text-[10px]">Was:</span>{' '}
+                        <span className="line-through">
+                            {originalSentence}
+                        </span>
+                    </p>
+                )}
 
                 <div className="px-4 py-3">
                     {draftRow ? (
@@ -403,20 +503,36 @@ export function MappingComposer({
                     <p className="text-[11px] text-ink-muted min-w-0">
                         {draftRow ? draftSentence : ''}
                     </p>
-                    <button
-                        type="submit"
-                        disabled={!ready || busy}
-                        className={cn(
-                            'shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors duration-150',
-                            ready && !busy
-                                ? 'bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/20'
-                                : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
+                    <span className="shrink-0 inline-flex items-center gap-2">
+                        {editing && (
+                            <button
+                                type="button"
+                                onClick={() => onCancel?.()}
+                                disabled={busy}
+                                className="px-3 py-2 rounded-xl text-sm font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+                            >
+                                Cancel
+                            </button>
                         )}
-                    >
-                        {busy
-                            ? <><Loader2 className="w-4 h-4 animate-spin" />Creating…</>
-                            : <><Plus className="w-4 h-4" />Create rule</>}
-                    </button>
+                        <button
+                            type="submit"
+                            disabled={!ready || busy || (editing !== null && !dirty)}
+                            className={cn(
+                                'inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors duration-150',
+                                ready && !busy && (!editing || dirty)
+                                    ? 'bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/20'
+                                    : 'bg-black/5 dark:bg-white/5 text-ink-muted cursor-not-allowed',
+                            )}
+                        >
+                            {editing
+                                ? (busy
+                                    ? <><Loader2 className="w-4 h-4 animate-spin" />Saving…</>
+                                    : <><Check className="w-4 h-4" />Save changes</>)
+                                : (busy
+                                    ? <><Loader2 className="w-4 h-4 animate-spin" />Creating…</>
+                                    : <><Plus className="w-4 h-4" />Create rule</>)}
+                        </button>
+                    </span>
                 </div>
             </div>
 

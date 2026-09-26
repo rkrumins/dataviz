@@ -15,7 +15,8 @@ import {
     ChevronRight,
     Wand2,
     Sparkles,
-    Repeat
+    Repeat,
+    Layers
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
@@ -26,6 +27,7 @@ import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { blankQuickStartTemplates } from '../blankTemplates'
 import { deriveLayersFromOntology } from '../blankModel'
+import { deriveRootTypeCandidates, layersForRootTypes } from '../autoLayers'
 
 // ============================================
 // Types
@@ -46,6 +48,9 @@ interface LayoutStepProps {
     dataSourceId?: string
     /** Blank model: no data source yet — read entity types from the hydrated schema store. */
     blank?: boolean
+    /** The layers came from an imported file. No Quick Start: a template replaces the layers
+     *  and so unplaces everything the file placed. */
+    imported?: boolean
 }
 
 interface LayerTemplate {
@@ -161,6 +166,23 @@ interface GalleryTemplate {
     category?: string
     recommended?: boolean
     layers: Array<Partial<ViewLayerConfig> & { name: string }>
+    /** Pin the view's entity scope when the template's layers only work under one.
+     *  A template whose layers carry `entityTypes` places entities BY RULE and
+     *  writes no assignments — that resolves only in open ('all') scope, and
+     *  `deriveEntityScope` would otherwise flip the view to 'curated' the moment
+     *  the user drags a single entity, emptying every other column. */
+    entityScope?: 'all' | 'curated'
+}
+
+/** "3 columns — Domains, Roots, Platforms — each carrying everything it contains."
+ *  Long type lists are trimmed so the card stays a card. */
+function describeColumns(labels: string[]): string {
+    const shown = labels.slice(0, 4).join(', ')
+    const rest = labels.length - 4
+    const named = rest > 0 ? `${shown} and ${rest} more` : shown
+    return labels.length === 1
+        ? `One ${named} column, carrying everything those entities contain.`
+        : `${labels.length} columns — ${named} — each carrying everything it contains.`
 }
 
 /** Gallery of Quick Start templates — one card per template with a mini preview,
@@ -242,11 +264,16 @@ function TemplateGallery({
 // Component
 // ============================================
 
-export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId, blank }: LayoutStepProps) {
+export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId, blank, imported }: LayoutStepProps) {
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
     // Blank models have no data source to probe; their ontology schema is hydrated
     // into the schema store, so read entity types from there instead.
-    const { entityTypes: dsEntityTypes } = useDataSourceSchema(dataSourceId)
+    const {
+        entityTypes: dsEntityTypes,
+        relationshipTypes: dsRelationshipTypes,
+        rootEntityTypes: dsRootEntityTypes,
+        containmentEdgeTypes: dsContainmentEdgeTypes,
+    } = useDataSourceSchema(dataSourceId)
     const storeEntityTypes = useSchemaEntityTypes()
     const schemaEntityTypes = blank ? storeEntityTypes : dsEntityTypes
     const availableEntityTypes = useMemo(
@@ -269,8 +296,8 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     // Existing-source mode keeps its original semantics: the gallery shows while
     // there are no layers (no choice is REQUIRED — canProceed is unchanged there).
     const [galleryOpen, setGalleryOpen] = useState(false)
-    const showGallery = galleryOpen
-        || (blank ? !formData.layoutTemplateId : formData.layers.length === 0)
+    const showGallery = !imported && (galleryOpen
+        || (blank ? !formData.layoutTemplateId : formData.layers.length === 0))
 
     const handleSwitchTemplate = useCallback(() => {
         if (formData.layers.length > 0 && !window.confirm('Switching templates will replace your current layers. Continue?')) {
@@ -320,16 +347,48 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     // The one list the gallery renders, per flow.
     const galleryTemplates: GalleryTemplate[] = useMemo(() => {
         if (blank) return blankTemplates
+
+        // One column per TOP-LEVEL type, so Domain and Root each get their own
+        // rather than sharing a single level-0 column. Each layer carries its one
+        // entityType, which IS the placement rule: every root of that type lands
+        // there and its containment children inherit, with no per-entity
+        // assignment written and no column to fill in by hand.
+        const rootTypeCandidates = deriveRootTypeCandidates({
+            entityTypes: schemaEntityTypes,
+            relationshipTypes: dsRelationshipTypes,
+            rootEntityTypes: dsRootEntityTypes,
+            containmentEdgeTypes: dsContainmentEdgeTypes,
+        })
+        const perRootType: GalleryTemplate | null = rootTypeCandidates.length > 0 ? {
+            id: 'per-root-type',
+            name: 'One layer per top-level type',
+            description: describeColumns(rootTypeCandidates.map(c => c.label)),
+            category: 'schema',
+            recommended: true,
+            layers: layersForRootTypes(rootTypeCandidates),
+            entityScope: 'all',
+        } : null
+
         const fromSchema: GalleryTemplate | null = schemaEntityTypes.length > 0 ? {
             id: 'from-schema',
             name: 'From your schema',
             description: 'One layer per level of your assigned ontology, with entity types pre-assigned.',
             category: 'schema',
-            recommended: true,
+            // Rule-driven exactly like the card above — its layers carry
+            // entityTypes and no assignments, so it needs the same open scope.
+            entityScope: 'all',
             layers: deriveLayersFromOntology({ entityTypes: schemaEntityTypes }),
         } : null
-        return [...(fromSchema ? [fromSchema] : []), ...activeTemplates]
-    }, [blank, blankTemplates, schemaEntityTypes, activeTemplates])
+
+        return [
+            ...(perRootType ? [perRootType] : []),
+            ...(fromSchema ? [fromSchema] : []),
+            ...activeTemplates,
+        ]
+    }, [
+        blank, blankTemplates, schemaEntityTypes, activeTemplates,
+        dsRelationshipTypes, dsRootEntityTypes, dsContainmentEdgeTypes,
+    ])
 
     // One apply path for every template origin: normalize layers (mint ids/orders,
     // default colors) and record the choice so the picker can be revisited.
@@ -346,7 +405,12 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             id: l.id ?? generateId(),
             order: i,
         }))
-        updateFormData({ layers, assignments: {}, layoutTemplateId: template.id })
+        updateFormData({
+            layers,
+            assignments: {},
+            layoutTemplateId: template.id,
+            entityScope: template.entityScope,
+        })
         setGalleryOpen(false)
     }, [updateFormData])
     // ────────────────────────────────────────────────────────────────────────
@@ -490,7 +554,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                                 </p>
                             </div>
                             <div className="flex items-center gap-2">
-                                {!showGallery && (
+                                {!showGallery && !imported && (
                                     <button
                                         onClick={handleSwitchTemplate}
                                         className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
@@ -513,6 +577,16 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                                 )}
                             </div>
                         </div>
+
+                        {imported && (
+                            <div className="flex items-start gap-3 rounded-xl border border-indigo-200 dark:border-indigo-900 bg-indigo-50/50 dark:bg-indigo-950/20 px-4 py-3">
+                                <Layers className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
+                                <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                                    <span className="font-semibold text-slate-800 dark:text-slate-100">These layers came from the file.</span>{' '}
+                                    Rename, reorder or add layers freely; removing a layer also unplaces what was placed on it.
+                                </p>
+                            </div>
+                        )}
 
                         {/* Quick Start template gallery — shared by both creation flows */}
                         {showGallery && (

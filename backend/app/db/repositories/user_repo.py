@@ -12,17 +12,22 @@ import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, or_
+
+from backend.common.display_name import resolve_display_name
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
 from backend.app.db.models import (
+    IdpProviderORM,
+    UserIdentityORM,
     UserORM,
     UserRoleORM,
     UserApprovalORM,
     OutboxEventORM,
     RoleBindingORM,
+    WorkspaceORM,
 )
 from backend.common.identity_provenance import (
     managed_fields as _managed_fields,
@@ -32,6 +37,7 @@ from backend.common.identity_provenance import (
 from backend.common.roles import (
     DEFAULT_PLATFORM_TIER,
     GLOBAL_ASSIGNABLE_ROLES,
+    PLATFORM_ADMIN_ROLES,
 )
 
 
@@ -335,26 +341,132 @@ async def search_users(
     return list(result.scalars().all())
 
 
+# The admin user list searches, sorts and counts in SQL, so all three must
+# agree with what a row SHOWS (see ``_admin_response``): the role is the
+# ``user_roles`` row, or the default tier when there is none, and the name is
+# ``resolve_display_name`` — a non-blank override, else "first last".
+_ROLE_SHOWN = func.coalesce(
+    select(func.min(UserRoleORM.role_name))
+    .where(UserRoleORM.user_id == UserORM.id)
+    .scalar_subquery(),
+    DEFAULT_PLATFORM_TIER,
+)
+_NAME_SHOWN = func.lower(func.coalesce(
+    func.nullif(func.trim(UserORM.display_name), ""),
+    UserORM.first_name + " " + UserORM.last_name,
+))
+_USER_SORTS = {
+    "name": _NAME_SHOWN,
+    "email": UserORM.email,
+    "status": UserORM.status,
+    "role": _ROLE_SHOWN,
+    "createdAt": UserORM.created_at,
+}
+
+
+def _user_list_filters(status: Optional[str], search: Optional[str]) -> list:
+    """WHERE clauses shared by :func:`list_users` and :func:`count_users`, so
+    a page and the total it is counted against can never disagree."""
+    filters = [UserORM.deleted_at.is_(None)]
+    if status:
+        filters.append(UserORM.status == status)
+    term = (search or "").strip()
+    if term:
+        like = f"%{term}%"
+        filters.append(or_(
+            UserORM.id.ilike(like),
+            UserORM.email.ilike(like),
+            UserORM.display_name.ilike(like),
+            (UserORM.first_name + " " + UserORM.last_name).ilike(like),
+            _ROLE_SHOWN.ilike(like),
+            # The providers an account signs in with — "Entra", "okta".
+            select(UserIdentityORM.id)
+            .join(IdpProviderORM, IdpProviderORM.id == UserIdentityORM.provider_id)
+            .where(
+                UserIdentityORM.user_id == UserORM.id,
+                or_(
+                    IdpProviderORM.display_name.ilike(like),
+                    IdpProviderORM.slug.ilike(like),
+                ),
+            )
+            .exists(),
+        ))
+    return filters
+
+
 async def list_users(
     session: AsyncSession,
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    *,
+    search: Optional[str] = None,
+    sort: str = "createdAt",
+    order: str = "desc",
 ) -> list[UserORM]:
-    stmt = select(UserORM).where(UserORM.deleted_at.is_(None))
-    if status:
-        stmt = stmt.where(UserORM.status == status)
-    stmt = stmt.order_by(UserORM.created_at.desc()).limit(limit).offset(offset)
+    key = _USER_SORTS[sort]
+    stmt = (
+        select(UserORM)
+        .where(*_user_list_filters(status, search))
+        # ``id`` breaks ties, so rows that sort equal (a bulk import shares
+        # one ``created_at``) can't straddle a page boundary differently on
+        # every request and appear twice or not at all.
+        .order_by(key.desc() if order == "desc" else key.asc(), UserORM.id)
+        .limit(limit)
+        .offset(offset)
+    )
     result = await session.execute(stmt)
     return list(result.scalars().all())
 
 
-async def count_users(session: AsyncSession, status: Optional[str] = None) -> int:
-    stmt = select(func.count()).select_from(UserORM).where(UserORM.deleted_at.is_(None))
-    if status:
-        stmt = stmt.where(UserORM.status == status)
+async def count_users(
+    session: AsyncSession,
+    status: Optional[str] = None,
+    *,
+    search: Optional[str] = None,
+) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(UserORM)
+        .where(*_user_list_filters(status, search))
+    )
     result = await session.execute(stmt)
     return result.scalar_one()
+
+
+async def user_stats(session: AsyncSession) -> dict[str, int]:
+    """Counts across every account, for the admin list's KPI cards and tabs.
+
+    The list is paged, so the page in hand can only count itself. Soft-deleted
+    accounts are left out throughout, exactly as the list leaves them out.
+    """
+    live = UserORM.deleted_at.is_(None)
+    by_status = dict((await session.execute(
+        select(UserORM.status, func.count())
+        .where(live)
+        .group_by(UserORM.status)
+    )).all())
+    admins = (await session.execute(
+        select(func.count(UserRoleORM.user_id.distinct()))
+        .select_from(UserRoleORM)
+        .join(UserORM, UserORM.id == UserRoleORM.user_id)
+        .where(live, UserRoleORM.role_name.in_(sorted(PLATFORM_ADMIN_ROLES)))
+    )).scalar_one()
+    resets = (await session.execute(
+        select(UserORM.reset_token_hash, UserORM.reset_token_expires_at)
+        .where(live, UserORM.reset_token_hash.is_not(None))
+    )).all()
+    return {
+        "total": sum(by_status.values()),
+        "pending": by_status.get("pending", 0),
+        "active": by_status.get("active", 0),
+        "suspended": by_status.get("suspended", 0),
+        "admins": admins,
+        "reset_requested": sum(
+            1 for token_hash, expires_at in resets
+            if _reset_is_pending(token_hash, expires_at)
+        ),
+    }
 
 
 async def update_user_status(session: AsyncSession, user_id: str, status: str) -> Optional[UserORM]:
@@ -365,6 +477,32 @@ async def update_user_status(session: AsyncSession, user_id: str, status: str) -
     user.updated_at = _now()
     await session.flush()
     return user
+
+
+async def set_system_account(
+    session: AsyncSession, user_id: str, flag: bool,
+) -> Optional[UserORM]:
+    """Mark or unmark the break-glass flag (``is_system_account``)."""
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        return None
+    user.is_system_account = bool(flag)
+    user.updated_at = _now()
+    await session.flush()
+    return user
+
+
+async def system_account_ids(session: AsyncSession) -> set[str]:
+    """Ids of every system account, deleted rows included.
+
+    The sweep and the token sweep both subtract this set, and a
+    soft-deleted system account must still be subtracted — resurrecting
+    its sessions is not the sweep's business either way.
+    """
+    result = await session.execute(
+        select(UserORM.id).where(UserORM.is_system_account.is_(True))
+    )
+    return set(result.scalars().all())
 
 
 # ── Roles ──────────────────────────────────────────────────────────────
@@ -686,6 +824,33 @@ async def revoke_sessions_from_now(session: AsyncSession, user_id: str) -> str:
     return cutoff
 
 
+async def revoke_sessions_from_now_for_all(
+    session: AsyncSession, *, exclude_user_ids: frozenset[str] | set[str] = frozenset(),
+) -> str:
+    """The platform-wide twin of :func:`revoke_sessions_from_now`.
+
+    One bulk stamp instead of a per-user loop, because the sweep runs
+    against every account at once. ``exclude_user_ids`` carries the
+    system accounts the sweep must leave signed in. Deleted rows are
+    skipped only because they cannot refresh anyway; suspended users
+    ARE stamped — their idle sessions are exactly the kind this
+    exists to end.
+
+    Returns the cutoff so callers can log or report it.
+    """
+    cutoff = _now()
+    stmt = (
+        UserORM.__table__.update()
+        .where(UserORM.deleted_at.is_(None))
+        .values(sessions_valid_from=cutoff, updated_at=cutoff)
+    )
+    if exclude_user_ids:
+        stmt = stmt.where(UserORM.id.not_in(exclude_user_ids))
+    await session.execute(stmt)
+    await session.flush()
+    return cutoff
+
+
 def _hash_token(token: str) -> str:
     """SHA-256 hash a reset token for safe storage."""
     return hashlib.sha256(token.encode()).hexdigest()
@@ -793,18 +958,26 @@ async def flag_reset_requested(session: AsyncSession, user_id: str) -> None:
         await session.flush()
 
 
+def _reset_is_pending(token_hash: Optional[str], expires_at: Optional[str]) -> bool:
+    """The rule behind :func:`has_pending_reset`, on the raw columns, so the
+    admin list's reset-request count uses the same rule as each row's badge."""
+    if not token_hash:
+        return False
+    # Sentinel means user requested a reset but admin hasn't generated a token yet
+    if token_hash == "__requested__":
+        return True
+    if expires_at:
+        expires = datetime.fromisoformat(expires_at)
+        return datetime.now(timezone.utc) <= expires
+    return False
+
+
 async def has_pending_reset(session: AsyncSession, user_id: str) -> bool:
     """Check if a user has a pending reset request or a non-expired reset token."""
     user = await get_user_by_id(session, user_id)
-    if user is None or not user.reset_token_hash:
+    if user is None:
         return False
-    # Sentinel means user requested a reset but admin hasn't generated a token yet
-    if user.reset_token_hash == "__requested__":
-        return True
-    if user.reset_token_expires_at:
-        expires = datetime.fromisoformat(user.reset_token_expires_at)
-        return datetime.now(timezone.utc) <= expires
-    return False
+    return _reset_is_pending(user.reset_token_hash, user.reset_token_expires_at)
 
 
 # ── Role management ───────────────────────────────────────────────────
@@ -855,3 +1028,125 @@ async def get_groups_for_user(session: AsyncSession, user_id: str) -> list[str]:
     """Group ids the user belongs to. Hot path; called on every login."""
     from . import group_repo
     return await group_repo.get_user_groups(session, user_id)
+
+
+async def get_identities_by_ids(
+    session: AsyncSession, user_ids: list[str],
+) -> dict[str, dict]:
+    """Name + email for a batch of user ids, keyed by id.
+
+    Exists so a log can name the people in it. The audit lens, and every
+    surface like it, holds a page of rows carrying nothing but
+    ``usr_ac3f19``-shaped identifiers; an administrator reading it had no
+    way to tell who that was without opening another tab per row, and no
+    way at all once the account was deleted.
+
+    SOFT-DELETED USERS ARE INCLUDED, deliberately, and this is the reason
+    the query does not reuse the repo's default ``deleted_at IS NULL``
+    filter. An audit log is a record of what happened, and the most
+    interesting question an administrator asks of it — who was that
+    account we removed, and what did it do first — is exactly the one that
+    excluding them makes unanswerable. ``deleted`` rides on the result so
+    the caller can mark it rather than pretend the account is current.
+
+    An id that resolves to nothing is simply ABSENT from the returned map.
+    The caller must keep showing the raw id in that case: an unresolvable
+    actor is a real state (a system-generated event, a hard-deleted row, a
+    payload naming something that was never a user) and inventing
+    "Unknown User" for it would claim a fact the database does not have.
+    """
+    ids = [i for i in dict.fromkeys(user_ids) if i]
+    if not ids:
+        return {}
+    rows = (await session.execute(
+        select(
+            UserORM.id,
+            UserORM.display_name,
+            UserORM.first_name,
+            UserORM.last_name,
+            UserORM.email,
+            UserORM.status,
+            UserORM.deleted_at,
+            UserORM.avatar_id,
+        ).where(UserORM.id.in_(ids))
+    )).all()
+    return {
+        r[0]: {
+            # Through the shared resolver, never a re-join of the halves —
+            # a stored display name has to win here as it does everywhere
+            # else, or the audit log names people differently from the
+            # user list it links to.
+            "name": resolve_display_name(r[1], r[2], r[3]),
+            "email": r[4],
+            "status": r[5],
+            "deleted": r[6] is not None,
+            # The picked illustration, for surfaces that draw an avatar.
+            # Additive: callers that only name people ignore it.
+            "avatar_id": r[7],
+        }
+        for r in rows
+    }
+
+
+async def get_workspace_names_by_ids(
+    session: AsyncSession, workspace_ids: list[str],
+) -> dict[str, str]:
+    """Name for a batch of workspace ids, keyed by id.
+
+    The sibling of :func:`get_identities_by_ids`, and it exists for the same
+    reason: an audit row that says an event happened in ``ws_4f21c8`` has told
+    the reader nothing they can act on.
+
+    DELETED AND INACTIVE WORKSPACES ARE INCLUDED. A log is a record of what
+    happened, and an event in a workspace that has since been torn down is
+    among the more interesting rows in it — filtering those out would leave
+    exactly those rows unreadable.
+
+    An id that resolves to nothing is ABSENT from the map, and the caller keeps
+    showing the raw id: a hard-deleted workspace is a real state, and inventing
+    a name for it would claim something the database cannot support.
+    """
+    ids = [i for i in dict.fromkeys(workspace_ids) if i]
+    if not ids:
+        return {}
+    rows = (await session.execute(
+        select(WorkspaceORM.id, WorkspaceORM.name).where(WorkspaceORM.id.in_(ids))
+    )).all()
+    return {r[0]: r[1] for r in rows if r[1]}
+
+
+async def find_user_ids_matching(
+    session: AsyncSession, term: str, *, limit: int = 200,
+) -> set[str]:
+    """Every user id whose id, email or name contains ``term``.
+
+    The audit lens filters by an exact user id, which was the only thing it
+    could offer while its rows showed nothing else. Now that the table names
+    people, an operator reading it will reasonably type "john" or
+    "john.doe@example.com" into the box above — and matching that against an id
+    column returns nothing, silently, which reads as "this person did nothing"
+    rather than as "that is not an id".
+
+    Soft-deleted users are included for the same reason they are named:
+    filtering the log down to a departed colleague is a normal thing to want.
+
+    Case-insensitive substring, capped: this exists to turn a typed name into a
+    set of ids for an ``IN``-shaped comparison, not to be a user search API.
+    """
+    needle = (term or "").strip().lower()
+    if not needle:
+        return set()
+    like = f"%{needle}%"
+    rows = (await session.execute(
+        select(UserORM.id).where(
+            or_(
+                func.lower(UserORM.id).like(like),
+                func.lower(UserORM.email).like(like),
+                func.lower(func.coalesce(UserORM.display_name, "")).like(like),
+                func.lower(
+                    UserORM.first_name + " " + UserORM.last_name
+                ).like(like),
+            )
+        ).limit(limit)
+    )).all()
+    return {r[0] for r in rows}

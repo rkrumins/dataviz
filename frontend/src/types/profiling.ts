@@ -10,6 +10,11 @@
 
 export type ProfilingScope = 'source' | 'workspace' | 'provider' | 'all'
 export type ProfilingMetric = 'total' | 'nodes' | 'edges'
+/** The chart's measures. Deliberately NOT `ProfilingMetric`: that one is also
+ *  the board's measure and the key of `MEASURE_LABEL` / `METRIC_NOUN`, and
+ *  `movement_board` cannot serve `aggregated` — widening it there would offer
+ *  a board measure whose `else` branch quietly resolves to *total*. */
+export type SeriesMetric = ProfilingMetric | 'aggregated' | 'property_keys'
 export type ProfilingBreakdown = 'none' | 'entity_type' | 'edge_type'
 export type ProfilingGrain = 'auto' | 'raw' | 'hour' | 'day'
 export type ProfilingWindow = '24h' | '7d' | '30d' | '90d' | 'custom'
@@ -31,6 +36,12 @@ export interface ProfilingSeries {
     label: string
     kind: 'metric' | 'type'
     points: SeriesPoint[]
+    /** The platform's OWN rolled-up lineage, not a type anyone ingested.
+     *  Drawn because the breakdown has to add up to the store, badged
+     *  because a reader must be able to tell the two apart — and excluded
+     *  from the gone/new verdict, since a rebuild wiping and rewriting the
+     *  rollup is not a type disappearing from their data. */
+    derived?: boolean
 }
 
 export interface SeriesPayload {
@@ -40,16 +51,42 @@ export interface SeriesPayload {
     to: string
     window: ProfilingWindow
     grain: Exclude<ProfilingGrain, 'auto'>
-    requested_metric: ProfilingMetric
+    /** The measure actually DRAWN — the backend falls back to `total` for
+     *  anything it does not know, so this is not necessarily what was asked
+     *  for. A client running ahead of its backend reads the truth here. */
+    requested_metric: SeriesMetric
     breakdown: ProfilingBreakdown
     buckets: string[]
     series: ProfilingSeries[]
-    totals: { nodes: number[]; edges: number[]; total: number[] }
+    /** `aggregated` is the platform's own materialised rollup, present on
+     *  every payload so the Relationships tile and the type ledger can show
+     *  it without a second request. Optional: a backend that predates it
+     *  simply omits the key, and every read site degrades to "no overlay to
+     *  show" rather than to zero. */
+    totals: {
+        nodes: number[]
+        edges: number[]
+        total: number[]
+        aggregated?: number[]
+        /** Registered property NAMES against the store's per-graph ceiling.
+         *  The MAXIMUM over the scope, not the sum: the ceiling applies to
+         *  each graph separately, so ten graphs at 6,000 names are nowhere
+         *  near it while their sum reads as 60,000.
+         *
+         *  `null` at a bucket means NOT MEASURED — a probe that could not
+         *  answer, or a source observed before this was collected. It is not
+         *  zero, and a reader must not draw it as one. */
+        property_keys?: (number | null)[]
+    }
     /** Which altitude this is. "Nothing moved" means very different things
      *  across a deployment and across one workspace's sources. */
     platform_wide: boolean
     truncated: boolean
     vanished_types: { type: string; peak: number }[]
+    /** Whether the rolled-up relationship types are in this payload's
+     *  breakdown. Echoed so a reader can tell "this source has no rollup"
+     *  from "rollups are switched off for this deployment". */
+    include_derived_edges?: boolean
     /** Where this scope's record begins, so a short series can say so rather
      *  than reading as data loss. */
     coverage_from: string | null
@@ -193,6 +230,11 @@ export interface ProfilingPolicy {
     alertsEnabled: boolean
     alertMinSeverity: string
     alertCooldownSecs: number
+    /** Show the platform's own rolled-up relationship types in breakdowns.
+     *  A DISPLAY decision, not a retention one: it changes what a chart
+     *  draws, never what is captured or kept, so turning it off loses no
+     *  history and turning it back on needs no backfill. */
+    includeDerivedEdges: boolean
     /** What the deployment would use with nothing persisted — the editor shows
      *  these as placeholders, so a blank field means "inherit" rather than
      *  pinning today's value forever. */
@@ -205,6 +247,7 @@ export interface ProfilingPolicy {
         silentAfterSecs: number
         alertMinSeverity: string
         alertCooldownSecs: number
+        includeDerivedEdges: boolean
     }
     /** Fields an operator has actually set, so the editor can mark them. */
     overridden: string[]

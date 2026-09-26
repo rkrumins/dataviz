@@ -22,8 +22,8 @@ vi.mock('@/services/workspaceService', () => ({
         restoreDataSource: vi.fn(),
     },
 }))
-const toast = vi.fn()
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast: toast }) }))
+const notify = vi.fn()
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 
 import { workspaceService } from '@/services/workspaceService'
 
@@ -155,9 +155,9 @@ describe('offboard vs delete permanently', () => {
         expect(workspaceService.removeDataSource).toHaveBeenCalledWith('ws1', 'ds1', false)
         expect(onChanged).toHaveBeenCalled()
 
-        // The undo is IN the toast. Most undos happen seconds after the mistake, long before
+        // The undo is IN the notification. Most undos happen seconds after the mistake, long before
         // anyone thinks to go hunting for a trash can — so the trash comes to them.
-        const [, msg, action] = toast.mock.calls.at(-1)!
+        const [, msg, action] = notify.mock.calls.at(-1)!
         expect(msg).toBe('Finance offboarded')
         expect(action.label).toBe('Undo')
 
@@ -175,7 +175,7 @@ describe('offboard vs delete permanently', () => {
         await act(async () => { await result.current.confirm() })
 
         expect(workspaceService.removeDataSource).toHaveBeenCalledWith('ws1', 'ds1', true)
-        const [, msg, action] = toast.mock.calls.at(-1)!
+        const [, msg, action] = notify.mock.calls.at(-1)!
         expect(msg).toBe('Finance deleted permanently')
         expect(action).toBeUndefined()          // there is nothing to undo, so do not pretend
     })

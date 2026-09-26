@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
+import type { PlacedOut, PlacementInfo } from './placement'
+import { PlacedTag } from '@/components/ui/PlacedTag'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
@@ -11,14 +13,36 @@ import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
+import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
+import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { portView, type NodePorts } from './lineagePorts'
+import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
 import { useReparentNode } from './useReparentNode'
 
+/** Which modifier keys were held when a row was clicked. */
+export interface RowSelectModifiers {
+  /** Cmd/Ctrl — add or remove this row without disturbing the rest. */
+  multi: boolean
+  /** Shift — select every row from the last-clicked one to this one. */
+  range: boolean
+}
+
 interface FlatTreeItemProps {
+  /** Set when this row is PLACED in this column apart from its parent: its path in the data. */
+  placement?: PlacementInfo
+  /** Set on a parent whose children are placed in other columns (the other end of a placement). */
+  placedOut?: PlacedOut
+  onRevealPlacement?: (placement: PlacementInfo) => void
+  /** Undo this row's view placement: show it under its parent again. */
+  onReturnPlacement?: (entityId: string, parentName?: string) => void
+  /** Group rows (view-only containers): manage the group, and place what is dropped on it. */
+  groupActions?: GroupActions
   node: HierarchyNode
   depth: number
   isLast: boolean
@@ -26,17 +50,27 @@ interface FlatTreeItemProps {
   layer: ViewLayerConfig
   schema: ReturnType<typeof useSchemaStore.getState>['schema']
   isSelected: boolean
+  /** This row is one of SEVERAL selected. A single selection is already
+   *  obvious (the drawer opens on it); a bulk one has to be countable at a
+   *  glance, so these rows carry an explicit mark rather than a tint. */
+  isBulkSelected?: boolean
   isExpanded: boolean
   isLoading?: boolean
   isSearchResult: boolean
   isHighlighted: boolean
   isFocusNode: boolean
   isClickHighlighted?: boolean
-  isHoverHighlighted?: boolean
   isDimmedByHighlight?: boolean
+  /** A multi-selection is active and this row is not in it. Dimmed more
+   *  gently than the search spotlight: the reader is still PICKING, so the
+   *  rows they have not chosen yet have to stay comfortably readable. */
+  isDimmedBySelection?: boolean
   isFocused?: boolean
   isTracing?: boolean
-  onSelect: (id: string) => void
+  /** A row click, with the modifiers that were held. `multi` toggles the
+   *  row in the selection; `range` selects from the last-clicked row to
+   *  this one. The column resolves `range` — it owns the visible order. */
+  onSelect: (id: string, modifiers: RowSelectModifiers) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
@@ -51,16 +85,17 @@ interface FlatTreeItemProps {
    *  band keeps the existing reparent drop. */
   reorderEnabled?: boolean
   onReorderDrop?: (draggedId: string, targetId: string, position: 'before' | 'after') => void
-  /** Ambient in/out lineage counts for THIS node. Rendered as edge
-   *  hairlines ANCHORED TO THE ROW BOX — so they always track the card's
-   *  width/position and unmount with it (no overlay coordinate math, no
-   *  stale/offset/ghost marks). */
-  lineageIn?: number
-  lineageOut?: number
-  /** Relative volume (0..1) vs the column's heaviest node — drives the
-   *  hairline opacity so hubs stand out and median rows fade. */
-  lineageIntensityIn?: number
-  lineageIntensityOut?: number
+  /** Where this card's lines on the canvas plug in, by side and direction —
+   *  its lineage PORTS (lineagePorts.ts). Rendered as children of the row
+   *  box, so they track the card's width and position and unmount with it. */
+  ports?: NodePorts
+  /** Relative volume (0..1) per side vs the column's busiest card — a port's
+   *  glow, so hubs stand out; every port is the same height. */
+  portStrengthLeft?: number
+  portStrengthRight?: number
+  /** Lineage in/out over the WHOLE graph (`/nodes/degree`); undefined = not
+   *  known. Shows a hollow port for lineage with nothing on this canvas. */
+  lineageTotals?: { in: number; out: number }
   /** Out-of-view lineage cue (curated views) — sky dashed marks. */
   externalIn?: number
   externalOut?: number
@@ -80,20 +115,26 @@ const FLAT_ROW_STYLE: Record<string, string> = {
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
   node,
+  placement,
+  placedOut,
+  onRevealPlacement,
+  onReturnPlacement,
+  groupActions,
   depth,
   isLast,
   parentIsLast,
   layer,
   schema,
   isSelected,
+  isBulkSelected = false,
   isExpanded,
   isLoading = false,
   isSearchResult,
   isHighlighted,
   isFocusNode,
   isClickHighlighted = false,
-  isHoverHighlighted = false,
   isDimmedByHighlight = false,
+  isDimmedBySelection = false,
   isFocused = false,
   isTracing = false,
   onSelect,
@@ -107,10 +148,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onBeginConnect,
   reorderEnabled = false,
   onReorderDrop,
-  lineageIn = 0,
-  lineageOut = 0,
-  lineageIntensityIn = 0,
-  lineageIntensityOut = 0,
+  ports,
+  portStrengthLeft = 0,
+  portStrengthRight = 0,
+  lineageTotals,
   externalIn = 0,
   externalOut = 0,
 }: FlatTreeItemProps) {
@@ -229,7 +270,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // `?? default` covers users whose persisted state predates these fields.
   const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const showTypeBadge = usePreferencesStore(s => s.showCanvasTypeBadge) ?? true
+  const showEntityIcon = usePreferencesStore(s => s.showCanvasEntityIcons) ?? true
   const subtleTreeLines = usePreferencesStore(s => s.subtleCanvasTreeLines) ?? false
+
+  // Business/Technical. `node.name` is the business-facing name the hierarchy
+  // was built with; the persona mode is applied here, at render, so switching
+  // it never rebuilds the tree. Technical mode reveals the qualified name (or
+  // the URN) on a second line — and only when it says something the name on the
+  // row does not, so no row ever prints the same string twice. The row grows by
+  // one line when it does; LayerColumn measures every row via
+  // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
+  const personaMode = usePersonaMode()
+  const displayName = resolveEntityName(node.data, personaMode, node.name)
+  const leftPort = portView('left', ports, lineageTotals)
+  const rightPort = portView('right', ports, lineageTotals)
+  const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
   const minRowHeightPx = isRoot ? sizing.rootHeight : sizing.childHeight
@@ -267,7 +322,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // safe at every depth; logical wrappers stay out (they aren't orderable).
   const reorderBandsActive = reorderEnabled && !isLogical && !!onReorderDrop
   const isRootDraggable = depth === 0 && !node.parentId && !isLogical
-  const isDraggable = !isPendingDelete && (isRootDraggable || reorderBandsActive)
+  // A group row drags as a GROUP (drop it on another group to nest it) — never as an entity.
+  const isGroupDraggable = isLogical && !!groupActions
+  const isDraggable = !isPendingDelete && (isRootDraggable || reorderBandsActive || isGroupDraggable)
   useEffect(() => {
     const el = itemRef.current
     if (!el) return
@@ -282,8 +339,13 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     const onDragStart = (e: DragEvent) => {
       if (!e.dataTransfer) return
       e.dataTransfer.effectAllowed = 'move'
-      e.dataTransfer.setData('text/x-entity-id', node.id)
-      e.dataTransfer.setData('text/x-entity-name', node.name)
+      if (isGroupDraggable) {
+        e.dataTransfer.setData('text/x-group-id', node.id.replace(/^logical:/, ''))
+        e.dataTransfer.setData('text/x-group-layer', groupActions!.layerId)
+      } else {
+        e.dataTransfer.setData('text/x-entity-id', node.id)
+        e.dataTransfer.setData('text/x-entity-name', node.name)
+      }
       e.dataTransfer.setDragImage(el, 20, 20)
     }
     const onDragEnd = () => {
@@ -296,7 +358,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       el.removeEventListener('dragstart', onDragStart)
       el.removeEventListener('dragend', onDragEnd)
     }
-  }, [node.id, node.name, isDraggable])
+  }, [node.id, node.name, isDraggable, isGroupDraggable])
 
   const { reparent } = useReparentNode()
   const [dropHover, setDropHover] = useState(false)
@@ -327,12 +389,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     <div
       ref={itemRef}
       id={`layer-node-${node.id}`}
+      // The hover spotlight's glow never replaces a selected row's own.
+      data-selected={isSelected || undefined}
       data-canvas-interactive
       data-trace-focus={isFocusNode ? 'true' : 'false'}
       onDragOver={(e) => {
         // Accept a node drag (reparent / reorder). The id can't be read during
         // dragover, so we can't exclude self here — drop handlers guard that.
-        if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+        const groupOnGroup = isLogical && !!groupActions && e.dataTransfer.types.includes('text/x-group-id')
+        if (!e.dataTransfer.types.includes('text/x-entity-id') && !groupOnGroup) return
         e.preventDefault()
         e.stopPropagation()
         e.dataTransfer.dropEffect = 'move'
@@ -353,6 +418,17 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         if (dropIndicator) setDropIndicator(null)
       }}
       onDrop={(e) => {
+        // A GROUP dropped on a group nests inside it (view arrangement).
+        const draggedGroup = e.dataTransfer.getData('text/x-group-id')
+        if (draggedGroup && isLogical && groupActions) {
+          e.preventDefault()
+          e.stopPropagation()
+          setDropHover(false)
+          const target = node.id.replace(/^logical:/, '')
+          const from = e.dataTransfer.getData('text/x-group-layer') || groupActions.layerId
+          if (draggedGroup !== target) groupActions.receive(draggedGroup, from, target)
+          return
+        }
         const draggedId = e.dataTransfer.getData('text/x-entity-id')
         if (!draggedId) return
         e.preventDefault()
@@ -360,6 +436,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         const indicator = dropIndicator
         setDropHover(false)
         setDropIndicator(null)
+        // A drop on a GROUP places the entity in it — view arrangement, never a data move.
+        if (isLogical && groupActions) {
+          groupActions.place(draggedId, node.id.replace(/^logical:/, ''), node.name)
+          return
+        }
         if (indicator && reorderBandsActive) {
           if (draggedId !== node.id) onReorderDrop!(draggedId, node.id, indicator)
           return
@@ -367,23 +448,29 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         if (draggedId !== node.id) reparent(draggedId, node.id)
       }}
       className={cn(
-        "flex items-center gap-2 mx-1 rounded-xl transition-all duration-200 group/item relative z-[2]",
+        "flex items-center gap-2 mx-1 rounded-xl transition-[background-color,background-image,box-shadow] duration-150 group/item relative z-[2]",
         // Reorderable rows advertise the drag with a grab cursor (+ the
         // hover-revealed grip below); everything else keeps the pointer.
         reorderBandsActive ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
         paddingClass,
-        // Subtle backdrop-blur on the card body — visually invisible
-        // (matches the glassy translucent design) but blurs anything
-        // painted behind so cross-column edges don't read as solid lines
-        // bleeding through the node. Same technique the layer header uses
-        // (`backdrop-blur-xl` at LayerColumn.tsx:508). The bg tint is kept
-        // near-zero so the airy feel of the original cards is preserved;
-        // hover / selected gradients below paint over this without conflict.
-        "bg-canvas-elevated/10 backdrop-blur-sm",
-        // Base hover state with gradient
-        "hover:bg-gradient-to-r hover:from-white/[0.06] hover:to-transparent",
+        // The card's surface: solid (lines pass cleanly under it) or, by the
+        // reader's choice, frosted — see `.nx-row-card` in globals.css. The
+        // hover / selected gradients below paint over either.
+        "nx-row-card",
+        // Base hover state with gradient.
+        //
+        // This was `from-white/[0.06]` alone — 6% white, which over a near-white
+        // row in LIGHT mode is invisible. Hover only ever worked in dark mode.
+        // Every other state on this row is either theme-aware or uses a hue that
+        // reads on both grounds; this one was not. A dark tint in light mode and
+        // a slightly stronger light tint in dark gives the same weight on both.
+        "hover:bg-gradient-to-r hover:to-transparent",
+        "hover:from-accent-lineage/[0.07] dark:hover:from-accent-lineage/[0.13]",
         // Selected state with accent glow
-        isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        isSelected && !isBulkSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        // One of several: the row has to be findable while scanning a column,
+        // so the ring is a full 2px in the accent rather than a 30% hairline.
+        isBulkSelected && "bg-gradient-to-r from-accent-lineage/25 via-accent-lineage/[0.12] to-transparent shadow-[inset_0_0_0_2px_rgba(var(--accent-lineage-rgb),0.7)]",
         // Search result highlight — direct match (advanced search or quick search)
         isSearchResult && !isSelected && cn(
             "bg-gradient-to-r from-amber-500/15 to-transparent",
@@ -407,14 +494,18 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         (isHighlighted || isOnLineage) && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
         // Click-highlight: subtle glow on connected nodes
         isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
-        // Hover-highlight: lighter ephemeral glow on connected nodes
-        isHoverHighlighted && !isSelected && !isClickHighlighted && "bg-gradient-to-r from-blue-500/[0.05] to-transparent ring-1 ring-blue-400/15 dark:from-blue-400/[0.06] dark:ring-blue-400/12",
+        // Hover-highlight (the lighter glow on a hovered entity's connections,
+        // and the dim on everything else) is the edge overlay's, applied as
+        // CSS — `.nx-row-card` under `[data-row-spotlight]`, globals.css.
         // Keyboard focus ring (4.5)
         isFocused && !isSelected && "ring-2 ring-accent-lineage/40 bg-gradient-to-r from-accent-lineage/[0.06] to-transparent",
         // Staged-change row treatment — full-row color tint per change type
         stagedRowClass,
         // Dimmed when not in trace path or not connected to highlighted node
         isDimmed && "opacity-40",
+        // The selection spotlight: lighter than the search one, and never
+        // applied on top of it (a row cannot be dimmed twice).
+        !isDimmed && isDimmedBySelection && "opacity-60",
         // Jump-to-node arrival pulse — one-shot ring animation
         isPulsing && "lineage-pulse",
         // Reparent drop target (middle band) — a node drag will nest INTO
@@ -435,7 +526,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       }}
       onClick={(e) => {
         e.stopPropagation()
-        onSelect(node.id)
+        onSelect(node.id, { multi: e.metaKey || e.ctrlKey, range: e.shiftKey })
       }}
       onDoubleClick={(e) => {
         e.stopPropagation()
@@ -584,8 +675,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
       </button>
 
-      {/* Entity Icon - Glass morphism container */}
+      {/* Entity Icon - Glass morphism container. The reader can turn the
+          ontology's icons off (Display > Display options): the row is then
+          its name alone — but a bulk-selected row keeps its check, the one
+          positive "you picked this" mark, in the icon's place. */}
+      {!showEntityIcon && isBulkSelected && (
+        <span
+          className="w-4 h-4 flex-shrink-0 rounded-full bg-accent-lineage flex items-center justify-center shadow-sm"
+          aria-hidden
+        >
+          <LucideIcons.Check className="w-2.5 h-2.5 text-white" strokeWidth={3.5} />
+        </span>
+      )}
+      {showEntityIcon && (
       <div
+        data-entity-icon
         className={cn(
           "rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200 shadow-sm relative",
           iconContainerSize,
@@ -598,12 +702,24 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           ...(isLogical && { border: `1px dashed ${nodeColor}50` }),
         }}
       >
+        {/* One of several selected. A positive mark, not a tint: the row has
+            to answer "did I pick this one?" without the reader comparing
+            shades across a scrolling column. */}
+        {isBulkSelected && (
+          <span
+            className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-accent-lineage flex items-center justify-center ring-2 ring-canvas shadow-sm"
+            aria-hidden
+          >
+            <LucideIcons.Check className="w-2.5 h-2.5 text-white" strokeWidth={3.5} />
+          </span>
+        )}
         <DynamicIcon
           name={logicalIcon ?? visual?.icon ?? 'Box'}
           className={cn(iconSize, "transition-transform duration-200")}
           style={{ color: nodeColor }}
         />
       </div>
+      )}
 
       {/* Name + type — the text region IS the row's primary payload.
           ``min-w-0`` keeps the flex child from forcing the row to
@@ -619,7 +735,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           unreadable widths). */}
       <div
         className="flex-1 min-w-0 flex flex-col justify-center"
-        title={stagedSummary ?? node.name}
+        title={stagedSummary ?? displayName}
       >
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
@@ -638,8 +754,28 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // their successors without scroll-jump.
           "line-clamp-3 break-words"
         )}>
-          {node.name}
+          {displayName}
         </span>
+        {/* Technical identity (Business/Technical toggle) — one truncated line,
+            full value on hover.
+
+            TRUNCATED FROM THE HEAD, not the tail. Every URN from one source
+            shares a long prefix (`urn:synodic:solidatus:node:OBJ-…`) and the
+            column gives this line ~143px against a ~234px string, so an end
+            ellipsis cuts off precisely the part that tells two rows apart —
+            a screenful of siblings then reads the identical
+            `urn:synodic:solidatus:n…`. An RTL inline direction puts the
+            ellipsis at the start and keeps the discriminating tail; the runs
+            inside are still read left-to-right. */}
+        {technicalLine && (
+          <span
+            className="text-[10px] font-mono text-ink-muted/70 truncate mt-0.5"
+            style={{ direction: 'rtl', textAlign: 'left' }}
+            title={technicalLine}
+          >
+            {technicalLine}
+          </span>
+        )}
         {/* Type badge — gated by usePreferencesStore.showCanvasTypeBadge so
             users can reclaim vertical space in dense canvases. */}
         {showTypeBadge && (
@@ -653,6 +789,18 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             />
             {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
           </span>
+        )}
+        {placement && (
+          <PlacementPath
+            placement={placement}
+            entityName={node.name}
+            onReveal={onRevealPlacement}
+            onReturn={onReturnPlacement ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
+          />
+        )}
+        {placedOut && <PlacedOutNote placedOut={placedOut} parentName={node.name} />}
+        {isLogical && groupActions && (
+          <GroupRowControls groupId={node.id.replace(/^logical:/, '')} name={node.name} actions={groupActions} />
         )}
         {/* Display-rule tags — shared chip cluster (premium chips +
             overflow popover) so all canvases render identically. */}
@@ -728,21 +876,25 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             2. Bump blur from ``backdrop-blur-md`` to
                ``backdrop-blur-xl`` so even the fade zone obscures
                any text it overlaps. */}
-      <motion.div
-        initial={false}
-        animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
-        transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+      {/* Visibility is owned by CSS (`group-hover/item`), not by React
+          state: a state-driven overlay stays painted on a row the pointer
+          left without a mouseleave (a row covered by a drawer, scrolled
+          away, or recycled), which read as a "white strip" on the node.
+          The browser never leaves :hover stuck. No blurred backdrop: the
+          gradient is already opaque under the buttons, and a blur surface
+          toggling inside a scroller is the shape that ghosts. */}
+      <div
+        data-row-actions
         className={cn(
           "absolute inset-y-0 flex items-center gap-1 pl-8 pr-1 rounded-l-xl z-[4]",
+          "opacity-0 translate-x-2 pointer-events-none",
+          "transition-[opacity,transform] duration-[180ms] ease-out",
+          "group-hover/item:opacity-100 group-hover/item:translate-x-0 group-hover/item:pointer-events-auto",
+          "bg-gradient-to-l from-canvas-elevated via-canvas-elevated via-75% to-transparent",
+          "dark:from-canvas-elevated dark:via-canvas-elevated dark:to-transparent",
           (ancestorMatchCount > 0 && !isExpanded && hasChildren)
             ? "right-[3.125rem]"
             : "right-2",
-          isHovered && cn(
-            "backdrop-blur-xl",
-            "bg-gradient-to-l from-canvas-elevated via-canvas-elevated via-75% to-transparent",
-            "dark:from-canvas-elevated dark:via-canvas-elevated dark:to-transparent",
-          ),
-          !isHovered && "pointer-events-none"
         )}
       >
         {/* Focus/Drill button */}
@@ -759,10 +911,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           </button>
         )}
 
-        {/* Search children button. Hidden while tracing: child search
-            REPLACES a parent's loaded children in the canvas store, which a
-            trace can never undo on exit, so the handler refuses it — and an
-            affordance that does nothing is worse than no affordance. */}
+        {/* Search children button. Hidden while tracing: the box scopes the
+            VIEW's search to this container, and a trace's tree is a filtered
+            overlay the store never sees — so its hits would be rows the trace
+            had deliberately left out, arriving from underneath it. An
+            affordance that answers the wrong question is worse than none.
+            A harness test pins the withdrawal. */}
         {hasChildren && onToggleSearch && !isTracing && (
           <button
             onClick={(e) => {
@@ -794,61 +948,60 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             <LucideIcons.Plus className="w-3 h-3 block" />
           </button>
         )}
-      </motion.div>
+      </div>
 
-      {/* Hover indicator line */}
-      <motion.div
-        className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] rounded-r-full"
-        style={{ backgroundColor: nodeColor }}
-        initial={false}
-        animate={{
-          height: isSelected ? '70%' : isHovered ? '50%' : '0%',
-          opacity: isSelected ? 1 : isHovered ? 0.6 : 0
-        }}
-        transition={{ duration: 0.2 }}
-      />
-
-      {/* ── Ambient lineage hairlines — ANCHORED TO THIS ROW BOX ──────────
-          Incoming hugs the left edge, outgoing the right; sky dashed cues
-          sit just inboard for out-of-view lineage. Because these are
-          children of the row (position:relative), they track the card's
-          width and position for free, unmount when the row collapses, and
-          can never drift/offset/ghost — no overlay coordinate math.
-          Opacity floors at 0.6 (presence is always legible) with volume
-          intensity on top so hubs stand out. Kept inside the box so the
-          column's overflow-x-hidden never clips them. ── */}
-      {lineageIn > 0 && (
-        <div
-          className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
-          style={{
-            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
-            opacity: 0.6 + lineageIntensityIn * 0.4,
+      {/* Hover indicator line. A left lineage port owns that edge — its rail
+          runs the card's height — so the indicator steps aside there rather
+          than stack a second bar on the same 4px; the card's tint and ring
+          still say hovered / selected. */}
+      {!leftPort && (
+        <motion.div
+          className="absolute left-0 top-1/2 -translate-y-1/2 rounded-r-full"
+          // Selection speaks in the accent, not in the entity's type colour:
+          // a rail tinted per type reads as decoration, and a column of them
+          // cannot be scanned for "what did I pick?".
+          style={{ backgroundColor: isSelected ? 'rgb(var(--accent-lineage-rgb))' : nodeColor }}
+          initial={false}
+          animate={{
+            width: isBulkSelected ? 4 : 3,
+            height: isSelected ? '85%' : isHovered ? '50%' : '0%',
+            opacity: isSelected ? 1 : isHovered ? 0.6 : 0,
           }}
-          title={`${lineageIn.toLocaleString()} incoming connection${lineageIn === 1 ? '' : 's'}`}
+          transition={{ duration: 0.2 }}
         />
       )}
-      {lineageOut > 0 && (
-        <div
-          className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 w-[3px] h-[58%] rounded-full"
-          style={{
-            background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
-            opacity: 0.6 + lineageIntensityOut * 0.4,
-          }}
-          title={`${lineageOut.toLocaleString()} outgoing connection${lineageOut === 1 ? '' : 's'}`}
+
+      {/* ── Lineage ports — ANCHORED TO THIS ROW BOX ──────────────────────
+          Where this card's lines plug in: a rail down each edge that carries
+          lines, the card's height, in the lineage direction colours —
+          incoming, outgoing, or split when a side carries both
+          (lineagePorts.ts). Solid: lines to entities on this canvas, glowing
+          brighter the more they carry. Hollow: lineage in the data, none of
+          it on this canvas. No rail: no lineage that way. ── */}
+      {leftPort && (
+        <LineagePortGlyph
+          side="left" view={leftPort} strength={portStrengthLeft}
+          counts={leftPort.kind === 'here' ? ports?.left : lineageTotals}
+        />
+      )}
+      {rightPort && (
+        <LineagePortGlyph
+          side="right" view={rightPort} strength={portStrengthRight}
+          counts={rightPort.kind === 'here' ? ports?.right : lineageTotals}
         />
       )}
       {externalIn > 0 && (
         <div
           className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalIn.toLocaleString()} incoming connection${externalIn === 1 ? '' : 's'} outside this view`}
+          title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}
       {externalOut > 0 && (
         <div
           className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalOut.toLocaleString()} outgoing connection${externalOut === 1 ? '' : 's'} outside this view`}
+          title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}
     </div>
@@ -858,3 +1011,225 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 
 // `formatBreakdown` + `pluralize` moved into ./SearchMatchBadge.tsx
 // alongside the tooltip rendering that consumes them.
+
+/**
+ * The placed end: "Placed · Part of <path> · in <parent's layer>". The tag says this column is a view
+ * arrangement; "Part of" says where the entity really sits in the data (root → parent); a click goes
+ * there. A long path keeps its start and its last two steps; the tooltip carries all of it.
+ */
+function PlacementPath({ placement, entityName, onReveal, onReturn }: {
+  placement: PlacementInfo
+  entityName: string
+  onReveal?: (placement: PlacementInfo) => void
+  onReturn?: () => void
+}) {
+  const names = placement.path.map((a) => a.displayName)
+  const shown = names.length > 3 ? [names[0], '…', ...names.slice(-2)] : names
+  const lead = placement.complete ? '' : '… › '
+  const full = `${lead}${names.join(' › ')}`
+  const parentName = names[names.length - 1] ?? 'its parent'
+  const explain = `Placed in ${placement.placedLayerName} for this view only — the data source is unchanged. `
+    + `In the data, ${entityName} is part of ${full} (shown in ${placement.parentLayerName}). `
+    + 'Click to go to its parent.'
+  return (
+    <span className="mt-1 flex items-center gap-1 min-w-0 max-w-full">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onReveal?.(placement) }}
+        title={explain}
+        aria-label={explain}
+        className="flex items-center gap-1.5 min-w-0 text-left rounded-md -mx-0.5 px-0.5 hover:bg-violet-500/[0.06] focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
+      >
+        <PlacedTag />
+        <span className="text-[10.5px] text-ink-muted truncate">
+          Part of <span className="text-ink font-medium">{lead}{shown.join(' › ')}</span>
+          <span className="text-ink-muted/70"> · in {placement.parentLayerName}</span>
+        </span>
+      </button>
+      {onReturn && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onReturn() }}
+          title={`Return to ${parentName} — show it under its parent again (this view only)`}
+          aria-label={`Return ${entityName} to ${parentName}`}
+          className="flex-shrink-0 p-0.5 rounded-md text-violet-500/70 hover:text-violet-600 hover:bg-violet-500/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
+        >
+          <LucideIcons.Undo2 className="w-3 h-3" aria-hidden />
+        </button>
+      )}
+    </span>
+  )
+}
+
+/** What a group row can do — bound to its layer by the column. */
+export interface GroupActions {
+  layerId: string
+  layerName: string
+  /** Every group in the layer, with its path — the targets the pickers offer. */
+  groups: Array<{ id: string; name: string; path: string }>
+  /** Is `name` already used by a group directly inside `parentId` (null = the layer's top level),
+   *  other than `exceptId`? Two groups side by side can't share a name. */
+  nameTaken: (name: string, parentId: string | null, exceptId?: string) => boolean
+  /** The group a group sits in (null = the layer's top level). */
+  parentOf: (groupId: string) => string | null
+  /** A group's own subtree (it can't move into any of these). */
+  subtreeOf: (groupId: string) => string[]
+  create: (name: string, parentGroupId?: string) => void
+  rename: (groupId: string, name: string) => void
+  remove: (groupId: string, name: string) => void
+  place: (entityId: string, groupId: string, groupName: string) => void
+  /** Move one of THIS layer's groups — within it, or to another layer (`toLayerId`). */
+  move: (groupId: string, newParentId: string | null, toLayerId?: string) => void
+  /** Take a group dropped here from any layer: to the top of this layer, or into one of its groups. */
+  receive: (groupId: string, fromLayerId: string, newParentId: string | null) => void
+  /** The other layers a group can move to, with their groups. */
+  otherLayers: Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
+  moveContents: (fromId: string, toId: string) => void
+  ungroup: (groupId: string, name: string) => void
+}
+
+/**
+ * A group row's own controls: add a group inside it, rename it, delete it. Quiet until the row is
+ * hovered or focused; naming happens in place; delete asks once and says what happens to the
+ * entities (they stay in the column, ungrouped — nothing leaves the view, the data is untouched).
+ */
+function GroupRowControls({ groupId, name, actions }: { groupId: string; name: string; actions: GroupActions }) {
+  const [mode, setMode] = useState<'idle' | 'rename' | 'inside' | 'confirm' | 'move' | 'contents'>('idle')
+  const [draft, setDraft] = useState('')
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation()
+  // A name already used beside it is refused by the operation itself; say so while typing.
+  const taken = draft.trim() !== '' && (mode === 'inside'
+    ? actions.nameTaken(draft, groupId)
+    : mode === 'rename' && actions.nameTaken(draft, actions.parentOf(groupId), groupId))
+  const commit = (fromBlur = false) => {
+    if (taken) { if (fromBlur) setMode('idle'); return }
+    if (mode === 'rename') actions.rename(groupId, draft)
+    if (mode === 'inside' && draft.trim()) actions.create(draft, groupId)
+    setMode('idle')
+  }
+  const iconBtn = 'p-0.5 rounded-md text-violet-500/70 hover:text-violet-600 hover:bg-violet-500/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors'
+  if (mode === 'rename' || mode === 'inside') {
+    return (
+      <span className="mt-1 flex flex-col gap-0.5" onClick={stop}>
+        <input
+          autoFocus
+          value={draft}
+          placeholder={mode === 'inside' ? `Group inside ${name}` : 'Group name'}
+          aria-label={mode === 'inside' ? `Name a new group inside ${name}` : `Rename group ${name}`}
+          aria-invalid={taken || undefined}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commit(); if (e.key === 'Escape') setMode('idle') }}
+          onBlur={() => commit(true)}
+          className={cn(
+            'w-full px-2 py-0.5 rounded-md bg-canvas-overlay border text-[11.5px] text-ink outline-none placeholder:text-ink-muted',
+            taken ? 'border-red-400' : 'border-violet-400/60',
+          )}
+        />
+        {taken && (
+          <span role="alert" className="text-[10.5px] text-red-500">
+            There's already a group called “{draft.trim()}” {mode === 'inside' ? `in ${name}` : 'beside it'}.
+          </span>
+        )}
+      </span>
+    )
+  }
+  if (mode === 'move' || mode === 'contents') {
+    const own = new Set(actions.subtreeOf(groupId))
+    const targets = actions.groups.filter((g) => (mode === 'move' ? !own.has(g.id) : g.id !== groupId && !own.has(g.id)))
+    // A choice is where the group goes: a layer, and a group in it (none = the layer's top level).
+    const dest = (layerId: string, parent: string | null) => JSON.stringify([layerId, parent])
+    return (
+      <select
+        autoFocus
+        defaultValue=""
+        aria-label={mode === 'move' ? `Move group ${name} into` : `Move everything in ${name} into`}
+        onClick={stop}
+        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setMode('idle') }}
+        onBlur={() => setMode('idle')}
+        onChange={(e) => {
+          const v = e.target.value
+          if (mode === 'move' && v) {
+            const [layerId, parent] = JSON.parse(v) as [string, string | null]
+            actions.move(groupId, parent, layerId)
+          } else if (v) actions.moveContents(groupId, v)
+          setMode('idle')
+        }}
+        className="mt-1 w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none"
+      >
+        <option value="" disabled>{mode === 'move' ? `Move “${name}” into…` : `Move everything in “${name}” into…`}</option>
+        {mode === 'move' ? (
+          <>
+            <optgroup label={`In ${actions.layerName}`}>
+              <option value={dest(actions.layerId, null)}>Top level of {actions.layerName}</option>
+              {targets.map((g) => <option key={g.id} value={dest(actions.layerId, g.id)}>{g.path}</option>)}
+            </optgroup>
+            {actions.otherLayers.map((l) => (
+              <optgroup key={l.layerId} label={`To ${l.layerName}`}>
+                <option value={dest(l.layerId, null)}>Top level of {l.layerName}</option>
+                {l.groups.map((g) => <option key={g.id} value={dest(l.layerId, g.id)}>{l.layerName} › {g.path}</option>)}
+              </optgroup>
+            ))}
+          </>
+        ) : targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
+      </select>
+    )
+  }
+  if (mode === 'confirm') {
+    return (
+      <span className="mt-1 flex items-center gap-1.5 text-[10.5px] text-ink-muted" onClick={stop}>
+        Delete “{name}”? Its entities stay in this column.
+        <button type="button" onClick={(e) => { stop(e); actions.remove(groupId, name); setMode('idle') }}
+          className="px-1.5 py-px rounded-md bg-rose-500/15 text-rose-500 hover:bg-rose-500/25 font-semibold">Delete</button>
+        <button type="button" onClick={(e) => { stop(e); setMode('idle') }}
+          className="px-1.5 py-px rounded-md hover:bg-white/10">Keep</button>
+      </span>
+    )
+  }
+  return (
+    <span className="mt-1 flex items-center gap-0.5 opacity-0 group-hover/item:opacity-100 focus-within:opacity-100 transition-opacity">
+      <button type="button" className={iconBtn} title={`New group inside ${name}`} aria-label={`New group inside ${name}`}
+        onClick={(e) => { stop(e); setDraft(''); setMode('inside') }}>
+        <LucideIcons.FolderPlus className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Rename group ${name}`} aria-label={`Rename group ${name}`}
+        onClick={(e) => { stop(e); setDraft(name); setMode('rename') }}>
+        <LucideIcons.Pencil className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Move group ${name} into another group or layer`} aria-label={`Move group ${name}`}
+        onClick={(e) => { stop(e); setMode('move') }}>
+        <LucideIcons.FolderInput className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Move everything in ${name} into another group`} aria-label={`Move the contents of ${name}`}
+        onClick={(e) => { stop(e); setMode('contents') }}>
+        <LucideIcons.ArrowRightLeft className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Ungroup ${name} — its contents move up a level`} aria-label={`Ungroup ${name}`}
+        onClick={(e) => { stop(e); actions.ungroup(groupId, name) }}>
+        <LucideIcons.Ungroup className="w-3 h-3" aria-hidden />
+      </button>
+      <button type="button" className={iconBtn} title={`Delete group ${name}`} aria-label={`Delete group ${name}`}
+        onClick={(e) => { stop(e); setMode('confirm') }}>
+        <LucideIcons.Trash2 className="w-3 h-3" aria-hidden />
+      </button>
+      <span className="text-[10px] text-ink-muted ml-1 truncate">Drop entities or groups here</span>
+    </span>
+  )
+}
+
+/** The parent's end: which of its children this view shows in other columns. */
+function PlacedOutNote({ placedOut, parentName }: { placedOut: PlacedOut; parentName: string }) {
+  const n = placedOut.children.length
+  const where = placedOut.layerNames.join(', ')
+  const explain = `${placedOut.children.join(', ')} ${n === 1 ? 'is' : 'are'} placed in ${where} for this view only. `
+    + `In the data, ${n === 1 ? 'it is' : 'they are'} still part of ${parentName}.`
+  return (
+    <span
+      title={explain}
+      aria-label={explain}
+      className="mt-1 flex items-center gap-1 min-w-0 text-[10.5px] text-violet-600/80 dark:text-violet-300/80 truncate"
+    >
+      <LucideIcons.LayoutGrid className="w-2.5 h-2.5 flex-shrink-0" aria-hidden />
+      {n} {n === 1 ? 'child' : 'children'} placed in {where}
+    </span>
+  )
+}

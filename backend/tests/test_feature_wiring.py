@@ -31,7 +31,16 @@ from pathlib import Path
 import pytest
 
 from backend.app.config.feature_wiring import FEATURE_WIRING
-from backend.app.db.seed_feature_registry import SEED_CATEGORIES, SEED_DEFINITIONS
+# From the module that DEFINES them, not the ORM module that re-exports them
+# for scripts' convenience. This test is pure tree-parsing — its CI job
+# (.github/workflows/alembic-guards.yml, "Every feature flag is really wired")
+# installs pytest and nothing else, deliberately, because there is no database
+# and no app to start here. Importing the re-export dragged in
+# backend.app.db.models and therefore SQLAlchemy, so the job died at collection
+# with ModuleNotFoundError and the guard has been reporting red instead of
+# guarding anything. ``seed_feature_registry`` re-exports these two unchanged
+# (its ``__all__``), so this is the same data by a route that costs nothing.
+from backend.app.config.features_seed import SEED_CATEGORIES, SEED_DEFINITIONS
 
 _REPO = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO / "backend" / "app"
@@ -135,6 +144,21 @@ def test_every_seeded_flag_declares_its_wiring():
         f"only in the seed: {sorted(seeded - set(FEATURE_WIRING))}; "
         f"only in the wiring: {sorted(set(FEATURE_WIRING) - seeded)}"
     )
+
+
+def test_every_definition_states_every_column_the_table_requires():
+    """One definition missing a NOT NULL column does not fail alone. The startup reconcile writes
+    NULL into it, the WHOLE seed transaction rolls back, and no flag added after it can ever reach
+    the database — which is how `analyticsShowEmailAddresses`, seeded without a `sort_order`, kept
+    every newer flag off Admin → Features on a deployment that looked perfectly healthy (the
+    failure is a startup WARNING, and the page simply lists fewer switches)."""
+    required = ("key", "name", "description", "category_id", "type", "default_value", "sort_order")
+    missing = {
+        d.get("key", "?"): [column for column in required if d.get(column) is None]
+        for d in SEED_DEFINITIONS
+    }
+    missing = {key: columns for key, columns in missing.items() if columns}
+    assert not missing, f"seeded definitions missing required columns: {missing}"
 
 
 def test_every_flag_belongs_to_a_real_category():

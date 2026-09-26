@@ -1,6 +1,7 @@
 // Re-export HierarchyNode from shared types for backward compatibility
 export type { HierarchyNode } from '@/types/hierarchy'
 import type { HierarchyNode } from '@/types/hierarchy'
+import type { AncestorRef, SearchHit } from '@/types/search'
 
 export interface FlatTreeNode {
   node: HierarchyNode
@@ -8,11 +9,26 @@ export interface FlatTreeNode {
   isLast: boolean
   parentIsLast: boolean[]  // Track which parents are "last" for proper tree lines
   isLoadMore?: boolean
-  loadMoreCount?: number
+  /** Remaining to load — `null` when unknown (a type feed's column row). */
+  loadMoreCount?: number | null
+  /** The column-level row that pages this column's TYPE feeds (open scope). */
+  isFeedMore?: boolean
   isSearchBox?: boolean
   isSkeleton?: boolean
   skeletonIndex?: number
   isFailed?: boolean
+  /** A hit of the view search that lives INSIDE this row's container.
+   *  Virtual: it is rendered from the search result alone and is never
+   *  written to the canvas store, so `node` is the PARENT (the same
+   *  convention `isLoadMore` uses) and `hit` is the entity shown. */
+  isSearchHit?: boolean
+  hit?: SearchHit
+  /** The steps between the container and the hit, ancestors above the
+   *  container cut away — see `inlineSearchHits`. */
+  crumbs?: AncestorRef[]
+  /** Set on the single trailing row instead of `hit`: how many hits the
+   *  inline cap left for the panel to show. */
+  overflow?: number
 }
 
 /** Imperative geometry API each LayerColumn registers with the canvas.
@@ -67,6 +83,9 @@ export type OverflowBadge = {
    *  connections; the tooltip's "+N more" must subtract entities from
    *  entities, never from `count`. */
   partnerTotal: number
+  /** Sideways badges: the layers the partners live in — the portal chip
+   *  names them. Empty for up/down. */
+  partnerLayerIds: string[]
 }
 
 /** A partial edge drawn from a visible node toward the container boundary,
@@ -97,6 +116,8 @@ export type ComputedEdge = {
   isGhost: boolean
   isBundled: boolean
   edgeCount: number
+  /** SVG `stroke-dasharray` for this edge — see `edgeDash.ts`. */
+  dashArray: string
   sx: number
   sy: number
   tx: number

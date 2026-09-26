@@ -142,6 +142,17 @@ def should_rematerialize(
     return False
 
 
+async def is_dirty(ds_id: str) -> bool:
+    """Whether ``ds_id`` changed since its payload was built — a peek, not a
+    consume (only the collector that rebuilds the payload clears the flag).
+    Best-effort: an unreadable flag reads as "not dirty", as before."""
+    try:
+        return await get_redis().exists(_dirty_key(ds_id)) > 0
+    except Exception as exc:
+        logger.warning("top_level_cache.is_dirty ds=%s error=%s", ds_id, exc)
+        return False
+
+
 async def consume_dirty_flag(ds_id: str) -> bool:
     """GETDEL the dirty flag for ``ds_id``. Best-effort: any Redis error
     is swallowed and treated as "not dirty"."""
@@ -208,6 +219,12 @@ async def try_serve_top_level(
 
     if (row.node_count or 0) < _serve_min_nodes():
         return _outcome("miss_small")
+
+    if await is_dirty(ds_id):
+        # The graph changed since this payload was built (a publish, a reconcile, a load)
+        # and the collector has not re-materialised it yet. Serving it here would be
+        # re-cached by the read cache under the post-change generation for its whole TTL.
+        return _outcome("miss_dirty")
 
     raw = row.top_level_nodes
     if not raw:

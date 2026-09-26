@@ -83,8 +83,9 @@ def _stored_payload(names, *, digest, total=None, truncated=False, entity_types=
     }
 
 
-def _patch(monkeypatch, row=None, enqueue=None):
+def _patch(monkeypatch, row=None, enqueue=None, dirty=False):
     monkeypatch.setattr(top_level_cache, "get_data_source_stats", AsyncMock(return_value=row))
+    monkeypatch.setattr(top_level_cache, "is_dirty", AsyncMock(return_value=dirty))
     enqueue = enqueue if enqueue is not None else AsyncMock()
     monkeypatch.setattr(top_level_cache, "enqueue_stats_job_safe_ex", enqueue)
     return enqueue
@@ -364,6 +365,20 @@ async def test_try_serve_fresh_serves_without_enqueue(monkeypatch):
     assert result is not None
     assert [n.display_name for n in result.nodes] == ["Alpha", "Beta"]
     enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_try_serve_goes_live_while_the_graph_is_dirty(monkeypatch):
+    """A fresh-tier payload built BEFORE a publish must not be served after it: the
+    read cache would re-cache it under the post-publish generation for an hour."""
+    payload = _stored_payload(["Alpha", "Beta"], digest=DIGEST)
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row, dirty=True)
+
+    result, _total = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1", limit=10, cursor=None,
+    )
+    assert result is None
 
 
 @pytest.mark.asyncio

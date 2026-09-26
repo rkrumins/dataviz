@@ -1010,6 +1010,12 @@ async def get_cached_stats_bulk(
             "nodeCount": cache.node_count or 0,
             "edgeCount": cache.edge_count or 0,
             "entityTypeCounts": _counts(cache.entity_type_counts),
+            # Raw nullable, deliberately NOT ``or 0`` like its neighbours:
+            # NULL means "not measured" (the store would not answer, the
+            # provider is not FalkorDB, or the row predates collection).
+            # Zero would read as "this graph has no properties", which is
+            # exactly backwards for the graphs this figure warns about.
+            "propertyKeyCount": cache.property_key_count,
             "updatedAt": cache.updated_at,
         }
 
@@ -1114,6 +1120,12 @@ async def get_cached_stats(
             "schemaStats": _maybe_load(cache.schema_stats),
             "ontologyMetadata": _maybe_load(cache.ontology_metadata),
             "graphSchema": _maybe_load(cache.graph_schema),
+            # Raw nullable, deliberately NOT ``or 0`` like its neighbours:
+            # NULL means "not measured" (the store would not answer, the
+            # provider is not FalkorDB, or the row predates collection).
+            # Zero would read as "this graph has no properties", which is
+            # exactly backwards for the graphs this figure warns about.
+            "propertyKeyCount": cache.property_key_count,
         }
 
         service_status, last_error = await classify_stats_service_health(session, ds_id)
