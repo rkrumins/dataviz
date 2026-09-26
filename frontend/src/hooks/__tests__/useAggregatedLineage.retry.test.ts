@@ -29,7 +29,10 @@ import {
 const SCOPE = 'ws:ds:main:'
 
 interface Ask { sourceUrns: string[]; targetUrns?: string[]; granularity: string | null }
-interface Answer { aggregatedEdges: ReturnType<typeof pair>[]; totalSourceEdges: number; truncated?: boolean; stale?: boolean; staleReason?: string | null }
+interface Answer {
+  aggregatedEdges: ReturnType<typeof pair>[]; totalSourceEdges: number
+  truncated?: boolean; stale?: boolean; staleReason?: string | null; truncationReason?: string | null
+}
 
 const pair = (s: string, t: string) => ({
   id: `agg-${s}-${t}`, sourceUrn: s, targetUrn: t, edgeCount: 1, edgeTypes: ['FLOWS_TO'], confidence: 1, sourceEdgeIds: [],
@@ -329,6 +332,26 @@ describe('useAggregatedLineage — the banners say what is still missing', () =>
     await wait(2000)
     expect(flags()).toEqual({ truncated: false, staleReason: null })
     expect(shown(hook.result.current.aggregatedEdges)).toEqual(['agg-a-b'])
+  })
+
+  it('says why a cut was made from its truncationReason: a cap has none, a read that gave up has one', async () => {
+    vi.useFakeTimers()
+    // Capped while a rebuild is in flight: stale, and still a cap.
+    graph([['a', 'b']], a => (a.sourceUrns.includes('b')
+      ? Promise.resolve({ aggregatedEdges: [], totalSourceEdges: 0, truncated: true, stale: true, staleReason: 'source_changed', truncationReason: null })
+      : undefined))
+    const capped = render()
+    await ask(capped, ['a', 'b'])
+    expect(capped.result.current.truncated).toBe(true)
+
+    // Gave up on a batch, with no freshness reason: no cap.
+    invalidateAggregatedEdges()
+    graph([['a', 'b']], a => (a.sourceUrns.includes('b')
+      ? Promise.resolve({ aggregatedEdges: [], totalSourceEdges: 0, truncated: true, staleReason: null, truncationReason: 'queue_full' })
+      : undefined))
+    const gaveUp = render()
+    await ask(gaveUp, ['a', 'b'])
+    expect(gaveUp.result.current.truncated).toBe(false)
   })
 
   it('the error goes once the rows it was about leave, though no line of theirs was known', async () => {

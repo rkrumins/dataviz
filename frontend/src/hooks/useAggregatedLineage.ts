@@ -364,10 +364,23 @@ function mergeAggregatedResults(results: AggregatedEdgeResult[]): AggregatedEdge
 // is asked again only the leg it missed — its flows out, or its flows in —
 // and a row whose flows out are known answers its part of a later page's
 // flows in meanwhile. A cut-short row keeps why it was cut, so the canvas
-// can tell a size cap (no reason) from a read that gave up.
+// can tell a cap (isCappedCut) from a read that gave up.
 
 /** Asks per row before its roll-ups are given up on, until Retry. */
 const MAX_ATTEMPTS = 5
+
+/** Why a read is cut the same way every time it is asked: a cap. */
+const CAP_REASONS = new Set(['truncated', 'max_nodes', 'degree_cap', 'orphan', 'derive_scope_cap', 'derive_hop_bound'])
+
+/** A cut-short answer the same read would cut again — a size or scope cap,
+ *  never a read that gave up. Its `truncationReason` says so (none for a
+ *  cap); a server that predates it says it with `staleReason`, which also
+ *  carries freshness (a stale cap is still a cap). */
+export function isCappedCut(result: AggregatedEdgeResult): boolean {
+    if (!result.truncated) return false
+    const reason = result.truncationReason !== undefined ? result.truncationReason : result.staleReason
+    return reason == null || CAP_REASONS.has(reason)
+}
 
 interface PairLedger {
     /** `${scopeKey}:${granularity}`: the graph and level the pairs are of. */
@@ -389,8 +402,10 @@ interface Miss {
     /** The legs still unanswered: its flows out (row × every row), its
      *  flows in (every row whose flows out are known × row). */
     legs: { in: boolean; out: boolean }
-    /** Why a cut-short answer was cut (its staleReason and detail); none
-     *  is the server's size cap. */
+    /** A cut-short answer was cut at a cap (isCappedCut). */
+    capped: boolean
+    /** What a cut-short answer said of itself (its staleReason and
+     *  detail), for the banners. */
     reason: string | null
     detail: AggregatedDegradedDetail | null
 }
@@ -542,7 +557,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         let failure: string | null = null
         ledger.misses.forEach(m => {
             if (m.error === null) {
-                if (m.reason === null) capped = true
+                if (m.capped) capped = true
                 reason ??= m.reason
                 detail ??= m.detail
             } else if (m.attempts >= MAX_ATTEMPTS) failure ??= m.error
@@ -626,10 +641,11 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 // goes, including what an invalidated ledger carried over.
                 const missed = new Map<string, Miss>()
                 const noteMiss = (urn: string, out: boolean, error: string | null, cut?: AggregatedEdgeResult) => {
-                    const m = missed.get(urn) ?? { attempts: 0, error: null, legs: { in: false, out: false }, reason: null, detail: null }
+                    const m = missed.get(urn) ?? { attempts: 0, error: null, legs: { in: false, out: false }, capped: false, reason: null, detail: null }
                     m.legs[out ? 'out' : 'in'] = true
                     if (error !== null) m.error = error
                     if (cut) {
+                        m.capped ||= isCappedCut(cut)
                         m.reason ??= cut.staleReason ?? null
                         m.detail ??= cut.degradedDetail ?? null
                     }

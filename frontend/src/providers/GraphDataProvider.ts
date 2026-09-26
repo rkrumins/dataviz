@@ -323,6 +323,14 @@ export interface AggregatedEdgeResult {
      * nothing was lost — narrowing that completed is a complete answer.
      */
     degradedDetail?: AggregatedDegradedDetail | null
+    /**
+     * Why a truncated answer is short: null for a cap, which the same read
+     * cuts the same way ("truncated", "max_nodes" say so too); the kind of
+     * loss for a read that gave up and may do better next time
+     * ("queue_full", "pool_full", "timeout", "query_memory", "failed").
+     * Absent from a server that predates it.
+     */
+    truncationReason?: string | null
 }
 
 export interface AggregatedDegradedDetail {
