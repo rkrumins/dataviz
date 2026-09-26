@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { OffCanvasFlows, OffCanvasLineage } from '@/hooks/useEdgeProjection'
+import type { ColumnFlows, OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import { buildNodePorts, columnEndLayer, partialLines, portTotals, portView, sideVolume, unloadedColumnLines, unplacedLines } from '../lineagePorts'
 
 // Columns left to right: Source 0, Warehouse 3, Report 4.
@@ -127,10 +127,11 @@ describe('portView — a card whose lineage could not be counted', () => {
 })
 
 describe('unloadedColumnLines — lineage into rows an anchored column has not drawn is IN the view', () => {
-  const flows = (inN: number, outN: number): OffCanvasFlows =>
-    ({ in: inN, out: outN, inPartners: new Set(), outPartners: new Set() })
-  const undrawn = (columns: Record<string, OffCanvasFlows>): OffCanvasLineage =>
-    ({ ...flows(0, 0), columns: new Map(Object.entries(columns)), unplaced: { in: 0, out: 0 } })
+  // Naming no row: an anchor's rest.
+  const flows = (inN: number, outN: number): ColumnFlows =>
+    ({ in: inN, out: outN, inPartners: new Set(), outPartners: new Set(), unnamed: { in: inN, out: outN } })
+  const undrawn = (columns: Record<string, ColumnFlows>): OffCanvasLineage =>
+    ({ in: 0, out: 0, inPartners: new Set(), outPartners: new Set(), columns: new Map(Object.entries(columns)), unplaced: { in: 0, out: 0 } })
   // The anchored Warehouse column's id, placed like the columns above.
   const columnAt: Record<string, number> = { WH: 3, REP: 4 }
   const layerOfAny = (id: string) => layer[id] ?? columnAt[columnEndLayer(id) ?? '']
@@ -157,13 +158,19 @@ describe('unloadedColumnLines — lineage into rows an anchored column has not d
   })
 
   it('counts the lines it stands for: one per row it reaches, and the glow follows', () => {
-    const toRows: OffCanvasFlows = { in: 0, out: 9, inPartners: new Set(), outPartners: new Set(['w1', 'w2', 'w3']) }
+    const toRows: ColumnFlows = { in: 0, out: 9, inPartners: new Set(), outPartners: new Set(['w1', 'w2', 'w3']), unnamed: { in: 0, out: 0 } }
     const lines = unloadedColumnLines(new Map([['rep', undrawn({ WH: toRows })]]))
     expect(lines).toHaveLength(1)
     const ports = buildNodePorts([...lines, { source: 'rep', target: 'src' }], layerOfAny)
     // Three rows of Warehouse not drawn, and one line drawn to Source.
     expect(ports.get('rep')!.left).toEqual({ in: 0, out: 4 })
     expect(sideVolume(ports.get('rep'), 'left')).toBe(4)
+  })
+
+  it('rows it names and an anchor\'s rest: the larger, so a forty-flow rest is not one line', () => {
+    const mixed: ColumnFlows = { in: 0, out: 41, inPartners: new Set(), outPartners: new Set(['w1']), unnamed: { in: 0, out: 40 } }
+    const lines = unloadedColumnLines(new Map([['rep', undrawn({ WH: mixed })]]))
+    expect(lines).toEqual([{ source: 'rep', target: 'column:WH', weight: 40 }])
   })
 
   it('a row with nothing undrawn in any column adds no line', () => {

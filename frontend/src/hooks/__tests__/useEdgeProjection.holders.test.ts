@@ -51,6 +51,7 @@ function run(opts: {
   holders?: Array<ReturnType<typeof cell>>
   expandedNodes?: Set<string>
   parentMap?: Record<string, string>
+  chains?: Record<string, string[]>
 }) {
   const layers = opts.layers ?? {
     L1: [hNode('R')],
@@ -82,6 +83,7 @@ function run(opts: {
     isContainmentEdge: () => false,
     browseBundleParentMap: new Map(Object.entries(opts.parentMap ?? { a1: 'A', a2: 'A', c1: 'P' })),
     promotedAnchors: new Map([['A', 'L2']]),
+    ancestorChains: opts.chains && new Map(Object.entries(opts.chains)),
   }))
   const lines = result.current.visibleLineageEdges as Array<{ source: string; target: string; edgeCount: number; isResidual: boolean }>
   return {
@@ -99,10 +101,21 @@ describe('an anchor holding rows not loaded yet', () => {
     })
     expect(res.lines).toEqual([['R', 'a1', 3, false], ['R', 'a2', 2, false]])
     const r = res.offCanvasByNode.get('R')!
-    expect(r.columns.get('L2')).toMatchObject({ out: 5, in: 0 })
+    expect(r.columns.get('L2')).toMatchObject({ out: 5, in: 0, unnamed: { in: 0, out: 5 } })
     expect(r.columns.get('L2')!.outPartners.size).toBe(0)
     expect(r.out).toBe(0)
     expect(res.unresolvedEdgeCount).toBe(0)
+  })
+
+  it('keeps apart what it names no row for, beside a row past the page it does name', () => {
+    // A selected container's own roll-up names a9, a row of A not loaded.
+    const res = run({
+      holders: [cell('R', 'A', 10), cell('R', 'a9', 4)],
+      chains: { a9: ['A'] },
+    })
+    const column = res.offCanvasByNode.get('R')!.columns.get('L2')!
+    expect(column).toMatchObject({ out: 10, unnamed: { in: 0, out: 6 } })
+    expect([...column.outPartners]).toEqual(['a9'])
   })
 
   it('files nothing when the loaded rows carry it all', () => {

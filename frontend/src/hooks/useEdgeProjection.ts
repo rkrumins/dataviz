@@ -224,6 +224,16 @@ export interface OffCanvasFlows {
 }
 
 /**
+ * Flows into an anchored column that are not drawn yet. The partners are the
+ * rows of it past its loaded page they name; `unnamed` counts those that
+ * name its anchor, drawn as the column itself, with no row to bring in (an
+ * anchor's rest).
+ */
+export interface ColumnFlows extends OffCanvasFlows {
+  unnamed: { in: number; out: number }
+}
+
+/**
  * `in`/`out` are the flows that truly LEAVE the view. `columns` holds, per
  * layer id, the flows into an anchored column that are not drawn yet: a row
  * of it past its loaded page, or its anchor, which has no partner to bring
@@ -233,7 +243,7 @@ export interface OffCanvasFlows {
  * it as far as anyone can tell, so never a stub, and never a hollow port.
  */
 export interface OffCanvasLineage extends OffCanvasFlows {
-  columns: ReadonlyMap<string, OffCanvasFlows>
+  columns: ReadonlyMap<string, ColumnFlows>
   unplaced: { readonly in: number; readonly out: number }
 }
 
@@ -550,7 +560,7 @@ export function useEdgeProjection({
     // it (see OffCanvasLineage). Only an end OUTSIDE the view is counted as
     // missing; one in an anchored column is in the view; one with no known
     // place (pending or unknown) is held, neither a stub nor a hollow port.
-    const offCanvas = new Map<string, MutableFlows & { columns: Map<string, MutableFlows>; unplaced: { in: number; out: number } }>()
+    const offCanvas = new Map<string, MutableFlows & { columns: Map<string, MutableFlows & ColumnFlows>; unplaced: { in: number; out: number } }>()
     let unresolvedThisPass = 0
     const fileUndrawn = (S: Place, T: Place, sUrn: string, tUrn: string,
       types: readonly string[], weight: number, wholeColumn: boolean) => {
@@ -573,8 +583,9 @@ export function useEdgeProjection({
         return
       }
       let column = entry.columns.get(far.layerId)
-      if (!column) { column = noFlows(); entry.columns.set(far.layerId, column) }
+      if (!column) { column = { ...noFlows(), unnamed: { in: 0, out: 0 } }; entry.columns.set(far.layerId, column) }
       // The anchor is drawn as the column: no partner to bring in.
+      if (isAnchor) column.unnamed[side] += weight
       note(column, side, isAnchor ? undefined : farUrn, weight)
     }
 

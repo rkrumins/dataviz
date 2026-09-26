@@ -224,9 +224,9 @@ export function columnEndLayer(id: string): string | undefined {
  * direction, whose far end is the column (`columnEndLayer`), never a row.
  *
  * It weighs what it stands for, so the port's count and glow are the real
- * ones: one line per row it reaches — what selecting the card draws — and,
- * when it names no row (an anchor's rest, rows past the page with no URN
- * known), its flows, the only count there is.
+ * ones: one line per row it names — what selecting the card draws — or the
+ * flows it names no row for (an anchor's rest, the only count there is),
+ * whichever is more. One row beside a forty-flow rest is not one line.
  */
 export function unloadedColumnLines(
   offCanvas: ReadonlyMap<string, OffCanvasLineage>,
@@ -234,8 +234,8 @@ export function unloadedColumnLines(
   const lines: Array<{ source: string; target: string; weight: number }> = []
   offCanvas.forEach(({ columns }, row) => {
     columns.forEach((flows, layerId) => {
-      if (flows.out > 0) lines.push({ source: row, target: COLUMN_END + layerId, weight: flows.outPartners.size || flows.out })
-      if (flows.in > 0) lines.push({ source: COLUMN_END + layerId, target: row, weight: flows.inPartners.size || flows.in })
+      if (flows.out > 0) lines.push({ source: row, target: COLUMN_END + layerId, weight: Math.max(flows.outPartners.size, flows.unnamed.out) })
+      if (flows.in > 0) lines.push({ source: COLUMN_END + layerId, target: row, weight: Math.max(flows.inPartners.size, flows.unnamed.in) })
     })
   })
   return lines
