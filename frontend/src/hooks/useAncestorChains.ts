@@ -22,12 +22,14 @@
  * the projection holds it back rather than flash a stub. One the server
  * left out, or whose request failed, is asked again on this hook's own
  * backoff (lookupRetryDelayMs), not on the next canvas change; after
- * MAX_ATTEMPTS it is published as NO_PLACE_FOUND. A 403 is asked again the
- * same way: the route is always answered now, so a refusal is passing (a
- * rolling deploy), not a verdict for the session. `undefined` means there
- * is no chain source at all — the hook is off, the provider has no chain
- * route, or it answered 501 — and the projection then reads an end it
- * cannot place as leading outside, as it did before.
+ * MAX_ATTEMPTS it is published as NO_PLACE_FOUND, and asked once more every
+ * NO_PLACE_RETRY_MS: a passing overload (a shed chain query) must not leave
+ * a partner in the view without a place for the session. A 403 is asked
+ * again the same way: the route is always answered now, so a refusal is
+ * passing (a rolling deploy), not a verdict for the session. `undefined`
+ * means there is no chain source at all — the hook is off, the provider
+ * has no chain route, or it answered 501 — and the projection then reads an
+ * end it cannot place as leading outside, as it did before.
  */
 import { useEffect, useRef, useState } from 'react'
 
@@ -46,6 +48,8 @@ const CONCURRENCY = 2
 const SETTLE_MS = 300
 /** Asks per end before its place is given up on. */
 const MAX_ATTEMPTS = 5
+/** How long a given-up end waits before it is asked once more. */
+const NO_PLACE_RETRY_MS = 5 * 60_000
 
 const NO_CHAINS: ReadonlyMap<string, readonly string[]> = new Map()
 const NO_ROWS: readonly string[] = []
@@ -85,6 +89,8 @@ export function useAncestorChains(
   const runningRef = useRef(false)
   const againRef = useRef(false)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  // One per batch of ends given up on, until it asks them again.
+  const givenUpTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>())
   // Bumped on a provider switch. A chain is a fact about ONE graph: an
   // answer that lands after the switch is dropped.
   const generationRef = useRef(0)
@@ -95,10 +101,13 @@ export function useAncestorChains(
     askedRef.current = new Set()
     attemptsRef.current = new Map()
     const raf = requestAnimationFrame(() => setChains(NO_CHAINS))
+    const givenUpTimers = givenUpTimersRef.current
     return () => {
       cancelAnimationFrame(raf)
       clearTimeout(retryTimerRef.current)
       retryTimerRef.current = undefined
+      givenUpTimers.forEach(clearTimeout)
+      givenUpTimers.clear()
     }
   }, [provider])
 
@@ -155,14 +164,24 @@ export function useAncestorChains(
         })
         if (unsupported) { setUnsupportedBy(provider); return }
 
-        // Unknown, not rootless: asked again after a wait, until given up on.
+        // Unknown, not rootless: asked again after a wait, until given up on,
+        // and then once more after a long one.
         let failures = 0
+        const givenUp: string[] = []
         for (const urn of unanswered) {
           const attempts = (attemptsRef.current.get(urn) ?? 0) + 1
           attemptsRef.current.set(urn, attempts)
-          if (attempts >= MAX_ATTEMPTS) { found.set(urn, NO_PLACE_FOUND); continue }
+          if (attempts >= MAX_ATTEMPTS) { found.set(urn, NO_PLACE_FOUND); givenUp.push(urn); continue }
           askedRef.current.delete(urn)
           failures = Math.max(failures, attempts)
+        }
+        if (givenUp.length > 0) {
+          const timer = setTimeout(() => {
+            givenUpTimersRef.current.delete(timer)
+            givenUp.forEach(urn => askedRef.current.delete(urn))
+            setWake(n => n + 1)
+          }, NO_PLACE_RETRY_MS)
+          givenUpTimersRef.current.add(timer)
         }
         if (found.size > 0) {
           setChains(prev => {

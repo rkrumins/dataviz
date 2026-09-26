@@ -95,9 +95,9 @@ export interface UseEdgeProjectionOptions {
    * counted as leading outside the view. Consulted only when the endpoint
    * itself does not resolve. A URN missing from a map that IS given is
    * pending: its place is still being asked, so it makes no stub and is not
-   * counted. One published as NO_PLACE_FOUND is unknown, the same way, for
-   * good. With no map at all there is no chain source, and such an end
-   * leads outside.
+   * counted. One published as NO_PLACE_FOUND is unknown, the same way,
+   * until it is asked again. With no map at all there is no chain source,
+   * and such an end leads outside.
    */
   ancestorChains?: ReadonlyMap<string, readonly string[]>
   /**

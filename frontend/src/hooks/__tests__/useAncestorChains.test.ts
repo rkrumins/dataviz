@@ -7,7 +7,8 @@
  * edges and the aggregated roll-ups alike, each asked once. One settle at a
  * time, two chunks in flight, one update per settle. An end the server left
  * out, or whose chunk failed, is asked again on the hook's own backoff; after
- * five attempts its place is given up on. A reader with no containment walk
+ * five attempts its place is given up on, and asked once more five minutes
+ * on. A reader with no containment walk
  * (501) is left alone, and then — like a provider with no chain route, or
  * the hook switched off — there is no chain source. A 403 is asked again on
  * the backoff like any failure.
@@ -263,18 +264,48 @@ describe('useAncestorChains — failures', () => {
     expect(result.current?.get('far-y')).toEqual(['warehouse'])
   })
 
-  it('gives an end up after five attempts: no place found, and not asked again', async () => {
+  it('gives an end up after five attempts: no place found, and not asked again for a while', async () => {
     vi.useFakeTimers()
     const getAncestorChains = vi.fn(async () => ({}))
     holder.current = { getAncestorChains }
 
     const { result } = render()
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 8; i++) {
       await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
     }
     expect(getAncestorChains).toHaveBeenCalledTimes(5)
     expect(result.current?.get('far-x')).toBe(NO_PLACE_FOUND)
     expect(result.current?.get('far-y')).toBe(NO_PLACE_FOUND)
+  })
+
+  it('asks a given-up end once more five minutes on, and places it if it answers then', async () => {
+    vi.useFakeTimers()
+    let answering = false
+    const getAncestorChains = vi.fn(async (urns: string[]) => (answering ? answerAll(urns) : {}))
+    holder.current = { getAncestorChains }
+    // A second at a time, so every wake-up's effect runs.
+    const pass = async (seconds: number) => {
+      for (let i = 0; i < seconds; i++) await act(async () => { await vi.advanceTimersByTimeAsync(1_000) })
+    }
+
+    const { result } = render()
+    // Five attempts, over the backoff's 2 + 4 + 8 + 16 s and their jitter.
+    await pass(60)
+    expect(getAncestorChains).toHaveBeenCalledTimes(5)
+    expect(result.current?.get('far-x')).toBe(NO_PLACE_FOUND)
+
+    // Still failing five minutes on: unknown again, for another five.
+    await pass(300)
+    expect(getAncestorChains).toHaveBeenCalledTimes(6)
+    expect(result.current?.get('far-x')).toBe(NO_PLACE_FOUND)
+    await pass(240)
+    expect(getAncestorChains).toHaveBeenCalledTimes(6)
+
+    answering = true
+    await pass(90)
+    expect(getAncestorChains).toHaveBeenCalledTimes(7)
+    expect(result.current?.get('far-x')).toEqual(['warehouse'])
+    expect(result.current?.get('far-y')).toEqual(['warehouse'])
   })
 
   it('leaves a reader that answers 501 alone, with no chain source', async () => {
