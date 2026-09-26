@@ -472,8 +472,9 @@ export interface NodeQuery {
  * One entity's lineage total (`getNodeDegrees`). `in`/`out` count its own
  * flows. `rollupIn`/`rollupOut`, when asked for, say whether it holds a
  * roll-up cell in that direction (1) or not (0): presence, not a count, so a
- * collapsed container can say it has lineage below it. A server that does
- * not know the flag leaves them out.
+ * collapsed container can say it has lineage below it. The server leaves
+ * them out when its roll-up check failed; useExternalDegrees reads such an
+ * answer as partial and asks again.
  */
 export interface NodeDegree {
     in: number
