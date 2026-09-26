@@ -669,8 +669,9 @@ def _answer_writes(redis):
 
 
 async def test_node_degrees_on_a_reader_that_cannot_count_is_501(test_client: AsyncClient, monkeypatch):
-    """A draft or a versioned branch has no degree count. Answering {} read
-    as "unknown" for every card, and the canvas asked again forever."""
+    """A draft on a base that has no degree count (a versioned branch).
+    Answering {} read as "unknown" for every card, and the canvas asked
+    again forever."""
     from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
 
     overlay = DraftOverlayProvider(

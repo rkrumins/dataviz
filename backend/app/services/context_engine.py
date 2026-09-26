@@ -839,10 +839,14 @@ class ContextEngine:
         return await self.provider.get_distinct_values(property_name)
 
     async def get_node_degrees(self, urns, edge_types=None, include_rollups=False):
-        """Total lineage degree per URN (see provider docstring). The draft
-        and versioned-branch readers cannot count at all, and say so the way
-        their other unsupported reads do (a 501 at the route): answering {}
-        read as "unknown" for every urn, which the canvas asked about again.
+        """Total lineage degree per URN (see provider docstring). A draft
+        counts through its base, moved by its own flows. The versioned-branch
+        reader cannot count at all, and says so the way its other unsupported
+        reads do (a 501 at the route): answering {} read as "unknown" for
+        every urn, which the canvas asked about again. It holds no roll-up
+        cells, so a collapsed container's presence would cost a containment
+        descent per container on every open, and raw counts alone would read
+        each such container as having no lineage.
         Roll-up presence is passed on only when asked for."""
         fn = getattr(self.provider, "get_node_degrees", None)
         if fn is None:

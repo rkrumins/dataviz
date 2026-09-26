@@ -2477,8 +2477,9 @@ async def get_node_degrees(
     promised — silently, since a bypass is a legal outcome.
 
     An answer that left urns out is never cached as THE answer (see
-    ``_DegreesResult``). A reader that cannot count at all (a draft, a
-    versioned branch) is a 501, like /nodes/ancestor-chains.
+    ``_DegreesResult``). A draft counts through its base. A reader that
+    cannot count at all (a versioned branch, or a draft on one) is a 501,
+    like /nodes/ancestor-chains.
 
     ``includeRollups`` opts in to roll-up presence for container markers
     (see ``NodeDegreeQuery``); a request without it is answered as before.

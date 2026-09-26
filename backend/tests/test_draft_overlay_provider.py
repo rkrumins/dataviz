@@ -231,6 +231,100 @@ def test_a_lineage_delta_keeps_the_base_answers_freshness():
     assert _is_incomplete_result(agg)
 
 
+class _CountingMain(StubMain):
+    """Main's degree counts for its one flow, A.c → B.c: the columns count it,
+    and the tables hold its roll-up cells (A out, B in)."""
+
+    def __init__(self):
+        super().__init__()
+        self.asked = []
+
+    async def get_node_degrees(self, urns, edge_types=None, *, include_rollups=False):
+        self.asked.append(include_rollups)
+        flows = {"A.c": (0, 1), "B.c": (1, 0)}
+        cells = {"A": (0, 1), "B": (1, 0), "A.c": (0, 1), "B.c": (1, 0)}
+        out = {}
+        for u in urns:
+            if u == "lost":
+                continue                                     # its bucket failed: unknown
+            i, o = flows.get(u, (0, 0))
+            out[u] = {"in": i, "out": o}
+            if include_rollups:
+                ri, ro = cells.get(u, (0, 0))
+                out[u].update(rollupIn=ri, rollupOut=ro)
+        return out
+
+
+class _ChainSvc(FakeSvc):
+    """The draft's containment chains, as the branch reader walks them."""
+
+    CHAINS = {"A.c": ["A"], "B.c": ["B"], "A": [], "B": []}
+
+    def __init__(self, delta):
+        super().__init__(delta)
+        self.chains_asked = []
+
+    async def ancestor_chains(self, *, graph_id, branch_id, urns, containment_edge_types, as_of_seq=None):
+        self.chains_asked.append(sorted(urns))
+        return {u: self.CHAINS[u] for u in urns if u in self.CHAINS}
+
+
+def _lin(eid, s, t, etype="LINEAGE"):
+    return {"id": eid, "sourceUrn": s, "targetUrn": t, "edgeType": etype, "confidence": 1.0, "properties": {}}
+
+
+def _counting_draft(delta):
+    svc = _ChainSvc(delta)
+    p = DraftOverlayProvider(_CountingMain(), svc=svc, graph_id="g", branch_id="d")
+    p.set_containment_edge_types(["CONTAINS"])
+    return p, svc
+
+
+URNS = ["A", "B", "A.c", "B.c", "lost"]
+
+
+def test_a_draft_counts_lineage_through_its_base():
+    """/nodes/degree was a 501 on every draft, so on a draft no card had a
+    lineage marker unless a line of it was drawn. A draft that changed no
+    lineage reads main's counts exactly, roll-up presence and unknowns included."""
+    p, svc = _counting_draft(_EMPTY)
+    got = asyncio.run(p.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True))
+    assert got == asyncio.run(_CountingMain().get_node_degrees(URNS, ["LINEAGE"], include_rollups=True))
+    assert "lost" not in got                                  # absent stays unknown
+    assert svc.chains_asked == []                              # nothing to roll up, nothing walked
+    # A plain ask is passed on plain: a base that knows no roll-ups still answers it.
+    assert asyncio.run(p.get_node_degrees(["A.c"], ["LINEAGE"])) == {"A.c": {"in": 0, "out": 1}}
+    assert p._base.asked == [True, False]
+
+
+def test_a_draft_counts_its_own_flows_on_top_of_main():
+    """The draft removed main's A.c → B.c and added B.c → A.c: the columns'
+    counts move by those flows, and each added flow gives its ends and their
+    containers a roll-up that way. A removed flow leaves main's flag alone —
+    other flows may hold that cell, and a flag left set keeps a marker solid,
+    never falsely hollow. A flow of a type not counted moves nothing."""
+    p, svc = _counting_draft({**_EMPTY,
+                              "edgesUpsert": [_lin("lin2", "B.c", "A.c"), _lin("x", "A.c", "B.c", "OTHER")],
+                              "edgesRemove": [_lin("lin1", "A.c", "B.c")]})
+    got = asyncio.run(p.get_node_degrees(URNS, ["lineage"], include_rollups=True))
+    assert got == {
+        "A.c": {"in": 1, "out": 0, "rollupIn": 1, "rollupOut": 1},
+        "B.c": {"in": 0, "out": 1, "rollupIn": 1, "rollupOut": 1},
+        "A": {"in": 0, "out": 0, "rollupIn": 1, "rollupOut": 1},
+        "B": {"in": 0, "out": 0, "rollupIn": 1, "rollupOut": 1},
+    }
+    assert svc.chains_asked == [["A.c", "B.c"]]              # one walk, for the added flow's ends
+
+
+def test_a_draft_over_a_base_that_cannot_count_says_so():
+    """A draft on a stale projection is served by the versioned reader, which
+    cannot count: the draft says so as its other unsupported reads do (a 501
+    at the route), rather than an AttributeError."""
+    p = _mk(StubMain(), _EMPTY)
+    with pytest.raises(NotImplementedError):
+        asyncio.run(p.get_node_degrees(["A"], ["LINEAGE"], include_rollups=True))
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("draft overlay invariant + sparse delta: OK")

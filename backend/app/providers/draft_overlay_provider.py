@@ -467,6 +467,53 @@ class DraftOverlayProvider:
         return base.model_copy(update={
             "aggregated_edges": edges, "total_source_edges": sum(e.edge_count for e in edges)})
 
+    async def get_node_degrees(
+        self, urns: List[str], edge_types: Optional[List[str]] = None,
+        *, include_rollups: bool = False,
+    ) -> Dict[str, Dict[str, int]]:
+        """Main's lineage counts, moved by the draft's own flows. A urn main
+        could not count stays absent (unknown), and a base that cannot count at
+        all (a stale projection is served by VersionedBranchProvider) says so,
+        as the draft's other unsupported reads do: a 501 at the route. The
+        delta does not tell an added flow from an edited one, so an edited
+        flow counts once more, as in the roll-ups above: too high keeps a
+        marker solid.
+
+        Roll-up presence: a flow the draft added gives its source and every
+        container above it a cell out, and its target and theirs a cell in, as
+        the materialiser rolls it up. A flow it removed leaves main's flag as
+        it is: other flows may hold that cell, and a flag left set keeps a
+        marker solid, never falsely hollow."""
+        fn = getattr(self._base, "get_node_degrees", None)
+        if fn is None:
+            raise NotImplementedError(
+                f"{getattr(self._base, 'name', type(self._base).__name__)} does not count node degrees")
+        base = await (fn(urns, edge_types, include_rollups=True) if include_rollups
+                      else fn(urns, edge_types))
+        d = await self._delta_()
+        if not d.lineage_changed:
+            return base
+        types = {t.upper() for t in (edge_types or []) if t}
+        added = [e for e in d.lineage_added if not types or (e.edge_type or "").upper() in types]
+        removed = [e for e in d.lineage_removed if not types or (e.edge_type or "").upper() in types]
+        out = {u: dict(v) for u, v in base.items()}
+        for sign, edges in ((1, added), (-1, removed)):
+            for e in edges:
+                for urn, way in ((e.source_urn, "out"), (e.target_urn, "in")):
+                    if urn in out:
+                        out[urn][way] += sign
+        for v in out.values():
+            v["in"], v["out"] = max(0, v["in"]), max(0, v["out"])
+        if include_rollups and added:
+            chains = await self.get_ancestor_chains(
+                sorted({u for e in added for u in (e.source_urn, e.target_urn)}))
+            for e in added:
+                for end, flag in ((e.source_urn, "rollupOut"), (e.target_urn, "rollupIn")):
+                    for urn in (end, *chains.get(end, [])):
+                        if urn in out:
+                            out[urn][flag] = 1
+        return out
+
     async def trace_at_level(
         self, urn: str, level: int, upstream_depth: int, downstream_depth: int,
         lineage_edge_types: List[str], containment_edge_types: List[str],
