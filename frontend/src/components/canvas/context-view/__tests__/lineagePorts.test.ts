@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { OffCanvasFlows, OffCanvasLineage } from '@/hooks/useEdgeProjection'
-import { buildNodePorts, columnEndLayer, portTotals, portView, unloadedColumnLines, unplacedLines } from '../lineagePorts'
+import { buildNodePorts, columnEndLayer, portTotals, portView, sideVolume, unloadedColumnLines, unplacedLines } from '../lineagePorts'
 
 // Columns left to right: Source 0, Warehouse 3, Report 4.
 const layer: Record<string, number> = { src: 0, wh: 3, rep: 4, rep2: 4 }
@@ -117,7 +117,7 @@ describe('unloadedColumnLines — lineage into rows an anchored column has not d
   it('a row whose only lineage leads to rows Warehouse has not loaded is solid on the side facing it', () => {
     const lines = unloadedColumnLines(new Map([['rep', undrawn({ WH: flows(0, 4) })]]))
     const ports = buildNodePorts(lines, layerOfAny)
-    expect(ports.get('rep')!.left).toEqual({ in: 0, out: 1 })
+    expect(ports.get('rep')!.left).toEqual({ in: 0, out: 4 })
     expect(portView('left', ports.get('rep'), { in: 0, out: 4 })).toEqual({ kind: 'here', dir: 'out' })
     // Not hollow on the conventional side: that would say "only outside".
     expect(portView('right', ports.get('rep'), { in: 0, out: 4 })).toBeNull()
@@ -130,8 +130,19 @@ describe('unloadedColumnLines — lineage into rows an anchored column has not d
     ]))
     expect(lines).toHaveLength(4)
     const ports = buildNodePorts(lines, layerOfAny)
-    expect(ports.get('rep')!.left).toEqual({ in: 1, out: 2 })
-    expect(ports.get('src')!.right).toEqual({ in: 1, out: 0 })
+    // Naming no row (an anchor's rest), each counts its flows.
+    expect(ports.get('rep')!.left).toEqual({ in: 2, out: 8 })
+    expect(ports.get('src')!.right).toEqual({ in: 5, out: 0 })
+  })
+
+  it('counts the lines it stands for: one per row it reaches, and the glow follows', () => {
+    const toRows: OffCanvasFlows = { in: 0, out: 9, inPartners: new Set(), outPartners: new Set(['w1', 'w2', 'w3']) }
+    const lines = unloadedColumnLines(new Map([['rep', undrawn({ WH: toRows })]]))
+    expect(lines).toHaveLength(1)
+    const ports = buildNodePorts([...lines, { source: 'rep', target: 'src' }], layerOfAny)
+    // Three rows of Warehouse not drawn, and one line drawn to Source.
+    expect(ports.get('rep')!.left).toEqual({ in: 0, out: 4 })
+    expect(sideVolume(ports.get('rep'), 'left')).toBe(4)
   })
 
   it('a row with nothing undrawn in any column adds no line', () => {

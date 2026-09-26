@@ -61,7 +61,8 @@ export interface PortView {
  * takes the convention — out on the right, in on the left.
  */
 export function buildNodePorts(
-  lines: Iterable<{ source: string; target: string; isBidirectional?: boolean; isDelegated?: boolean }>,
+  /** `weight`: the lines one stands for (unloadedColumnLines); 1 if absent. */
+  lines: Iterable<{ source: string; target: string; isBidirectional?: boolean; isDelegated?: boolean; weight?: number }>,
   layerOf: (id: string) => number | undefined,
 ): Map<string, NodePorts> {
   const ports = new Map<string, NodePorts>()
@@ -73,7 +74,7 @@ export function buildNodePorts(
     }
     return p
   }
-  for (const { source, target, isBidirectional, isDelegated } of lines) {
+  for (const { source, target, isBidirectional, isDelegated, weight = 1 } of lines) {
     if (source === target) continue
     if (isDelegated) {
       at(source).delegated.out++
@@ -90,13 +91,13 @@ export function buildNodePorts(
     const sameColumn = s !== undefined && s === t
     const sSide = sameColumn || !rightward ? 'left' : 'right'
     const tSide = sameColumn || rightward ? 'left' : 'right'
-    at(source)[sSide].out++
-    at(target)[tSide].in++
+    at(source)[sSide].out += weight
+    at(target)[tSide].in += weight
     // A two-way bundle is drawn once, oriented by id rather than by flow, so
     // its other direction meets the very same sides.
     if (isBidirectional) {
-      at(source)[sSide].in++
-      at(target)[tSide].out++
+      at(source)[sSide].in += weight
+      at(target)[tSide].out += weight
     }
   }
   return ports
@@ -202,15 +203,20 @@ export function columnEndLayer(id: string): string | undefined {
  * projection's `columns`). That lineage is IN the view, so the card's port is
  * solid, on the side facing that column: one line per row, column and
  * direction, whose far end is the column (`columnEndLayer`), never a row.
+ *
+ * It weighs what it stands for, so the port's count and glow are the real
+ * ones: one line per row it reaches — what selecting the card draws — and,
+ * when it names no row (an anchor's rest, rows past the page with no URN
+ * known), its flows, the only count there is.
  */
 export function unloadedColumnLines(
   offCanvas: ReadonlyMap<string, OffCanvasLineage>,
-): Array<{ source: string; target: string }> {
-  const lines: Array<{ source: string; target: string }> = []
+): Array<{ source: string; target: string; weight: number }> {
+  const lines: Array<{ source: string; target: string; weight: number }> = []
   offCanvas.forEach(({ columns }, row) => {
     columns.forEach((flows, layerId) => {
-      if (flows.out > 0) lines.push({ source: row, target: COLUMN_END + layerId })
-      if (flows.in > 0) lines.push({ source: COLUMN_END + layerId, target: row })
+      if (flows.out > 0) lines.push({ source: row, target: COLUMN_END + layerId, weight: flows.outPartners.size || flows.out })
+      if (flows.in > 0) lines.push({ source: COLUMN_END + layerId, target: row, weight: flows.inPartners.size || flows.in })
     })
   })
   return lines

@@ -188,6 +188,27 @@ describe('an anchored view: every card ends solid, hollow, none or unknown', () 
   }, 20_000)
 })
 
+describe("a card's lineage into rows an anchored column has not drawn", () => {
+  it('counts one line per row it reaches, in the tip and the glow', async () => {
+    const estate = anchoredPortsEstate()
+    await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      // s1 and s9 are rows of Staging past its loaded page.
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => !['s1', 's9', 'far'].includes(urn)),
+      ancestorChains: true,
+      nodeDegrees: { s2: { in: 0, out: 2 } },
+    })
+    act(() => {
+      useCanvasStore.getState().addGraph([], [flow('s2', 's9'), flow('s2', 's1')] as never)
+    })
+    await waitFor(() => {
+      expect(ports('s2')).toEqual({ left: 'here:out', right: null })
+      const port = document.getElementById('layer-node-s2')?.querySelector<HTMLElement>('[data-lineage-port="left"]')
+      expect(port?.dataset.out).toBe('2')
+    }, { timeout: 8000 })
+  }, 20_000)
+})
+
 describe('a card whose lineage sits below it, or that the reader hid', () => {
   it('a closed container holding roll-up cells is hollow; open, it leaves that to its rows', async () => {
     const estate = anchoredPortsEstate()
