@@ -10807,7 +10807,11 @@ class FalkorDBProvider(GraphDataProvider):
                 chains = await self._compute_and_store_ancestors_bulk(
                     list(nodes_by_urn.keys()),
                 )
-            except Exception:
+            except Exception as exc:
+                # A shed is "ask again in a moment" (429 + Retry-After), not
+                # a trace with every chain dropped.
+                if _is_load_shed(exc):
+                    raise
                 # Lineage was already collected; surface the partial result
                 # via truncationReason so the frontend safety-net renders
                 # the lineage without the (now-missing) ancestor chain.
@@ -11335,7 +11339,9 @@ class FalkorDBProvider(GraphDataProvider):
                         list(nodes_by_urn.keys()), ctypes, chains=chains,
                         labels={u: str(n.entity_type) for u, n in nodes_by_urn.items() if n.entity_type},
                     )
-            except Exception:
+            except Exception as exc:
+                if _is_load_shed(exc):
+                    raise   # 429 + Retry-After, not every chain dropped
                 st.reasons.append("ancestors_failed")
 
         # The most severe reason wins: a FAILURE outranks a budget cut, so a
@@ -11518,7 +11524,9 @@ class FalkorDBProvider(GraphDataProvider):
                         list(nodes_by_urn.keys()), ctypes, chains=chains,
                         labels={u: str(n.entity_type) for u, n in nodes_by_urn.items() if n.entity_type},
                     )
-            except Exception:
+            except Exception as exc:
+                if _is_load_shed(exc):
+                    raise   # 429 + Retry-After, not every chain dropped
                 reasons.append("ancestors_failed")
 
         truncation_reason: Optional[str] = None
@@ -11664,7 +11672,9 @@ class FalkorDBProvider(GraphDataProvider):
                 ancestor_urns = await self._collect_ancestor_urns(
                     list(nodes_by_urn.keys()), ctypes,
                 )
-            except Exception:
+            except Exception as exc:
+                if _is_load_shed(exc):
+                    raise   # 429 + Retry-After, not every chain dropped
                 ancestor_urns = []
                 truncation_reason = truncation_reason or "ancestors_failed"
             new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
@@ -13514,7 +13524,9 @@ class FalkorDBProvider(GraphDataProvider):
         if chains is None:
             try:
                 chains = await self._compute_and_store_ancestors_bulk(list(urns))
-            except Exception:
+            except Exception as exc:
+                if _is_load_shed(exc):
+                    raise   # 429 + Retry-After, not every chain dropped
                 chains = {}
 
         pairs: Set[tuple] = set()

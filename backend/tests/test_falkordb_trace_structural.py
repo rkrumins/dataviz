@@ -1649,3 +1649,60 @@ def test_coarse_on_a_focus_with_no_cells_is_an_honest_empty_page():
     assert r.edges == [] and r.truncated is False
     assert [n.urn for n in r.nodes] == ["obj_lonely"]
 
+
+# ── a shed chain walk ─────────────────────────────────────────────────
+#
+# A shed chain query is raised out of the bulk chain path ("ask again in a
+# moment"). The trace hydration caught it with everything else, so ONE shed
+# bucket dropped every chain of the trace and answered 200 "ancestors_failed"
+# instead of 429 + Retry-After.
+
+async def _shed(*a, **kw):
+    from backend.common.adapters import ProviderBusy
+
+    raise ProviderBusy("falkordb", "the graph server's query queue is full")
+
+
+def test_trace_closure_lets_a_shed_chain_walk_out():
+    import pytest
+    from backend.common.adapters import ProviderBusy
+
+    fake = _TraceFake()
+    fake.lineage = [("c0", "c1", "FLOWS")]
+    p = _make_provider(fake)
+    p._compute_and_store_ancestors_bulk = _shed
+    with pytest.raises(ProviderBusy):
+        _run(p.trace_closure(
+            "c1", upstream_depth=25, downstream_depth=25,
+            lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+            max_nodes=1000, timeout_ms=5000,
+        ))
+
+
+def test_coarse_lets_a_shed_chain_walk_out():
+    import pytest
+    from backend.common.adapters import ProviderBusy
+
+    p = _coarse_provider(_coarse_fake())
+    p._compute_and_store_ancestors_bulk = _shed
+    with pytest.raises(ProviderBusy):
+        _run(p.trace_closure_coarse(
+            "obj_f", direction="both", aggregated_edge_type="AGGREGATED",
+            containment_edge_types=["HAS"], max_cells=2000, timeout_ms=5000,
+        ))
+
+
+def test_a_drill_lets_a_shed_chain_walk_out():
+    import pytest
+    from backend.common.adapters import ProviderBusy
+
+    fake = _TraceFake()
+    _seed_self_nesting(fake)
+    p = _make_provider(fake)
+    p._collect_ancestor_urns = _shed
+    with pytest.raises(ProviderBusy):
+        _run(p.expand_aggregated(
+            "r_a", "r_b", next_level=1,
+            lineage_edge_types=["FLOWS"], containment_edge_types=["HAS"],
+            max_nodes=100, timeout_ms=5000,
+        ))
