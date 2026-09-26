@@ -25,6 +25,7 @@ describe('RemoteGraphProvider.getAncestorChains', () => {
     mockFetch.mockResolvedValue({
       ok: true, status: 200, headers: { get: () => null },
       json: async () => ({ chains: { a: ['b'] } }),
+      text: async () => JSON.stringify({ chains: { a: ['b'] } }),
     } as unknown as Response)
     const provider = new RemoteGraphProvider({ workspaceId: 'ws_ac', dataSourceId: 'ds_ac' })
 

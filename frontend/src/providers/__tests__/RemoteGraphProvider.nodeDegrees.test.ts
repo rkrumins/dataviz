@@ -18,6 +18,7 @@ beforeEach(() => {
   mockFetch.mockResolvedValue({
     ok: true, status: 200, headers: { get: () => null },
     json: async () => ({ a: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } }),
+    text: async () => JSON.stringify({ a: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } }),
   } as unknown as Response)
 })
 
