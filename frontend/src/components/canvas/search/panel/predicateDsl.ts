@@ -65,6 +65,11 @@
  *   noDownstream                   → isLeaf edgeClass=lineage
  *   noLineage                      → isOrphan edgeClass=lineage
  *
+ * A condition the words above can't spell exactly — within N hops, a path, a
+ * depth-bounded descendantOf, a case-sensitive or exact text match… — is
+ * written as its own JSON, `{"kind": "withinHops", …}`, and read back as it
+ * is: Code mode never changes a condition it shows.
+ *
  * Examples:
  *
  *   customer AND tag:PII           → AND(text(customer), tag(PII))
@@ -91,7 +96,7 @@ import type {
 } from '@/types/search'
 import { OPERATOR_TABLE } from '@/types/generated/searchOperators'
 
-import { arityOf, autoTypeOf, isNegative } from '../typed/operators'
+import { arityOf, autoTypeOf, isNegative, predicateType } from '../typed/operators'
 import { type DurationUnit, parseDuration, toDuration } from '../typed/valueCodec'
 import type { ValueType } from '../typed/valueTypes'
 
@@ -187,26 +192,97 @@ function formatExpr(p: Predicate, isTopLevel: boolean): string {
 }
 
 
+/** One condition as DSL: the first spelling that reads back as this very
+ *  condition, or — when none does — the condition itself as JSON, which
+ *  always does. A `[withinHops]` once came back as a name search. */
 function formatAtom(c: Predicate): string {
+    for (const spelling of spellings(c)) {
+        const back = parsePredicate(spelling)
+        if (!back.error && back.predicate && meaning(back.predicate) === meaning(c)) return spelling
+    }
+    return JSON.stringify(c)
+}
+
+
+const TEXT_FIELD: Partial<Record<TextTarget, string>> = {
+    name: 'name', qualifiedName: 'qname', description: 'description', tags: 'tags',
+}
+const TEXT_VERB: Record<string, string> = {
+    substring: 'CONTAINS', prefix: 'STARTS WITH', suffix: 'ENDS WITH',
+}
+
+
+/** The ways the words can write ``c``, plainest first. */
+function spellings(c: Predicate): string[] {
     switch (c.kind) {
         case 'text': {
             const target: TextTarget = (c.target ?? 'name') as TextTarget
-            // Bareword shortcut: substring/name/case-insensitive → raw word
-            if (target === 'name'
-                && (c.match ?? 'substring') === 'substring'
-                && !c.caseSensitive
-            ) {
-                if (!needsQuotes(c.value)) return c.value
-                return `"${c.value}"`
-            }
-            const value = needsQuotes(c.value) ? `"${c.value}"` : c.value
-            if (target === 'name') return `name CONTAINS ${value}`
-            if (target === 'qualifiedName') return `qname:${value}`
-            if (target === 'description') return `description:${value}`
-            if (target === 'tags') return `tag:${value}`
-            if (target === 'any') return value
-            return `${target}:${value}`
+            const match = c.match ?? 'substring'
+            const out: string[] = []
+            // A bare or quoted word is a case-insensitive name search.
+            if (target === 'name' && match === 'substring') out.push(c.value, `"${c.value}"`)
+            if (target === 'qualifiedName' && match === 'substring') out.push(`qname:${c.value}`)
+            if (target === 'description' && match === 'substring') out.push(`description:${c.value}`)
+            const field = TEXT_FIELD[target]
+            const verb = TEXT_VERB[match]
+            if (field && verb) out.push(`${field} ${verb} ${c.value}`, `${field} ${verb} "${c.value}"`)
+            return out
         }
+        default: {
+            const one = spelling(c)
+            return one === null ? [] : [one]
+        }
+    }
+}
+
+
+/** A condition's meaning: every default spelled out, a comparison as the
+ *  server compares it — two ways of writing one condition compare equal. */
+function meaning(p: Predicate): string {
+    switch (p.kind) {
+        case 'text':
+            return stable(['text', p.value, p.target ?? 'name', p.match ?? 'substring',
+                !!p.caseSensitive, p.boost ?? 1, p.propertyKey ?? null])
+        case 'tag':
+            return stable(['tag', p.op ?? 'hasAny', p.values])
+        case 'entityType':
+            return stable(['entityType', p.op ?? 'in', p.values])
+        case 'hasProperty':
+            return stable(['hasProperty', p.key, p.keyMatch ?? 'exact', !!p.negate])
+        case 'isRoot': case 'isLeaf': case 'isOrphan': case 'hasIncoming': case 'hasOutgoing':
+            return stable([p.kind, p.edgeClass ?? DEFAULT_EDGE_CLASS, p.edgeTypes ?? null])
+        case 'property': {
+            const op = p.op ?? 'eq'
+            const arity = arityOf(op)
+            return stable(['property', p.key, op,
+                arity === 'none' ? null : arity === 'duration' ? String(p.value).toUpperCase() : p.value,
+                arity === 'none' || OPERATOR_TABLE[op].types.length === 1 ? null : predicateType(p),
+                arity !== 'none' && !!p.caseSensitive, isNegative(op) && !!p.includeMissing])
+        }
+        case 'group': {
+            // `not has:x` reads back as NOT around the name test.
+            const only = p.children.length === 1 ? p.children[0] : null
+            if (p.op === 'not' && only?.kind === 'hasProperty') {
+                return meaning({ ...only, negate: !only.negate })
+            }
+            return stable(p)
+        }
+        default:
+            return stable(p)
+    }
+}
+
+
+/** JSON with keys in order and undefined fields dropped. */
+function stable(v: unknown): string {
+    return JSON.stringify(v, (_, x) => (x && typeof x === 'object' && !Array.isArray(x)
+        ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x))
+}
+
+
+/** The one way the words write a condition that isn't text, or null. */
+function spelling(c: Predicate): string | null {
+    switch (c.kind) {
         case 'entityType': {
             const verb = c.op === 'notIn' ? 'type NOT IN' : 'type:'
             if (verb.endsWith(':')) return `type:${c.values.join(',')}`
@@ -239,13 +315,13 @@ function formatAtom(c: Predicate): string {
         case 'descendantOf': {
             // URNs always contain `:`, so quote unconditionally — the
             // prefix lexer would otherwise misread `urn:foo:bar` as a
-            // `urn:` prefixed token. maxDepth (rare; UI never sets it)
-            // is lossy in DSL — preserve via JSON view if needed.
+            // `urn:` prefixed token. One with a maxDepth doesn't read back
+            // from this, so it is written as JSON (``formatAtom``).
             const quoted = c.urns.map((u) => `"${u}"`).join(', ')
             return `descendantOf IN (${quoted})`
         }
         default:
-            return `[${(c as { kind?: string }).kind ?? 'unknown'}]`
+            return null
     }
 }
 
@@ -264,6 +340,7 @@ const enum TokenKind {
     AndKw = 'and',
     OrKw = 'or',
     NotKw = 'not',
+    Json = 'json',           // {…}: a condition written as its own JSON
 }
 
 interface Token {
@@ -292,6 +369,14 @@ function lex(input: string): Token[] {
                 raw: input.slice(i, close + 1),
             })
             i = close + 1
+            continue
+        }
+        if (ch === '{') {
+            // A condition as JSON: to its matching brace, strings and all.
+            const end = jsonEnd(input, i)
+            const text = input.slice(i, end)
+            out.push({ kind: TokenKind.Json, text, raw: text })
+            i = end
             continue
         }
         if (ch === '(' || ch === ')' || ch === ',') {
@@ -355,6 +440,29 @@ function lex(input: string): Token[] {
         }
     }
     return out
+}
+
+
+/** Just past the ``}`` closing the JSON object that opens at ``start`` —
+ *  or the input's end, when nothing closes it (the parser then refuses it). */
+function jsonEnd(input: string, start: number): number {
+    let depth = 0
+    let inString = false
+    for (let i = start; i < input.length; i += 1) {
+        const c = input[i]
+        if (inString) {
+            if (c === '\\') i += 1
+            else if (c === '"') inString = false
+        } else if (c === '"') {
+            inString = true
+        } else if (c === '{' || c === '[') {
+            depth += 1
+        } else if (c === '}' || c === ']') {
+            depth -= 1
+            if (depth === 0) return i + 1
+        }
+    }
+    return input.length
 }
 
 
@@ -470,6 +578,23 @@ class Parser {
 
     parsePredicateToken(): Predicate {
         const t = this.consume()
+
+        // 0) A condition written as its own JSON — read back as it is, or
+        //    refused: never searched for as a name.
+        if (t.kind === TokenKind.Json) {
+            let value: unknown
+            try {
+                value = JSON.parse(t.text)
+            } catch {
+                value = null
+            }
+            const kind = (value as { kind?: unknown } | null)?.kind
+            if (!value || typeof value !== 'object' || Array.isArray(value) || typeof kind !== 'string') {
+                throw new Error(`Not a condition: ${t.raw}`)
+            }
+            this.recognized.push(kind)
+            return value as Predicate
+        }
 
         // 1) boolean-shaped bareword (noUpstream, etc.)
         if (t.kind === TokenKind.Word) {

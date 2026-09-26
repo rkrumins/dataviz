@@ -433,3 +433,74 @@ describe('predicateDsl — typed comparisons', () => {
         }), { numRuns: 400 })
     })
 })
+
+
+// ---------------------------------------------------------------------------
+// Code mode shows every condition, and never changes one. A condition the
+// words can't spell (within N hops, a path, a depth-bounded descendantOf…)
+// used to print as `[withinHops]` and come back as a name search.
+// ---------------------------------------------------------------------------
+
+describe('predicateDsl — Code mode never rewrites a condition', () => {
+    const roundTrip = (p: Predicate) => parsePredicate(stringifyPredicate(p)).predicate
+    const text = (over: Record<string, unknown>): Predicate => ({
+        kind: 'text', value: 'orders', target: 'name', match: 'substring',
+        caseSensitive: false, boost: 1, ...over,
+    } as Predicate)
+
+    it.each<[string, Predicate]>([
+        ['within hops', { kind: 'withinHops', urns: ['urn:a'], hops: 2, direction: 'both',
+            edgeClass: 'lineage' } as Predicate],
+        ['a path', { kind: 'path', sourceUrns: ['urn:a'], targetUrns: ['urn:b'], maxHops: 4,
+            edgeClass: 'lineage', direction: 'outgoing' } as Predicate],
+        ['a degree', { kind: 'degree', op: 'gt', value: 3, direction: 'out' } as Predicate],
+        ['every entity', { kind: 'all' } as Predicate],
+        ['a depth-bounded descendantOf', { kind: 'descendantOf', urns: ['urn:x'], maxDepth: 1 }],
+        ['a lineage test on named edges', { kind: 'isRoot', edgeClass: 'lineage',
+            edgeTypes: ['FEEDS'] } as Predicate],
+        ['text in any field', text({ target: 'any' })],
+        ['an exact name', text({ match: 'exact' })],
+        ['a case-sensitive name', text({ value: 'Orders', caseSensitive: true })],
+        ['text in tags', text({ value: 'pii', target: 'tags' })],
+        ['a name that starts with', text({ match: 'prefix' })],
+        ['a qualified name that ends with', text({ target: 'qualifiedName', match: 'suffix' })],
+        ['a word that reads as a lineage test', text({ value: 'orphans' })],
+        ['a value with spaces round it', text({ value: ' orders ' })],
+    ])('keeps %s', (_, p) => {
+        expect(roundTrip(p)).toEqual(p)
+    })
+
+    it('keeps a condition it cannot spell in its place in a group', () => {
+        const p = { kind: 'group', op: 'and', children: [
+            text({}), { kind: 'withinHops', urns: ['urn:a'], hops: 2 },
+        ] } as Predicate
+        expect(stringifyPredicate(p)).toMatch(/^orders AND \{/)
+        expect(roundTrip(p)).toEqual(p)
+    })
+
+    it('still writes a condition it can spell as words', () => {
+        expect(stringifyPredicate(text({}))).toBe('orders')
+        expect(stringifyPredicate({ kind: 'descendantOf', urns: ['urn:x'] })).toBe('descendantOf IN ("urn:x")')
+    })
+
+    it('refuses JSON that is not a condition, never searching for it', () => {
+        for (const input of ['{"urns": ["a"]}', '{"kind": "withinHops"', '[1, 2]']) {
+            const r = parsePredicate(input)
+            if (input.startsWith('[')) continue       // not JSON syntax: an ordinary word
+            expect(r.error).toBeTruthy()
+            expect(r.fallbackText).toEqual([])
+        }
+    })
+
+    it('any text search survives a round trip', () => {
+        const search = fc.record({
+            value: fc.string({ maxLength: 12 }),
+            target: fc.constantFrom('name', 'qualifiedName', 'description', 'tags', 'any'),
+            match: fc.constantFrom('substring', 'prefix', 'suffix', 'exact'),
+            caseSensitive: fc.boolean(),
+        }).map((over) => text(over))
+        fc.assert(fc.property(search, (p) => {
+            expect(roundTrip(p)).toEqual(p)
+        }), { numRuns: 400 })
+    })
+})
