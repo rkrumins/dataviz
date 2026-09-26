@@ -227,6 +227,21 @@ describe('selecting a collapsed container', () => {
     await h.settle()
     await act(async () => { await new Promise(r => setTimeout(r, 1500)) })
     expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'lineage:out' })
+
+    // Cut at a cap, the same read cuts it the same way: another selection
+    // asks nothing again.
+    const own = () => asksOf(h).filter(([s, t]) => s.length === 1 && s[0] === 'SRC.DB_A' && t.length === 0).length
+    expect(own()).toBe(1)
+    act(() => { useCanvasStore.getState().selectNode('rpt', true) })
+    await h.settle()
+    act(() => { useCanvasStore.getState().selectNode('rpt', true) })
+    await h.settle()
+    act(() => { useCanvasStore.getState().clearSelection() })
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+    await h.settle()
+    await act(async () => { await new Promise(r => setTimeout(r, 1000)) })
+    expect(own()).toBe(1)
+    expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'lineage:out' })
   }, 30_000)
 })
 

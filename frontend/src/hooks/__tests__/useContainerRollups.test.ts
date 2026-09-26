@@ -171,9 +171,12 @@ describe('useContainerRollups — what it keeps', () => {
     let cut = true
     graph(FLOWS)
     const answer = (holder.current as { getAggregatedEdges: (req: Ask) => Promise<Record<string, unknown>> }).getAggregatedEdges
+    // A read that gave up: it may do better next time.
     holder.current = {
       ...holder.current,
-      getAggregatedEdges: async (req: Ask) => ({ ...(await answer(req)), truncated: cut && req.sourceUrns.length > 0 }),
+      getAggregatedEdges: async (req: Ask) => ({
+        ...(await answer(req)), truncated: cut && req.sourceUrns.length > 0, truncationReason: 'timeout',
+      }),
     }
     const hook = render()
     await ask(hook, { out: ['C'], in: ['C'] })
@@ -193,6 +196,22 @@ describe('useContainerRollups — what it keeps', () => {
     expect([...hook.result.current.containerPartial.out]).toEqual(['C'])
     await ask(hook, {}, urn => urn !== 'C')
     expect(hook.result.current.containerPartial.out.size).toBe(0)
+  })
+
+  it('an answer cut at a cap is its answer: kept in part, and not asked again', async () => {
+    const asks = graph(FLOWS)
+    const answer = (holder.current as { getAggregatedEdges: (req: Ask) => Promise<Record<string, unknown>> }).getAggregatedEdges
+    holder.current = {
+      ...holder.current,
+      getAggregatedEdges: async (req: Ask) => ({ ...(await answer(req)), truncated: true, truncationReason: null }),
+    }
+    const hook = render()
+    await ask(hook, { out: ['C'] })
+    expect([...hook.result.current.containerPartial.out]).toEqual(['C'])
+    asks.length = 0
+    await ask(hook, { out: ['C'] })
+    expect(asks).toEqual([])
+    expect([...hook.result.current.containerPartial.out]).toEqual(['C'])
   })
 
   it('a container no longer drawn closed takes its cells, and asks nothing', async () => {

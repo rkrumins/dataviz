@@ -17,9 +17,11 @@
  * once. An invalidation keeps them until a fresh answer replaces them, and
  * the next ask asks again. A leg that fails — an older server cannot answer
  * the in-direction — costs only that leg, and is asked again next time; a
- * cut-short answer is kept and asked again next time, and meanwhile its
- * container is `containerPartial` that way: what the cut left out may be in
- * the view, so the card is never hollow on it.
+ * cut-short answer is kept, and its container is `containerPartial` that
+ * way: what the cut left out may be in the view, so the card is never
+ * hollow on it. A read that gave up is asked again next time; one cut at a
+ * cap (isCappedCut) is not, until the cache version moves — the same read
+ * would cut it the same way.
  *
  * Bounded: every far end kept is one more chain to ask for and place. A
  * cell to what the container holds, or to what holds it, is the container
@@ -35,7 +37,7 @@ import { useCallback, useRef, useState } from 'react'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { AggregatedEdgeInfo, AggregatedEdgeRequest } from '@/providers/GraphDataProvider'
 
-import { useAggregatedEdgesCacheVersion } from './useAggregatedLineage'
+import { isCappedCut, useAggregatedEdgesCacheVersion } from './useAggregatedLineage'
 
 const CHUNK_SIZE = 500
 /** Cells kept per container and direction: the strongest. */
@@ -176,7 +178,7 @@ export function useContainerRollups(granularity: string | null): {
           cells: cells.slice(0, CONTAINER_CELLS_CAP),
           cut: !!answer.truncated || cells.length > CONTAINER_CELLS_CAP,
         })
-        if (!answer.truncated && ledger.version === version) ledger.answered.add(key)
+        if ((!answer.truncated || isCappedCut(answer)) && ledger.version === version) ledger.answered.add(key)
       }
     })
     publish(ledger)
