@@ -196,7 +196,7 @@ async def test_a_unit_asks_for_its_raw_values_before_its_statements():
                   sort=SortSpec((SortKey("n.urn"),)), containment=("CONTAINS",), max_depth=12,
                   raw_leaves=(leaf, other), raw_labels=frozenset({"Dataset"}))
     unit = Unit(kind="range", label="Dataset", lo=0, hi=100, size=100)
-    session = type("S", (), {"k": 0, "clamps": [], "after": None})()
+    session = type("S", (), {"k": 0, "clamps": [], "clamp_depths": [], "after": None})()
     seen = []
 
     async def run(cypher, params, timeout_s):
@@ -226,7 +226,7 @@ async def test_a_unit_of_a_label_keeping_nothing_raw_is_not_probed():
     ctx = Context(where=leaf.wrapped, params={leaf.raw_ids: [], leaf.true_ids: []},
                   sort=SortSpec((SortKey("n.urn"),)), containment=("CONTAINS",), max_depth=12,
                   raw_leaves=(leaf,), raw_labels=frozenset({"Legacy"}))
-    session = type("S", (), {"k": 0, "clamps": [], "after": None})()
+    session = type("S", (), {"k": 0, "clamps": [], "clamp_depths": [], "after": None})()
     seen = []
 
     async def run(cypher, params, timeout_s):
