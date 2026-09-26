@@ -40,6 +40,7 @@ export const CONTAINER_CELLS_CAP = 250
 
 const NONE: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
 const WHOLE: { in: ReadonlySet<string>; out: ReadonlySet<string> } = { in: new Set(), out: new Set() }
+const UNREAD: { in: ReadonlySet<string>; out: ReadonlySet<string> } = { in: new Set(), out: new Set() }
 
 type Way = 'in' | 'out'
 
@@ -72,6 +73,8 @@ export function useContainerRollups(granularity: string | null): {
   containerEdges: ReadonlyMap<string, AggregatedEdgeInfo>
   /** Containers whose roll-ups that way came back cut short. */
   containerPartial: { in: ReadonlySet<string>; out: ReadonlySet<string> }
+  /** Containers whose roll-ups that way have been read, whole or cut. */
+  containerRead: { in: ReadonlySet<string>; out: ReadonlySet<string> }
   /** Ask about `asks` (URNs, per direction), and drop the containers `kept`
    *  no longer holds: those no longer drawn closed. `inside(container, far)`:
    *  the far end is under the container, or holds it. */
@@ -86,6 +89,7 @@ export function useContainerRollups(granularity: string | null): {
   const graph = `${provider?.scopeKey ?? ''}:${granularity}`
   const [containerEdges, setContainerEdges] = useState<ReadonlyMap<string, AggregatedEdgeInfo>>(NONE)
   const [containerPartial, setContainerPartial] = useState(WHOLE)
+  const [containerRead, setContainerRead] = useState(UNREAD)
 
   const ledgerRef = useRef<ContainerLedger>(emptyLedger('', 0))
   // The latest `kept`: an answer that lands after a container was opened
@@ -103,12 +107,15 @@ export function useContainerRollups(granularity: string | null): {
     const publish = (ledger: ContainerLedger) => {
       const cells = new Map<string, AggregatedEdgeInfo>()
       const partial = { in: new Set<string>(), out: new Set<string>() }
+      const read = { in: new Set<string>(), out: new Set<string>() }
       ledger.legs.forEach(leg => {
         leg.cells.forEach(c => cells.set(c.id, c))
         if (leg.cut) partial[leg.way].add(leg.urn)
+        read[leg.way].add(leg.urn)
       })
       setContainerEdges(cells.size > 0 ? cells : NONE)
       setContainerPartial(partial.in.size + partial.out.size > 0 ? partial : WHOLE)
+      setContainerRead(read.in.size + read.out.size > 0 ? read : UNREAD)
     }
 
     let ledger = ledgerRef.current
@@ -172,5 +179,5 @@ export function useContainerRollups(granularity: string | null): {
     publish(ledger)
   }, [provider, graph, cacheVersion, granularity])
 
-  return { containerEdges, containerPartial, fetchContainerRollups }
+  return { containerEdges, containerPartial, containerRead, fetchContainerRollups }
 }

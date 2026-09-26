@@ -27,6 +27,9 @@
  * nothing of that direction is in it, and only when those flows are all it
  * counted that way: a flow the canvas never read (pruned with a collapse, a
  * group member not read, roll-up cells not asked for) may be in the view.
+ * Holding roll-up cells is not such a flow. A closed container with no flow
+ * of its own that way is held (NodePorts) until its own roll-ups are read
+ * whole, so it is hollow only once every cell they name is placed outside.
  *
  * An UNKNOWN total (not fetched yet, or its query failed) is never read as
  * zero, nor as some. Once counting has FAILED, and nothing else says the
@@ -55,8 +58,9 @@ export interface NodePorts {
    *  they keep the card from reading hollow. */
   delegated: SideLines
   /** Lineage with no line of its own yet: its far end has no known place
-   *  (unplacedLines), or its read came back at its cap (partialLines). The
-   *  card has lineage that way, and none of it is known to leave the view. */
+   *  (unplacedLines), or its read came back at its cap, or a closed
+   *  container's roll-ups were not read in full (partialLines). The card
+   *  has lineage that way, and none of it is known to leave the view. */
   held: SideLines
 }
 
@@ -144,11 +148,14 @@ export function portView(
   const drawn = (ports?.left[dir] ?? 0) + (ports?.right[dir] ?? 0)
   const held = ports?.held[dir] ?? 0
   const placedOutside = outside?.[dir] ?? 0
-  const counted = (total?.[dir] ?? 0) + ((dir === 'in' ? total?.rollupIn : total?.rollupOut) ?? 0)
+  // Its own flows that way. Holding roll-up cells says it has lineage, and
+  // is no flow more to place: a cube server flags every entity with a flow.
+  const counted = total?.[dir] ?? 0
+  const rolledUp = (dir === 'in' ? total?.rollupIn : total?.rollupOut) ?? 0
   if (drawn === 0) {
     if (placedOutside > 0 && placedOutside >= counted && held + (ports?.delegated[dir] ?? 0) === 0) return { kind: 'beyond', dir }
     // A line standing aside for its children's is theirs to show.
-    if (placedOutside + held + counted > 0) return { kind: 'lineage', dir }
+    if (placedOutside + held + counted + rolledUp > 0) return { kind: 'lineage', dir }
   }
   if (!unknown) return null
   // Its count failed: unknown, unless anything else says it has lineage.

@@ -160,6 +160,20 @@ describe('selecting a collapsed container', () => {
     await waitFor(() => expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'beyond:out' }), { timeout: 8000 })
   }, 30_000)
 
+  it('with a flow of its own, reads hollow once its roll-ups all lead outside', async () => {
+    const h = await open({
+      // A cube server flags it: its own flow is a cell too.
+      degrees: { 'SRC.DB_A': { in: 0, out: 1, rollupIn: 0, rollupOut: 1 } },
+      cells: [rollUp('SRC.DB_A', 'far', 1)],
+    })
+    await waitFor(() => expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'lineage:out' }), { timeout: 8000 })
+    await h.settle()
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+
+    await waitFor(() => expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'beyond:out' }), { timeout: 8000 })
+  }, 30_000)
+
   it('an answer cut short never makes it hollow: what it left out may be in the view', async () => {
     const estate = anchoredPortsEstate()
     const h = await renderCanvasWithTrace(estate, {

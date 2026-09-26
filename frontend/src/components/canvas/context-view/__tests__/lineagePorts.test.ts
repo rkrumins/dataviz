@@ -80,9 +80,17 @@ describe('portView — what each side shows', () => {
     // has not read — a partner pruned with a collapse, a member not primed.
     expect(portView('left', undefined, { in: 2, out: 0 }, false, { in: 1, out: 0 })).toEqual({ kind: 'lineage', dir: 'in' })
     expect(portView('left', undefined, { in: 2, out: 0 }, false, { in: 2, out: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
-    // Roll-up cells it holds that way count as lineage placed nowhere yet.
-    expect(portView('right', undefined, { in: 0, out: 1, rollupIn: 0, rollupOut: 1 }, false, { in: 0, out: 1 }))
-      .toEqual({ kind: 'lineage', dir: 'out' })
+  })
+
+  it('holding roll-up cells is lineage, never a flow more to account for', () => {
+    // A cube server flags every entity with a flow: its own flow is a cell
+    // to the ancestors of its far end.
+    expect(portView('left', undefined, { in: 1, out: 0, rollupIn: 1, rollupOut: 0 }, false, { in: 1, out: 0 }))
+      .toEqual({ kind: 'beyond', dir: 'in' })
+    expect(portView('right', undefined, { in: 0, out: 5, rollupIn: 0, rollupOut: 1 }, false, { in: 0, out: 5 }))
+      .toEqual({ kind: 'beyond', dir: 'out' })
+    expect(portView('left', undefined, { in: 2, out: 0, rollupIn: 1, rollupOut: 0 }, false, { in: 1, out: 0 }))
+      .toEqual({ kind: 'lineage', dir: 'in' })
   })
 
   it('no marker for a direction the canvas already shows', () => {

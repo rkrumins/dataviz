@@ -136,6 +136,8 @@ describe('useContainerRollups — what it keeps', () => {
     const hook = render()
     await ask(hook, { out: ['C'], in: ['C'] })
     expect(shown(hook.result.current.containerEdges)).toEqual(['agg-C-far', 'agg-C-s9'])
+    expect([...hook.result.current.containerRead.out]).toEqual(['C'])
+    expect(hook.result.current.containerRead.in.size).toBe(0)
 
     refusing = false
     asks.length = 0

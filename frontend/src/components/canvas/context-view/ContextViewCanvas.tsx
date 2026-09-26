@@ -824,7 +824,7 @@ export function ContextViewCanvas({
   const { holderEdges, fetchHolders } = useHolderRollups(lineageGranularity)
   // And a selected collapsed container's, all of them (see the selection
   // effects below).
-  const { containerEdges, containerPartial, fetchContainerRollups } = useContainerRollups(lineageGranularity)
+  const { containerEdges, containerPartial, containerRead, fetchContainerRollups } = useContainerRollups(lineageGranularity)
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
   // when the visible container set (and so the URN key) hasn't changed. Scoped
   // to this canvas's provider, so an invalidation aimed at one graph (a node
@@ -4970,6 +4970,20 @@ export function ContextViewCanvas({
     return ids
   }, [trace.expandingPairs, effectiveLineageEdges, displayMap])
 
+  // ── Total lineage per entity — "no lineage" vs "lineage elsewhere".
+  // Degrees over the whole graph, fetched per hydration settle for every
+  // view: each card's lineage ports read them (lineagePorts.ts), so a card
+  // whose lineage no line shows yet still shows it. Absent totals mean
+  // UNKNOWN, never a false "no lineage" claim. A card whose count FAILED
+  // says so on its ports until the hook's retry counts it.
+  const { totals: externalDegrees, failed: degreeFailures, uncountable } = useExternalDegrees(showLineageFlow)
+  // What the ports read (portTotals): a container's roll-up cells only while
+  // it is closed, and a closed logical group's members summed.
+  const { totals: lineagePortTotals, failed: lineagePortUnknown } = useMemo(() =>
+    portTotals([...renderByLayer.values()].flat(), externalDegrees, degreeFailures,
+      id => expandedForRender.has(id)),
+  [renderByLayer, externalDegrees, degreeFailures, expandedForRender])
+
   // Per-node lineage counts. Drives the in/out indicators on each entity
   // card — computed in EVERY render mode so a node always communicates
   // "has lineage in/out" vs "has none" (full ribbons in stubs mode, a
@@ -4983,21 +4997,33 @@ export function ContextViewCanvas({
   // anchored column's rows that are not drawn is in the view too: it plugs
   // in on the side facing that column (unloadedColumnLines). Lineage whose
   // far end has no known place yet (unplacedLines), or read only in part
-  // (partialLines: a row's flows, or a selected container's roll-ups), is
-  // held: solid on the conventional side, never hollow. Browse only, as the
-  // stubs are — a trace's wires are its own.
+  // (partialLines: a row's flows, or a selected container's roll-ups, or a
+  // closed container's not read yet), is held: solid on the conventional
+  // side, never hollow. Browse only, as the stubs are — a trace's wires are
+  // its own.
   const lineagePartial = useCanvasStore((s) => s.lineagePartial)
   const nodePorts = useMemo(() => {
     const layerOrdinal = new Map(sortedLayers.map((l, i) => [l.id, i]))
     // A closed group's member holds it on the group's row.
     const heldOn = (ids: ReadonlySet<string>) => new Set([...ids].map(id => closedGroupOf.get(id) ?? id))
+    // A closed container with no flow of its own one way, whose roll-up
+    // cells say it has lineage that way, is held until its own roll-ups
+    // that way are read: flows placed outside before then may be only some.
+    const unread = { in: new Set<string>(), out: new Set<string>() }
+    lineagePortTotals.forEach((t, id) => {
+      if (id.startsWith('logical:')) return
+      if (t.in === 0 && (t.rollupIn ?? 0) > 0 && !containerRead.in.has(id)) unread.in.add(id)
+      if (t.out === 0 && (t.rollupOut ?? 0) > 0 && !containerRead.out.has(id)) unread.out.add(id)
+    })
     return buildNodePorts(
       overlay.active ? visibleLineageEdges
         : [...visibleLineageEdges, ...unloadedColumnLines(offCanvasByNode), ...unplacedLines(offCanvasByNode),
-          ...partialLines(lineagePartial), ...partialLines({ in: heldOn(containerPartial.in), out: heldOn(containerPartial.out) })],
+          ...partialLines(lineagePartial), ...partialLines({ in: heldOn(containerPartial.in), out: heldOn(containerPartial.out) }),
+          ...partialLines({ in: heldOn(unread.in), out: heldOn(unread.out) })],
       (id) => nodeLayerIndexMap.get(id) ?? layerOrdinal.get(columnEndLayer(id) ?? ''),
     )
-  }, [visibleLineageEdges, overlay.active, offCanvasByNode, lineagePartial, containerPartial, closedGroupOf, nodeLayerIndexMap, sortedLayers])
+  }, [visibleLineageEdges, overlay.active, offCanvasByNode, lineagePartial, containerPartial, containerRead, lineagePortTotals,
+    closedGroupOf, nodeLayerIndexMap, sortedLayers])
 
   const nodeStubCounts = useMemo(() => {
     const counts = new Map<string, { in: number; out: number }>()
@@ -5248,20 +5274,6 @@ export function ContextViewCanvas({
   // anchors the focus edges to the chip rects. Chip click reuses the
   // reveal mechanism (per-partner Frame); the "+N more" overflow routes
   // to the Lens — the full, searchable list.
-  // ── Total lineage per entity — "no lineage" vs "lineage elsewhere".
-  // Degrees over the whole graph, fetched per hydration settle for every
-  // view: each card's lineage ports read them (lineagePorts.ts), so a card
-  // whose lineage no line shows yet still shows it. Absent totals mean
-  // UNKNOWN, never a false "no lineage" claim. A card whose count FAILED
-  // says so on its ports until the hook's retry counts it.
-  const { totals: externalDegrees, failed: degreeFailures, uncountable } = useExternalDegrees(showLineageFlow)
-  // What the ports read (portTotals): a container's roll-up cells only while
-  // it is closed, and a closed logical group's members summed.
-  const { totals: lineagePortTotals, failed: lineagePortUnknown } = useMemo(() =>
-    portTotals([...renderByLayer.values()].flat(), externalDegrees, degreeFailures,
-      id => expandedForRender.has(id)),
-  [renderByLayer, externalDegrees, degreeFailures, expandedForRender])
-
   // Selecting a collapsed container draws its lines. Its lineage is its
   // rows', and the canvas asks for roll-ups only among the rows it draws and
   // those it holds past a page: one whose partners are rows past another

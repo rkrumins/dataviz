@@ -253,4 +253,42 @@ describe('hollow only when the flows placed outside are all it counted', () => {
     await settled(h)
     expect(ports('logical:grp').right).toBe('lineage:out')
   }, 30_000)
+
+  it('a row a cube server flags as holding roll-up cells is hollow once its flows are all placed outside', async () => {
+    const h = await renderCanvasWithTrace(anchoredPortsEstate(), {
+      focus: 'SRC.raw_orders',
+      browseHolds: holds(),
+      ancestorChains: true,
+      // Its one flow in is also a cell from the ancestors of its source.
+      nodeDegrees: { dash: { in: 1, out: 0, rollupIn: 1, rollupOut: 0 } },
+    })
+    act(() => { useCanvasStore.getState().addGraph([], [flow('far', 'dash')] as never) })
+    await waitFor(() => {
+      expect(ports('dash')).toEqual({ left: 'beyond:in', right: null })
+      expect(cues('dash')).toHaveLength(1)
+    }, { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('dash') })
+    await settled(h)
+    expect(ports('dash')).toEqual({ left: 'beyond:in', right: null })
+  }, 30_000)
+
+  it('a closed container with no flow of its own is hollow only once its own roll-ups, read in full, are all outside', async () => {
+    const h = await renderCanvasWithTrace(anchoredPortsEstate(), {
+      focus: 'SRC.raw_orders',
+      browseHolds: holds(),
+      ancestorChains: true,
+      nodeDegrees: { 'SRC.DB_A': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },
+      aggregatedCells: [{ sourceUrn: 'SRC.DB_A', targetUrn: 'far' }],
+    })
+    // A row inside it leads outside; what else it holds was never read.
+    act(() => { useCanvasStore.getState().addGraph([], [flow('SRC.DB_A.t1', 'far')] as never) })
+    await settled(h)
+    expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'lineage:out' })
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+    await waitFor(() => {
+      expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'beyond:out' })
+    }, { timeout: 8000 })
+  }, 30_000)
 })
