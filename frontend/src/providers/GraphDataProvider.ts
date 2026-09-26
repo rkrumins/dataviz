@@ -575,14 +575,6 @@ export interface ExpandAggregatedRequest {
     drillAnchor?: URN
 }
 
-/** A pair of a batched drill the server could not expand. `retryable`: it
- *  may answer if asked again (the store was busy). */
-export interface ExpandPairError {
-    sourceUrn: URN
-    targetUrn: URN
-    retryable?: boolean
-}
-
 export interface ExpandAggregatedBatchRequest {
     /** One entry per aggregated-edge to drill into; all share the same config below. */
     pairs: Array<{
@@ -1018,10 +1010,9 @@ export interface GraphDataProvider {
      * Batched drill-down. The frontend collects all incident AGGREGATED
      * edges of an expanding traced node into a single backend call —
      * one HTTP round trip instead of one-per-edge. Server fans out and
-     * returns a merged, deduplicated TraceV2Result, with the pairs it could
-     * not expand in `pairErrors` when it says which.
+     * returns a merged, deduplicated TraceV2Result.
      */
-    expandAggregatedBatch?(request: ExpandAggregatedBatchRequest): Promise<TraceV2Result & { pairErrors?: ExpandPairError[] }>
+    expandAggregatedBatch?(request: ExpandAggregatedBatchRequest): Promise<TraceV2Result>
 
     // ==========================================
     // Layer/Classification Queries
