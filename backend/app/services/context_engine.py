@@ -2050,6 +2050,25 @@ class ContextEngine:
         # affordance; the one-time migration heals the legacy
         # stampVersion<2 backlog. See readpath-perf plan, trigger-model
         # decision (2026-07-12).
+
+        # ``excludeInternal``: a selected container's roll-ups with no far side
+        # named hold a cell to each of its own descendants a flow inside it
+        # reaches, and to the ancestors it shares with a far end. The canvas
+        # cannot tell those apart for the rows of a closed container it never
+        # loaded, and they are the heaviest cells, so they filled its bound and
+        # cut off the partners it asked for. Both ends are placed through their
+        # chains (the chain cache, on FalkorDB); an end with no known chain
+        # cannot be told inside, and its cell is kept.
+        if request.exclude_internal and result.aggregated_edges:
+            chains = await self.get_ancestor_chains(sorted(
+                {u for e in result.aggregated_edges for u in (e.source_urn, e.target_urn)}))
+            kept = [e for e in result.aggregated_edges
+                    if e.source_urn not in chains.get(e.target_urn, ())
+                    and e.target_urn not in chains.get(e.source_urn, ())]
+            if len(kept) < len(result.aggregated_edges):
+                result = result.model_copy(update={
+                    "aggregated_edges": kept,
+                    "total_source_edges": sum(e.edge_count for e in kept)})
         return result
 
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:

@@ -3016,6 +3016,7 @@ async def get_aggregated_edges(
 
     Without ``targetUrns`` it answers every edge out of the sources; with an
     empty ``sourceUrns`` and ``targetUrns`` set, every edge into the targets.
+    ``excludeInternal`` leaves out every cell one of whose ends holds the other.
     """
     await _enforce_fair_share(engine, ENDPOINT_AGGREGATED)
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
@@ -3031,17 +3032,21 @@ async def get_aggregated_edges(
     # input order map to the same cache key — the frontend's chunked
     # fan-out frequently produces equivalent batches in different orders.
     failing_over: dict = {}
+    params = {
+        "sourceUrns": sorted(request.source_urns or []),
+        "targetUrns": sorted(request.target_urns or []) if request.target_urns else None,
+        "granularity": request.granularity,
+        "includeEdgeTypes": sorted(request.include_edge_types or []) if request.include_edge_types else None,
+        "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
+        "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
+    }
+    # Only when set: an ask without it keeps the key its cached answers have.
+    if request.exclude_internal:
+        params["excludeInternal"] = True
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_AGGREGATED,
-        params={
-            "sourceUrns": sorted(request.source_urns or []),
-            "targetUrns": sorted(request.target_urns or []) if request.target_urns else None,
-            "granularity": request.granularity,
-            "includeEdgeTypes": sorted(request.include_edge_types or []) if request.include_edge_types else None,
-            "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
-            "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
-        },
+        params=params,
         compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
