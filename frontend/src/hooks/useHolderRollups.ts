@@ -15,9 +15,12 @@
  * one that fails, or comes back cut short, must not cost the rows their own
  * lines. Asked like the ledger: new rows against every holder, the rows
  * already asked against a new holder; whatever leaves takes its cells and
- * asks nothing. A failed or cut-short round is asked again on
- * lookupRetryDelayMs, MAX_ATTEMPTS rounds in a row at most, then on the next
- * change. It raises no banner: what it could not learn stays as it was.
+ * asks nothing. A failed round, or one a read gave up on part way, is asked
+ * again on lookupRetryDelayMs, MAX_ATTEMPTS rounds in a row at most, then on
+ * the next change. One cut at a cap (isCappedCut) — on a branch, where an
+ * anchor's cells are derived by walking its whole column, that is the usual
+ * answer — would be cut the same way again: it is final. It raises no
+ * banner: what it could not learn stays as it was.
  *
  * Another graph or level starts empty, at once: its cells are no fact about
  * this one, and an answer that lands for a graph the canvas has left is
@@ -32,7 +35,7 @@ import { mapWithConcurrency } from '@/lib/concurrency'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { AggregatedEdgeInfo, GraphDataProvider } from '@/providers/GraphDataProvider'
 
-import { useAggregatedEdgesCacheVersion } from './useAggregatedLineage'
+import { isCappedCut, useAggregatedEdgesCacheVersion } from './useAggregatedLineage'
 
 const CHUNK_SIZE = 500
 /** Asks in flight at once: the rows' own roll-ups come first. */
@@ -136,12 +139,12 @@ export function useHolderRollups(granularity: string | null): {
       if (latest?.scope !== ledger.scope || latest.version !== ledger.version) return
 
       // What an answer says is kept, cut short or not; only a whole answer
-      // to both legs makes its rows (or its new holders) known, and is the
-      // whole truth about them: a cell an invalidation carried over that it
-      // no longer names goes.
+      // (or one cut at a cap) to both legs makes its rows (or its new
+      // holders) known, and is the whole truth about them: a cell an
+      // invalidation carried over that it no longer names goes.
       const whole = asks.map(() => true)
       settled.forEach((s, n) => {
-        if (s.status === 'rejected' || s.value.truncated) whole[legs[n].i] = false
+        if (s.status === 'rejected' || (s.value.truncated && !isCappedCut(s.value))) whole[legs[n].i] = false
       })
       asks.forEach((a, i) => {
         if (!whole[i]) return

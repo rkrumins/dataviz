@@ -27,8 +27,12 @@ const cell = (s: string, t: string) => ({
 })
 
 /** A graph whose roll-ups are `flows`: an ask for S × T answers the flows
- *  from S to T. `fail` rejects, and `cut` truncates, the asks it matches. */
-function graph(flows: Array<[string, string]>, opts: { fail?: (ask: Ask) => boolean; cut?: (ask: Ask) => boolean; scopeKey?: string } = {}) {
+ *  from S to T. `fail` rejects the asks it matches; `cut` answers them cut
+ *  short by a read that gave up, `capped` cut at a cap (a branch's
+ *  derivation bound). */
+function graph(flows: Array<[string, string]>, opts: {
+  fail?: (ask: Ask) => boolean; cut?: (ask: Ask) => boolean; capped?: (ask: Ask) => boolean; scopeKey?: string
+} = {}) {
   const asks: Ask[] = []
   const getAggregatedEdges = vi.fn(async (req: Ask) => {
     const ask = { ...req, sourceUrns: [...req.sourceUrns], targetUrns: [...(req.targetUrns ?? [])] }
@@ -36,10 +40,14 @@ function graph(flows: Array<[string, string]>, opts: { fail?: (ask: Ask) => bool
     if (opts.fail?.(ask)) throw new Error('504 Gateway Timeout')
     const S = new Set(req.sourceUrns)
     const T = new Set(req.targetUrns ?? [])
+    const cut = opts.cut?.(ask) ?? false
+    const capped = opts.capped?.(ask) ?? false
     return {
       aggregatedEdges: flows.filter(([s, t]) => S.has(s) && T.has(t)).map(([s, t]) => cell(s, t)),
       totalSourceEdges: 0,
-      truncated: opts.cut?.(ask) ?? false,
+      truncated: cut || capped,
+      ...(cut ? { truncationReason: 'timeout' } : {}),
+      ...(capped ? { stale: true, staleReason: 'derive_scope_cap', truncationReason: null } : {}),
     }
   })
   holder.current = { scopeKey: opts.scopeKey ?? 'ws:ds:main:', getAggregatedEdges }
@@ -167,6 +175,21 @@ describe('useHolderRollups — failures', () => {
     asks.length = 0
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
     expect(pairsOf(asks)).toEqual(['A > r1', 'r1 > A'])
+  })
+
+  it('an answer cut at a cap is final: asked once, and its rows are known', async () => {
+    vi.useFakeTimers()
+    const asks = graph(FLOWS, { capped: () => true })
+    const hook = render()
+    await ask(hook, ['r1'], ['A'])
+    expect(shown(hook.result.current.holderEdges)).toEqual(['agg-r1-A'])
+
+    asks.length = 0
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(asks).toEqual([])
+    // A new row is asked alone: r1 is known.
+    await ask(hook, ['r1', 'r2'], ['A'])
+    expect(pairsOf(asks)).toEqual(['A > r2', 'r2 > A'])
   })
 
   it('stops after five rounds, until the next change', async () => {
