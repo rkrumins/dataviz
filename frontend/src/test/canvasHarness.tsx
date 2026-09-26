@@ -616,6 +616,9 @@ export async function renderCanvasWithTrace(
     /** Flows `getEdges` answers with, by source or target, as TRANSFORMS
      *  edges with id `f:<source>><target>`. Absent: it answers none. */
     flows?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
+    /** A test's own turn on the stub provider: wrap a read to fail it, or
+     *  hold it. */
+    wrapProvider?: (provider: GraphDataProvider) => GraphDataProvider
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -692,7 +695,7 @@ export async function renderCanvasWithTrace(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
-          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains, opts.holdChildren, opts.aggregatedCells, opts.flows),
+          provider: (opts.wrapProvider ?? (p => p))(stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains, opts.holdChildren, opts.aggregatedCells, opts.flows)),
           isLoading: false, error: null, scopeKind: 'ready',
           workspaceId: 'harness-ws', dataSourceId: null,
           providerReady: true, providerVersion: 1,

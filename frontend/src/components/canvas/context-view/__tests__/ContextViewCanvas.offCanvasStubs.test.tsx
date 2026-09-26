@@ -91,6 +91,58 @@ describe('a card\'s lines into rows of an anchored column that are not loaded', 
     expect(useNotificationStore.getState().notifications).toHaveLength(said)
     expect(h.consoleErrors()).toEqual([])
   }, 20_000)
+
+  it('a row that could not be brought in is asked again once, after a wait', async () => {
+    const estate = anchoredPortsEstate()
+    // The first read of s9's path fails; the reveal lands nothing.
+    let failures = 1
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      wrapProvider: p => ({
+        ...p,
+        getNodes: async (query: Parameters<typeof p.getNodes>[0]) => {
+          if (query.urns?.includes('s9') && failures-- > 0) throw new Error('503 Service Unavailable')
+          return p.getNodes(query)
+        },
+      }) as typeof p,
+    })
+    act(() => { useCanvasStore.getState().addGraph([], [flow('s2', 's9')] as never) })
+    await waitFor(() => expect(overlay.offCanvas?.get('s2')?.columns.get('stg')?.outPartners.has('s9')).toBe(true),
+      { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('s2') })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('s9'), { timeout: 12_000 })
+    expect(failures).toBe(-1)
+  }, 30_000)
+
+  it('and only once: a row that misses twice is left for the next selection', async () => {
+    const estate = anchoredPortsEstate()
+    let reads = 0
+    await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      wrapProvider: p => ({
+        ...p,
+        getNodes: async (query: Parameters<typeof p.getNodes>[0]) => {
+          if (query.urns?.includes('s9')) { reads += 1; throw new Error('503 Service Unavailable') }
+          return p.getNodes(query)
+        },
+      }) as typeof p,
+    })
+    act(() => { useCanvasStore.getState().addGraph([], [flow('s2', 's9')] as never) })
+    await waitFor(() => expect(overlay.offCanvas?.get('s2')?.columns.get('stg')?.outPartners.has('s9')).toBe(true),
+      { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('s2') })
+
+    await waitFor(() => expect(reads).toBe(2), { timeout: 12_000 })
+    await act(async () => { await new Promise(r => setTimeout(r, 6000)) })
+    expect(reads).toBe(2)
+  }, 40_000)
 })
 
 describe('selecting cards the view opened with', () => {

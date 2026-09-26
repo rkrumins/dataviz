@@ -60,6 +60,7 @@ import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
 import { primeLineageFor } from '@/lib/primeLineageFor'
+import { lookupRetryDelayMs } from '@/config/polling'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
 import {
   childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
@@ -4765,8 +4766,10 @@ export function ContextViewCanvas({
   // the rest's share, strongest first where a container's own roll-ups say
   // how many flows each stands for. At most REVEAL_PARTNERS_CAP per
   // selection, whether they are placed at once or later, as their chains
-  // arrive (`partnersAskedRef` keeps count, and asks no partner twice); never
-  // while a trace holds the canvas.
+  // arrive (`partnersAskedRef` keeps count); never while a trace holds the
+  // canvas. A partner is done with once it has landed; one that missed (a
+  // read shed, a timeout) is asked once more, after lookupRetryDelayMs, and
+  // then left for the next selection.
   const revealPartners = useRevealPartners({
     provider,
     setExpandedNodes,
@@ -4778,13 +4781,24 @@ export function ContextViewCanvas({
     lineageEdgeTypes,
   })
   useEffect(() => { revealPartnersRef.current = revealPartners })
-  const partnersAskedRef = useRef<{ selection: string; asked: Set<string> }>({ selection: '', asked: new Set() })
+  // Per selection: the partners done with, out now, and missed once (held
+  // back until their wait is up).
+  const partnersAskedRef = useRef({
+    selection: '', asked: new Set<string>(), out: new Set<string>(), waiting: new Set<string>(), missedOnce: new Set<string>(),
+  })
+  const [partnerRetryDue, setPartnerRetryDue] = useState(0)
+  const partnerTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>())
+  useEffect(() => {
+    const timers = partnerTimersRef.current
+    return () => timers.forEach(clearTimeout)
+  }, [])
   useEffect(() => {
     const selection = selectedNodeIds.join('\n')
     if (partnersAskedRef.current.selection !== selection) {
-      partnersAskedRef.current = { selection, asked: new Set() }
+      partnersAskedRef.current = { selection, asked: new Set(), out: new Set(), waiting: new Set(), missedOnce: new Set() }
     }
-    const { asked } = partnersAskedRef.current
+    const round = partnersAskedRef.current
+    const { asked, out, waiting } = round
     if (selectedNodeIds.length === 0 || traceWriteLocked()) return
     const strength = new Map<string, number>()
     containerEdges.forEach(c => {
@@ -4794,16 +4808,32 @@ export function ContextViewCanvas({
       .flatMap(flows => [...flows.inPartners, ...flows.outPartners])
       .sort((a, b) => (strength.get(b) ?? 0) - (strength.get(a) ?? 0)))
     const batch = new Set<string>()
-    const room = () => asked.size + batch.size < REVEAL_PARTNERS_CAP
+    const held = (partner: string) => asked.has(partner) || out.has(partner) || waiting.has(partner)
+    const room = () => asked.size + out.size + waiting.size + batch.size < REVEAL_PARTNERS_CAP
     for (let i = 0; room() && each.some(partners => i < partners.length); i++) {
       for (const partners of each) {
-        if (i < partners.length && room() && !asked.has(partners[i])) batch.add(partners[i])
+        if (i < partners.length && room() && !held(partners[i])) batch.add(partners[i])
       }
     }
     if (batch.size === 0) return
-    batch.forEach(partner => asked.add(partner))
+    batch.forEach(partner => out.add(partner))
     void revealPartners([...batch])
-  }, [selectedNodeIds, offCanvasByNode, revealPartners, traceWriteLocked, containerEdges])
+      .catch(() => ({ landed: [] as string[], missed: [...batch] }))
+      .then(({ landed, missed }) => {
+        batch.forEach(partner => out.delete(partner))
+        landed.forEach(partner => asked.add(partner))
+        const again = missed.filter(partner => !round.missedOnce.has(partner))
+        missed.forEach(partner => { if (round.missedOnce.has(partner)) asked.add(partner) })
+        if (again.length === 0) return
+        again.forEach(partner => { round.missedOnce.add(partner); waiting.add(partner) })
+        const timer = setTimeout(() => {
+          partnerTimersRef.current.delete(timer)
+          again.forEach(partner => waiting.delete(partner))
+          setPartnerRetryDue(n => n + 1)
+        }, lookupRetryDelayMs(1))
+        partnerTimersRef.current.add(timer)
+      })
+  }, [selectedNodeIds, offCanvasByNode, revealPartners, traceWriteLocked, containerEdges, partnerRetryDue])
 
   // A leaf row the view opened with never read its own flows: a first page
   // arrives with the view, and only a page loaded through loadChildren reads
