@@ -21,7 +21,7 @@ import { CONTAINER_CELLS_CAP, useContainerRollups } from '../useContainerRollups
 
 const SCOPE = 'ws:ds:main:'
 
-interface Ask { sourceUrns: string[]; targetUrns?: string[]; granularity: string | null }
+interface Ask { sourceUrns: string[]; targetUrns?: string[]; granularity: string | null; excludeInternal?: boolean }
 
 const cell = (s: string, t: string, edgeCount = 2) => ({
   id: `agg-${s}-${t}`, sourceUrn: s, targetUrn: t, edgeCount, edgeTypes: ['FLOWS_TO'], confidence: 1, sourceEdgeIds: [],
@@ -73,9 +73,11 @@ describe('useContainerRollups — what it asks', () => {
     const asks = graph(FLOWS)
     const hook = render()
     await ask(hook, { out: ['C'], in: ['C'] })
+    // The server leaves out the cells between a container and what it
+    // holds, or what holds it.
     expect(asks).toEqual([
-      { sourceUrns: ['C'], targetUrns: undefined, granularity: 'dataset' },
-      { sourceUrns: [], targetUrns: ['C'], granularity: 'dataset' },
+      { sourceUrns: ['C'], targetUrns: undefined, granularity: 'dataset', excludeInternal: true },
+      { sourceUrns: [], targetUrns: ['C'], granularity: 'dataset', excludeInternal: true },
     ])
     expect(shown(hook.result.current.containerEdges)).toEqual(['agg-C-far', 'agg-C-s9', 'agg-up-C'])
   })
@@ -127,6 +129,25 @@ describe('useContainerRollups — how much it keeps', () => {
     expect(hook.result.current.containerEdges.has(`agg-C-p${CONTAINER_CELLS_CAP}`)).toBe(false)
     expect([...hook.result.current.containerPartial.out]).toEqual(['C'])
   })
+
+  it('bounds what is left once the cells to the container itself are out', async () => {
+    // Heavier cells to rows it holds that the canvas never loaded, which
+    // the server leaves out when asked to.
+    const inner = Array.from({ length: CONTAINER_CELLS_CAP + 10 }, (_, i) => ({ ...cell('C', `C.hidden${i}`), edgeCount: 10 }))
+    graph([['C', 's9']])
+    const getAggregatedEdges = (holder.current as { getAggregatedEdges: (req: Ask) => Promise<{ aggregatedEdges: ReturnType<typeof cell>[] }> }).getAggregatedEdges
+    holder.current = {
+      ...holder.current,
+      getAggregatedEdges: async (req: Ask) => {
+        const answer = await getAggregatedEdges(req)
+        return req.excludeInternal ? answer : { ...answer, aggregatedEdges: [...inner, ...answer.aggregatedEdges] }
+      },
+    }
+    const hook = render()
+    await ask(hook, { out: ['C'] })
+    expect(shown(hook.result.current.containerEdges)).toEqual(['agg-C-s9'])
+    expect(hook.result.current.containerPartial.out.size).toBe(0)
+  })
 })
 
 describe('useContainerRollups — what it keeps', () => {
@@ -142,7 +163,7 @@ describe('useContainerRollups — what it keeps', () => {
     refusing = false
     asks.length = 0
     await ask(hook, { out: ['C'], in: ['C'] })
-    expect(asks).toEqual([{ sourceUrns: [], targetUrns: ['C'], granularity: 'dataset' }])
+    expect(asks).toEqual([{ sourceUrns: [], targetUrns: ['C'], granularity: 'dataset', excludeInternal: true }])
     expect(shown(hook.result.current.containerEdges)).toEqual(['agg-C-far', 'agg-C-s9', 'agg-up-C'])
   })
 
@@ -201,7 +222,7 @@ describe('useContainerRollups — what it keeps', () => {
     asks.length = 0
     hook.rerender({ g: 'schema' })
     await ask(hook, { out: ['C'] })
-    expect(asks).toEqual([{ sourceUrns: ['C'], targetUrns: undefined, granularity: 'schema' }])
+    expect(asks).toEqual([{ sourceUrns: ['C'], targetUrns: undefined, granularity: 'schema', excludeInternal: true }])
   })
 
   it('an answer for a graph it has left is never shown', async () => {

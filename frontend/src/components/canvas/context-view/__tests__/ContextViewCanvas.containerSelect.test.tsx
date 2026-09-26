@@ -117,6 +117,34 @@ describe('selecting a collapsed container', () => {
     expect(h.visibleCardIds()).not.toContain('s2')
   }, 30_000)
 
+  it('draws to its partner past a page however many heavier cells it has with rows it holds', async () => {
+    const estate = anchoredPortsEstate()
+    // Cells to rows it holds that the canvas never loaded, heavier than its
+    // one partner's: the server leaves them out when asked to.
+    const inner = Array.from({ length: 260 }, (_, i) => rollUp('SRC.DB_A', `SRC.DB_A.hidden_${i}`, 10))
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      nodeDegrees: { 'SRC.DB_A': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },
+      aggregatedCells: [rollUp('SRC.DB_A', 's9', 1)],
+      wrapProvider: (p: GraphDataProvider) => ({
+        ...p,
+        getAggregatedEdges: async (req: AggregatedEdgeRequest) => {
+          const answer = await p.getAggregatedEdges(req)
+          const own = req.targetUrns === undefined && req.sourceUrns.includes('SRC.DB_A')
+          return own && !req.excludeInternal ? { ...answer, aggregatedEdges: [...inner, ...answer.aggregatedEdges] } : answer
+        },
+      }) as GraphDataProvider,
+    })
+    await waitFor(() => expect(ports('SRC.DB_A').right).toBe('lineage:out'), { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('s9'), { timeout: 8000 })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_A', target: 's9' }), { timeout: 8000 })
+  }, 30_000)
+
   it('draws a roll-up line to the closed row on the canvas that holds a far end', async () => {
     const h = await open({
       degrees: { 'SRC.DB_A': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },

@@ -22,10 +22,13 @@
  * the view, so the card is never hollow on it.
  *
  * Bounded: every far end kept is one more chain to ask for and place. A
- * cell to what the container holds, or to what holds it (`inside`, as far
- * as the canvas knows its containment), is the container summarised
- * against itself and is dropped at once; of the rest, a leg keeps its
- * CONTAINER_CELLS_CAP strongest, and is partial when it had more.
+ * cell to what the container holds, or to what holds it, is the container
+ * summarised against itself: the server leaves those out
+ * (`excludeInternal`), and any that come back anyway (an older server, as
+ * far as the canvas knows the containment: `inside`) are dropped at once.
+ * Of the rest, a leg keeps its CONTAINER_CELLS_CAP strongest, and is
+ * partial when it had more. The internal cells are the heaviest, and
+ * bounded first they crowded out every partner the container has.
  */
 import { useCallback, useRef, useState } from 'react'
 
@@ -147,8 +150,8 @@ export function useContainerRollups(granularity: string | null): {
     const version = ledger.version
     const settled = await Promise.allSettled(legs.map(({ way, urns }) => {
       const request: AggregatedEdgeRequest = way === 'out'
-        ? { sourceUrns: urns, granularity }
-        : { sourceUrns: [], targetUrns: urns, granularity }
+        ? { sourceUrns: urns, granularity, excludeInternal: true }
+        : { sourceUrns: [], targetUrns: urns, granularity, excludeInternal: true }
       return provider.getAggregatedEdges(request)
     }))
     legs.forEach(({ way, urns }) => urns.forEach(urn => ledger.asking.delete(legKey(way, urn))))

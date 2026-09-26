@@ -263,6 +263,9 @@ export interface AggregatedEdgeRequest {
     includeEdgeTypes?: string[]
     lineageEdgeTypes?: string[]
     containmentEdgeTypes?: string[]
+    /** Asked with one side open: leave out every cell one of whose ends
+     *  holds the other — the named entity summarised against itself. */
+    excludeInternal?: boolean
 }
 
 /** One canvas open, asked for in one request. See `canvasBootstrap`. */
