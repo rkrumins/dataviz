@@ -238,14 +238,16 @@ class _CountingMain(StubMain):
     def __init__(self):
         super().__init__()
         self.asked = []
+        self.urns_asked = []
 
     async def get_node_degrees(self, urns, edge_types=None, *, include_rollups=False):
         self.asked.append(include_rollups)
+        self.urns_asked.append(list(urns))
         flows = {"A.c": (0, 1), "B.c": (1, 0)}
         cells = {"A": (0, 1), "B": (1, 0), "A.c": (0, 1), "B.c": (1, 0)}
         out = {}
         for u in urns:
-            if u == "lost":
+            if u == "lost" or u not in self.nodes:
                 continue                                     # its bucket failed: unknown
             i, o = flows.get(u, (0, 0))
             out[u] = {"in": i, "out": o}
@@ -258,7 +260,7 @@ class _CountingMain(StubMain):
 class _ChainSvc(FakeSvc):
     """The draft's containment chains, as the branch reader walks them."""
 
-    CHAINS = {"A.c": ["A"], "B.c": ["B"], "A": [], "B": []}
+    CHAINS = {"A.c": ["A"], "B.c": ["B"], "A": [], "B": [], "N.c": ["N"], "N": []}
 
     def __init__(self, delta):
         super().__init__(delta)
@@ -314,6 +316,49 @@ def test_a_draft_counts_its_own_flows_on_top_of_main():
         "B": {"in": 0, "out": 0, "rollupIn": 1, "rollupOut": 1},
     }
     assert svc.chains_asked == [["A.c", "B.c"]]              # one walk, for the added flow's ends
+
+
+def test_a_draft_answers_what_it_created_from_its_own_flows():
+    """The draft created N, N.c inside it, and a flow A.c -> N.c. They are
+    not in main's graph, so asking main about them cost a full-scan degree
+    query on FalkorDB, which on a large graph passed its deadline and left
+    them out: unknown, asked again on the canvas's backoff for as long as the
+    draft was open. Their only lineage is the draft's own, so the draft
+    answers them itself and never asks main."""
+    new = {"urn": "N", "entityType": "Table", "displayName": "N"}
+    p, svc = _counting_draft({**_EMPTY,
+                              "nodesNew": ["N", "N.c"],
+                              "nodesUpsert": [new, {**new, "urn": "N.c", "entityType": "Column"}],
+                              "edgesUpsert": [_lin("lin2", "A.c", "N.c"),
+                                              _lin("n>c", "N", "N.c", "CONTAINS")]})
+    got = asyncio.run(p.get_node_degrees([*URNS, "N", "N.c"], ["LINEAGE"], include_rollups=True))
+    assert p._base.urns_asked == [URNS]
+    assert got["N.c"] == {"in": 1, "out": 0, "rollupIn": 1, "rollupOut": 0}
+    assert got["N"] == {"in": 0, "out": 0, "rollupIn": 1, "rollupOut": 0}
+    assert got["A.c"] == {"in": 0, "out": 2, "rollupIn": 0, "rollupOut": 1}
+    assert "lost" not in got
+
+    got = asyncio.run(p.get_node_degrees(["N", "N.c"], ["LINEAGE"]))
+    assert got == {"N": {"in": 0, "out": 0}, "N.c": {"in": 1, "out": 0}}
+    assert len(p._base.urns_asked) == 1                      # nothing of main's to ask
+
+
+def test_a_failed_rollup_walk_keeps_the_counts():
+    """The walk that places the draft's added flows under their containers
+    failed, and the whole /nodes/degree chunk was a 500: the counts main had
+    answered were lost with it, and the canvas marked every card of the chunk
+    missed. As when main's own probe fails, the counts stand and only the
+    roll-up flags are left out, so the canvas asks for them again."""
+    class _WalkFails(_ChainSvc):
+        async def ancestor_chains(self, **kw):
+            raise RuntimeError("connection reset")
+
+    p = DraftOverlayProvider(_CountingMain(), svc=_WalkFails({**_EMPTY, "edgesUpsert": [_lin("lin2", "B.c", "A.c")]}),
+                             graph_id="g", branch_id="d")
+    p.set_containment_edge_types(["CONTAINS"])
+    got = asyncio.run(p.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True))
+    assert got == {"A": {"in": 0, "out": 0}, "B": {"in": 0, "out": 0},
+                   "A.c": {"in": 1, "out": 1}, "B.c": {"in": 1, "out": 1}}
 
 
 def test_a_draft_over_a_base_that_cannot_count_says_so():

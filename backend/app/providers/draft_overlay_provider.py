@@ -483,20 +483,32 @@ class DraftOverlayProvider:
         container above it a cell out, and its target and theirs a cell in, as
         the materialiser rolls it up. A flow it removed leaves main's flag as
         it is: other flows may hold that cell, and a flag left set keeps a
-        marker solid, never falsely hollow."""
+        marker solid, never falsely hollow. When the walk that places the
+        added flows fails, the counts stand and the flags are left out, as
+        when main's own probe fails: the canvas asks for them again.
+
+        An entity the draft created is not in main, and asking main about it
+        cost a full-scan query that on a large graph passed its deadline and
+        left it unknown. All of its lineage is the draft's own, so the draft
+        counts it from its own flows alone and main is never asked."""
         fn = getattr(self._base, "get_node_degrees", None)
         if fn is None:
             raise NotImplementedError(
                 f"{getattr(self._base, 'name', type(self._base).__name__)} does not count node degrees")
-        base = await (fn(urns, edge_types, include_rollups=True) if include_rollups
-                      else fn(urns, edge_types))
         d = await self._delta_()
+        mains = [u for u in urns if u not in d.node_new]
+        base: Dict[str, Dict[str, int]] = {}
+        if mains:
+            base = await (fn(mains, edge_types, include_rollups=True) if include_rollups
+                          else fn(mains, edge_types))
+        nothing = {"in": 0, "out": 0, **({"rollupIn": 0, "rollupOut": 0} if include_rollups else {})}
+        out = {**{u: dict(v) for u, v in base.items()},
+               **{u: dict(nothing) for u in urns if u in d.node_new}}
         if not d.lineage_changed:
-            return base
+            return out
         types = {t.upper() for t in (edge_types or []) if t}
         added = [e for e in d.lineage_added if not types or (e.edge_type or "").upper() in types]
         removed = [e for e in d.lineage_removed if not types or (e.edge_type or "").upper() in types]
-        out = {u: dict(v) for u, v in base.items()}
         for sign, edges in ((1, added), (-1, removed)):
             for e in edges:
                 for urn, way in ((e.source_urn, "out"), (e.target_urn, "in")):
@@ -505,8 +517,14 @@ class DraftOverlayProvider:
         for v in out.values():
             v["in"], v["out"] = max(0, v["in"]), max(0, v["out"])
         if include_rollups and added:
-            chains = await self.get_ancestor_chains(
-                sorted({u for e in added for u in (e.source_urn, e.target_urn)}))
+            try:
+                chains = await self.get_ancestor_chains(
+                    sorted({u for e in added for u in (e.source_urn, e.target_urn)}))
+            except Exception:
+                for v in out.values():
+                    v.pop("rollupIn", None)
+                    v.pop("rollupOut", None)
+                return out
             for e in added:
                 for end, flag in ((e.source_urn, "rollupOut"), (e.target_urn, "rollupIn")):
                     for urn in (end, *chains.get(end, [])):
