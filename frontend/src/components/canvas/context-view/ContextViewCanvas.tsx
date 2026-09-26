@@ -3800,7 +3800,7 @@ export function ContextViewCanvas({
   //      ghosts in empty layers the moment any one layer received a node.
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
   const hydrationStatus = useCanvasStore((s) => s.hydrationStatus)
-  const hydrationFailed = hydrationStatus === 'warming' || hydrationStatus === 'slow' || hydrationStatus === 'unavailable' || hydrationStatus === 'error'
+  const hydrationFailed = hydrationStatus === 'warming' || hydrationStatus === 'slow' || hydrationStatus === 'unavailable' || hydrationStatus === 'error' || hydrationStatus === 'session'
 
   /**
    * Why an anchored column can show nothing. Both cases otherwise render as an

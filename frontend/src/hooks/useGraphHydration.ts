@@ -148,8 +148,8 @@ export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete
  *                           only if it returned 0 nodes)
  *   loading → warming      (provider is loading its dataset — friendly overlay)
  *   loading → slow         (a request was too slow, was shed, or hit a
- *                           transient gateway/session problem — the provider
- *                           is reachable; calm overlay, keep retrying)
+ *                           transient gateway problem — the provider is
+ *                           reachable; calm overlay, keep retrying)
  *   loading → unavailable  (the backend CONFIRMED the provider is unreachable
  *                           — overlay)
  *   loading → error        (code threw while the load ran — a UI library
@@ -157,20 +157,31 @@ export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete
  *                           not JSON. A bug, named as such: never rendered as
  *                           an outage, never counted by the breaker, retried
  *                           at the same calm cadence as `slow`)
- *   warming/slow/unavailable/error → ready  (a retry succeeded)
+ *   loading → session      (a 401 / CSRF 403 survived the fetch layer's own
+ *                           refresh-or-heal and replay — the sign-in needs
+ *                           reconnecting, not the provider. Calm overlay
+ *                           offering a page reload, which re-runs /auth/me
+ *                           (healing CSRF) or lands on /login; keeps retrying
+ *                           meanwhile in case the session recovers elsewhere)
+ *   warming/slow/unavailable/error/session → ready  (a retry succeeded)
  * A retry NEVER leaves a failed state until it actually succeeds, so the
  * overlay stays put and "Start building" can't flash between attempts.
  *
  * `slow` exists because the canvas used to read every failure that was not a
  * warming provider as an outage: a 504 from a slow query, a 429 from the
- * backend shedding the view's own burst, a 401 from a just-expired access
- * token, a client-side timeout on a slow link — all rendered "Graph service
- * is unavailable" over a FalkorDB that was serving fine.
+ * backend shedding the view's own burst, a client-side timeout on a slow
+ * link — all rendered "Graph service is unavailable" over a FalkorDB that was
+ * serving fine.
+ *
+ * `session` exists because `slow` then swallowed auth failures too: with every
+ * graph request of an SSO user failing 401 / 403 `csrf_failed`, each view sat
+ * on "Taking a little longer than usual" forever — a problem one reload fixes,
+ * reported as a slow graph the user could only wait on.
  */
-export type HydrationStatus = 'loading' | 'ready' | 'warming' | 'slow' | 'unavailable' | 'error'
+export type HydrationStatus = 'loading' | 'ready' | 'warming' | 'slow' | 'unavailable' | 'error' | 'session'
 
-/** The four ways a load can end without data. See {@link HydrationStatus}. */
-export type HydrationFailure = 'warming' | 'slow' | 'unavailable' | 'error'
+/** The five ways a load can end without data. See {@link HydrationStatus}. */
+export type HydrationFailure = 'warming' | 'slow' | 'unavailable' | 'error' | 'session'
 
 /** Thrown by the reference-view load when the view SHOULD have entities
  *  (has assignments / branch-created delta) but every fetch failed — so the
@@ -181,6 +192,7 @@ class HydrationLoadError extends Error {
             kind === 'warming' ? 'PROVIDER_LOADING'
                 : kind === 'unavailable' ? 'provider-unavailable'
                 : kind === 'error' ? 'application-error'
+                : kind === 'session' ? 'session-unrecoverable'
                 : 'provider-slow',
         )
         this.name = 'HydrationLoadError'
@@ -188,20 +200,23 @@ class HydrationLoadError extends Error {
 }
 
 /** Map a rejected load to the state the canvas should show. Anything the
- *  shared classification calls transient (a slow, shed, or session-repair
- *  failure) is `slow`; only a backend-confirmed outage is `unavailable`; an
- *  engine error thrown by code is `error`, never either of those. */
+ *  shared classification calls transient (a slow, shed or gateway failure)
+ *  is `slow`; only a backend-confirmed outage is `unavailable`; an auth
+ *  failure the fetch layer could not repair is `session`; an engine error
+ *  thrown by code is `error`, never any of those. */
 export function toHydrationFailure(err: unknown): HydrationFailure {
     if (err instanceof HydrationLoadError) return err.kind
     const kind = classifyGraphFailure(err)
     return kind === 'transient' ? 'slow' : kind
 }
 
-const FAILURE_SEVERITY: Record<HydrationFailure, number> = { slow: 0, error: 1, warming: 2, unavailable: 3 }
+const FAILURE_SEVERITY: Record<HydrationFailure, number> = { slow: 0, error: 1, warming: 2, unavailable: 3, session: 4 }
 
-/** The state for a load whose batches failed in more than one way: a
- *  confirmed outage outranks a warming provider, which outranks a thrown
- *  error, which outranks slowness. */
+/** The state for a load whose batches failed in more than one way: a broken
+ *  session outranks everything — it fails every batch, not some, and it is
+ *  the only state the user can act on (a reload), so it must not hide behind
+ *  an outage they can only wait out. Then a confirmed outage outranks a
+ *  warming provider, which outranks a thrown error, which outranks slowness. */
 export function worstHydrationFailure(errors: readonly unknown[]): HydrationFailure {
     let worst: HydrationFailure = 'slow'
     for (const err of errors) {
@@ -224,6 +239,7 @@ const HYDRATION_FAILURE_MESSAGE: Record<HydrationFailure, string> = {
     slow: 'Your graph is taking longer than usual to load. Retrying automatically…',
     unavailable: 'The graph provider for this view is unavailable. Your data is safe — this view will load automatically once the provider is back.',
     error: 'This view hit an error while loading. Your data is safe — retrying automatically; a refresh usually clears it.',
+    session: 'Your session needs to reconnect before this view can load. Retrying automatically — reloading the page reconnects it straight away.',
 }
 
 /** The copy for a failure, given what actually caused it. Only `warming`
@@ -236,9 +252,12 @@ function hydrationMessage(failure: HydrationFailure, cause: unknown): string {
         : HYDRATION_FAILURE_MESSAGE.warming
 }
 
-/** True for the states in which a load ended without (complete) data. */
+/** True for the states in which a load ended without (complete) data.
+ *  `session` is one on purpose: the retry loop and the visibility /
+ *  provider-health re-triggers key off this, so a session repaired elsewhere
+ *  (another tab's refresh) fills the view in without the user reloading. */
 export function isHydrationFailure(status: HydrationStatus): status is HydrationFailure {
-    return status === 'warming' || status === 'slow' || status === 'unavailable' || status === 'error'
+    return status === 'warming' || status === 'slow' || status === 'unavailable' || status === 'error' || status === 'session'
 }
 
 export interface UseGraphHydrationResult {
@@ -1051,11 +1070,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 if (!controller.signal.aborted) {
                     // "Warming" = the provider is loading its dataset (restart);
                     // "slow" = a request was too slow / shed / hit a transient
-                    // gateway or session problem — both auto-retried with a
-                    // friendly tone. Only a backend-CONFIRMED outage (503
-                    // PROVIDER_UNAVAILABLE, or no backend at all) is
-                    // "unavailable"; a 504, 429, 502, 401 or client timeout
-                    // never is — see services/graphRequestFailure.
+                    // gateway problem — both auto-retried with a friendly
+                    // tone. "Session" = a 401 / CSRF 403 the fetch layer
+                    // already failed to repair. Only a backend-CONFIRMED
+                    // outage (503 PROVIDER_UNAVAILABLE, or no backend at all)
+                    // is "unavailable"; a 504, 429, 502, 401 or client
+                    // timeout never is — see services/graphRequestFailure.
                     const failure = toHydrationFailure(err)
                     if (failure === 'unavailable') {
                         console.error('[useGraphHydration] Hydration failed — provider unavailable:', err)

@@ -274,6 +274,10 @@ class SignUpResponse(BaseModel):
     #: Where to land them — the invited workspace when the invite was
     #: workspace-scoped, otherwise the app root.
     redirect_to: Optional[str] = Field(default=None, alias="redirectTo")
+    #: Which deployment answered, set alongside the session cookies. The
+    #: page reads two of them by an environment-scoped name, and this is
+    #: how it learns the name — see ``SessionResponse.environment_id``.
+    environment_id: Optional[str] = Field(default=None, alias="environmentId")
 
 
 class ResetTokenResponse(BaseModel):

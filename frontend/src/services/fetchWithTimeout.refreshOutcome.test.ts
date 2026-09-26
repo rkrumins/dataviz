@@ -214,16 +214,19 @@ describe('the silent back-channel recovery', () => {
         expect(sessionLost).toBe(0)
     })
 
-    it('reads a failed recovery as a lost session — one announcement, no navigation', async () => {
+    it('lands a failed recovery on the sign-in page, with a clean page load', async () => {
+        // The session is already over server-side. A full load of /login —
+        // which reads the latched reason and never refreshes silently —
+        // beats an in-app sign-out that leaves stale caches and module
+        // state behind for the next sign-in to start from.
         attemptSilentReauth.mockResolvedValue('failed')
         const f = mockFetch([gatewayReauth])
         globalThis.fetch = f as unknown as typeof fetch
 
-        const res = await fetchWithTimeout(PROTECTED_URL)
+        await fetchWithTimeout(PROTECTED_URL)
 
-        expect(res.status).toBe(401)
-        expect(sessionLost).toBe(1)
-        expect(window.location.href).toBe('http://localhost/dashboard')
+        expect(window.location.href).toBe('/login')
+        expect(sessionLost).toBe(0)
     })
 
     it('keeps the navigation for a provider it cannot recover', async () => {

@@ -356,7 +356,12 @@ class BackchannelSettings:
     #: row rates Unverified unless its claims are signed against PASTED
     #: material (see ``assurance.py``).
     tls_verify: bool = True
-    require_auth_time: bool = True
+    #: (``require_auth_time`` is retired. It refused every sign-in whose
+    #: gateway reply carried no authentication time — one renamed field
+    #: upstream locked out everyone on the connection. A missing time is
+    #: now measured from the sign-in, like one too old to use; see
+    #: ``complete_sso_login``. A stored row that still carries the key
+    #: parses unchanged — nothing reads it.)
     #: Whether the connection's mapped avatar claim participates at all.
     #: Off — the default — strips ``avatar_url`` from the identity, so
     #: nothing downstream fetches, stores or locks an image. On, the
@@ -472,7 +477,6 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
         max_response_bytes=_as_int(s.get("max_response_bytes"), MAX_JSON_BYTES),
         tls_verify=_as_bool(s.get("tls_verify", True)),
-        require_auth_time=_as_bool(s.get("require_auth_time", True)),
         map_avatar=_as_bool(s.get("map_avatar")),
         trust_gateway_email=_as_bool(s.get("trust_gateway_email", True)),
         liveness_on_refresh=_as_bool(s.get("liveness_on_refresh", True)),
@@ -1142,13 +1146,10 @@ class BackchannelProvider:
                 raw_claims={**identity.raw_claims, "email_verified": True},
             )
 
-        if self._s.require_auth_time and not getattr(identity, "auth_time", None):
-            # Without one, ``complete_sso_login`` falls back to "now"
-            # with a warning — which quietly disables the 24h SSO
-            # re-auth ceiling for every session this provider mints.
-            raise BackchannelError(
-                "auth_time_absent", code="backchannel_auth_time_absent",
-            )
+        # No authentication time is not refused. ``complete_sso_login``
+        # measures the re-auth ceiling from this sign-in, warns, and
+        # records ``auth_time_asserted: false`` on the login — and the
+        # session stays bound to the gateway, re-asked on every renewal.
         return identity
 
     def _unverified_claims(self, text: str) -> dict:

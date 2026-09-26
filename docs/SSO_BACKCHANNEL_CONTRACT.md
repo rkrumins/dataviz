@@ -299,13 +299,18 @@ What the application needs:
 | profile picture URL | no | see below |
 
 **The authentication instant** is the moment the person actually signed
-in — not the moment you answered us. Without it the application cannot
-tell how long ago that was, and a daily re-authentication ceiling stops
-applying to everyone on this connection. If your reply carries no such
+in — not the moment you answered us. The application's daily
+re-authentication ceiling measures from it. If your reply carries no such
 field, say so explicitly rather than letting a "close enough" timestamp
-be mapped to it. (An operator can turn the requirement off; the
-rehearsal verdict then states that the ceiling will measure from each
-sign-in instead of from your authentication.)
+be mapped to it.
+
+A missing instant never refuses the sign-in, and neither does an old one
+(your portal's original login, days ago, is common). Either way the
+ceiling measures from the sign-in to this application instead, the login
+is recorded as such (`auth_time_asserted: false` or
+`auth_time_anchored: true`), and the rehearsal verdict says so. Your own
+session still decides when ours ends: it is re-checked on every renewal
+(server mode), or bounds ours through its token's expiry (browser mode).
 
 **The profile picture** is a URL (`picture`, `avatarUrl`, `photoUrl`
 and similar names map by default), and it is opt-in per connection.

@@ -268,3 +268,69 @@ def test_the_defaults_are_the_agreed_policy():
 
     assert config.SESSION_IDLE_MAX_SECONDS == 12 * 3600
     assert config.SESSION_ABSOLUTE_MAX_SECONDS == 168 * 3600
+
+
+# ── An SSO session past a ceiling re-authenticates, not dead-ends ────
+#
+# Both ceilings apply to SSO sessions exactly as above. What differs is
+# the answer: a bare 401 sent an SSO user to the sign-in page to press the
+# provider's button — the "open it the next day" experience — when the
+# provider could simply vouch for them again. So an SSO session gets the
+# re-auth envelope the SPA already follows, WITHOUT ``force``: the IdP's
+# own session decides whether a credential is needed.
+
+
+async def _make_sso(real_engine, *, auth_time: int) -> None:
+    """Give the family an IdP authentication instant — the server's own
+    marker of an SSO session, read from the record rather than the token."""
+    maker = async_sessionmaker(bind=real_engine, expire_on_commit=False)
+    async with maker() as session:
+        for row in (await session.execute(select(RefreshTokenORM))).scalars():
+            row.auth_time = auth_time
+        await session.commit()
+
+
+async def test_an_idle_sso_session_is_sent_to_its_idp(
+    service, factory, real_engine, monkeypatch,
+):
+    from backend.auth_service.interface import SsoReauthRequired
+
+    monkeypatch.setattr(
+        "backend.auth_service.service.SESSION_ABSOLUTE_MAX_SECONDS", 0,
+    )
+    monkeypatch.setattr(
+        "backend.auth_service.service.SESSION_IDLE_MAX_SECONDS", 600,
+    )
+    await _seed(factory)
+    _user, tokens = await service.login("life@example.com", _PASSWORD)
+    await _make_sso(real_engine, auth_time=int(time.time()) - 60)
+    await _age_family(real_engine, by_seconds=601)
+
+    with pytest.raises(SsoReauthRequired) as err:
+        await service.refresh(tokens.refresh_token)
+    assert "force=1" not in err.value.login_url
+
+    # Still over: the family is revoked, so the old cookie cannot rotate.
+    with pytest.raises(InvalidRefreshToken):
+        await service.refresh(tokens.refresh_token)
+
+
+async def test_an_sso_session_past_the_absolute_ceiling_is_sent_to_its_idp(
+    service, factory, real_engine, monkeypatch,
+):
+    from backend.auth_service.interface import SsoReauthRequired
+
+    monkeypatch.setattr(
+        "backend.auth_service.service.SESSION_ABSOLUTE_MAX_SECONDS", 3600,
+    )
+    monkeypatch.setattr(
+        "backend.auth_service.service.SESSION_IDLE_MAX_SECONDS", 0,
+    )
+    await _seed(factory)
+    _user, tokens = await service.login("life@example.com", _PASSWORD)
+    await _make_sso(real_engine, auth_time=int(time.time()) - 60)
+    await _age_family(real_engine, by_seconds=3601)
+
+    with pytest.raises(SsoReauthRequired) as err:
+        await service.refresh(tokens.refresh_token)
+    assert "force=1" not in err.value.login_url

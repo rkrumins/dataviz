@@ -28,7 +28,8 @@ clusters entirely. With the id unset the names are unchanged.
 ``nx_access_exp`` is scoped too, despite carrying no signature: it decides
 when the client renews, so a sibling deployment writing the same name into
 the same jar leaves each tab scheduling against the other's token. The
-client resolves the suffix from ``environment_id`` on ``GET /auth/me``.
+client resolves the suffix from ``environment_id``, which every response
+that establishes, rotates or heals a session carries.
 
 ``nx_csrf`` is scoped for a different reason again. Sharing its VALUE is
 harmless — the double-submit check only compares it against the header on
@@ -100,10 +101,17 @@ REFRESH_COOKIE_NAME = _scoped(_BASE_REFRESH_COOKIE_NAME)
 # The original objection — JavaScript reads this by name, so a scoped
 # name has to be discovered at runtime, and getting it wrong 403s every
 # POST — is answered the same way ``nx_access_exp`` answers it: the SPA
-# learns the suffix from ``environment_id`` on ``GET /auth/me``, and
-# falls back to the unscoped name until it does. Writes only happen after
-# bootstrap, so the window in which the fallback is load-bearing does not
-# overlap with any write.
+# learns the suffix from ``environment_id``, and falls back to the
+# unscoped name until it does.
+#
+# That answer used to be ``GET /auth/me`` alone, on the premise that
+# writes only happen after bootstrap. They do not: an SSO sign-in that
+# completes on the page (the Enterprise Gateway, a browser-storage
+# portal, an invited signup) never makes that call, and its tab read
+# ``nx_csrf``, found nothing, and sent every write without its token —
+# graph reads included, which are POSTs. So every response that
+# establishes, rotates or heals a session now names the environment —
+# the CSRF heal included, so a repair can always read what it minted.
 CSRF_COOKIE_NAME = _scoped(_BASE_CSRF_COOKIE_NAME)
 # When ``nx_access`` expires, as a unix epoch. Readable by JavaScript,
 # because the browser cannot read the HttpOnly access cookie and so has
@@ -139,9 +147,9 @@ CSRF_COOKIE_NAME = _scoped(_BASE_CSRF_COOKIE_NAME)
 # the whole keepalive exists to prevent.
 #
 # The original objection is real but small: JavaScript reads this by
-# name, so the suffix has to be discovered. ``GET /auth/me`` — the
-# bootstrap call, made before the keepalive can start — returns
-# ``environment_id`` for that. Discovery failing is survivable by
+# name, so the suffix has to be discovered. Every response that
+# establishes or rotates a session returns ``environment_id`` for that
+# (see ``nx_csrf`` above). Discovery failing is survivable by
 # construction: the reader falls back to the unscoped name, and the
 # scheduler already treats "no published expiry" as "probe again in 60s"
 # rather than an error.

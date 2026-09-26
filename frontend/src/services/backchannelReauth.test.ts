@@ -45,10 +45,13 @@ import {
     attemptSilentReauth,
     autoPortalAlreadyTried,
     clearReauthFailure,
+    clearSignedOutByChoice,
     markAutoPortalTried,
+    markSignedOutByChoice,
     readReauthFailure,
     REAUTH_COOLDOWN_MS,
 } from './backchannelReauth'
+import { BackchannelLoginError } from './authService'
 
 const GATEWAY = {
     id: 'idp_1', slug: 'corp-gateway', displayName: 'Corporate Gateway',
@@ -72,6 +75,7 @@ function contextWith(providers: unknown[]) {
 beforeEach(() => {
     vi.clearAllMocks()
     window.sessionStorage.clear()
+    window.localStorage.clear()
     clearReauthFailure()
     contextWith([GATEWAY])
     runAuthenticateTrigger.mockResolvedValue(null)
@@ -233,5 +237,84 @@ describe('failure, latched', () => {
         runAuthenticateTrigger.mockRejectedValue(new Error('down'))
         await attemptSilentReauth('corp-gateway')
         expect(autoPortalAlreadyTried()).toBe(true)
+    })
+})
+
+
+describe('a busy moment is not a verdict', () => {
+    // At 9am a whole office renews at once, often behind one corporate
+    // egress address, and our own completion POST can answer 429 or 5xx.
+    // That says nothing about the corporate session — treating it as a
+    // refusal latched the cooldown and cost everyone a click and a minute.
+
+    async function settle<T>(p: Promise<T>): Promise<T> {
+        // The retry waits a jittered second; don't make the suite do so.
+        await vi.runAllTimersAsync()
+        return p
+    }
+
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('a rate-limited completion is retried once, from the top', async () => {
+        loginWithBackchannel
+            .mockRejectedValueOnce(new BackchannelLoginError('http_429'))
+            .mockResolvedValueOnce({ user: { id: 'u1' } })
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('recovered')
+        // The whole browser half again — a browser-exchange assertion is
+        // single-use, so the one that just failed cannot be re-posted.
+        expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2)
+        expect(loginWithBackchannel).toHaveBeenCalledTimes(2)
+    })
+
+    it('still failing, it leaves the cooldown unlatched for the login page', async () => {
+        loginWithBackchannel.mockRejectedValue(new BackchannelLoginError('http_503'))
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(loginWithBackchannel).toHaveBeenCalledTimes(2)
+        // The login page this lands on gets its own automatic attempt.
+        expect(readReauthFailure()).toBeNull()
+        expect(autoPortalAlreadyTried()).toBe(false)
+    })
+
+    it('a gateway that timed out behind us is retried too', async () => {
+        loginWithBackchannel
+            .mockRejectedValueOnce(new BackchannelLoginError('backchannel_unavailable'))
+            .mockResolvedValueOnce({ user: { id: 'u1' } })
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('recovered')
+    })
+
+    it('a refusal is a verdict: no retry, and the cooldown latches', async () => {
+        loginWithBackchannel.mockRejectedValue(
+            new BackchannelLoginError('backchannel_no_session'),
+        )
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(loginWithBackchannel).toHaveBeenCalledTimes(1)
+        expect(readReauthFailure()).not.toBeNull()
+    })
+
+    it('the browser\'s own call to the corporate host is never retried', async () => {
+        // Usually a machine outside the domain or a CORS rule — repeating
+        // it changes nothing, even though it fails like a network error.
+        runAuthenticateTrigger.mockRejectedValue(new TypeError('Failed to fetch'))
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
+        expect(readReauthFailure()).not.toBeNull()
+    })
+})
+
+describe('signing out sticks', () => {
+    it('holds the automatic sign-in in every tab until a sign-in', () => {
+        markSignedOutByChoice()
+        // Not the tab's sixty-second sentinel: localStorage, and no clock.
+        window.sessionStorage.clear()
+        expect(autoPortalAlreadyTried()).toBe(true)
+
+        clearSignedOutByChoice()
+        expect(autoPortalAlreadyTried()).toBe(false)
     })
 })

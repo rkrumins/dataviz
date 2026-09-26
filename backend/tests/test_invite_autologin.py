@@ -81,6 +81,24 @@ async def test_invited_signup_returns_a_session(test_client: AsyncClient, db_ses
 
 
 @pytest.mark.asyncio
+async def test_an_invited_signup_names_the_environment(
+    test_client: AsyncClient, monkeypatch,
+):
+    """The session this issues writes environment-scoped cookies, and the
+    page reads two of them by name. Every other response that establishes
+    a session says which environment answered; this one has to as well,
+    or the invitee's first write goes out without its CSRF token."""
+    from backend.app.api.v1.endpoints import auth as _auth_mod
+
+    monkeypatch.setattr(_auth_mod, "AUTH_ENVIRONMENT_ID", "production")
+    token = (await _mint(test_client)).json()["inviteToken"]
+
+    r = await _signup(test_client, email="named@example.com", token=token)
+    assert r.status_code == 201, r.text
+    assert r.json()["environmentId"] == "production"
+
+
+@pytest.mark.asyncio
 async def test_the_issued_session_actually_authenticates(test_client: AsyncClient):
     """A cookie that does not work is worse than no cookie."""
     token = (await _mint(test_client)).json()["inviteToken"]

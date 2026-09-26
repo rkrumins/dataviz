@@ -64,12 +64,15 @@ const REASONS: Record<string, Reason> = {
         next: 'Open the connection\u2019s Claim mapping and check it '
             + 'against what actually arrived.',
     },
+    // Only on failures recorded before this was retired: a reply with no
+    // authentication time is no longer refused.
     backchannel_auth_time_absent: {
-        what: 'Their reply carried no authentication time, and this '
-            + 'connection requires one.',
-        next: 'Ask their team to include it. Turning the requirement off '
-            + 'is possible and quietly disables the daily '
-            + 're-authentication ceiling for everyone on this connection.',
+        what: 'Their reply carried no authentication time, which this '
+            + 'connection used to refuse.',
+        next: 'Nothing to do now — such sign-ins succeed, and the daily '
+            + 're-authentication limit counts from each sign-in. Asking '
+            + 'their team to include the time still makes the limit '
+            + 'measure from their own sign-in.',
     },
     backchannel_jwt_invalid: {
         what: 'The reply could not be accepted as a signed token — '

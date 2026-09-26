@@ -240,16 +240,39 @@ refresh cycle).
 SSO refresh tokens carry the IdP-issued `auth_time` claim. On
 `/refresh`:
 
-* `SSO_SESSION_MAX_AGE_HOURS` exceeded → revoke the family + every
-  live access token via the injected session-killer (Redis
-  reverse-index) + raise `SsoReauthRequired` → router returns 401
-  `{"error":"sso_reauth_required","login_url":"..."}`.
+* `SSO_SESSION_MAX_AGE_HOURS` exceeded → revoke THIS session's family +
+  raise `SsoReauthRequired` → router returns 401
+  `{"error":"sso_reauth_required","login_url":"..."}`. The user's other
+  sessions carry their own `auth_time` and meet the ceiling on their own
+  schedule. (Only an enterprise IdP withdrawing a session on a liveness
+  check ends every session the user holds, via the session-killer.)
 * Frontend's `fetchWithTimeout.tryRefresh` detects this body and
-  navigates via `window.location.href` to the IdP — silent re-auth.
+  navigates via `window.location.href` to the IdP — silent re-auth. A
+  gateway connection with a browser half re-signs in on the page instead;
+  if that fails it lands on `/login` with the reason.
 * OIDC authorize URL pins `max_age=86400` + `prompt=login` on the
   re-auth bounce (belt-and-suspenders at the IdP).
 * SAML AuthnRequest sets `ForceAuthn=true` on the re-auth bounce.
 * Local password sessions are exempt — `auth_time` is NULL.
+
+No session is minted already past the ceiling. At sign-in an `auth_time`
+that would not survive the first renewal is:
+
+* for OIDC and SAML, answered with one bounce back to the IdP with
+  `prompt=login` / `ForceAuthn` (the flow cookie records `force`, so the
+  bounce happens once);
+* for gateway, portal and custom connections — which have no upstream
+  prompt to force — and for an IdP that ignored the forced request,
+  measured from this sign-in instead, recorded as
+  `auth_time_anchored: true` on `user.logged_in`. A missing `auth_time`
+  is treated the same way (`auth_time_asserted: false`) and never refuses
+  the sign-in.
+
+An SSO session past the idle or absolute ceiling
+(`SESSION_IDLE_MAX_HOURS`, `SESSION_ABSOLUTE_MAX_HOURS`) gets the same
+envelope WITHOUT `force=1`, so the IdP's own session decides whether a
+credential is needed — rather than a bare 401 that stranded the user on
+the sign-in page. Password sessions still get the bare 401.
 
 ### 1.7 Linking + manual linking
 
@@ -353,7 +376,7 @@ Outbox events (consumed by `auth_audit_log` table via the relay):
 | `user.sso_jit_blocked` | JIT refused because `allow_jit_provisioning=false` |
 | `user.sso_unsigned_accepted` | `custom_profile` login accepted an unsigned payload (`trust_unsigned`) |
 | `user.sso_header_accepted` | `custom_profile` login trusted a proxy-injected header |
-| `user.sso_session_expired` | 24h ceiling hit during /refresh |
+| `user.sso_session_expired` | SSO session ended at /refresh: `reason` is `reauth_ceiling` (24h), `idle` or `absolute` |
 | `user.identity.linked` / `user.identity.unlinked` | self-service link/unlink |
 | `user.identity.admin_linked` / `user.identity.admin_unlinked` | admin link/unlink |
 | `idp.provider.{created,updated,deleted}` | IdP provider CRUD |
