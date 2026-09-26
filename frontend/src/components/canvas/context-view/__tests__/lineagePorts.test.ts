@@ -290,6 +290,17 @@ describe('portTotals — what each card reads for the lineage it has no line for
     expect(none.failed.has('logical:g')).toBe(true)
   })
 
+  it('a member asked again after its roll-up check failed lends the group the flags it had', () => {
+    const roots = [group('logical:g', [entity('a'), entity('b')])]
+    const kept = portTotals(roots,
+      new Map([['a', { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }], ['b', { in: 0, out: 0, rollupIn: 0, rollupOut: 0 }]]),
+      new Set(['a']), closed)
+    expect(kept.totals.get('logical:g')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    expect(kept.failed.has('logical:g')).toBe(false)
+    // As the member reads drawn on its own.
+    expect(portView('right', undefined, kept.totals.get('logical:g'), false)).toEqual({ kind: 'lineage', dir: 'out' })
+  })
+
   it('an open container reads its own flows alone, so a failed roll-up check leaves it counted', () => {
     const open = (id: string) => id === 'box'
     const { totals, failed } = portTotals([entity('box', [entity('box.t')])],

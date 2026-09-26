@@ -178,9 +178,9 @@ const NO_TOTALS: ReadonlyMap<string, NodeDegree> = new Map()
  * A logical group is no entity, so the server has no total for it. Closed,
  * it stands for its members (and a nested group's): its total is theirs,
  * summed. A member's lineage is the group's at once — flows counted by a
- * member whose roll-up check failed too; with none found, it waits for
- * every member, and is unknown when one's count failed. Open, its members
- * speak for themselves.
+ * member whose roll-up check failed too, and the flags it had before that
+ * check; with none found, it waits for every member, and is unknown when
+ * one's count failed. Open, its members speak for themselves.
  *
  * An open container reads its own flows alone, so a total with its flows
  * counted is its whole answer, whatever its roll-up check did.
@@ -207,7 +207,7 @@ export function portTotals<N extends { id: string; isLogical?: boolean; children
     for (const member of group.children) {
       const own = totals.get(member.id)
       const t = member.isLogical ? sum(member)
-        : failed.has(member.id) && !(own && own.in + own.out > 0) ? 'unknown' : own
+        : failed.has(member.id) && !(own && own.in + own.out + (own.rollupIn ?? 0) + (own.rollupOut ?? 0) > 0) ? 'unknown' : own
       if (t === 'unknown') unknown = true
       else if (t === undefined) uncounted = true
       else {
