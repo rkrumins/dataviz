@@ -919,7 +919,7 @@ function ModeTab({ active, onClick, disabled, icon: Icon, label, badge }: ModeTa
         active
           ? "bg-white/10 text-ink shadow-sm"
           : disabled
-            ? "text-ink-muted/50"
+            ? "text-ink-muted opacity-50"
             : "text-ink-muted hover:text-ink hover:bg-white/5"
       )}
     >

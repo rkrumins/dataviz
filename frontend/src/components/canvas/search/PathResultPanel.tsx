@@ -69,7 +69,7 @@ export const PathResultPanel: FC<PathResultPanelProps> = ({
                     Shortest first.
                 </span>
             </div>
-            <p className="text-[11px] leading-relaxed text-ink-muted/80">
+            <p className="text-[11px] leading-relaxed text-ink-muted">
                 {truncated && 'Raise maxPaths (up to 128) in Code to see more. '}
                 Paths can't be exported — Export saves a search's matches, and these are routes.
             </p>
