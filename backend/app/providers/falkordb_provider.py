@@ -10065,7 +10065,10 @@ class FalkorDBProvider(GraphDataProvider):
             try:
                 return await self._read_with_ladder(issue, batch, pressure=record)
             except Exception as e:
+                # Recorded like every other lost batch, so the answer says
+                # it is short instead of being cached as complete.
                 logger.warning(f"Raw lineage pair synthesis failed: {e}")
+                record.degrade(_lost_batch_kind(e))
                 return []
 
         batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE

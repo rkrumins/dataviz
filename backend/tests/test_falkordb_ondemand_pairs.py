@@ -1757,6 +1757,26 @@ def test_a_chain_walk_that_failed_marks_the_answer_short():
     assert result.stale_reason == "degraded"
 
 
+def test_a_raw_mirror_batch_that_failed_marks_the_answer_short():
+    """In cube regime the raw mirror is the only source of leaf pairs. A
+    batch it lost used to be logged and dropped, and the answer read as
+    complete: kept for the full TTL and mirrored as last-known-good."""
+    fake = _FakeGraph()
+    fake.set_meta("cube", 2)
+    p, _ = _clocked_provider(fake, _seed_mixed(fake))
+    ro_query = p._ro_query
+
+    async def raw_fails(cypher, params=None, timeout=None, **kw):
+        if "type(r) IN $ltypes" in cypher:
+            raise RuntimeError("raw mirror batch failed")
+        return await ro_query(cypher, params=params, timeout=timeout, **kw)
+
+    p._ro_query = raw_fails
+    result = _clocked_read(p)
+    assert result.truncated and result.truncation_reason == "failed"
+    assert result.stale_reason == "degraded"
+
+
 def test_leafness_is_an_existence_probe_not_a_child_count():
     """count(ch) walks every child of every target, an anchored column's
     whole contents, on every chunk. Whether a node has a child at all stops
