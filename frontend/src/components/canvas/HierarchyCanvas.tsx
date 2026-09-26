@@ -49,6 +49,8 @@ import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
 import { DisplayRuleTagChips } from './property-manager/DisplayRuleTagChips'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
+import { useViewLibrary } from '@/hooks/useViewLibrary'
+import { useEffectiveBranchId } from '@/store/branchStore'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { TraceToolbar } from './TraceToolbar'
@@ -112,6 +114,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // Property Manager display-rule engine — publishes match sets so the
   // HierarchyContainer rows render tag chips.
   useDisplayRuleEngine(activeView?.id ?? null)
+  // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
+  const libraryBranchId = useEffectiveBranchId(
+    activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
+  useViewLibrary(activeView?.id ?? null, libraryBranchId)
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // Edit Mode State (shared across canvases). `surface` distinguishes the

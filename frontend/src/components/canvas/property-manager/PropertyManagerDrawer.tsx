@@ -5,33 +5,33 @@
  *   • Properties tab — browse every property key / value / tag in use
  *     across the view (sourced from Advanced-Search discovery), with a
  *     one-click handoff to create a rule from any of them.
- *   • Display rules tab — CRUD the saved rules; each tags its matched
- *     entities with a colored chip on the canvas. Rules persist in the
- *     view blueprint via Save Blueprint.
+ *   • Display rules tab — CRUD the view's rules; each tags its matched
+ *     entities with a colored chip on the canvas. Every change is saved to
+ *     the view's library as it is made (on a draft, to the draft's own
+ *     rules), and the library exports to — and imports from — a file.
  *
  * Built as a ``motion.aside`` flex-sibling (mirrors EntityDrawer) so it
  * shrinks the canvas rather than overlaying it, and is driven purely by
- * props + the referenceModelStore — no canvas coupling — so other
- * canvases can mount it with just a ``viewId``.
+ * props + the referenceModelStore and viewLibraryStore — no canvas
+ * coupling — so other canvases can mount it with just a ``viewId``.
  */
 import { AnimatePresence, motion } from 'framer-motion'
-import { SlidersHorizontal, Tags, Layers, X } from 'lucide-react'
+import { Download, Loader2, RefreshCw, SlidersHorizontal, Tags, Layers, Upload, X } from 'lucide-react'
 import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useAppNotifications } from '@/components/ui/notifications'
-import {
-    useDisplayRules,
-    useReferenceModelStore,
-} from '@/store/referenceModelStore'
-import { useSearchStore } from '@/store/searchStore'
-import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
+import { exportViewLibrary, type LibraryImportResult } from '@/services/viewLibraryService'
+import { useDisplayRules } from '@/store/referenceModelStore'
+import { useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 
 import { DisplayRuleEditor } from './DisplayRuleEditor'
 import { DisplayRuleList } from './DisplayRuleList'
+import { LibraryImportDialog } from './LibraryImportDialog'
 import { PropertyBrowser } from './PropertyBrowser'
+import { saveLibraryFile } from './libraryFile'
 import { MOTION } from '@/lib/motion'
 
 
@@ -65,21 +65,28 @@ export function PropertyManagerDrawer({
     const [tab, setTab] = useState<Tab>('rules')
     const [editor, setEditor] = useState<EditorState>({ mode: 'closed' })
 
+    const [importOpen, setImportOpen] = useState(false)
+
     const rules = useDisplayRules()
-    const addDisplayRule = useReferenceModelStore((s) => s.addDisplayRule)
-    const updateDisplayRule = useReferenceModelStore((s) => s.updateDisplayRule)
-    const removeDisplayRule = useReferenceModelStore((s) => s.removeDisplayRule)
-    const toggleDisplayRule = useReferenceModelStore((s) => s.toggleDisplayRule)
-    const reorderDisplayRules = useReferenceModelStore((s) => s.reorderDisplayRules)
+    // The library the canvas loaded, when it is this view's.
+    const libraryStatus = useViewLibraryStore((s) => (s.viewId === viewId ? s.status : 'loading'))
+    const libraryError = useViewLibraryStore((s) => s.error)
+    const canEdit = useViewLibraryStore((s) => s.viewId === viewId && s.canEdit)
+    const branchId = useViewLibraryStore((s) => s.branchId)
+    const saveRule = useViewLibraryStore((s) => s.saveRule)
+    const removeRule = useViewLibraryStore((s) => s.removeRule)
+    const toggleRule = useViewLibraryStore((s) => s.toggleRule)
+    const reorderRules = useViewLibraryStore((s) => s.reorderRules)
+    const reloadLibrary = useViewLibraryStore((s) => s.reload)
     const { notify } = useAppNotifications()
 
-    const handleSaveRule = (rule: DisplayRuleConfig) => {
+    const reportFailure = (what: string) => (e: unknown) =>
+        notify('error', `Couldn't ${what} — ${(e as Error).message}`)
+
+    /** Saved when the server says so; a refusal stays in the editor. */
+    const handleSaveRule = async (rule: DisplayRuleConfig) => {
         const isUpdate = rules.some((r) => r.id === rule.id)
-        if (isUpdate) {
-            updateDisplayRule(rule.id, rule)
-        } else {
-            addDisplayRule(rule)
-        }
+        await saveRule(rule)
         setEditor({ mode: 'closed' })
         // Premium feedback: confirm the rule applied. The engine recomputes
         // the match set asynchronously; the notification reassures the user the
@@ -87,28 +94,33 @@ export function PropertyManagerDrawer({
         notify('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — tagging matched entities`)
     }
 
-    /** Reveal a rule's matched nodes on the canvas by publishing them
-     *  through the shared search-highlight channel (same mechanism the
-     *  Advanced Search panel uses). Spotlights the matches; the user can
-     *  clear via the canvas's existing search-clear affordance. */
+    /** Reveal a rule's matches by running its criteria as a search: the
+     *  search panel lists every match in the view with its exact count,
+     *  lights them up on the canvas and badges the containers they sit
+     *  in — the same answer, and the same controls, as any search. */
     const handleRevealRule = (rule: DisplayRuleConfig) => {
-        const urns = useDisplayRuleMatchStore.getState().matchUrnsByRule.get(rule.id)
-        if (!urns || urns.size === 0) {
-            notify('info', `“${rule.name}” has no matches on the canvas yet`)
-            return
-        }
-        useSearchStore.getState().setResult({
-            viewId,
-            matchUrns: urns,
-            queryHash: `display-rule:${rule.id}`,
-        })
-        notify('info', `Spotlighting ${urns.size} match${urns.size === 1 ? '' : 'es'} for “${rule.name}”`)
+        if (!onSearchPredicate) return
+        onSearchPredicate(rule.predicate as Predicate)
+        notify('info', `Showing the matches for “${rule.name}”`)
     }
 
     // Names of OTHER rules — feeds the editor's duplicate-name guard.
     const otherNames = rules
         .filter((r) => (editor.mode === 'edit' ? r.id !== editor.rule.id : true))
         .map((r) => r.name)
+
+    const handleExport = async () => {
+        try {
+            saveLibraryFile(await exportViewLibrary(viewId, branchId))
+        } catch (e) {
+            reportFailure('export the library')(e)
+        }
+    }
+
+    const handleImported = (result: LibraryImportResult) => {
+        setImportOpen(false)
+        notify('success', `Imported ${result.added.toLocaleString()} ${result.added === 1 ? 'item' : 'items'} into this view`)
+    }
 
     const handleCreateFromPredicate = (predicate: Predicate, suggestedName: string) => {
         setTab('rules')
@@ -126,6 +138,7 @@ export function PropertyManagerDrawer({
     }
 
     return (
+        <>
         <AnimatePresence>
             {open && (
                 <motion.aside
@@ -210,15 +223,42 @@ export function PropertyManagerDrawer({
                                             exit={{ opacity: 0, x: -8 }}
                                             transition={{ duration: 0.16 }}
                                         >
-                                            <DisplayRuleList
-                                                rules={rules}
-                                                onNew={() => setEditor({ mode: 'new' })}
-                                                onEdit={(rule) => setEditor({ mode: 'edit', rule })}
-                                                onToggle={toggleDisplayRule}
-                                                onDelete={removeDisplayRule}
-                                                onReorder={reorderDisplayRules}
-                                                onReveal={handleRevealRule}
-                                            />
+                                            {libraryStatus === 'loading' && rules.length === 0 ? (
+                                                <div className="flex items-center justify-center gap-2 py-10 text-xs text-ink-muted">
+                                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                    Loading this view's rules…
+                                                </div>
+                                            ) : libraryStatus === 'error' ? (
+                                                <div role="alert" className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-4 text-center">
+                                                    <p className="text-xs text-ink">Couldn't load this view's rules</p>
+                                                    <p className="mt-1 text-[11px] text-ink-muted">{libraryError}</p>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => void reloadLibrary()}
+                                                        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent-lineage/15 text-accent-lineage hover:bg-accent-lineage/25 transition-colors"
+                                                    >
+                                                        <RefreshCw className="w-3.5 h-3.5" /> Try again
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    <DisplayRuleList
+                                                        rules={rules}
+                                                        readOnly={!canEdit}
+                                                        onNew={() => setEditor({ mode: 'new' })}
+                                                        onEdit={(rule) => setEditor({ mode: 'edit', rule })}
+                                                        onToggle={(id) => { toggleRule(id).catch(reportFailure('change the rule')) }}
+                                                        onDelete={(id) => { removeRule(id).catch(reportFailure('delete the rule')) }}
+                                                        onReorder={(ids) => { reorderRules(ids).catch(reportFailure('reorder the rules')) }}
+                                                        onReveal={handleRevealRule}
+                                                    />
+                                                    <LibraryActions
+                                                        canImport={canEdit}
+                                                        onExport={() => void handleExport()}
+                                                        onImport={() => setImportOpen(true)}
+                                                    />
+                                                </>
+                                            )}
                                         </motion.div>
                                     ) : (
                                         <motion.div
@@ -246,6 +286,43 @@ export function PropertyManagerDrawer({
                 </motion.aside>
             )}
         </AnimatePresence>
+        {importOpen && (
+            <LibraryImportDialog
+                viewId={viewId}
+                branchId={branchId}
+                onClose={() => setImportOpen(false)}
+                onImported={handleImported}
+            />
+        )}
+        </>
+    )
+}
+
+
+/** Take the view's rules and saved queries elsewhere, or bring another
+ *  view's in. */
+function LibraryActions({ canImport, onExport, onImport }: {
+    canImport: boolean
+    onExport: () => void
+    onImport: () => void
+}) {
+    const button = 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors'
+    return (
+        <div className="mt-4 pt-3 border-t border-glass-border flex items-center gap-1">
+            <span className="mr-auto text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted">
+                Rules &amp; saved queries
+            </span>
+            <button type="button" onClick={onExport} className={button}
+                title="Download this view's display rules and saved queries as a file">
+                <Download className="w-3.5 h-3.5" /> Export
+            </button>
+            {canImport && (
+                <button type="button" onClick={onImport} className={button}
+                    title="Add display rules and saved queries from a library file">
+                    <Upload className="w-3.5 h-3.5" /> Import…
+                </button>
+            )}
+        </div>
     )
 }
 

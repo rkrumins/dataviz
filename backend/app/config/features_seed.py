@@ -287,8 +287,9 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "key": "editModeEnabled",
         "name": "Edit mode",
         "description": (
-            "Let people change the data itself — editing node properties from a view and saving "
-            "those changes back to the source."
+            "Let people change the data itself — editing entities and their properties in a draft "
+            "of a view, then publishing the draft. A data source without version control stays "
+            "read-only."
         ),
         "impact_when_off": (
             "Views become read-only. The edit controls disappear from the entity drawer and the "

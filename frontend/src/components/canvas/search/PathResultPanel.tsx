@@ -65,10 +65,14 @@ export const PathResultPanel: FC<PathResultPanelProps> = ({
                     <span className="text-ink font-medium">
                         {sorted.length} {sorted.length === 1 ? 'path' : 'paths'}
                     </span>
-                    {' '}found{truncated ? ' (truncated — increase max paths to see more)' : ''}.
+                    {' '}found{truncated ? ' — the most one search returns, so there may be more' : ''}.
                     Shortest first.
                 </span>
             </div>
+            <p className="text-[11px] leading-relaxed text-ink-muted">
+                {truncated && 'Raise maxPaths (up to 128) in Code to see more. '}
+                Paths can't be exported — Export saves a search's matches, and these are routes.
+            </p>
 
             <div className="flex flex-col gap-2.5">
                 {sorted.map((path, i) => (

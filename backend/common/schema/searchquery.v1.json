@@ -313,8 +313,18 @@
       "type": "object"
     },
     "EdgePropertyPredicate": {
-      "description": "Typed comparison against a single edge property.\n\nEvaluated against each traversed relationship inside a\n``PathPredicate`` or ``WithinHopsPredicate``. Compiles to\n``rel.<key> <op> $val`` inside an ``ALL(rel IN relationships(p) \u2026)``\nblock. ``between`` expects ``value`` to be a two-element list\n``[lo, hi]``.",
+      "description": "Typed comparison against a single edge property.\n\nEvaluated against each traversed relationship inside a\n``PathPredicate`` or ``WithinHopsPredicate``, inside an\n``ALL(rel IN relationships(p) \u2026)`` block. The comparison itself is\n``PropertyPredicate``'s \u2014 same operators, value shapes and types.",
       "properties": {
+        "caseSensitive": {
+          "default": false,
+          "title": "Casesensitive",
+          "type": "boolean"
+        },
+        "includeMissing": {
+          "default": false,
+          "title": "Includemissing",
+          "type": "boolean"
+        },
         "key": {
           "maxLength": 128,
           "minLength": 1,
@@ -341,7 +351,14 @@
             "contains",
             "startsWith",
             "endsWith",
-            "between"
+            "between",
+            "notContains",
+            "containsAll",
+            "withinLast",
+            "isSet",
+            "isNotSet",
+            "isEmpty",
+            "isNotEmpty"
           ],
           "title": "Op",
           "type": "string"
@@ -349,6 +366,18 @@
         "value": {
           "default": null,
           "title": "Value"
+        },
+        "valueType": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "string",
+            "number",
+            "boolean",
+            "date"
+          ],
+          "title": "Valuetype",
+          "type": "string"
         }
       },
       "required": [
@@ -546,6 +575,7 @@
           "items": {
             "discriminator": {
               "mapping": {
+                "all": "#/$defs/MatchAllPredicate",
                 "degree": "#/$defs/DegreePredicate",
                 "descendantOf": "#/$defs/DescendantOfPredicate",
                 "entityType": "#/$defs/EntityTypePredicate",
@@ -610,6 +640,9 @@
               },
               {
                 "$ref": "#/$defs/PathPredicate"
+              },
+              {
+                "$ref": "#/$defs/MatchAllPredicate"
               },
               {
                 "$ref": "#/$defs/GroupPredicate"
@@ -725,12 +758,22 @@
       "type": "object"
     },
     "HasPropertyPredicate": {
-      "description": "\"Does this node have a property named X\" \u2014 key presence only.\n\nCompiles to ``EXISTS(n.<key>)`` (or ``NOT EXISTS`` when ``negate``).\nNative-property storage makes this cheap; pre-refactor this required\nparsing the blob in Python for every node.",
+      "description": "\"Does this node have a property named X\" \u2014 key presence only.\n\nCompiles to ``EXISTS(n.<key>)`` (or ``NOT EXISTS`` when ``negate``).\nNative-property storage makes this cheap; pre-refactor this required\nparsing the blob in Python for every node.\n\n``key_match`` searches by the NAME instead: ``prefix`` / ``contains``\nmatch any user property whose name starts with / contains ``key``,\ncase-insensitively (\"a property whose name contains 'owner'\").",
       "properties": {
         "key": {
           "maxLength": 128,
           "minLength": 1,
           "title": "Key",
+          "type": "string"
+        },
+        "keyMatch": {
+          "default": "exact",
+          "enum": [
+            "exact",
+            "prefix",
+            "contains"
+          ],
+          "title": "Keymatch",
           "type": "string"
         },
         "kind": {
@@ -892,6 +935,19 @@
       "title": "LayerPredicate",
       "type": "object"
     },
+    "MatchAllPredicate": {
+      "description": "Every entity in scope \u2014 \"all in this view\", \"count everything\".\n\nAn ``and`` group with no children would mean the same, and the model\nrefuses one on purpose: a client bug that dropped every condition must\nnot quietly match the whole view. Asking for everything is spelled out.",
+      "properties": {
+        "kind": {
+          "const": "all",
+          "default": "all",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "MatchAllPredicate",
+      "type": "object"
+    },
     "PathHit": {
       "description": "One returned path: an ordered alternating sequence of nodes and\nedges, with the hop count for sorting / display.\n\nConstraint: ``len(nodes) == len(edges) + 1`` always. The first\nnode is one of the ``source_urns`` and the last is one of the\n``target_urns`` (after direction normalisation).",
       "properties": {
@@ -1047,11 +1103,16 @@
       "type": "object"
     },
     "PropertyPredicate": {
-      "description": "Typed comparison against a single user-property.\n\nAfter the storage refactor, user properties are native FalkorDB\nfields, so these compile to ``WHERE n.<key> <op> $val`` \u2014 no Python\npost-filter. ``eq``/``neq`` case-fold (``toLower(toString(n.<key>))\n<op> toLower($val)``) when ``value`` is a string and\n``case_sensitive`` is false; a non-string value (or\n``case_sensitive=True``) keeps the raw, indexed column comparison.\n``between`` expects ``value`` to be a two-element list ``[lo, hi]``.",
+      "description": "Typed comparison against a single user-property.\n\n``value_type`` says how stored values are read \u2014 under ``number`` a\nstored \"15\" is 15, under ``string`` a stored 15 is \"15\" \u2014 and the\ncomparison holds for any stored kind, a list included (it matches when\nan element does). ``value`` is shaped by ``op``: one value, a list\n(``in`` / ``notIn`` / ``containsAll``), ``[lo, hi]`` (``between``), an\nISO duration such as ``\"P30D\"`` (``withinLast``) or nothing (``isSet``,\n``isEmpty`` and their negations). An integer beyond 2^53 is best sent\nas its digits in a string with ``value_type='number'``: it is compared\nexactly. Text comparisons are case-insensitive unless\n``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /\n``notContains`` match entities without the key. The full contract is\n``backend/common/search_semantics``.",
       "properties": {
         "caseSensitive": {
           "default": false,
           "title": "Casesensitive",
+          "type": "boolean"
+        },
+        "includeMissing": {
+          "default": false,
+          "title": "Includemissing",
           "type": "boolean"
         },
         "key": {
@@ -1080,7 +1141,14 @@
             "contains",
             "startsWith",
             "endsWith",
-            "between"
+            "between",
+            "notContains",
+            "containsAll",
+            "withinLast",
+            "isSet",
+            "isNotSet",
+            "isEmpty",
+            "isNotEmpty"
           ],
           "title": "Op",
           "type": "string"
@@ -1088,6 +1156,18 @@
         "value": {
           "default": null,
           "title": "Value"
+        },
+        "valueType": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "string",
+            "number",
+            "boolean",
+            "date"
+          ],
+          "title": "Valuetype",
+          "type": "string"
         }
       },
       "required": [
@@ -1278,6 +1358,466 @@
         "matchCount"
       ],
       "title": "SearchAggregateBucket",
+      "type": "object"
+    },
+    "SearchAncestorCount": {
+      "properties": {
+        "count": {
+          "description": "Matches below this container, at any depth.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "displayName": {
+          "default": "",
+          "title": "Displayname",
+          "type": "string"
+        },
+        "entityType": {
+          "default": "",
+          "title": "Entitytype",
+          "type": "string"
+        },
+        "typeCounts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "The same matches by entity type.",
+          "title": "Typecounts",
+          "type": "object"
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "title": "SearchAncestorCount",
+      "type": "object"
+    },
+    "SearchAncestorCountsRequest": {
+      "description": "``POST /search/ancestor-counts``: how many of a search's matches each\nof these containers holds, below it at any depth \u2014 from the session the\nsearch returned. The search's ``ancestor`` facet lists the fullest\ncontainers; this answers for any container, e.g. the ones on screen.",
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "sessionId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Sessionid",
+          "type": "string"
+        },
+        "urns": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2000,
+          "title": "Urns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "scope",
+        "sessionId",
+        "urns"
+      ],
+      "title": "SearchAncestorCountsRequest",
+      "type": "object"
+    },
+    "SearchAncestorCountsResult": {
+      "properties": {
+        "counts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SearchAncestorCount"
+          },
+          "description": "Every requested urn \u2192 its count (0: none).",
+          "title": "Counts",
+          "type": "object"
+        },
+        "status": {
+          "description": "``complete``: exact. ``running``: the search is still scanning; counts so far. ``expired``: the session is gone \u2014 run the search again.",
+          "enum": [
+            "complete",
+            "running",
+            "expired"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "SearchAncestorCountsResult",
+      "type": "object"
+    },
+    "SearchCatalogEntityType": {
+      "properties": {
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "count"
+      ],
+      "title": "SearchCatalogEntityType",
+      "type": "object"
+    },
+    "SearchCatalogProperty": {
+      "properties": {
+        "byEntityType": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Byentitytype",
+          "type": "object"
+        },
+        "count": {
+          "description": "Entities carrying the key.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "distinct": {
+          "description": "Distinct values \u2014 a floor unless ``distinctExact``.",
+          "title": "Distinct",
+          "type": "integer"
+        },
+        "distinctExact": {
+          "title": "Distinctexact",
+          "type": "boolean"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "kinds": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "Entities per kind the value is stored as. Two kinds compare as two.",
+          "title": "Kinds",
+          "type": "object"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Greatest numeric value, exact.",
+          "title": "Max"
+        },
+        "min": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Least numeric value, exact.",
+          "title": "Min"
+        },
+        "residual": {
+          "default": 0,
+          "description": "Entities holding it in propertiesRaw, past the native-key budget.",
+          "title": "Residual",
+          "type": "integer"
+        },
+        "values": {
+          "description": "The values most held, with their exact counts \u2014 while the key has at most 1,000 distinct values; past that it is high-cardinality and none are listed.",
+          "items": {
+            "$ref": "#/$defs/SearchCatalogValue"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "key",
+        "count",
+        "distinct",
+        "distinctExact"
+      ],
+      "title": "SearchCatalogProperty",
+      "type": "object"
+    },
+    "SearchCatalogRequest": {
+      "description": "``POST /search/catalog``: every property the view's entities carry \u2014\non how many, stored as which kinds, with which values \u2014 read from every\nentity in its scope, not a sample. A large view takes more than one\nrequest: send it again with the returned ``sessionId`` until ``status``\nis ``complete``.",
+      "properties": {
+        "refresh": {
+          "default": false,
+          "description": "Read the view again, even when a recent catalog of it is at hand.",
+          "title": "Refresh",
+          "type": "boolean"
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sessionid"
+        },
+        "waitMs": {
+          "default": 800,
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "Waitms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "title": "SearchCatalogRequest",
+      "type": "object"
+    },
+    "SearchCatalogResult": {
+      "properties": {
+        "asOf": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When the read began (UTC).",
+          "title": "Asof"
+        },
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataversion"
+        },
+        "entities": {
+          "default": 0,
+          "description": "Entities in the view's scope read so far.",
+          "title": "Entities",
+          "type": "integer"
+        },
+        "entityTypes": {
+          "items": {
+            "$ref": "#/$defs/SearchCatalogEntityType"
+          },
+          "title": "Entitytypes",
+          "type": "array"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "properties": {
+          "items": {
+            "$ref": "#/$defs/SearchCatalogProperty"
+          },
+          "title": "Properties",
+          "type": "array"
+        },
+        "sessionId": {
+          "title": "Sessionid",
+          "type": "string"
+        },
+        "stale": {
+          "default": false,
+          "description": "Read before the data last changed \u2014 see ``asOf``.",
+          "title": "Stale",
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "complete"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tagged": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Entities carrying any tag \u2014 null when a unit held too many distinct tag sets to count them.",
+          "title": "Tagged"
+        },
+        "tags": {
+          "description": "Every tag, with the entities carrying it.",
+          "items": {
+            "$ref": "#/$defs/SearchCatalogTag"
+          },
+          "title": "Tags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sessionId",
+        "status"
+      ],
+      "title": "SearchCatalogResult",
+      "type": "object"
+    },
+    "SearchCatalogTag": {
+      "properties": {
+        "count": {
+          "description": "Entities carrying the tag.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "tag": {
+          "title": "Tag",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tag",
+        "count"
+      ],
+      "title": "SearchCatalogTag",
+      "type": "object"
+    },
+    "SearchCatalogValue": {
+      "properties": {
+        "count": {
+          "description": "Entities holding it.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "kind": {
+          "description": "Integer, Float, String, Boolean or List.",
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "description": "As stored \u2014 a list's elements count one by one.",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "value",
+        "kind",
+        "count"
+      ],
+      "title": "SearchCatalogValue",
+      "type": "object"
+    },
+    "SearchCountsRequest": {
+      "description": "``POST /search/counts``: how many entities in the view match each\nrule \u2014 exactly, however many. A count over a large view takes more than\none request: send the same request again with the returned ``sessions``\nuntil every count is complete.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/SearchRuleItem"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "sessions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Rule id \u2192 the session a previous answer returned.",
+          "title": "Sessions",
+          "type": "object"
+        },
+        "waitMs": {
+          "default": 1000,
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "Waitms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope",
+        "items"
+      ],
+      "title": "SearchCountsRequest",
+      "type": "object"
+    },
+    "SearchCountsResult": {
+      "properties": {
+        "counts": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SearchRuleCount"
+          },
+          "title": "Counts",
+          "type": "object"
+        },
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataversion"
+        },
+        "elapsedMs": {
+          "default": 0,
+          "title": "Elapsedms",
+          "type": "integer"
+        }
+      },
+      "title": "SearchCountsResult",
       "type": "object"
     },
     "SearchDiscoverEdgeInfo": {
@@ -1504,6 +2044,230 @@
       "title": "SearchExplainResult",
       "type": "object"
     },
+    "SearchExportRequest": {
+      "description": "``POST /search/exports``: every entity in the view that matches\n``predicate``, written to a file \u2014 exactly, however many. A large export\ntakes more than one request: send the same request again with the\nreturned ``sessionId`` until ``status`` is ``complete``, then download\nit from ``GET /search/exports/{sessionId}/download``.",
+      "properties": {
+        "columns": {
+          "description": "Properties to add to each row, after its urn, name, type and qualified name \u2014 ``description`` and ``tags`` included.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 200,
+          "title": "Columns",
+          "type": "array"
+        },
+        "format": {
+          "default": "csv",
+          "enum": [
+            "csv",
+            "ndjson"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/MatchAllPredicate",
+              "degree": "#/$defs/DegreePredicate",
+              "descendantOf": "#/$defs/DescendantOfPredicate",
+              "entityType": "#/$defs/EntityTypePredicate",
+              "group": "#/$defs/GroupPredicate",
+              "hasIncoming": "#/$defs/HasIncomingPredicate",
+              "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+              "hasProperty": "#/$defs/HasPropertyPredicate",
+              "isLeaf": "#/$defs/IsLeafPredicate",
+              "isOrphan": "#/$defs/IsOrphanPredicate",
+              "isRoot": "#/$defs/IsRootPredicate",
+              "layer": "#/$defs/LayerPredicate",
+              "path": "#/$defs/PathPredicate",
+              "property": "#/$defs/PropertyPredicate",
+              "tag": "#/$defs/TagPredicate",
+              "text": "#/$defs/TextPredicate",
+              "withinHops": "#/$defs/WithinHopsPredicate"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TextPredicate"
+            },
+            {
+              "$ref": "#/$defs/PropertyPredicate"
+            },
+            {
+              "$ref": "#/$defs/TagPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasPropertyPredicate"
+            },
+            {
+              "$ref": "#/$defs/DescendantOfPredicate"
+            },
+            {
+              "$ref": "#/$defs/WithinHopsPredicate"
+            },
+            {
+              "$ref": "#/$defs/EntityTypePredicate"
+            },
+            {
+              "$ref": "#/$defs/LayerPredicate"
+            },
+            {
+              "$ref": "#/$defs/DegreePredicate"
+            },
+            {
+              "$ref": "#/$defs/IsOrphanPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsLeafPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsRootPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasIncomingPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasOutgoingPredicate"
+            },
+            {
+              "$ref": "#/$defs/PathPredicate"
+            },
+            {
+              "$ref": "#/$defs/MatchAllPredicate"
+            },
+            {
+              "$ref": "#/$defs/GroupPredicate"
+            }
+          ],
+          "title": "Predicate"
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sessionid"
+        },
+        "waitMs": {
+          "default": 2000,
+          "maximum": 60000,
+          "minimum": 0,
+          "title": "Waitms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scope",
+        "predicate"
+      ],
+      "title": "SearchExportRequest",
+      "type": "object"
+    },
+    "SearchExportResult": {
+      "properties": {
+        "columns": {
+          "description": "Every column, in order.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataversion"
+        },
+        "downloadToken": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Once complete: ``GET /search/exports/{sessionId}/download?token=\u2026`` for an hour, for whoever ran the export.",
+          "title": "Downloadtoken"
+        },
+        "filename": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What the download is saved as.",
+          "title": "Filename"
+        },
+        "format": {
+          "default": "csv",
+          "enum": [
+            "csv",
+            "ndjson"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rows": {
+          "default": 0,
+          "description": "Rows written so far \u2014 every match, once complete.",
+          "title": "Rows",
+          "type": "integer"
+        },
+        "sessionId": {
+          "title": "Sessionid",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "complete"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "status"
+      ],
+      "title": "SearchExportResult",
+      "type": "object"
+    },
     "SearchHighlight": {
       "description": "Where in a hit's text the match landed, for ``<mark>`` rendering.",
       "properties": {
@@ -1587,6 +2351,80 @@
       "title": "SearchHit",
       "type": "object"
     },
+    "SearchMembershipRequest": {
+      "description": "``POST /search/membership``: which of these entities \u2014 the ones on\nscreen \u2014 match which rules. Answers only for entities inside the view's\nscope; one outside it never matches, whatever it holds.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/SearchRuleItem"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        },
+        "urns": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "title": "Urns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "scope",
+        "items",
+        "urns"
+      ],
+      "title": "SearchMembershipRequest",
+      "type": "object"
+    },
+    "SearchMembershipResult": {
+      "properties": {
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataversion"
+        },
+        "elapsedMs": {
+          "default": 0,
+          "title": "Elapsedms",
+          "type": "integer"
+        },
+        "errors": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Rule id \u2192 why it could not be evaluated. Such a rule matches nothing here.",
+          "title": "Errors",
+          "type": "object"
+        },
+        "matches": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Rule id \u2192 the requested urns it matches (in scope).",
+          "title": "Matches",
+          "type": "object"
+        }
+      },
+      "title": "SearchMembershipResult",
+      "type": "object"
+    },
     "SearchOptions": {
       "description": "Per-request shape / pagination / deadline controls.\n\nDefaults are tuned for the UI's Map-mode-first experience:\n``results='aggregates'`` returns just buckets, ``page_size=50`` is\nused only when hits are requested, and a 3-second soft deadline\nkeeps the UI responsive (partial results returned on timeout).",
       "properties": {
@@ -1618,7 +2456,7 @@
             }
           ],
           "default": null,
-          "description": "Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max.",
+          "description": "Per-request override of the candidate-scan ceiling. ``None`` uses the deployment default from ``DEEP_SEARCH_CANDIDATE_CAP`` (default 10000). Requests can raise this up to ``DEEP_SEARCH_CANDIDATE_CAP_MAX`` (default 100000) when the user explicitly opts into a larger scan. The service validator rejects values above the deployment max. The uncapped engine (``DEEP_SEARCH_ENGINE=v2``) never caps hits or counts; it applies only to the facets that still pivot on a capped candidate set.",
           "title": "Candidatecap"
         },
         "cursor": {
@@ -1663,6 +2501,20 @@
           "title": "Results",
           "type": "string"
         },
+        "sessionId": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Continue this search session (from a ``running`` response) rather than start a new one. It finishes on the data it started on even if the graph changes meanwhile, and says so (``stale``). Ignored when it doesn't belong to this query.",
+          "title": "Sessionid"
+        },
         "softDeadlineMs": {
           "default": 30000,
           "description": "Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.",
@@ -1706,9 +2558,51 @@
           "default": null,
           "description": "When set, hits are ordered by this native node property (e.g. 'rowCount') instead of by `sort`. Useful for 'biggest first' / 'newest first' UX.",
           "title": "Sortproperty"
+        },
+        "waitMs": {
+          "anyOf": [
+            {
+              "maximum": 120000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Progressive mode (uncapped engine). Answer after this long with what the scan has found so far \u2014 ``status: 'running'``, provisional hits in their final order, a ``progress`` block \u2014 and send the SAME request again with ``sessionId`` to continue it. Omitted, the request waits up to ``softDeadlineMs`` for the complete answer.",
+          "title": "Waitms"
         }
       },
       "title": "SearchOptions",
+      "type": "object"
+    },
+    "SearchProgress": {
+      "description": "How far a running search has got. Node counts are the scan's\nestimate of what each part of the graph holds, so ``scanned / total``\nis a fraction to draw, not a count to report.",
+      "properties": {
+        "matched": {
+          "description": "Matches found so far \u2014 exact for the parts scanned.",
+          "title": "Matched",
+          "type": "integer"
+        },
+        "scanned": {
+          "description": "Nodes in the parts already scanned.",
+          "title": "Scanned",
+          "type": "integer"
+        },
+        "total": {
+          "description": "Nodes in every part the search scans.",
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scanned",
+        "total",
+        "matched"
+      ],
+      "title": "SearchProgress",
       "type": "object"
     },
     "SearchQuery": {
@@ -1726,6 +2620,7 @@
         "predicate": {
           "discriminator": {
             "mapping": {
+              "all": "#/$defs/MatchAllPredicate",
               "degree": "#/$defs/DegreePredicate",
               "descendantOf": "#/$defs/DescendantOfPredicate",
               "entityType": "#/$defs/EntityTypePredicate",
@@ -1792,6 +2687,9 @@
               "$ref": "#/$defs/PathPredicate"
             },
             {
+              "$ref": "#/$defs/MatchAllPredicate"
+            },
+            {
               "$ref": "#/$defs/GroupPredicate"
             }
           ],
@@ -1840,6 +2738,23 @@
           "title": "Candidatecount",
           "type": "integer"
         },
+        "countStatus": {
+          "anyOf": [
+            {
+              "enum": [
+                "exact",
+                "lowerBound"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether ``candidateCount`` is the exact number of matches or only those found so far.",
+          "title": "Countstatus"
+        },
         "cursor": {
           "anyOf": [
             {
@@ -1851,6 +2766,19 @@
           ],
           "default": null,
           "title": "Cursor"
+        },
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The graph data the session read. Opaque.",
+          "title": "Dataversion"
         },
         "deadlineExceeded": {
           "default": false,
@@ -1893,6 +2821,17 @@
           "description": "Populated when the request's predicate contains a PathPredicate and options.results='paths'. Ordered node\u2192edge\u2192node sequences from source to target.",
           "title": "Paths"
         },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "queryExplain": {
           "anyOf": [
             {
@@ -1915,6 +2854,42 @@
           ],
           "default": null,
           "description": "Resolved-scope + ontology diagnostics. Surfaced on every response so the FE can interpret 0-result cases without round-tripping to /search/explain."
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The search session this page came from. Send it back as ``options.sessionId`` to continue a running one.",
+          "title": "Sessionid"
+        },
+        "stale": {
+          "default": false,
+          "description": "The graph changed after this session started; run the search again for an answer on the current data.",
+          "title": "Stale",
+          "type": "boolean"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "enum": [
+                "running",
+                "complete"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "``running``: the scan is not finished \u2014 the hits are the best found so far, already in their final order, and ``totalCount`` is null. ``complete``: every match was counted and ranked.",
+          "title": "Status"
         },
         "totalCount": {
           "anyOf": [
@@ -1940,6 +2915,159 @@
         "elapsedMs"
       ],
       "title": "SearchResultPage",
+      "type": "object"
+    },
+    "SearchRuleCount": {
+      "properties": {
+        "count": {
+          "description": "Matches found so far \u2014 exact once complete.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sessionid"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "complete"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "count",
+        "status"
+      ],
+      "title": "SearchRuleCount",
+      "type": "object"
+    },
+    "SearchRuleItem": {
+      "description": "One rule (or saved query) to evaluate: an id the caller chose, and\nits predicate.",
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/MatchAllPredicate",
+              "degree": "#/$defs/DegreePredicate",
+              "descendantOf": "#/$defs/DescendantOfPredicate",
+              "entityType": "#/$defs/EntityTypePredicate",
+              "group": "#/$defs/GroupPredicate",
+              "hasIncoming": "#/$defs/HasIncomingPredicate",
+              "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+              "hasProperty": "#/$defs/HasPropertyPredicate",
+              "isLeaf": "#/$defs/IsLeafPredicate",
+              "isOrphan": "#/$defs/IsOrphanPredicate",
+              "isRoot": "#/$defs/IsRootPredicate",
+              "layer": "#/$defs/LayerPredicate",
+              "path": "#/$defs/PathPredicate",
+              "property": "#/$defs/PropertyPredicate",
+              "tag": "#/$defs/TagPredicate",
+              "text": "#/$defs/TextPredicate",
+              "withinHops": "#/$defs/WithinHopsPredicate"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/TextPredicate"
+            },
+            {
+              "$ref": "#/$defs/PropertyPredicate"
+            },
+            {
+              "$ref": "#/$defs/TagPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasPropertyPredicate"
+            },
+            {
+              "$ref": "#/$defs/DescendantOfPredicate"
+            },
+            {
+              "$ref": "#/$defs/WithinHopsPredicate"
+            },
+            {
+              "$ref": "#/$defs/EntityTypePredicate"
+            },
+            {
+              "$ref": "#/$defs/LayerPredicate"
+            },
+            {
+              "$ref": "#/$defs/DegreePredicate"
+            },
+            {
+              "$ref": "#/$defs/IsOrphanPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsLeafPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsRootPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasIncomingPredicate"
+            },
+            {
+              "$ref": "#/$defs/HasOutgoingPredicate"
+            },
+            {
+              "$ref": "#/$defs/PathPredicate"
+            },
+            {
+              "$ref": "#/$defs/MatchAllPredicate"
+            },
+            {
+              "$ref": "#/$defs/GroupPredicate"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "id",
+        "predicate"
+      ],
+      "title": "SearchRuleItem",
       "type": "object"
     },
     "SearchScope": {
@@ -2044,6 +3172,60 @@
         "viewId"
       ],
       "title": "SearchScope",
+      "type": "object"
+    },
+    "SearchValueSuggestion": {
+      "description": "One distinct value of a property and how many times it is stored.\n``value`` keeps its stored kind \u2014 a 19-digit id is that integer.",
+      "properties": {
+        "count": {
+          "default": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "title": "SearchValueSuggestion",
+      "type": "object"
+    },
+    "SearchValuesResult": {
+      "description": "Response shape for ``GET /search/values``: a property's most common\nvalues across the view's entity types \u2014 the value picker's list.\n\nSuggestions, not statistics: the scan is time-bounded, so ``complete``\nsays whether every type was read and ``truncated`` whether a type had\nmore distinct values than listed (a count may then be an undercount).",
+      "properties": {
+        "complete": {
+          "default": true,
+          "description": "Every entity type was read within the time budget.",
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "elapsedMs": {
+          "default": 0,
+          "title": "Elapsedms",
+          "type": "integer"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "truncated": {
+          "default": false,
+          "description": "A type had more distinct values than listed.",
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "values": {
+          "items": {
+            "$ref": "#/$defs/SearchValueSuggestion"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "SearchValuesResult",
       "type": "object"
     },
     "TagPredicate": {
@@ -2270,6 +3452,72 @@
       ],
       "default": null
     },
+    "searchAncestorCountsRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchAncestorCountsRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchAncestorCountsResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchAncestorCountsResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchCatalogRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchCatalogRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchCatalogResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchCatalogResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchCountsRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchCountsRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchCountsResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchCountsResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "searchDiscoverResult": {
       "anyOf": [
         {
@@ -2292,6 +3540,50 @@
       ],
       "default": null
     },
+    "searchExportRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchExportRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchExportResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchExportResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchMembershipRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchMembershipRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchMembershipResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchMembershipResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "searchQuery": {
       "anyOf": [
         {
@@ -2307,6 +3599,17 @@
       "anyOf": [
         {
           "$ref": "#/$defs/SearchResultPage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchValuesResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchValuesResult"
         },
         {
           "type": "null"

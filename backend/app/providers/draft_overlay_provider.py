@@ -546,6 +546,14 @@ class DraftOverlayProvider:
     #: service layer.
     is_overlay = True
 
+    # The ontology's edge classification, as the base reads it (the scope
+    # diagnostics report it).
+    def _get_containment_edge_types(self):
+        return self._base._get_containment_edge_types()
+
+    def _get_lineage_edge_types(self):
+        return self._base._get_lineage_edge_types()
+
     async def deep_search(self, query, *, deadline_ms=None):
         """Search the base graph — the draft's own edits are NOT included.
 
@@ -563,6 +571,45 @@ class DraftOverlayProvider:
         """
         return await self._base.deep_search(query, deadline_ms=deadline_ms)
 
+    @property
+    def supports_search_sessions(self) -> bool:
+        return bool(getattr(self._base, "supports_search_sessions", False))
+
+    async def deep_search_session(self, query, *, context):
+        """The uncapped engine, on the base — the draft's edits are not
+        searched, for the reason :meth:`deep_search` gives."""
+        return await self._base.deep_search_session(query, context=context)
+
+    async def deep_search_count(self, query, *, context, advance=True):
+        """A rule's total — the base's, like :meth:`deep_search`."""
+        return await self._base.deep_search_count(query, context=context, advance=advance)
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        """Rule membership — the base's, like :meth:`deep_search`."""
+        return await self._base.deep_search_membership(scope, items, urns, context=context)
+
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False):
+        """The property catalog — the base's, like :meth:`deep_search_session`."""
+        return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
+                                                    session_id=session_id, refresh=refresh)
+
+    async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
+                                 session_id=None):
+        """An export of every match — the base's, like :meth:`deep_search_session`."""
+        return await self._base.deep_search_export(query, context=context, fmt=fmt,
+                                                   columns=columns, wait_ms=wait_ms,
+                                                   session_id=session_id)
+
+    async def deep_search_export_open(self, session_id, *, context):
+        """A complete export, to stream — the base's."""
+        return await self._base.deep_search_export_open(session_id, context=context)
+
+    async def deep_search_ancestor_counts(self, session_id, urns, *, context):
+        """Container counts from a search session — the base's, like
+        :meth:`deep_search_session`."""
+        return await self._base.deep_search_ancestor_counts(session_id, urns, context=context)
+
     async def deep_search_explain(self, query):
         """Compile-only path. Delegated for the same reason as
         :meth:`deep_search` — the Cypher explained is the one that would
@@ -574,6 +621,12 @@ class DraftOverlayProvider:
         queryable is a property of the base graph's storage."""
         return await self._base.deep_search_discover(
             sample_per_label=sample_per_label,
+        )
+
+    async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
+        """Value suggestions — the base's values, like :meth:`deep_search`."""
+        return await self._base.deep_search_values(
+            key=key, entity_types=entity_types, q=q, limit=limit,
         )
 
     # ---- writes: commit to the draft (reused from the branch provider) -- #

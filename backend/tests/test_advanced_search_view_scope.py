@@ -839,6 +839,23 @@ async def test_service_diagnostics_only_refuses_search():
         await svc.search(query)
 
 
+async def test_provider_without_deep_search_is_not_implemented():
+    """Neo4j / Spanner / DataHub have no deep-search methods. The lookup's
+    AttributeError used to escape the service (the breaker proxy lets it
+    through) and the route answered 500; it is a 501 "not supported"."""
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+
+    class _NoSearchProvider:
+        pass
+
+    class _Engine:
+        provider = _NoSearchProvider()
+
+    svc = AdvancedSearchService.for_diagnostics(_Engine())
+    with pytest.raises(NotImplementedError):
+        await svc.discover()
+
+
 async def test_service_rejects_view_from_other_workspace(db_session: AsyncSession):
     """search() must reject a view_id that exists in a different
     workspace as ViewNotFound (mapped to 404 by the HTTP layer). Don't

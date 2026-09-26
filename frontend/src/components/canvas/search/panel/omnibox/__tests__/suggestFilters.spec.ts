@@ -100,13 +100,14 @@ describe('suggestFilters', () => {
         expect(ids(sections)).toContain('text:name')
     })
 
-    it('offers the typed literal against a key even when unsampled', () => {
-        // Samples are 20 values per key — absence is not evidence, so
-        // matching a key must not gate the value on the sample.
+    it('offers to compare a key it matched to any value', () => {
+        // What was typed names the key: the row takes the value — never
+        // "owner is \"owner\"".
         const sections = suggestFilters({ ...BASE, query: 'owner' })
         const hit = flat(sections).find((i) => i.id === 'keyeq:owner')
+        expect(hit!.title).toBe('owner is …')
         expect(hit!.predicate).toMatchObject({
-            kind: 'property', key: 'owner', op: 'eq', value: 'owner',
+            kind: 'property', key: 'owner', op: 'eq', value: '',
         })
     })
 

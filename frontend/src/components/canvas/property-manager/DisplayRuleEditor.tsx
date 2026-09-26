@@ -23,6 +23,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn, generateId } from '@/lib/utils'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { countRules } from '@/services/ruleCounts'
 import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 
@@ -31,7 +33,6 @@ import { fieldClass } from '../search/builder/editors/shared'
 import { isRowIncomplete } from '../search/panel/ConditionRow'
 import { topLevelConditions } from '../search/panel/predicateComposition'
 import { VisualQueryBuilder } from '../search/panel/VisualQueryBuilder'
-import { evaluateDisplayRule } from '@/services/displayRuleEval'
 
 
 /** Curated swatch palette — premium, legible-on-dark tag colors. */
@@ -67,7 +68,9 @@ export interface DisplayRuleEditorProps {
     /** Names already in use by OTHER enabled rules — drives the
      *  duplicate-name guard. */
     existingNames?: string[]
-    onSave: (rule: DisplayRuleConfig) => void
+    /** Save the rule. A promise that rejects keeps the editor open with the
+     *  reason shown (the server refused it: a taken name, say). */
+    onSave: (rule: DisplayRuleConfig) => void | Promise<void>
     onCancel: () => void
 }
 
@@ -80,8 +83,16 @@ export function DisplayRuleEditor({
     const [color, setColor] = useState(rule?.color ?? SWATCHES[0])
     const [icon, setIcon] = useState<string | undefined>(rule?.icon)
     const [previewCount, setPreviewCount] = useState<number | null>(null)
+    // False while the count is still reading the view: the number so far.
+    const [previewExact, setPreviewExact] = useState(true)
     const [isPreviewing, setIsPreviewing] = useState(false)
     const [previewError, setPreviewError] = useState<string | null>(null)
+    const [saving, setSaving] = useState(false)
+    const [saveError, setSaveError] = useState<string | null>(null)
+    // Empty id ⇒ a seeded "new" rule from the Properties tab (or the
+    // Advanced-Search "Create rule" flow). Minted once, so a save retried
+    // after a lost answer replaces the rule rather than adding it twice.
+    const [ruleId] = useState(() => rule?.id || generateId('rule'))
 
     // Local predicate state seeded from the rule. The flat-filter
     // VisualQueryBuilder mutates it via onSeed/onCommit; we don't need
@@ -91,7 +102,7 @@ export function DisplayRuleEditor({
     )
 
     const {
-        allKeys, keysByEntityType, tagValues, getValueSamples,
+        allKeys, keysByEntityType, tagValues, getValueSamples, suggestValues,
     } = useDiscovery(viewId)
 
     // Layer names → picker options. Memoised so the builder's row props stay
@@ -113,25 +124,40 @@ export function DisplayRuleEditor({
         () => existingNames.some((n) => n.toLowerCase() === trimmedName.toLowerCase()),
         [existingNames, trimmedName],
     )
-    const canSave = trimmedName.length > 0 && !isEmpty && !hasIncomplete && !isDuplicate
+    const canSave = trimmedName.length > 0 && !isEmpty && !hasIncomplete && !isDuplicate && !saving
 
     // ── Live preview-as-you-build ────────────────────────────────────
-    // Re-evaluate the predicate (debounced) whenever it changes so the
-    // user sees the match count update while authoring. The explicit
-    // "Refresh" button forces an immediate re-run.
+    // Count the predicate's matches in the view (debounced) whenever it
+    // changes, exactly — the count shows what it has found while it reads a
+    // large view. The explicit "Refresh" button forces an immediate re-run.
     const treeKey = JSON.stringify(predicate)
     const runPreview = useMemo(() => {
         return async (signal?: AbortSignal) => {
-            if (!predicate || isEmpty || hasIncomplete) {
+            if (!predicate || isEmpty || hasIncomplete
+                || !(provider instanceof RemoteGraphProvider)) {
                 setPreviewCount(null)
                 return
             }
             setIsPreviewing(true)
             setPreviewError(null)
+            // Never show the last criteria's count as this one's.
+            setPreviewCount(null)
             try {
-                const urns = await evaluateDisplayRule(provider, viewId, predicate, signal)
+                const counts = await countRules(provider, viewId, [{ id: 'preview', predicate }], {
+                    signal,
+                    onUpdate: (update) => {
+                        const c = update.get('preview')
+                        if (signal?.aborted || !c) return
+                        setPreviewCount(c.count)
+                        setPreviewExact(c.complete)
+                        setPreviewError(c.error ?? null)
+                    },
+                })
                 if (signal?.aborted) return
-                setPreviewCount(urns.length)
+                const final = counts.get('preview')
+                setPreviewCount(final?.count ?? 0)
+                setPreviewExact(true)
+                if (final?.error) setPreviewError(final.error)
             } catch (e) {
                 if (signal?.aborted) return
                 setPreviewError((e as Error).message)
@@ -149,30 +175,35 @@ export function DisplayRuleEditor({
         return () => { controller.abort(); clearTimeout(t) }
     }, [runPreview])
 
-    const handleSave = () => {
+    const handleSave = async () => {
         if (!canSave || !predicate) return
-        onSave({
-            // Empty id ⇒ a seeded "new" rule from the Properties tab (or
-            // the Advanced-Search "Create rule" flow); mint a fresh id so
-            // the save path treats it as an add.
-            id: rule?.id || generateId('rule'),
-            name: trimmedName,
-            color,
-            icon,
-            // Strip the FE-only ``uiScope`` hint that the flat builder
-            // attaches to ``descendantOf`` rows so it never leaks into
-            // the persisted blueprint.
-            predicate: stripUiScope(predicate),
-            enabled: rule?.enabled ?? true,
-            createdAt: rule?.createdAt ?? new Date().toISOString(),
-        })
+        setSaving(true)
+        setSaveError(null)
+        try {
+            await onSave({
+                id: ruleId,
+                name: trimmedName,
+                color,
+                icon,
+                // Strip the FE-only ``uiScope`` hint that the flat builder
+                // attaches to ``descendantOf`` rows so it never leaks into
+                // the persisted blueprint.
+                predicate: stripUiScope(predicate),
+                enabled: rule?.enabled ?? true,
+                createdAt: rule?.createdAt ?? new Date().toISOString(),
+            })
+        } catch (e) {
+            setSaveError((e as Error).message)
+        } finally {
+            setSaving(false)
+        }
     }
 
     // Keyboard: Esc cancels, ⌘/Ctrl+Enter saves.
     const rootRef = useRef<HTMLDivElement>(null)
     const onKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Escape') { e.preventDefault(); onCancel() }
-        else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleSave() }
+        else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void handleSave() }
     }
 
     return (
@@ -267,7 +298,7 @@ export function DisplayRuleEditor({
                     predicate={predicate}
                     onSeed={setPredicate}
                     onCommit={setPredicate}
-                    discovery={{ allKeys, keysByEntityType, tagValues, getValueSamples }}
+                    discovery={{ allKeys, keysByEntityType, tagValues, getValueSamples, suggestValues }}
                     knownEntityTypes={knownEntityTypes}
                     discoveredLayers={layerOptions}
                     onSubmit={() => void runPreview()}
@@ -277,7 +308,7 @@ export function DisplayRuleEditor({
             {/* Live preview row */}
             <div className="flex items-center justify-between gap-2 min-h-[28px]">
                 <div className="text-[11px] text-ink-muted tabular-nums flex items-center gap-1.5">
-                    {isPreviewing ? (
+                    {isPreviewing && previewCount === null ? (
                         <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Previewing…</>
                     ) : previewError ? (
                         <span className="text-rose-400 truncate max-w-[220px]">{previewError}</span>
@@ -287,8 +318,11 @@ export function DisplayRuleEditor({
                                 className="inline-block w-2 h-2 rounded-full"
                                 style={{ backgroundColor: color }}
                             />
-                            <span className="text-ink font-semibold">{previewCount}</span>
-                            {previewCount === 1 ? 'entity will be tagged' : 'entities will be tagged'}
+                            <span className="text-ink font-semibold">{previewCount.toLocaleString()}</span>
+                            {!previewExact
+                                ? 'found so far…'
+                                : previewCount === 1 ? 'entity will be tagged' : 'entities will be tagged'}
+                            {isPreviewing && <Loader2 className="w-3 h-3 animate-spin" />}
                         </>
                     ) : isEmpty ? (
                         <span className="text-ink-muted/60">Add a condition to preview matches</span>
@@ -309,6 +343,12 @@ export function DisplayRuleEditor({
                 </button>
             </div>
 
+            {saveError && (
+                <p role="alert" className="text-[11px] text-rose-400 leading-snug">
+                    Couldn't save the rule — {saveError}
+                </p>
+            )}
+
             {/* Actions */}
             <div className="flex items-center justify-end gap-2 pt-1 border-t border-glass-border/50">
                 <button
@@ -320,7 +360,7 @@ export function DisplayRuleEditor({
                 </button>
                 <button
                     type="button"
-                    onClick={handleSave}
+                    onClick={() => void handleSave()}
                     disabled={!canSave}
                     title={canSave ? 'Save (⌘/Ctrl + Enter)' : undefined}
                     className={cn(
@@ -330,7 +370,7 @@ export function DisplayRuleEditor({
                             : 'bg-glass/30 text-ink-muted/40 cursor-not-allowed',
                     )}
                 >
-                    <Check className="w-3.5 h-3.5" /> {rule ? 'Save rule' : 'Create rule'}
+                    <Check className="w-3.5 h-3.5" /> {saving ? 'Saving…' : rule ? 'Save rule' : 'Create rule'}
                 </button>
             </div>
         </div>

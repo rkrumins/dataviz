@@ -10,12 +10,12 @@
  * the branch-switch effect flushes the pending save and then guards its re-fetch with
  * `if (pendingLayoutSave.current) return` — a guard the failed flush had already disarmed. The
  * server's stale layout then overwrote the edit. `UnsavedWorkGuard` cannot help: it keys off staged
- * changes, and layer/placement/display-rule edits are never staged.
+ * changes, and layer/placement edits are never staged.
  *
  * Everything durable on this canvas goes down this path — creating, renaming and reordering layers,
- * moving entities between columns, display rules. Driven here through display rules, which is the
- * one gesture reachable without a pointer: the Property Manager writes `useReferenceModelStore`,
- * and the canvas's persist effect arms exactly the same debounced save as every other gesture.
+ * moving entities between columns. Driven here through a column rename on a draft, which arms
+ * exactly the same debounced save as every other gesture. (Display rules no longer ride it: they
+ * are saved to the view's library, one rule at a time.)
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
@@ -29,9 +29,7 @@ import { act, cleanup, fireEvent, screen } from '@testing-library/react'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
-import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useNotificationStore } from '@/components/ui/notifications'
-import type { DisplayRuleConfig } from '@/types/schema'
 
 /** Longer than the canvas's 1500ms autosave debounce. */
 const PAST_THE_DEBOUNCE = 1800
@@ -39,20 +37,23 @@ const PAST_THE_DEBOUNCE = 1800
 const messages = () => useNotificationStore.getState().notifications.map(n => `${n.type}: ${n.message}`)
 const retryButton = () => screen.queryByRole('button', { name: /sync issue/i })
 
-const rule = (id: string): DisplayRuleConfig => ({
-  id, name: id, color: '#ff0000', predicate: null, enabled: true, createdAt: '2026-08-30T00:00:00Z',
-})
-
 async function openCanvas() {
   // The layout save is armed only for a caller who may edit the view AND manage the data source.
   useAuthStore.setState({ permissions: { global: ['system:admin'], ws: {} } } as never)
   useNotificationStore.setState({ notifications: [], history: [] } as never)
-  return renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+  // A draft, where the columns can be renamed.
+  return renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', draft: true })
 }
 
-/** Make a durable layout edit — the canvas arms its debounced save on it. */
-function editLayout(id = 'r1') {
-  act(() => { useReferenceModelStore.getState().setDisplayRules([rule(id)]) })
+/** Make a durable layout edit — rename the first column; the canvas arms its debounced save on it. */
+function editLayout(name = 'Renamed column') {
+  act(() => { fireEvent.click(screen.getAllByTitle('Rename layer')[0]) })
+  const input = document.activeElement as HTMLInputElement
+  expect(input.tagName).toBe('INPUT')
+  act(() => {
+    fireEvent.change(input, { target: { value: name } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+  })
 }
 
 describe('a canvas layout save that fails', () => {

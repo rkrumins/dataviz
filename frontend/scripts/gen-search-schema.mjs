@@ -14,6 +14,14 @@
  *   Input  : ../backend/common/schema/searchquery.v1.json
  *   Output : src/types/generated/searchquery.ts
  *
+ * It also turns the property-operator table the backend exports
+ * (`search_semantics.OPERATOR_TABLE` — what each operator takes and
+ * compares as) into a typed constant, so the browser never keeps its own
+ * copy of what an operator means:
+ *
+ *   Input  : ../backend/common/schema/searchoperators.v1.json
+ *   Output : src/types/generated/searchOperators.ts
+ *
  * Run manually:
  *   pnpm gen:search-schema
  *
@@ -35,6 +43,8 @@ const REPO_ROOT = resolve(FE_ROOT, '..')
 // source of truth for the export script's drift check.
 const SCHEMA_PATH = resolve(REPO_ROOT, 'backend/common/schema/searchquery.v1.json')
 const OUT_PATH = resolve(FE_ROOT, 'src/types/generated/searchquery.ts')
+const OPERATORS_PATH = resolve(REPO_ROOT, 'backend/common/schema/searchoperators.v1.json')
+const OPERATORS_OUT_PATH = resolve(FE_ROOT, 'src/types/generated/searchOperators.ts')
 
 /**
  * Pre-codegen schema preprocessing.
@@ -158,7 +168,42 @@ function collapseAnyTypedToUnknown(rootSchema) {
     })
 }
 
+/** The operator table as an `as const` object, one operator per line. */
+function renderOperatorTable(table) {
+    const rows = Object.keys(table).sort().map((op) => {
+        const { arity, types, negative } = table[op]
+        const typeList = types.map((t) => `'${t}'`).join(', ')
+        return `    ${op}: { arity: '${arity}', types: [${typeList}], negative: ${negative} },`
+    })
+    return [
+        '/**',
+        ' * AUTO-GENERATED FROM THE PROPERTY-OPERATOR TABLE — DO NOT EDIT BY HAND.',
+        ' *',
+        ` * Source : ${OPERATORS_PATH.replace(REPO_ROOT + '/', '')}`,
+        ' *          (backend/common/search_semantics.py OPERATOR_TABLE)',
+        ' * Run    : `pnpm gen:search-schema` (from the frontend tree)',
+        ' *',
+        ' * `arity` is the value an operator takes (none | one | many | pair |',
+        ' * duration); `types` the value types it compares as (one type: it always',
+        ' * compares as that); `negative` marks the operators that match by absence.',
+        ' */',
+        'export const OPERATOR_TABLE = {',
+        ...rows,
+        '} as const',
+        '',
+        'export type PropertyOperator = keyof typeof OPERATOR_TABLE',
+        "export type OperatorArity = (typeof OPERATOR_TABLE)[PropertyOperator]['arity']",
+        "export type ComparisonType = (typeof OPERATOR_TABLE)[PropertyOperator]['types'][number]",
+        '',
+    ].join('\n')
+}
+
 async function main() {
+    const operators = renderOperatorTable(JSON.parse(readFileSync(OPERATORS_PATH, 'utf-8')))
+    mkdirSync(dirname(OPERATORS_OUT_PATH), { recursive: true })
+    writeFileSync(OPERATORS_OUT_PATH, operators, 'utf-8')
+    console.log(`[gen:search-schema] wrote ${OPERATORS_OUT_PATH.replace(FE_ROOT + '/', '')}`)
+
     const raw = readFileSync(SCHEMA_PATH, 'utf-8')
     const schema = JSON.parse(raw)
     relaxArrayBoundsForCodegen(schema)

@@ -231,6 +231,20 @@ describe('HeaderSearch — the status line', () => {
 
     expect(screen.getByText(/50,000\+ matches/)).toBeInTheDocument()
   })
+
+  it('says what a scan still running has found so far, and how far it is', () => {
+    const session = stubSession({
+      advanced: stubAdvanced({
+        view: resultsView({
+          status: 'running', candidateCount: 2210, truncated: false, hits: [],
+          progress: { scanned: 3, total: 8, matched: 2210 },
+        }),
+      }),
+    })
+    renderBox(session)
+
+    expect(screen.getByText('2,210 found so far · scanning 37% · 0 layers')).toBeInTheDocument()
+  })
 })
 
 

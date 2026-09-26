@@ -8,11 +8,16 @@
  * sampled at 200 nodes) but not free; we cache it per-mount and
  * invalidate by view change.
  */
-import { useEffect, useState, useMemo } from 'react'
+import { useCallback, useEffect, useState, useMemo } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider, httpStatusOf } from '@/providers/RemoteGraphProvider'
-import type { SearchDiscoverResult } from '@/types/search'
+import type { SearchDiscoverResult, SearchValuesResult } from '@/types/search'
+
+
+/** A property's most common values in a view, narrowed to those whose text
+ *  contains `q` — or null when the backend cannot say. */
+export type ValueSuggester = (propertyKey: string, q: string) => Promise<SearchValuesResult | null>
 
 
 export interface UseDiscoveryResult {
@@ -57,6 +62,44 @@ export interface UseDiscoveryResult {
     keysByEdgeType: Record<string, string[]>
     /** Look up known sample values for an edge property key. */
     getEdgeValueSamples: (edgeType: string, propertyKey: string) => unknown[]
+    /** A property's most common values counted across the whole view —
+     *  not the sample `getValueSamples` reads — narrowed by typed text.
+     *  Resolves null when the backend cannot answer (a share link, a
+     *  provider without deep search); callers fall back to the samples. */
+    suggestValues: ValueSuggester
+}
+
+
+// Value suggestions per provider: "view, key, text" → the request, in
+// flight or settled. A picker asks again on every keystroke and reopen; a
+// minute's cache answers those without a round trip. A failure is cached as
+// null for the same minute, so a refusal is not re-asked per keystroke.
+const SUGGESTION_TTL_MS = 60_000
+const SUGGESTION_CACHE_MAX = 300
+const suggestionCache = new WeakMap<
+    RemoteGraphProvider,
+    Map<string, { at: number; result: Promise<SearchValuesResult | null> }>
+>()
+
+function cachedSuggestions(
+    provider: RemoteGraphProvider, viewId: string, key: string, q: string,
+): Promise<SearchValuesResult | null> {
+    let cache = suggestionCache.get(provider)
+    if (!cache) {
+        cache = new Map()
+        suggestionCache.set(provider, cache)
+    }
+    const slot = `${viewId}\u0000${key}\u0000${q}`
+    const hit = cache.get(slot)
+    if (hit && Date.now() - hit.at < SUGGESTION_TTL_MS) return hit.result
+    const result = provider.searchPropertyValues(viewId, key, q).catch(() => null)
+    cache.delete(slot)
+    cache.set(slot, { at: Date.now(), result })
+    if (cache.size > SUGGESTION_CACHE_MAX) {
+        const oldest = cache.keys().next().value
+        if (oldest !== undefined) cache.delete(oldest)
+    }
+    return result
 }
 
 
@@ -196,6 +239,13 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
         }
     }, [discovery])
 
+    const suggestValues = useCallback<ValueSuggester>((propertyKey, q) => {
+        if (!viewId || !propertyKey || !(provider instanceof RemoteGraphProvider)) {
+            return Promise.resolve(null)
+        }
+        return cachedSuggestions(provider, viewId, propertyKey, q.trim())
+    }, [provider, viewId])
+
     return {
         discovery,
         isInitialLoading,
@@ -208,5 +258,6 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
         edgeTypes,
         keysByEdgeType,
         getEdgeValueSamples,
+        suggestValues,
     }
 }

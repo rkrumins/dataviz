@@ -56,6 +56,7 @@ import {
 
 import { cn } from '@/lib/utils'
 import { useActiveView, useSchemaStore } from '@/store/schema'
+import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import {
     useCanRedo,
     useCanUndo,
@@ -71,7 +72,8 @@ import { SEARCH_OPTIONS } from '../searchOptions'
 
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
-import type { LayerOption } from './layerOptions'
+import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
+import type { CodeKind } from './AddFilterPalette'
 import { appendCondition, topLevelConditions } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
@@ -116,6 +118,8 @@ export const QueryCard: FC<QueryCardProps> = ({
     const canUndo = useCanUndo()
     const canRedo = useCanRedo()
     const saveDraftAsMineEntry = useSearchStore((s) => s.saveDraftAsMineEntry)
+    const saveViewQuery = useViewLibraryStore((s) => s.saveQuery)
+    const canSaveToView = useLibraryCanEdit()
     // clearSearchResults wipes match URNs / ancestor maps but leaves
     // draft + history alone — needed by the auto-run effect so an
     // empty draft doesn't destroy the history stack the user just
@@ -123,22 +127,28 @@ export const QueryCard: FC<QueryCardProps> = ({
     const clearSearchResults = useSearchStore((s) => s.clearSearchResults)
     const discovery = useDiscovery(viewId)
     const knownEntityTypes = useEntityTypeNames()
-    // Layers are a VIEW concept, not an entity property — source them
-    // from the active view's reference-layout config first, then fall
-    // back to any 'layer' / 'layerAssignment' values discovered from
-    // entity property samples (for views without an explicit layer set).
+    // What the omnibox and the first-run examples offer: the types this
+    // view's data holds, most common first — every "Everything of type …"
+    // returns something. The ontology's full list until discovery answers.
+    const presentEntityTypes = useMemo(
+        () => entityTypesInView(discovery.discovery?.labels, knownEntityTypes),
+        [discovery.discovery, knownEntityTypes],
+    )
+    // Layers are a VIEW concept, not an entity property — the
+    // ``layerAssignment`` values entities carry, named from the view's
+    // reference-layout config, or else the view's configured layers.
     const discoveredLayers = useViewLayerOptions(discovery.getValueSamples)
 
     const [mode, setMode] = useState<ViewMode>('visual')
 
     /**
-     * Code-only palette entries (path, withinHops) hand off to the
+     * Code-only palette entries (path, withinHops, degree) hand off to the
      * main panel's Code view rather than the AdvancedDrawer JSON tab.
      * Seed a stub predicate of the chosen kind into the draft
      * (preserving existing work via AND-wrap), then flip the local
      * mode to 'code' so the user lands directly in the DSL editor.
      */
-    const handleOpenCode = useCallback((kind: 'path' | 'withinHops') => {
+    const handleOpenCode = useCallback((kind: CodeKind) => {
         const stub: Predicate = kind === 'path'
             ? ({
                 kind: 'path',
@@ -148,13 +158,15 @@ export const QueryCard: FC<QueryCardProps> = ({
                 edgeClass: 'lineage',
                 direction: 'outgoing',
             } as unknown as Predicate)
-            : ({
-                kind: 'withinHops',
-                urns: [],
-                hops: 2,
-                direction: 'both',
-                edgeClass: 'lineage',
-            } as unknown as Predicate)
+            : kind === 'degree'
+                ? { kind: 'degree', direction: 'both', op: 'gte', value: 1, edgeClass: 'lineage' }
+                : ({
+                    kind: 'withinHops',
+                    urns: [],
+                    hops: 2,
+                    direction: 'both',
+                    edgeClass: 'lineage',
+                } as unknown as Predicate)
         const current = useSearchStore.getState().draftPredicate
         let next: Predicate
         if (!current) {
@@ -327,7 +339,7 @@ export const QueryCard: FC<QueryCardProps> = ({
             variant={isEmptyVisual ? 'hero' : 'inline'}
             onAdd={handleAddFromOmnibox}
             onBrowseAll={onOpenAdvanced}
-            entityTypes={knownEntityTypes}
+            entityTypes={presentEntityTypes}
             tagValues={discovery.tagValues}
             propertyKeys={discovery.allKeys}
             valueSamples={valueSamples}
@@ -431,7 +443,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                             omnibox={omnibox}
                             onSeed={(p) => commitDraft(p)}
                             onUseCodeMode={() => setMode('code')}
-                            discoveredEntityTypes={knownEntityTypes}
+                            discoveredEntityTypes={presentEntityTypes}
                             discoveredTags={discovery.tagValues}
                             discoveredLayers={discoveredLayers}
                             discoveryLoading={discovery.isInitialLoading}
@@ -449,6 +461,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                     keysByEntityType: discovery.keysByEntityType,
                                     tagValues: discovery.tagValues,
                                     getValueSamples: discovery.getValueSamples,
+                                    suggestValues: discovery.suggestValues,
                                 }}
                                 knownEntityTypes={knownEntityTypes}
                                 discoveredLayers={discoveredLayers}
@@ -483,15 +496,20 @@ export const QueryCard: FC<QueryCardProps> = ({
             {saveTargetEntry && (
                 <SaveQueryDialog
                     entry={saveTargetEntry}
+                    canSaveToView={canSaveToView}
                     onCancel={() => setSaveTargetEntry(null)}
-                    onSave={(name, description) => {
-                        saveDraftAsMineEntry({
-                            viewId: saveTargetEntry.viewId,
-                            predicate: saveTargetEntry.predicate,
-                            label: saveTargetEntry.label,
-                            name,
-                            description,
-                        })
+                    onSave={async (name, description, destination) => {
+                        if (destination === 'view') {
+                            await saveViewQuery({ name, description, predicate: saveTargetEntry.predicate })
+                        } else {
+                            saveDraftAsMineEntry({
+                                viewId: saveTargetEntry.viewId,
+                                predicate: saveTargetEntry.predicate,
+                                label: saveTargetEntry.label,
+                                name,
+                                description,
+                            })
+                        }
                         setSaveTargetEntry(null)
                     }}
                 />
@@ -1233,22 +1251,27 @@ function SaveQueryButton({
  * "Create rule" — turn the current query into a Property Manager
  * display rule (tags every match with a colored chip on the canvas).
  * Opens the shared DisplayRuleEditor seeded with the query. Disabled
- * when there's no runnable draft (same gate as Save).
+ * when there's no runnable draft (same gate as Save), and for someone who
+ * can't edit the view: its rules are the view's.
  */
 function CreateRuleButton({
-    onCreateRule, disabled,
+    onCreateRule, disabled: noQuery,
 }: {
     onCreateRule: () => void
     disabled?: boolean
 }) {
+    const canEditView = useLibraryCanEdit()
+    const disabled = noQuery || !canEditView
     return (
         <button
             type="button"
             onClick={onCreateRule}
             disabled={disabled}
-            title={disabled
-                ? 'Add at least one complete filter to tag matches'
-                : 'Create a display rule from this query'}
+            title={!canEditView
+                ? 'Only people who can edit this view can add display rules'
+                : disabled
+                    ? 'Add at least one complete filter to tag matches'
+                    : 'Create a display rule from this query'}
             aria-label="Create display rule"
             className={cn(
                 'inline-flex items-center gap-1 px-2 h-7 rounded-md',
@@ -1524,9 +1547,9 @@ function useEntityTypeNames(): string[] {
  * Resolve layer options for the active view.
  *
  * Strategy:
- *   1. Sample DB-stored ``layer`` / ``layerAssignment`` property values
- *      (these are exactly what the BE will compare against). For each,
- *      enrich the label from the view config when possible.
+ *   1. Sample DB-stored ``layerAssignment`` values (exactly what the BE
+ *      compares against). For each, enrich the label from the view
+ *      config when possible.
  *   2. If discovery returns nothing, fall back to the view's reference-
  *      layout config — using ``layer.id`` as value (typical assignment
  *      writer) and ``layer.name`` as label.
@@ -1539,30 +1562,8 @@ function useViewLayerOptions(
     getValueSamples: (key: string) => unknown[],
 ): LayerOption[] {
     const activeView = useActiveView()
-    return useMemo<LayerOption[]>(() => {
-        const viewLayers = activeView?.layout?.referenceLayout?.layers ?? []
-        const labelOf = new Map<string, string>()
-        for (const l of viewLayers) {
-            if (l.id) labelOf.set(l.id, l.name || l.id)
-            if (l.name) labelOf.set(l.name, l.name)
-        }
-
-        const discovered = new Set<string>()
-        for (const key of ['layer', 'layerAssignment']) {
-            for (const v of getValueSamples(key)) {
-                if (typeof v === 'string' && v) discovered.add(v)
-            }
-        }
-
-        if (discovered.size > 0) {
-            return Array.from(discovered)
-                .sort()
-                .map((value) => ({ value, label: labelOf.get(value) ?? value }))
-        }
-
-        return viewLayers
-            .filter((l) => !!l.id)
-            .map((l) => ({ value: l.id, label: l.name || l.id }))
-            .sort((a, b) => a.label.localeCompare(b.label))
-    }, [activeView, getValueSamples])
+    return useMemo<LayerOption[]>(
+        () => layerOptions(activeView?.layout?.referenceLayout?.layers ?? [], getValueSamples),
+        [activeView, getValueSamples],
+    )
 }

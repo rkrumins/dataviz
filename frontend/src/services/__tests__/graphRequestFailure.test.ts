@@ -133,7 +133,7 @@ describe('isIdempotentGraphRead', () => {
   const ws = '/api/v1/ws_1/graph'
   it('every GET, and the POSTs that only query', () => {
     expect(isIdempotentGraphRead('GET', `${ws}/stats?dataSourceId=ds`)).toBe(true)
-    for (const path of ['/nodes/query', '/edges/between', '/nodes/degree', '/nodes/ancestor-chains', '/search/advanced', '/trace/v2', '/trace/closure', '/edges/aggregated', '/assignments/compute']) {
+    for (const path of ['/nodes/query', '/edges/between', '/nodes/degree', '/nodes/ancestor-chains', '/search/advanced', '/search/membership', '/search/counts', '/search/ancestor-counts', '/search/catalog', '/search/exports', '/trace/v2', '/trace/closure', '/edges/aggregated', '/assignments/compute']) {
       expect(isIdempotentGraphRead('POST', `${ws}${path}?dataSourceId=ds&viewId=v`)).toBe(true)
     }
   })
