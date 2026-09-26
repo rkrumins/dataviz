@@ -1353,6 +1353,9 @@ def _anchor_on_targets(
 ) -> bool:
     """Seek a pair read from its targets instead of its sources.
 
+    Always when no sources are named: that asks for every cell INTO the
+    targets, as naming no targets asks for every cell out of the sources.
+
     A ledger's in-leg names every covered row as a source and only the rows
     just added as targets; seeking from the sources expanded every covered
     row's cells on every page or expand. Only when the targets are far fewer
@@ -1366,9 +1369,10 @@ def _anchor_on_targets(
     walking everything below it."""
     from ..config.resilience import AGGREGATED_SOURCE_URN_BATCH_SIZE
 
-    return (
-        bool(target_urns)
-        and len(source_urns) <= AGGREGATED_SOURCE_URN_BATCH_SIZE
+    if not target_urns:
+        return False
+    return not source_urns or (
+        len(source_urns) <= AGGREGATED_SOURCE_URN_BATCH_SIZE
         and len(target_urns) * _TARGET_ANCHOR_RATIO <= len(source_urns)
     )
 
@@ -9299,7 +9303,9 @@ class FalkorDBProvider(GraphDataProvider):
             lbl = f":{label}" if label else ""
             if by_target:
                 pattern = f"(s)-[r:AGGREGATED]->(t{lbl})"
-                where = ["t.urn IN $targetUrns", "s.urn IN $sourceUrns"]
+                where = ["t.urn IN $targetUrns"]
+                if source_urns:
+                    where.append("s.urn IN $sourceUrns")
             else:
                 pattern = f"(s{lbl})-[r:AGGREGATED]->(t)"
                 where = ["s.urn IN $sourceUrns"]
@@ -9367,7 +9373,9 @@ class FalkorDBProvider(GraphDataProvider):
             while True:
                 limit = max(floor, page_limit)
                 if by_target:
-                    params: Dict[str, Any] = {"targetUrns": batch, "sourceUrns": source_urns}
+                    params: Dict[str, Any] = {"targetUrns": batch}
+                    if source_urns:
+                        params["sourceUrns"] = source_urns
                 else:
                     params = {"sourceUrns": batch}
                     if target_urns:
@@ -9667,7 +9675,7 @@ class FalkorDBProvider(GraphDataProvider):
         ltypes = self._alias_rel_types(
             [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
         )
-        if not ltypes or not source_urns:
+        if not ltypes or not (source_urns or target_urns):
             return [], [], False, None
         if meta is None:
             meta = await self._aggregation_run_meta()
@@ -9817,7 +9825,7 @@ class FalkorDBProvider(GraphDataProvider):
         rows: list = []
         mixed_rows: list = []
 
-        if target_urns:
+        if source_urns and target_urns:
             src_prof = await _profile(source_urns)
             tgt_prof = await _profile(target_urns)
             src_leaves = [
@@ -9909,6 +9917,24 @@ class FalkorDBProvider(GraphDataProvider):
                     cap=cap, batch=batch,
                     run_proj=_run_proj, chain_resolve=_chain_resolve,
                 )
+        elif not source_urns:
+            # Target-only mode, the mirror image: exact typed raw fan-in of
+            # requested leaf targets (no source set to resolve upward).
+            tgt_prof = await _profile(target_urns)
+            tgt_leaves = [
+                u for u in target_urns if not tgt_prof.get(u, (False, 0))[0]
+            ]
+            for y_label, y_bucket in await self._label_buckets(tgt_leaves):
+                y_anchor = f"(y:{y_label})" if y_label else "(y)"
+                for i in range(0, len(y_bucket), batch):
+                    rows.extend(await _run(
+                        f"MATCH (s)-[r:{l_pattern}]->{y_anchor} "
+                        f"WHERE y.urn IN $ys AND s.urn <> y.urn "
+                        f"RETURN s.urn AS sUrn, y.urn AS tUrn, "
+                        f"count(r) AS weight, "
+                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                        {"ys": y_bucket[i:i + batch]},
+                    ))
         else:
             # Source-only mode: exact typed raw fan-out of requested leaf
             # sources (no target set to resolve upward against).
@@ -10083,8 +10109,9 @@ class FalkorDBProvider(GraphDataProvider):
             if by_target:
                 return (
                     f"MATCH (s)-[r]->(t{':' + label if label else ''}) "
-                    "WHERE t.urn IN $targetUrns AND s.urn IN $sourceUrns "
-                    "AND type(r) IN $ltypes AND s.urn <> t.urn "
+                    "WHERE t.urn IN $targetUrns "
+                    + ("AND s.urn IN $sourceUrns " if source_urns else "")
+                    + "AND type(r) IN $ltypes AND s.urn <> t.urn "
                     "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                     "count(r) AS weight, collect(DISTINCT type(r)) AS types"
                 )
@@ -10110,7 +10137,8 @@ class FalkorDBProvider(GraphDataProvider):
         async def _run_batch(label: str, batch: List[str]) -> list:
             base: Dict[str, Any] = {"ltypes": list(ltypes)}
             if by_target:
-                base["sourceUrns"] = source_urns
+                if source_urns:
+                    base["sourceUrns"] = source_urns
             elif target_urns:
                 base["targetUrns"] = target_urns
 

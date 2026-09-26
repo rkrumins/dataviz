@@ -241,18 +241,25 @@ class _FakeGraph:
                         types.append(et)
             return _Result([[x, t, len(e), ty] for (x, t), (e, ty) in cells.items()])
         if _Q2_RE.search(cypher):
-            # Leaf targets: EXACT typed raw fan-in.
+            # Leaf targets: EXACT typed raw fan-in. Q2 returns y first; the
+            # target-only mode returns rows in the read's (sUrn, tUrn) order.
             lt = _pattern_types(cypher)
+            source_first = "RETURN s.urn AS sUrn" in cypher
             cells = {}
             for y in params["ys"]:
                 for eid, s, t, et in self.lineage:
                     if t != y or et not in lt:
                         continue
+                    if "s.urn <> y.urn" in cypher and s == y:
+                        continue
                     eids, types = cells.setdefault((y, s), (set(), []))
                     eids.add(eid)
                     if et not in types:
                         types.append(et)
-            return _Result([[y, s, len(e), ty] for (y, s), (e, ty) in cells.items()])
+            return _Result([
+                [s, y, len(e), ty] if source_first else [y, s, len(e), ty]
+                for (y, s), (e, ty) in cells.items()
+            ])
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
 
@@ -1907,3 +1914,55 @@ def test_a_read_with_comparable_sides_still_seeks_from_the_sources():
     stored = []
     _pairs(_recording_provider(fake, levels, stored, []), sources[:19], targets)
     assert stored and all("(s:lvl" in c and "(t:" not in c for c, _ in stored)
+
+
+# ── no sources named: every cell INTO the targets ───────────────────────
+#
+# Selecting a collapsed container draws its lines. Out is sources=[it] with
+# no targets; in had no way to be asked without naming every possible
+# source. With no sources the read seeks from the targets and answers
+# everything that ends on them, the mirror image of the source-only mode.
+
+def _into(fake, levels, targets, stored=None, raw=None):
+    p = _recording_provider(fake, levels, stored if stored is not None else [], raw if raw is not None else [])
+    return _pairs(p, [], targets)
+
+
+def test_no_sources_reads_every_stored_cell_into_a_container():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.add_node("urn:x0", "lvl0")
+    fake.aggregated("urn:a1", "urn:b1", 5)
+    fake.aggregated("urn:x0", "urn:b1", 3)
+    fake.aggregated("urn:a1", "urn:b0", 4)              # into another target
+    stored = []
+    assert _into(fake, levels, ["urn:b1"], stored) == {("urn:a1", "urn:b1"): 5, ("urn:x0", "urn:b1"): 3}
+    assert stored and all(
+        "-[r:AGGREGATED]->(t:lvl1)" in c and "sourceUrns" not in c and "sourceUrns" not in prm
+        for c, prm in stored
+    ), stored
+
+
+def test_no_sources_on_a_leaf_target_is_its_raw_fan_in():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    assert _into(fake, levels, ["urn:b2"]) == {("urn:a2", "urn:b2"): 2}
+
+
+def test_no_sources_in_cube_regime_mirrors_the_raw_fan_in():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.set_meta("cube", 2)
+    fake.aggregated("urn:a1", "urn:b2", 2)
+    raw = []
+    assert _into(fake, levels, ["urn:b2"], raw=raw) == {("urn:a2", "urn:b2"): 2, ("urn:a1", "urn:b2"): 2}
+    assert raw and all("->(t:lvl2)" in c and "sourceUrns" not in c for c, _ in raw), raw
+
+
+def test_no_sources_and_no_targets_is_still_nothing():
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 5)
+    stored = []
+    p = _recording_provider(fake, levels, stored, [])
+    assert _pairs(p, [], None) == {} and stored == []

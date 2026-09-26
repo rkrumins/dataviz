@@ -2998,6 +2998,9 @@ async def get_aggregated_edges(
     Get aggregated edges between containers.
     Returns summarized edge information showing lineage connections
     at a higher granularity level (e.g., between datasets instead of columns).
+
+    Without ``targetUrns`` it answers every edge out of the sources; with an
+    empty ``sourceUrns`` and ``targetUrns`` set, every edge into the targets.
     """
     await _enforce_fair_share(engine, ENDPOINT_AGGREGATED)
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
