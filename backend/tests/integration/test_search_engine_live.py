@@ -160,7 +160,7 @@ async def _expected(provider, query):
     return [r[0] for r in rows]
 
 
-async def _walk(provider, query):
+async def _walk(provider, query, data_version="1"):
     from backend.app.services.deep_search import SearchRunContext
     from backend.app.providers.falkordb_search.engine import execute_session_search
 
@@ -169,7 +169,7 @@ async def _walk(provider, query):
         q = query.model_copy(update={"options": query.options.model_copy(
             update={"cursor": cursor})})
         page = await execute_session_search(
-            provider, q, context=SearchRunContext(data_version="1"))
+            provider, q, context=SearchRunContext(data_version=data_version))
         assert page.status == "complete"
         first = first or page
         seen += [h.node.urn for h in page.hits]
@@ -356,16 +356,22 @@ async def _in_scope_matching(provider, scope, predicate, urns=None):
                 "WITH DISTINCT n")
         params["_r"] = scope.root_urns
     conds = [f"({where})"]
-    for i, urn_set in enumerate(compiler.hoisted_root_urns):
-        conds.append(f"ANY(_x IN _anc WHERE _x IN $_h{i})")
-        params[f"_h{i}"] = urn_set
+    # Each descendantOf reaches its own maxDepth below its roots — read
+    # off the predicate itself, not the compiler under test.
+    clauses = [c for c in (predicate.children if predicate.kind == "group" else [predicate])
+               if c.kind == "descendantOf"]
+    ancestors = ""
+    for i, clause in enumerate(clauses):
+        ancestors += f", [(n)<-[:CONTAINS*0..{clause.max_depth or 12}]-(_a) | _a.urn] AS _anc{i}"
+        conds.append(f"ANY(_x IN _anc{i} WHERE _x IN $_h{i})")
+        params[f"_h{i}"] = list(clause.urns)
     if urns is not None:
         conds.append("n.urn IN $_u")
         params["_u"] = urns
     # A pattern comprehension can't sit in a WHERE beside a MATCH
     # (S0_FINDINGS §3): project the ancestors first.
     rows = (await provider._ro_query(
-        f"{head} WITH n, [(n)<-[:CONTAINS*0..12]-(_a) | _a.urn] AS _anc "
+        f"{head} WITH n{ancestors} "
         f"WHERE {' AND '.join(conds)} RETURN n.urn", params=params, timeout=60)).result_set
     return {r[0] for r in rows}
 
@@ -377,6 +383,11 @@ RULES = {
     "under-a-container": {"kind": "group", "op": "and", "children": [
         {"kind": "descendantOf", "urns": ["urn:container:3", "urn:container:7"]},
         {"kind": "text", "value": "orders", "target": "name"}]},
+    # The containers and their datasets — never a column, two levels down.
+    "near-a-container": {"kind": "group", "op": "and", "children": [
+        {"kind": "descendantOf", "urns": ["urn:container:3", "urn:container:7"],
+         "maxDepth": 1},
+        {"kind": "all"}]},
 }
 
 
@@ -400,7 +411,8 @@ async def test_membership_is_each_rule_on_each_urn_in_scope(provider, scope_name
 
 
 @pytest.mark.parametrize("scope_name", ["data-source", "domain", "containers"])
-@pytest.mark.parametrize("rule", ["owner-in", "not-pii", "under-a-container"])
+@pytest.mark.parametrize("rule", ["owner-in", "not-pii", "under-a-container",
+                                  "near-a-container"])
 async def test_a_rule_count_is_exact_across_requests(provider, rule, scope_name):
     from pydantic import TypeAdapter
 
@@ -422,6 +434,57 @@ async def test_a_rule_count_is_exact_across_requests(provider, rule, scope_name)
             break
     assert answer["status"] == "complete"
     assert answer["count"] == want
+
+
+@pytest.fixture(params=["walked", "clamped"])
+def subtree_shape(request, monkeypatch):
+    """``walked``: each subtree is small enough to walk from its roots.
+    ``clamped``: none is, so every set clamps range units — a set's depth
+    then travels with the session rather than on a walk unit."""
+    if request.param == "clamped":
+        from backend.app.services.deep_search import get_deep_search_settings
+        monkeypatch.setenv("DEEP_SEARCH_WALK_MAX", "1")
+        get_deep_search_settings.cache_clear()
+    return request.param
+
+
+@pytest.mark.parametrize("scope_name", ["data-source", "domain", "containers"])
+@pytest.mark.parametrize("depth", [1, 2, None])
+async def test_a_descendant_of_reaches_no_deeper_than_its_max_depth(provider, depth, scope_name,
+                                                                    subtree_shape):
+    """Every page of a ``descendantOf`` search, its exact total and the
+    capped engine's answer hold exactly the in-scope entities within its
+    ``maxDepth`` below its roots: at 1 the containers and their datasets,
+    never a column two levels down. The depth used to be ignored."""
+    from pydantic import TypeAdapter
+
+    from backend.common.models.search import Predicate, SearchOptions, SearchQuery
+
+    clause = {"kind": "descendantOf", "urns": ["urn:container:3", "urn:container:7"]}
+    if depth:
+        clause["maxDepth"] = depth
+    predicate = TypeAdapter(Predicate).validate_python(
+        {"kind": "group", "op": "and", "children": [clause, {"kind": "all"}]})
+    scope = _scopes()[scope_name]
+    want = await _in_scope_matching(provider, scope, predicate)
+    if depth == 1:
+        assert not any(u.startswith("urn:column:") for u in want)
+        # The fixture's random tree may put both containers outside a scope.
+        assert want or scope_name != "data-source"
+
+    q = SearchQuery(predicate=predicate, scope=scope,
+                    options=SearchOptions(results="hits", page_size=37))
+    # Its own data version: a shape must plan its own session, not find the
+    # other shape's.
+    first, seen = await _walk(provider, q, data_version=subtree_shape)
+    assert sorted(seen) == sorted(want) and first.total_count == len(want)
+
+    capped = await provider.deep_search(q.model_copy(update={"options": SearchOptions(
+        results="hits", page_size=5000)}))
+    assert {h.node.urn for h in capped.hits} == want
+    counted = await provider.deep_search(q.model_copy(update={"options": SearchOptions(
+        results="aggregates", aggregations=[{"by": "entityType"}])}))
+    assert counted.total_count == len(want)
 
 
 @pytest.mark.parametrize("scope_name", ["data-source", "domain", "containers"])

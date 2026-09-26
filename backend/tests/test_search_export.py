@@ -253,7 +253,7 @@ class TestSessions:
         _, before = await _download(provider, objects, out["sessionId"])
         written = dict(objects.blobs)
         work = export_mod._ExportWork(
-            SimpleNamespace(clamps=[], count=0), export_mod.Context(
+            SimpleNamespace(clamps=[], clamp_depths=[], count=0), export_mod.Context(
                 where="true", params={}, sort=None, containment=("CONTAINS",), max_depth=12),
             provider.graph.run, objects,
             Manifest("csv", COLUMNS, next(iter(written)).rsplit("/", 1)[0]))
@@ -262,6 +262,23 @@ class TestSessions:
         assert all(objects.blobs[k] == v for k, v in written.items())
         _, after = await _download(provider, objects, out["sessionId"])
         assert after == before
+
+    async def test_a_clamp_reaches_the_depth_its_session_planned(self):
+        """A descendantOf's own maxDepth, planned into the session, bounds
+        the export's reading as it bounds the search's."""
+        statements = []
+
+        async def run(cypher, params, timeout_s):
+            statements.append(cypher)
+            return SimpleNamespace(result_set=[])
+
+        work = export_mod._ExportWork(
+            SimpleNamespace(clamps=[[3]], clamp_depths=[1], count=0), export_mod.Context(
+                where="true", params={}, sort=None, containment=("CONTAINS",), max_depth=12),
+            run, _Objects(), Manifest("csv", COLUMNS, "folder"))
+        await work.unit(Unit("range", "Dataset"), 1.0)
+        assert any("MATCH (n)<-[:CONTAINS*0..1]-(_r0) WHERE ID(_r0) IN $_roots0" in s
+                   for s in statements)
 
     async def test_a_unit_slower_than_the_wait_is_written_once(self, monkeypatch):
         """The dialog follows an export with 2 s waits. A unit that takes

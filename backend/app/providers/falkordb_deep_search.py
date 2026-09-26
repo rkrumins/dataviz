@@ -200,7 +200,8 @@ class _Compiler:
     State is gathered on the instance:
       * ``params`` — generated parameter values (bound by Cypher ``$name``)
       * ``hoisted_root_urns`` — DescendantOf URN-sets pulled up to scope
-      * ``hoisted_max_depths`` — DescendantOf per-predicate max_depths
+      * ``hoisted_max_depths`` — each hoisted set's own ``maxDepth``, in
+        the same order (None: the scope's depth bounds it)
       * ``hoisted_within_hops`` — WithinHops continuations (compiled
         post-candidate; one MATCH per occurrence)
 
@@ -221,7 +222,7 @@ class _Compiler:
     ):
         self.params: Dict[str, Any] = {}
         self.hoisted_root_urns: List[List[str]] = []
-        self.hoisted_max_depths: List[int] = []
+        self.hoisted_max_depths: List[Optional[int]] = []
         # Each entry: ({"urns": [...], "hops": int, "direction": str,
         #               "edgeTypes": [str] | None})
         self.hoisted_within_hops: List[Dict[str, Any]] = []
@@ -277,8 +278,7 @@ class _Compiler:
                     "multiple queries."
                 )
             self.hoisted_root_urns.append(list(p.urns))
-            if p.max_depth is not None:
-                self.hoisted_max_depths.append(p.max_depth)
+            self.hoisted_max_depths.append(p.max_depth)
             return "true"  # scope check enforces the constraint
         if kind == "withinHops":
             if in_or or not at_top_and:
@@ -1073,6 +1073,7 @@ def _build_scope_continuation_chain(
     provider,
     urn_sets: List[List[str]],
     max_depth: int,
+    depths: Optional[List[int]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """Emit one MATCH continuation per non-empty URN set, AND'd via
     chained ``WITH DISTINCT n``.
@@ -1087,7 +1088,10 @@ def _build_scope_continuation_chain(
     Each MATCH uses an indexed param name (``_scopeRootUrnsK``) and an
     indexed root variable (``rootK``) so the multiple MATCH clauses
     don't collide. Empty input sets are skipped (defensive — the
-    compiler never emits empty hoists in practice).
+    compiler never emits empty hoists in practice). ``depths``, when
+    given, is how far below its roots each set reaches
+    (``_scope_urn_sets_with_depths``); otherwise every set reaches
+    ``max_depth``.
 
     Returns ``('', {})`` when the provider has no configured
     containment edge types (the caller continues without scope
@@ -1109,10 +1113,10 @@ def _build_scope_continuation_chain(
     rel = "|".join(_sanitize_label(t) for t in ctypes)
     fragments: List[str] = []
     params: Dict[str, Any] = {}
-    depth = int(max_depth)
     for i, urns in enumerate(urn_sets):
         if not urns:
             continue
+        depth = int(depths[i] if depths else max_depth)
         param_name = f"_scopeRootUrns{i}"
         root_var = f"root{i}"
         params[param_name] = list(urns)
@@ -1124,9 +1128,9 @@ def _build_scope_continuation_chain(
     return " ".join(fragments), params
 
 
-def _collect_scope_urn_sets(query, compiler) -> List[List[str]]:
-    """Collect the URN sets that should each become a scope-clamp
-    continuation, in display order.
+def _scope_urn_sets_with_depths(query, compiler) -> Tuple[List[List[str]], List[int]]:
+    """The URN sets that should each become a scope-clamp continuation, in
+    display order, and how far below its roots each one reaches.
 
     ``view`` mode contributes ``scope.root_urns`` (the view's
     authorised top-level containers) plus every hoisted DescendantOf
@@ -1135,16 +1139,23 @@ def _collect_scope_urn_sets(query, compiler) -> List[List[str]]:
     (visible uses the URN-equality clause in the WHERE; data_source is
     by definition the whole graph).
 
+    The view's roots reach ``scope.max_depth``; a DescendantOf its own
+    ``maxDepth``, or the scope's when it names none.
+
     Empty sets are dropped — an empty hoisted set would be a compiler
     bug, and ``scope.root_urns`` of ``None`` is the no-clamp case.
     """
+    scope_depth = int(query.scope.max_depth or 12)
     sets: List[List[str]] = []
+    depths: List[int] = []
     if query.scope.scope_mode == "view" and query.scope.root_urns:
         sets.append(list(query.scope.root_urns))
-    for s in compiler.hoisted_root_urns:
+        depths.append(scope_depth)
+    for s, depth in zip(compiler.hoisted_root_urns, compiler.hoisted_max_depths):
         if s:
             sets.append(list(s))
-    return sets
+            depths.append(int(depth) if depth is not None else scope_depth)
+    return sets, depths
 
 
 def _build_scope_pre_filter(
@@ -1506,7 +1517,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     # used to collapse to ∅. ``_effective_root_urns`` is still computed
     # for the diagnostic field but no longer drives Cypher emission.
     eff_root_urns = _effective_root_urns(compiler, query.scope.root_urns)
-    scope_urn_sets = _collect_scope_urn_sets(query, compiler)
+    scope_urn_sets, scope_depths = _scope_urn_sets_with_depths(query, compiler)
     eff_union: Optional[List[str]] = None
     if scope_urn_sets:
         union: set = set()
@@ -1550,7 +1561,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
 
     if scope_urn_sets:
         scope_chain, scope_params = _build_scope_continuation_chain(
-            provider, scope_urn_sets, query.scope.max_depth or 12,
+            provider, scope_urn_sets, query.scope.max_depth or 12, scope_depths,
         )
         base_params.update(scope_params)
         if not scope_chain:
@@ -2226,7 +2237,7 @@ def _candidate_prefixes(
     """
     # 2. Effective scope — collect the URN sets each becoming its own
     #    scope-clamp MATCH (see explain_deep_search for the rationale).
-    scope_urn_sets = _collect_scope_urn_sets(query, compiler)
+    scope_urn_sets, scope_depths = _scope_urn_sets_with_depths(query, compiler)
 
     # 3. Scope mode resolution (mirrors explain_deep_search).
     scope_mode = query.scope.scope_mode
@@ -2237,7 +2248,7 @@ def _candidate_prefixes(
     scope_chain = ""
     if scope_urn_sets:
         scope_chain, scope_params = _build_scope_continuation_chain(
-            provider, scope_urn_sets, query.scope.max_depth or 12,
+            provider, scope_urn_sets, query.scope.max_depth or 12, scope_depths,
         )
         base_params.update(scope_params)
 

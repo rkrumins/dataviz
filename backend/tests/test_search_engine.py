@@ -208,6 +208,8 @@ class TestRanges:
         walk = Unit("walk", roots=[1, 2, 3], size=6).split()
         assert [w.roots for w in walk] == [[1], [2, 3]]
         assert Unit("walk", roots=[1]).split() is None
+        # A walk's halves reach as deep as it did.
+        assert [w.depth for w in Unit("walk", roots=[1, 2], depth=2).split()] == [2, 2]
 
 
 class _PlanDb:
@@ -323,6 +325,40 @@ class TestPlanning:
         assert 1 not in walked and sorted(walked) == [i for i in range(len(roots)) if i != 1]
         assert max(len(u.roots) for u in plan.units) <= plan_mod.WALK_BUCKET_ROOTS
 
+    def _near(self, max_depth, roots=None):
+        """``descendantOf d1`` no deeper than ``max_depth``, in a view
+        rooted at ``roots`` (none: the whole data source)."""
+        return SearchQuery.model_validate({
+            "predicate": {"kind": "group", "op": "and", "children": [
+                {"kind": "descendantOf", "urns": ["d1"], "maxDepth": max_depth},
+                {"kind": "text", "value": "x"}]},
+            "scope": ({"viewId": "v", "scopeMode": "view", "rootUrns": roots} if roots
+                      else {"viewId": "v", "scopeMode": "data_source"}),
+            "options": {"results": "hits"}})
+
+    async def test_a_descendant_of_walks_no_deeper_than_its_own_max_depth(self):
+        db = _PlanDb(labels=["A"], counts={"A": 10_000}, ids={"d1": 3}, walk=40)
+        plan = await _plan(db, self._near(1))
+        assert [(u.kind, u.roots, u.depth) for u in plan.units] == [("walk", [3], 1)]
+        # Its size is learned no deeper either.
+        assert any("MATCH (_w)-[:CONTAINS*0..1]->(n)" in s for s in db.statements)
+
+    async def test_the_views_roots_keep_the_scopes_depth_beside_a_shallower_clause(self):
+        db = _PlanDb(labels=["A"], counts={"A": 10_000}, ids={"r1": 7, "d1": 3}, walk=40)
+        plan = await _plan(db, self._near(2, roots=["r1"]))
+        [unit] = plan.units
+        # Whichever set is walked, the other clamps it at its own depth.
+        depth_of = {7: 12, 3: 2}
+        assert unit.depth == depth_of[unit.roots[0]]
+        assert [depth_of[c[0]] for c in plan.clamps] == plan.clamp_depths
+        assert len(plan.clamps) == 1
+
+    async def test_a_large_subtree_is_clamped_at_each_sets_own_depth(self):
+        db = _PlanDb(labels=["A"], counts={"A": 10_000}, ids={"r1": 7, "d1": 3}, walk=10**9)
+        plan = await _plan(db, self._near(1, roots=["r1"]), walk_max=100)
+        assert all(u.kind == "range" for u in plan.units)
+        assert sorted(zip((c[0] for c in plan.clamps), plan.clamp_depths)) == [(3, 1), (7, 12)]
+
     async def test_roots_that_do_not_exist_contain_nothing(self):
         db = _PlanDb(labels=["A"], counts={"A": 10})
         plan = await _plan(db, self._rooted(["gone"]))
@@ -363,6 +399,29 @@ class TestStatements:
                                 "MATCH (_w)-[:CONTAINS*0..12]->(n) WITH DISTINCT n")
         assert count.endswith("RETURN count(n)")
         assert "LIMIT $_k RETURN _k0, _k1" in rows and "collect(" not in rows
+
+    def test_each_clamp_reaches_its_own_depth(self):
+        [(cypher, _, _)] = page_statements(Unit("range", "A"), self._ctx(clamp_depths=(12, 2)),
+                                           [[3], [4]], 5)
+        assert "MATCH (n)<-[:CONTAINS*0..12]-(_r0) WHERE ID(_r0) IN $_roots0" in cypher
+        assert "MATCH (n)<-[:CONTAINS*0..2]-(_r1) WHERE ID(_r1) IN $_roots1" in cypher
+
+    def test_a_walk_reaches_its_own_depth(self):
+        statements = page_statements(Unit("walk", roots=[1], depth=1), self._ctx(), [], 5)
+        assert all("MATCH (_w)-[:CONTAINS*0..1]->(n)" in c for c, _, _ in statements)
+
+    async def test_a_unit_run_reaches_each_clamps_planned_depth(self):
+        statements = []
+
+        async def run(cypher, params, timeout_s):
+            statements.append(cypher)
+            return SimpleNamespace(result_set=[[0]])
+
+        plan = Plan([Unit("range", "A")], [[3], [4]], clamp_depths=[12, 1])
+        session = Session.start("s1", "q", "1", None, 0, plan)
+        await engine_mod._run_unit(Unit("range", "A"), session, self._ctx(), run, 1.0)
+        assert "MATCH (n)<-[:CONTAINS*0..12]-(_r0) WHERE ID(_r0) IN $_roots0" in statements[-1]
+        assert "MATCH (n)<-[:CONTAINS*0..1]-(_r1) WHERE ID(_r1) IN $_roots1" in statements[-1]
 
     def test_a_units_ancestors_are_tallied_by_entity_type(self):
         cypher, params = tally_statement(Unit("range", "A", 10, 20), self._ctx(), [[3]])
@@ -412,6 +471,13 @@ class TestStores:
         back = await store.load("s1")
         assert (back.rows, back.count, back.scanned, back.pending) == (
             [[1, "u"]], 7, 5, [Unit("range", "A", size=5)])
+
+    async def test_each_clamps_depth_and_a_walks_depth_round_trip(self, store):
+        plan = Plan([Unit("walk", roots=[1], depth=1)], [[3]], clamp_depths=[2])
+        assert await store.save(Session.start("s1", "q", "1", None, 10, plan), None, 60)
+        back = await store.load("s1")
+        assert (back.pending, back.clamps, back.clamp_depths) == (
+            [Unit("walk", roots=[1], depth=1)], [[3]], [2])
 
     async def test_one_request_holds_the_lease(self, store):
         token = await store.lease("s1", 10_000)

@@ -351,7 +351,7 @@ def _stamp_resolved_scope(
     output, never the client's request, before the compiler runs.
 
     Roots are stamped in ``view`` mode only — the compiler reads them
-    nowhere else (``_collect_scope_urn_sets``), and stamping them in
+    nowhere else (``_scope_urn_sets_with_depths``), and stamping them in
     ``visible`` / ``data_source`` mode would push a large view over the
     root cap for a clamp that is never applied.
 

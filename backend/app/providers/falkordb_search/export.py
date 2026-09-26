@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import csv
+import dataclasses
 import hashlib
 import io
 import json
@@ -200,7 +201,8 @@ class _ExportWork:
     async def unit(self, unit: Unit, timeout_s: float) -> Tuple[int, str, int]:
         from backend.app.providers.falkordb_search.engine import unit_context
 
-        ctx = await unit_context(unit, self.ctx, self.run, timeout_s)
+        ctx = dataclasses.replace(self.ctx, clamp_depths=tuple(self.session.clamp_depths))
+        ctx = await unit_context(unit, ctx, self.run, timeout_s)
         fmt, columns = self.manifest.fmt, self.manifest.columns
         written = 0
 

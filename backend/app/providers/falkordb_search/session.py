@@ -60,6 +60,8 @@ class Session:
     notes: List[str] = field(default_factory=list)
     created: float = field(default_factory=time.time)
     scope_hash: str = ""              # the resolved view scope it was planned for
+    # How far below its roots each clamp reaches (``Plan.clamp_depths``).
+    clamp_depths: List[int] = field(default_factory=list)
 
     @classmethod
     def start(cls, sid: str, query_id: str, data_version: str,
@@ -67,7 +69,8 @@ class Session:
               scope_hash: str = "") -> "Session":
         session = cls(sid, query_id, data_version, after, k, list(plan.units),
                       list(plan.clamps), sum(u.size for u in plan.units),
-                      notes=list(plan.notes), scope_hash=scope_hash)
+                      notes=list(plan.notes), scope_hash=scope_hash,
+                      clamp_depths=list(plan.clamp_depths))
         if not session.pending:
             session.status = COMPLETE
         return session
@@ -85,6 +88,7 @@ class Session:
             "total": self.total, "scanned": self.scanned, "count": self.count,
             "rows": self.rows, "status": self.status, "error": self.error,
             "notes": self.notes, "created": self.created, "sh": self.scope_hash,
+            "cd": self.clamp_depths,
         }, separators=(",", ":"))
 
     @classmethod
@@ -100,7 +104,7 @@ class Session:
                 int(d["total"]), int(d["scanned"]), int(d["count"]),
                 [list(r) for r in d.get("rows") or []], d["status"], d.get("error"),
                 list(d.get("notes") or []), float(d.get("created") or 0.0),
-                str(d.get("sh") or ""),
+                str(d.get("sh") or ""), [int(x) for x in d.get("cd") or []],
             )
         except Exception as exc:                     # noqa: BLE001 — a miss, not an error
             logger.debug("search session unreadable: %r", exc)

@@ -13,8 +13,10 @@ URNs × 10 rules cost 36 ms wrapped, 65 ms bare (S0_FINDINGS §8).
 The view's scope is enforced here, on the server: an entity outside it
 never matches, whatever it holds. Containment scope — the view's roots, and
 a rule's own ``descendantOf`` — is checked against each entity's ancestors,
-read in the same statement. ``withinHops`` and ``path`` say nothing about
-one entity on its own, so a rule using them is refused (``errors``).
+read in the same statement: the roots' to the scope's depth, a
+``descendantOf``'s to its own ``maxDepth``. ``withinHops`` and ``path`` say
+nothing about one entity on its own, so a rule using them is refused
+(``errors``).
 
 A property a node keeps raw (``propertiesRaw``) is answered as a search
 answers it (``raw_properties``): the batch's raw JSON is read first, when
@@ -23,7 +25,7 @@ the graph keeps anything raw.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from backend.app.providers.falkordb_deep_search import (
     _build_compiler_for_provider,
@@ -66,6 +68,13 @@ async def evaluate_membership(
     visible = (set(scope.visible_urns or [])
                if scope.scope_mode == "visible" and scope.visible_urns else None)
     ancestors_needed = bool(containment) and (bool(roots) or any(hoisted.values()))
+    # The depths ancestors are read to: the view's roots reach the scope's,
+    # a rule's descendantOf its own maxDepth.
+    depths: List[int] = []
+    if ancestors_needed:
+        wanted = {depth} if roots else set()
+        wanted.update(d or depth for sets in hoisted.values() for _, d in sets)
+        depths = sorted(wanted)
     labels = None
     allowed = None
     if visible is None and not (roots and containment):
@@ -73,9 +82,13 @@ async def evaluate_membership(
         allowed = {lbl.lower() for lbl in _labels_in_scope(provider, labels, scope.entity_types)}
     by_label = await _labels_by_urn(provider, run, labels, urns, timeout_s)
 
-    anc = (f"[(n)<-[:{_rel(containment)}*0..{depth}]-(_ma) | _ma.urn]"
-           if ancestors_needed else "[]")
-    rows: Dict[str, Tuple[Set[str], Set[str], List[bool]]] = {}
+    # Each list its own variable: FalkorDB binds a name reused across pattern
+    # comprehensions, and the second ``_ma`` list comes back empty.
+    anc = (", ".join(f"[(n)<-[:{_rel(containment)}*0..{d}]-(_ma{i}) | _ma{i}.urn]"
+                     for i, d in enumerate(depths))
+           if depths else "[]")
+    width = max(1, len(depths))
+    rows: Dict[str, Tuple[Set[str], Dict[int, Set[str]], List[bool]]] = {}
     for label, label_urns in by_label.items():
         lists = (await _raw_answers(run, label, label_urns, raw_leaves)
                  if label in raw_labels else empty_params(raw_leaves))
@@ -87,13 +100,15 @@ async def evaluate_membership(
             {**params, **lists, "_urns": label_urns},
         )
         for row in res.result_set or []:
-            urn, node_labels, ancestors, values = row[0], row[1], row[2], row[3:]
+            urn, node_labels, values = row[0], row[1], row[2 + width:]
+            ancestors = {d: {a for a in row[2 + i] or [] if a} for i, d in enumerate(depths)}
             seen = rows.get(urn)
             if seen is None:
                 rows[urn] = ({str(x).lower() for x in node_labels or []},
-                             {a for a in ancestors or [] if a}, [bool(v) for v in values])
+                             ancestors, [bool(v) for v in values])
             else:           # a node read under two labels: the same answer
-                seen[1].update(a for a in ancestors or [] if a)
+                for d, found in ancestors.items():
+                    seen[1].setdefault(d, set()).update(found)
 
     for urn in urns:
         found = rows.get(urn)
@@ -102,12 +117,13 @@ async def evaluate_membership(
         node_labels, ancestors, values = found
         if visible is not None and urn not in visible:
             continue
-        if roots and containment and not (ancestors & roots):
+        if roots and containment and not (ancestors.get(depth, set()) & roots):
             continue
         if allowed is not None and not (node_labels & allowed):
             continue
         for (item_id, _), value in zip(columns, values):
-            if value and all(ancestors & s for s in hoisted[item_id]):
+            if value and all(ancestors.get(d or depth, set()) & s
+                             for s, d in hoisted[item_id]):
                 matches[item_id].append(urn)
     return _result(matches, errors, started)
 
@@ -125,15 +141,16 @@ async def _raw_answers(run, label: str, urns: List[str], leaves: Sequence[RawLea
 
 
 def _compile(provider, items, errors, *, raw: bool = False
-             ) -> Tuple[List[Tuple[str, str]], Dict[str, Any], Dict[str, List[Set[str]]],
-                        List[RawLeaf]]:
+             ) -> Tuple[List[Tuple[str, str]], Dict[str, Any],
+                        Dict[str, List[Tuple[Set[str], Optional[int]]]], List[RawLeaf]]:
     """Each rule's WHERE fragment — parameters numbered on from the last
     rule's, so every rule shares one statement — its ``descendantOf`` URN
-    sets and, when the graph keeps properties ``raw``, every rule's property
-    conditions to answer for them."""
+    sets with each one's own ``maxDepth`` (None: the scope's) and, when the
+    graph keeps properties ``raw``, every rule's property conditions to
+    answer for them."""
     columns: List[Tuple[str, str]] = []
     params: Dict[str, Any] = {}
-    hoisted: Dict[str, List[Set[str]]] = {}
+    hoisted: Dict[str, List[Tuple[Set[str], Optional[int]]]] = {}
     raw_leaves: List[RawLeaf] = []
     counter = 0
     for item_id, predicate in items:
@@ -152,7 +169,8 @@ def _compile(provider, items, errors, *, raw: bool = False
             continue
         counter = compiler._param_counter
         params.update(compiler.params)
-        hoisted[item_id] = [set(s) for s in compiler.hoisted_root_urns]
+        hoisted[item_id] = [(set(s), d) for s, d in
+                            zip(compiler.hoisted_root_urns, compiler.hoisted_max_depths)]
         raw_leaves.extend(compiler.raw_leaves or [])
         columns.append((item_id, where if where else "true"))
     return columns, params, hoisted, raw_leaves

@@ -1537,6 +1537,27 @@ class TestScopeChainSemantics:
         assert result["params"]["_scopeRootUrns0"] == ["urn:a"]
         assert result["params"]["_scopeRootUrns1"] == ["urn:b"]
 
+    def test_a_descendant_ofs_own_max_depth_bounds_its_match(self):
+        """A descendantOf's ``maxDepth`` bounds the walk below its own
+        roots; the view's roots keep the scope's depth. It used to be
+        recorded and then ignored: every set walked the scope's 12."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                TagPredicate(values=["PII"]),
+                DescendantOfPredicate(urns=["urn:objectX"], max_depth=1),
+            ]),
+            scope=SearchScope(view_id="view_test", scope_mode="view",
+                              root_urns=["urn:layerA"]),
+        )
+        cypher = explain_deep_search(_StubScopeProvider(), q)["cypher"]
+        assert ("MATCH (root0)-[:CONTAINS*0..12]->(n) "
+                "WHERE root0.urn IN $_scopeRootUrns0") in cypher
+        assert ("MATCH (root1)-[:CONTAINS*0..1]->(n) "
+                "WHERE root1.urn IN $_scopeRootUrns1") in cypher
+
     def test_data_source_mode_honours_descendant_of(self):
         """Pre-fix: data_source mode dropped scope.root_urns AND
         silently dropped hoisted descendantOf. Post-fix: the user's

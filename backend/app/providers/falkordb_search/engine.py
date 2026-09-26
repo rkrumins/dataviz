@@ -94,8 +94,9 @@ logger = logging.getLogger(__name__)
 
 #: Bumped when a session's meaning changes, so no session from an older
 #: build answers a newer one's request. (3: a search asking for the
-#: ``ancestor`` facet tallies it during the scan.)
-ENGINE_VERSION = "3"
+#: ``ancestor`` facet tallies it during the scan. 4: a descendantOf reaches
+#: its own ``maxDepth``, which older sessions ignored.)
+ENGINE_VERSION = "4"
 
 #: Slack past the last unit's budget before a request stops waiting for it
 #: (the budget ends a unit first), and in the request's lease.
@@ -542,6 +543,7 @@ async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: 
     tallies ancestors — its ``[urn, name, label, entity type, matches]``
     rows (a later page's session counts nothing — the total is page 1's;
     a count session keeps no rows)."""
+    ctx = dataclasses.replace(ctx, clamp_depths=tuple(session.clamp_depths))
     ctx = await unit_context(unit, ctx, run, timeout_s)
     if session.k == 0:
         cypher, params = count_statement(unit, ctx, session.clamps)

@@ -10,6 +10,7 @@ to a real graph (``tests/integration/test_search_engine_live.py``).
 """
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -248,10 +249,18 @@ class _Graph:
         if "RETURN n.urn, labels(n)" in cypher:
             label = cypher.split("MATCH (n:`", 1)[1].split("`", 1)[0]
             columns = cypher.count("ANY(_mz IN [0] WHERE")
+            # One ancestor list per depth the statement reads them to.
+            depths = [int(d) for d in re.findall(
+                r"\[\(n\)<-\[:[\w|]+\*0\.\.(\d+)\]-\(_ma\d+\) \| _ma\d+\.urn\]", cypher)] or [None]
             for urn in params["_urns"]:
                 lbl, anc, flags = self.nodes[urn]
                 if lbl == label:
-                    rows.append([urn, [lbl], anc] + [flags.get(i, False) for i in range(columns)])
+                    # ``anc``: its ancestors' URNs, or {urn: levels up}.
+                    within = [[a for a in anc
+                               if d is None or not isinstance(anc, dict) or anc[a] <= d]
+                              for d in depths]
+                    rows.append([urn, [lbl], *within]
+                                + [flags.get(i, False) for i in range(columns)])
         return SimpleNamespace(result_set=rows)
 
 
@@ -293,7 +302,7 @@ class TestMembershipStatement:
         out = await _members(graph, scope, [("r", P({"kind": "all"}))], ["in", "out"])
         assert out["matches"] == {"r": ["in"]}
         cypher = next(s[0] for s in graph.statements if "RETURN n.urn, labels(n)" in s[0])
-        assert "[(n)<-[:CONTAINS*0..12]-(_ma) | _ma.urn]" in cypher
+        assert "[(n)<-[:CONTAINS*0..12]-(_ma0) | _ma0.urn]" in cypher
 
     async def test_a_rules_own_descendant_of_is_checked_against_ancestors(self):
         graph = _Graph({"a": ("A", ["a", "sales"], {0: True}),
@@ -303,6 +312,32 @@ class TestMembershipStatement:
         out = await _members(graph, SearchScope(view_id="v", scope_mode="data_source"),
                              [("r", rule)], ["a", "b"])
         assert out["matches"] == {"r": ["a"]}
+
+    async def test_a_rules_descendant_of_reaches_no_deeper_than_its_max_depth(self):
+        # ``b`` sits two levels below ``sales``, ``a`` one.
+        graph = _Graph({"a": ("A", {"a": 0, "sales": 1}, {0: True}),
+                        "b": ("A", {"b": 0, "mid": 1, "sales": 2}, {0: True})})
+        rule = P({"kind": "group", "op": "and", "children": [
+            {"kind": "descendantOf", "urns": ["sales"], "maxDepth": 1}, {"kind": "all"}]})
+        out = await _members(graph, SearchScope(view_id="v", scope_mode="data_source"),
+                             [("r", rule)], ["a", "b"])
+        assert out["matches"] == {"r": ["a"]}
+        cypher = next(s[0] for s in graph.statements if "RETURN n.urn, labels(n)" in s[0])
+        assert "[(n)<-[:CONTAINS*0..1]-(_ma0) | _ma0.urn]" in cypher and "*0..12" not in cypher
+
+    async def test_the_views_roots_keep_the_scopes_depth_beside_a_shallower_rule(self):
+        graph = _Graph({"a": ("A", {"a": 0, "sales": 1, "root": 5}, {0: True}),
+                        "b": ("A", {"b": 0, "sales": 2, "root": 3}, {0: True})})
+        rule = P({"kind": "group", "op": "and", "children": [
+            {"kind": "descendantOf", "urns": ["sales"], "maxDepth": 1}, {"kind": "all"}]})
+        scope = SearchScope(view_id="v", scope_mode="view", root_urns=["root"])
+        out = await _members(graph, scope, [("r", rule)], ["a", "b"])
+        assert out["matches"] == {"r": ["a"]}
+        # One ancestor list per depth, each its own variable: FalkorDB binds
+        # a name reused across comprehensions, and the second list is empty.
+        cypher = next(s[0] for s in graph.statements if "RETURN n.urn, labels(n)" in s[0])
+        assert "[(n)<-[:CONTAINS*0..1]-(_ma0) | _ma0.urn]" in cypher
+        assert "[(n)<-[:CONTAINS*0..12]-(_ma1) | _ma1.urn]" in cypher
 
     async def test_without_roots_the_views_types_bound_it(self):
         graph = _Graph({"a": ("A", [], {0: True}), "b": ("B", [], {0: True})})

@@ -40,7 +40,7 @@ from typing import Any, Awaitable, Callable, Dict, FrozenSet, List, Optional, Se
 
 from backend.app.providers.falkordb_deep_search import (
     _build_within_hops_continuation,
-    _collect_scope_urn_sets,
+    _scope_urn_sets_with_depths,
     _sanitize_label,
     _searchable_labels,
 )
@@ -67,6 +67,7 @@ class Unit:
     exclude: Tuple[str, ...] = ()      # in-scope labels read before this one
     size: int = 1                      # estimated nodes, for progress
     span: int = 0                      # open-ended range: IDs it likely covers
+    depth: Optional[int] = None        # walk: how far below its roots (None: the scope's)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -95,8 +96,8 @@ class Unit:
         if self.kind == "walk" and self.roots and len(self.roots) > 1:
             mid = len(self.roots) // 2
             half = max(1, self.size // 2)
-            return [Unit("walk", roots=self.roots[:mid], size=half),
-                    Unit("walk", roots=self.roots[mid:], size=half)]
+            return [Unit("walk", roots=self.roots[:mid], size=half, depth=self.depth),
+                    Unit("walk", roots=self.roots[mid:], size=half, depth=self.depth)]
         return None
 
 
@@ -106,16 +107,20 @@ class Plan:
     # Root-ID sets every match must descend from, checked per unit.
     clamps: List[List[int]] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    # How far below its roots each clamp reaches (none given: the scope's).
+    clamp_depths: List[int] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {"units": [u.to_dict() for u in self.units],
-                "clamps": self.clamps, "notes": self.notes}
+                "clamps": self.clamps, "notes": self.notes,
+                "clamp_depths": self.clamp_depths}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Plan":
         return cls([Unit.from_dict(u) for u in d.get("units") or []],
                    [list(c) for c in d.get("clamps") or []],
-                   list(d.get("notes") or []))
+                   list(d.get("notes") or []),
+                   [int(x) for x in d.get("clamp_depths") or []])
 
 
 @dataclass(frozen=True)
@@ -137,6 +142,9 @@ class Context:
     # visible unit) answers them first (``raw_probe_statement``).
     raw_leaves: Tuple[RawLeaf, ...] = ()
     raw_labels: FrozenSet[str] = frozenset()
+    # The session's ``clamp_depths``: how far below its roots each clamp
+    # reaches — a descendantOf's own maxDepth (none given: ``max_depth``).
+    clamp_depths: Tuple[int, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +160,8 @@ async def make_plan(provider, query, compiler, *, run: Run, width: int,
     containment = _containment(provider)
     notes: List[str] = []
 
+    root_sets, depths = _scope_urn_sets_with_depths(query, compiler)
     if query.scope.scope_mode == "visible" and query.scope.visible_urns:
-        root_sets = _collect_scope_urn_sets(query, compiler)
         clamps = await _resolve_clamps(run, labels, root_sets, containment, notes)
         if clamps is None:
             return Plan([], notes=notes)
@@ -161,16 +169,14 @@ async def make_plan(provider, query, compiler, *, run: Run, width: int,
         units = [Unit("visible", label, exclude=tuple(in_scope[:i]),
                       size=max(1, len(query.scope.visible_urns) // max(1, len(in_scope))))
                  for i, label in enumerate(in_scope)]
-        return Plan(units, clamps, notes)
+        return Plan(units, clamps, notes, depths if clamps else [])
 
-    root_sets = _collect_scope_urn_sets(query, compiler)
     if root_sets and containment:
         clamps = await _resolve_clamps(run, labels, root_sets, containment, notes)
         if clamps is None:
             return Plan([], notes=notes)
-        return await _rooted_plan(run, clamps, stats, labels, containment,
-                                  query.scope.max_depth or 12, width=width,
-                                  walk_max=walk_max, notes=notes)
+        return await _rooted_plan(run, clamps, depths, stats, labels, containment,
+                                  width=width, walk_max=walk_max, notes=notes)
     if root_sets:
         notes.append("containment edge types are not configured, so the view's "
                      "roots could not bound the search — it read every entity type")
@@ -290,27 +296,30 @@ async def _ids_of(run: Run, labels: Sequence[str], urns: Sequence[str]) -> List[
     return sorted({int(r[0]) for r in (res.result_set or []) if r and r[0] is not None})
 
 
-async def _rooted_plan(run: Run, clamps: List[List[int]], stats, labels,
-                       containment, max_depth: int, *, width: int, walk_max: int,
+async def _rooted_plan(run: Run, clamps: List[List[int]], depths: List[int], stats,
+                       labels, containment, *, width: int, walk_max: int,
                        notes: List[str]) -> Plan:
+    """``depths``: how far below its roots each of ``clamps`` reaches."""
     rel = _rel(containment)
     total = sum(c for c, _ in stats.values())
     limit = min(walk_max, max(width, total // 8))
     probes: List[int] = []
-    for ids in clamps:
-        probes.append(await _walk_size(run, ids, rel, max_depth, limit) if limit else limit + 1)
+    for ids, depth in zip(clamps, depths):
+        probes.append(await _walk_size(run, ids, rel, depth, limit) if limit else limit + 1)
     anchor = min(range(len(clamps)), key=lambda i: (probes[i], len(clamps[i])))
     others = [c for i, c in enumerate(clamps) if i != anchor]
+    other_depths = [d for i, d in enumerate(depths) if i != anchor]
     if probes[anchor] <= limit:
         # Small enough to walk in one statement; the other sets clamp it.
-        return Plan([Unit("walk", roots=clamps[anchor], size=max(1, probes[anchor]))],
-                    others, notes)
+        return Plan([Unit("walk", roots=clamps[anchor], size=max(1, probes[anchor]),
+                          depth=depths[anchor])], others, notes, other_depths)
     if len(clamps[anchor]) <= CLAMP_MAX_ROOTS:
-        return Plan(_range_units(sorted(labels), stats, width), clamps, notes)
-    roots = await _outermost(run, clamps[anchor], rel, max_depth)
+        return Plan(_range_units(sorted(labels), stats, width), clamps, notes, list(depths))
+    roots = await _outermost(run, clamps[anchor], rel, depths[anchor])
     buckets = [roots[i:i + WALK_BUCKET_ROOTS] for i in range(0, len(roots), WALK_BUCKET_ROOTS)]
     per = max(1, total // max(1, len(buckets)))
-    return Plan([Unit("walk", roots=b, size=per) for b in buckets], others, notes)
+    return Plan([Unit("walk", roots=b, size=per, depth=depths[anchor]) for b in buckets],
+                others, notes, other_depths)
 
 
 def _rel(containment: Sequence[str]) -> str:
@@ -359,7 +368,8 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
     if unit.kind == "walk":
         params["_walk"] = list(unit.roots or [])
         head = ("UNWIND $_walk AS _wi MATCH (_w) WHERE ID(_w) = _wi "
-                f"MATCH (_w)-[:{rel}*0..{int(ctx.max_depth)}]->(n) WITH DISTINCT n "
+                f"MATCH (_w)-[:{rel}*0..{int(unit.depth or ctx.max_depth)}]->(n) "
+                "WITH DISTINCT n "
                 "WHERE " + " AND ".join(["n.urn IS NOT NULL"] + where))
     else:
         conds: List[str] = []
@@ -381,7 +391,8 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
                 + " AND ".join(conds + where))
     parts = [head]
     for i, ids in enumerate(clamps):
-        parts.append(f"WITH n MATCH (n)<-[:{rel}*0..{int(ctx.max_depth)}]-(_r{i}) "
+        depth = ctx.clamp_depths[i] if i < len(ctx.clamp_depths) else ctx.max_depth
+        parts.append(f"WITH n MATCH (n)<-[:{rel}*0..{int(depth)}]-(_r{i}) "
                      f"WHERE ID(_r{i}) IN $_roots{i} WITH DISTINCT n")
         params[f"_roots{i}"] = list(ids)
     if ctx.within_hops:
