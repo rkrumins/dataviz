@@ -124,6 +124,39 @@ async def test_a_rule_is_checked_as_a_search_is(test_client: AsyncClient):
     assert (await _library(test_client, view_id))["displayRules"] == []
 
 
+async def test_a_rule_the_engines_cannot_evaluate_is_refused_with_why(test_client: AsyncClient):
+    """Saved, these used to fail every time the canvas counted or tagged
+    them. A rule is refused for its own shape only — the graph's edge types
+    are not needed to save one."""
+    view_id = await _view(test_client)
+    base = f"/api/v1/views/{view_id}/library/rules"
+    for rule_id, predicate, why in [
+        ("rx", {"kind": "text", "value": "^ord", "match": "regex"}, "regex"),
+        ("ft", {"kind": "text", "value": "orders", "match": "fulltext"}, "fulltext"),
+        ("or", {"kind": "group", "op": "or", "children": [
+            {"kind": "descendantOf", "urns": ["urn:a"]},
+            {"kind": "tag", "values": ["PII"]}]}, "top-level AND"),
+    ]:
+        resp = await test_client.put(f"{base}/{rule_id}", json=_rule(rule_id, rule_id, predicate=predicate))
+        assert resp.status_code == 422, rule_id
+        assert why in resp.json()["detail"], resp.json()["detail"]
+    lineage = await test_client.put(f"{base}/root", json=_rule("root", "Roots", predicate={
+        "kind": "isRoot", "edgeClass": "lineage"}))
+    assert lineage.status_code == 200, lineage.text
+    assert [r["id"] for r in (await _library(test_client, view_id))["displayRules"]] == ["root"]
+
+
+async def test_a_stored_rule_the_engines_cannot_evaluate_is_flagged(test_client: AsyncClient):
+    view_id = await _view(test_client, config={"layout": {"type": "reference", "referenceLayout": {
+        "displayRules": [
+            _rule("ok", "Owned"),
+            _rule("rx", "Regex", predicate={"kind": "text", "value": "^ord", "match": "regex"}),
+        ]}}})
+    rules = (await _library(test_client, view_id))["displayRules"]
+    assert [r["id"] for r in rules if r.get("invalid")] == ["rx"]
+    assert "regex" in rules[1]["invalid"]
+
+
 async def test_a_stored_rule_a_rule_may_not_be_is_flagged_when_read(test_client: AsyncClient):
     """A bundle import or a version restore stores a view's rules as given,
     and rules saved before the library checked them never were. One a rule

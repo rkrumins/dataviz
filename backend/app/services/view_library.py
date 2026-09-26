@@ -33,7 +33,7 @@ from backend.app.services.advanced_search_service import (
     ValidationError as SearchValidationError,
     _validate_predicate,
 )
-from backend.app.services.deep_search import get_deep_search_settings
+from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.app.services.view_scope import _collect_content_scope, _collect_reference_roots
 from backend.common.models.search import Predicate
 from backend.common.models.view_library import (
@@ -74,7 +74,9 @@ def _check_predicate(raw: Any, *, rule: bool) -> Any:
     """``raw`` validated as a search's predicate is — its shape, its typed
     values, its size — or a 422 naming what is wrong. A rule also refuses
     ``withinHops`` and paths: they describe a route through the graph, and a
-    rule is asked about one entity at a time."""
+    rule is asked about one entity at a time. And it refuses what the engines
+    that count and tag it would (``_rule_compile_problem``): saved, such a
+    rule failed every time the canvas asked about it."""
     try:
         model = _PREDICATE.validate_python(raw)
     except PydanticValidationError as exc:
@@ -92,7 +94,24 @@ def _check_predicate(raw: Any, *, rule: bool) -> Any:
     if rule and _has_route(model):
         raise LibraryError(422, "A rule can't use 'within hops' or a path: they describe "
                                 "a route through the graph, not an entity.")
+    if rule:
+        problem = _rule_compile_problem(model)
+        if problem:
+            raise LibraryError(422, problem)
     return model
+
+
+def _rule_compile_problem(model: Any) -> Optional[str]:
+    """What the membership and count engines would refuse in ``model``: a
+    regex or fulltext match, a descendantOf under OR or NOT… Its own shape
+    only — the edge types are stand-ins, so a graph whose ontology is still
+    loading refuses nothing here."""
+    from backend.app.providers.falkordb_deep_search import _Compiler
+    try:
+        _Compiler(lineage_edge_types={"_"}, containment_edge_types={"_"}).compile(model)
+    except CompileError as exc:
+        return str(exc)
+    return None
 
 
 def _flag_invalid(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
