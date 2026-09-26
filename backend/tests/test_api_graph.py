@@ -762,6 +762,30 @@ async def test_a_plain_degree_request_still_reaches_a_reader_without_rollups(
     assert resp.json() == {"u1": {"in": 1, "out": 2}}
 
 
+class _RollupLostStub(_StubProvider):
+    """Counted every urn, but its roll-up probe failed: the flags are absent."""
+
+    async def get_node_degrees(self, urns, edge_types=None, *, include_rollups=False):
+        return {u: {"in": 1, "out": 2} for u in urns}
+
+
+async def test_a_degree_answer_without_its_rollup_flags_is_held_only_briefly(
+    test_client: AsyncClient, monkeypatch,
+):
+    """Absent flags are unknown, like an absent urn: kept for the negative
+    TTL and never as the last-known-good, so the next ask can fill them."""
+    from backend.app.services import graph_cache as _gc
+
+    engine, cache, redis = _make_scoped_engine_and_cache(_RollupLostStub())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, urns=("u1",), includeRollups=True)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"u1": {"in": 1, "out": 2}}
+    writes = _answer_writes(redis)
+    assert [c.kwargs.get("ex") for c in writes] == [_gc._NEGATIVE_TTL]
+    assert not [c for c in writes if str(c.args[0]).startswith(_gc._LKG_PREFIX)]
+
+
 async def test_rollups_on_a_reader_that_cannot_count_are_501(test_client: AsyncClient, monkeypatch):
     engine, cache, _ = _make_scoped_engine_and_cache(_StubProvider())
     resp = await _post_degrees(test_client, engine, monkeypatch, cache, includeRollups=True)

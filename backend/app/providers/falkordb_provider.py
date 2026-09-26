@@ -14347,7 +14347,8 @@ class FalkorDBProvider(GraphDataProvider):
         Semantics: a URN ABSENT from the result is UNKNOWN (its bucket's
         query failed) — callers must not treat absence as zero. URNs in
         a successfully-queried bucket that simply have no edges are
-        explicitly zero-filled.
+        explicitly zero-filled. A failed roll-up probe leaves only its
+        flag absent: the raw counts were answered.
 
         ``include_rollups`` adds ``rollupIn`` / ``rollupOut``: 1 when the
         node has a roll-up cell (:AGGREGATED, on the projection graph) in
@@ -14370,6 +14371,7 @@ class FalkorDBProvider(GraphDataProvider):
         for label, bucket_urns in await self._label_buckets(urns):
             lbl_frag = f":{label}" if label else ""
             bucket_ok = True
+            lost: List[str] = []
             counts: Dict[str, Dict[str, int]] = {}
             count = "WHERE n.urn IN $urns RETURN n.urn AS urn, count(r) AS c"
             asks = [
@@ -14400,6 +14402,9 @@ class FalkorDBProvider(GraphDataProvider):
                         "get_node_degrees %s failed (%d urns, label=%r): %s",
                         direction, len(bucket_urns), label, exc,
                     )
+                    if direction.startswith("rollup"):
+                        lost.append(direction)
+                        continue
                     bucket_ok = False
                     break
                 for row in (result.result_set or []):
@@ -14408,6 +14413,8 @@ class FalkorDBProvider(GraphDataProvider):
                 continue  # absent = unknown, never zero
             for urn in bucket_urns:
                 out[urn] = counts.get(urn, dict(zero))
+                for direction in lost:
+                    out[urn].pop(direction, None)
         return out
 
     #: URNs per label-qualified seek in ``resolve_identities``.

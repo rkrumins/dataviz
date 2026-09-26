@@ -2487,7 +2487,13 @@ async def get_node_degrees(
         result = _DegreesResult(await engine.get_node_degrees(
             query.urns, query.edge_types, include_rollups=query.include_rollups,
         ))
-        result._unanswered = len(set(query.urns) - result.root.keys())
+        # An urn whose roll-up flags are absent (its probe failed) is as
+        # unanswered as an absent urn.
+        flags = {"rollupIn", "rollupOut"} if query.include_rollups else set()
+        result._unanswered = sum(
+            1 for u in set(query.urns)
+            if u not in result.root or not flags <= result.root[u].keys()
+        )
         return result
 
     try:

@@ -83,6 +83,11 @@ async def test_a_shed_rollup_probe_is_told_to_ask_again():
         await p.get_node_degrees(["u1"], ["TRANSFORMS"], include_rollups=True)
 
 
-async def test_a_failed_rollup_probe_leaves_its_urns_unknown():
-    p = _provider(proj_fails=RuntimeError("projection unreadable"))
-    assert await p.get_node_degrees(["u1"], ["TRANSFORMS"], include_rollups=True) == {}
+async def test_a_failed_rollup_probe_keeps_the_raw_counts():
+    """Only the roll-up flags go absent (unknown). The raw counts were
+    answered; dropping them too put a neutral "unknown" on every card
+    whenever the projection could not be read, for example before a
+    dedicated projection graph exists."""
+    p = _provider(proj_fails=RuntimeError("Invalid graph operation on empty key"))
+    degrees = await p.get_node_degrees(["u1", "u2"], ["TRANSFORMS"], include_rollups=True)
+    assert degrees == {"u1": {"in": 3, "out": 3}, "u2": {"in": 0, "out": 0}}
