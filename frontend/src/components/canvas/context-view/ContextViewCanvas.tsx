@@ -3540,6 +3540,17 @@ export function ContextViewCanvas({
   // recovers), so it is safe at this component's top level; it is read by JSX
   // only and is in no memo's dependency array.
   const projectionCatchUp = useProjectionCatchUp(dataSourceId, aggregationStaleReason)
+  // The summaries — the connections between collapsed items — the answer
+  // lacks, when the source is not simply behind (the banner above says that
+  // better): 'missing' when the source has none, or only ones an older
+  // version built; 'partial' when a read could not finish them (a branch's
+  // derived roll-ups hit their scope or hop bound, or part of the read
+  // failed). Neither is a cap the reader can narrow their way out of.
+  const summariesGap = projectionCatchUp.catchingUp ? null
+    : aggregationStaleReason === 'unmaterialized' || aggregationStaleReason === 'legacy_cells' ? 'missing'
+      : aggregationStaleReason === 'derive_scope_cap' || aggregationStaleReason === 'derive_hop_bound'
+        || aggregationStaleReason === 'degraded' ? 'partial'
+        : null
 
   // A node can become expanded WITHOUT going through the toggle handler that
   // loads its first page — the per-view expanded-state restore above replays a
@@ -5645,12 +5656,31 @@ export function ContextViewCanvas({
             <span>{catchUpMessage(projectionCatchUp.commitsBehind)}</span>
           </div>
         )}
+        {/* Summaries banner — ONE, and plain: the lines between collapsed
+            items come from summaries the source builds, and without them a
+            collapsed item shows no line and nothing says why. Opening an
+            item is what the reader can do; building them is the source's
+            job, so there is no button. */}
+        {summariesGap && (
+          <div
+            data-canvas-interactive
+            data-testid="canvas-summaries-banner"
+            role="status"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2 z-20"
+          >
+            {summariesGap === 'missing'
+              ? 'Connections between collapsed items haven’t been summarised for this source yet — open an item to see the connections inside it.'
+              : 'Some connections between collapsed items could not be summarised — open an item to see them.'}
+          </div>
+        )}
         {/* Aggregation truncation banner — backend signal that the visible
             edge set was capped. The "computing" and "last computed Xh ago"
             banners were removed: the materialization-triggered flag was
             sticky after first paint and the staleness banner fired even
-            for fresh aggregations. Trust the data already on canvas. */}
-        {((aggregationTruncated && !projectionCatchUp.catchingUp && !readPressure) || edgesTruncated) && (
+            for fresh aggregations. Trust the data already on canvas. Only
+            for a cap on the answer's size: an answer short for a reason the
+            banners above name is not helped by narrowing. */}
+        {((aggregationTruncated && !projectionCatchUp.catchingUp && !readPressure && !summariesGap) || edgesTruncated) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
