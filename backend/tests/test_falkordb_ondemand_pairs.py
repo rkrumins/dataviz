@@ -42,7 +42,10 @@ _CLASSIFY_RE = re.compile(r"MATCH \(n:(\w+)\) WHERE n\.urn IN \$urns")
 _RESOLVE_UP_RE = re.compile(r"RETURN (?:DISTINCT )?c\.urn, a\.urn")
 _Q1_RE = re.compile(r"MATCH \(x(?::\w+)?\)-\[r:[\w|]+\]->\(t\) WHERE x\.urn IN \$xs")
 _Q2_RE = re.compile(r"MATCH \(s\)-\[r:[\w|]+\]->\(y(?::\w+)?\) WHERE y\.urn IN \$ys")
-_RAW_RE = re.compile(r"MATCH \(s(?::\w+)?\)-\[r(?::[\w|]+)?\]->\(t\) WHERE s\.urn IN \$sourceUrns")
+_RAW_RE = re.compile(
+    r"MATCH \(s(?::\w+)?\)-\[r(?::[\w|]+)?\]->\(t(?::\w+)?\) "
+    r"WHERE (?:s\.urn IN \$sourceUrns|t\.urn IN \$targetUrns)"
+)
 
 
 def _pattern_types(cypher):
@@ -210,9 +213,9 @@ class _FakeGraph:
             # Exact-endpoint raw mirror (cube/unknown regime, no containment).
             lt = params.get("ltypes") or _pattern_types(cypher)
             cells = {}
-            tgts = params.get("targetUrns")
+            srcs, tgts = params.get("sourceUrns"), params.get("targetUrns")
             for eid, s, t, et in self.lineage:
-                if s not in params["sourceUrns"] or et not in lt:
+                if (srcs is not None and s not in srcs) or et not in lt:
                     continue
                 if s == t or (tgts is not None and t not in tgts):
                     continue
@@ -1804,3 +1807,103 @@ def test_a_row_fifty_levels_down_still_rolls_up_to_a_shallow_container():
     got = {(e.source_urn, e.target_urn): e.edge_count for e in result.aggregated_edges}
     assert got == {("urn:a49", "urn:b1"): 2, ("urn:a49", "urn:b40"): 2}
     assert result.truncated is False
+
+
+# ── a read naming far fewer targets seeks from the targets ──────────────
+#
+# A ledger's in-leg names every covered row as a source and only the rows
+# just added as targets. Seeking from the sources expanded every covered
+# row's cells (and, in cube regime, every covered row's raw edges) on every
+# page or expand.
+
+def _in_leg(fake, *, regime):
+    """20 sources (a2, a1 and 18 rows with no lineage) against 2 targets."""
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 5)
+    fake.set_meta(regime, 2)
+    for i in range(18):
+        fake.add_node(f"urn:x{i}", "lvl2")
+    return levels, ["urn:a2", "urn:a1", *[f"urn:x{i}" for i in range(18)]], ["urn:b2", "urn:b1"]
+
+
+def _recording_provider(fake, levels, stored, raw):
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
+        if "ORDER BY weight DESC" in cypher:
+            stored.append((cypher, params))
+            srcs, tgts = params.get("sourceUrns"), params.get("targetUrns")
+            return _Result([
+                [s_, t_, w, list(ty)] for s_, t_, w, ty, sd, td in fake.agg
+                if (srcs is None or s_ in srcs) and (tgts is None or t_ in tgts)
+            ])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    async def ro_query(cypher, params=None, timeout=None, **kw):
+        if _RAW_RE.search(cypher):
+            raw.append((cypher, params))
+        return await fake.ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._proj_ro_query = proj_ro_query
+    p._ro_query = ro_query
+    return p
+
+
+def _pairs(p, sources, targets):
+    result = _run(p.get_aggregated_edges_between(
+        sources, targets, granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=["FLOWS"],
+    ))
+    return {(e.source_urn, e.target_urn): e.edge_count for e in result.aggregated_edges}
+
+
+def test_an_in_leg_reads_its_stored_cells_from_the_targets(monkeypatch):
+    fake = _FakeGraph()
+    levels, sources, targets = _in_leg(fake, regime="boundary")
+    stored, raw = [], []
+    got = _pairs(_recording_provider(fake, levels, stored, raw), sources, targets)
+
+    assert stored and all(
+        "-[r:AGGREGATED]->(t:lvl" in c and "t.urn IN $targetUrns" in c
+        and "s.urn IN $sourceUrns" in c and set(prm["targetUrns"]) <= set(targets)
+        and prm["sourceUrns"] == sources
+        for c, prm in stored
+    ), stored
+    # The same answer the sources' side gives.
+    import backend.app.providers.falkordb_provider as fp
+    monkeypatch.setattr(fp, "_TARGET_ANCHOR_RATIO", 1000)
+    by_source = []
+    assert got == _pairs(_recording_provider(fake, levels, by_source, []), sources, targets)
+    assert by_source and all("(s:lvl" in c for c, _ in by_source)
+    assert got == {
+        ("urn:a1", "urn:b1"): 5, ("urn:a2", "urn:b2"): 2,
+        ("urn:a2", "urn:b1"): 2, ("urn:a1", "urn:b2"): 2,
+    }
+
+
+def test_an_in_leg_in_cube_regime_reads_its_raw_pairs_from_the_targets(monkeypatch):
+    fake = _FakeGraph()
+    levels, sources, targets = _in_leg(fake, regime="cube")
+    stored, raw = [], []
+    got = _pairs(_recording_provider(fake, levels, stored, raw), sources, targets)
+
+    assert raw and all(
+        "->(t:lvl" in c and "t.urn IN $targetUrns" in c and prm["sourceUrns"] == sources
+        for c, prm in raw
+    ), raw
+    import backend.app.providers.falkordb_provider as fp
+    monkeypatch.setattr(fp, "_TARGET_ANCHOR_RATIO", 1000)
+    assert got == _pairs(_recording_provider(fake, levels, [], []), sources, targets)
+    assert got == {("urn:a1", "urn:b1"): 5, ("urn:a2", "urn:b2"): 2}
+
+
+def test_a_read_with_comparable_sides_still_seeks_from_the_sources():
+    fake = _FakeGraph()
+    levels, sources, targets = _in_leg(fake, regime="boundary")
+    stored = []
+    _pairs(_recording_provider(fake, levels, stored, []), sources[:19], targets)
+    assert stored and all("(s:lvl" in c and "(t:" not in c for c, _ in stored)

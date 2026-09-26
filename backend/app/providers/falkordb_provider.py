@@ -1338,6 +1338,41 @@ def _read_spent(deadline: Optional[float]) -> bool:
     )
 
 
+#: How many times more sources than targets a pair read must name before it
+#: seeks from its targets. Measured on FalkorDB 4.18.3 (index seek on the
+#: anchored side, traverse, the other side filtered by list membership):
+#: 500 sources x 50 targets 3.1 ms from the targets against 7.2 ms from the
+#: sources, 5000 x 500 even (152 against 159 ms); at 5000 x 1250 the targets
+#: lose (315 against 261 ms), because each cell they reach is checked
+#: against the whole source list.
+_TARGET_ANCHOR_RATIO = 10
+
+
+def _anchor_on_targets(
+    source_urns: Sequence[str], target_urns: Optional[Sequence[str]],
+) -> bool:
+    """Seek a pair read from its targets instead of its sources.
+
+    A ledger's in-leg names every covered row as a source and only the rows
+    just added as targets; seeking from the sources expanded every covered
+    row's cells on every page or expand. Only when the targets are far fewer
+    and the source list fits one batch, since it is sent whole with each
+    target batch.
+
+    The stored-cell read and the raw mirror follow this. The boundary
+    regime's on-demand synthesis stays source-anchored: it resolves each leaf
+    source's raw far ends UP to the requested targets through their chains,
+    and a seek from a container target cannot find those far ends without
+    walking everything below it."""
+    from ..config.resilience import AGGREGATED_SOURCE_URN_BATCH_SIZE
+
+    return (
+        bool(target_urns)
+        and len(source_urns) <= AGGREGATED_SOURCE_URN_BATCH_SIZE
+        and len(target_urns) * _TARGET_ANCHOR_RATIO <= len(source_urns)
+    )
+
+
 def _within(timeout: Optional[float], deadline: Optional[float]) -> Optional[float]:
     """``timeout`` capped by what is left of a read's wall clock."""
     if deadline is None:
@@ -9255,12 +9290,21 @@ class FalkorDBProvider(GraphDataProvider):
         # to scanning EVERY :AGGREGATED relation with per-row IN-list
         # membership — observed timing out (and returning an empty
         # canvas) at 595k stored cells × 600 visible urns. With the label
-        # it is |batch| index seeks + local out-edge expansion.
+        # it is |batch| index seeks + local out-edge expansion. A read naming
+        # far fewer targets than sources seeks from the targets instead
+        # (``_anchor_on_targets``), batched and bucketed the same way.
+        by_target = _anchor_on_targets(source_urns, target_urns)
+
         def _cypher_for(label: str, *, resume: bool, limit: int) -> str:
-            anchor = f"(s:{label})" if label else "(s)"
-            where = ["s.urn IN $sourceUrns"]
-            if target_urns:
-                where.append("t.urn IN $targetUrns")
+            lbl = f":{label}" if label else ""
+            if by_target:
+                pattern = f"(s)-[r:AGGREGATED]->(t{lbl})"
+                where = ["t.urn IN $targetUrns", "s.urn IN $sourceUrns"]
+            else:
+                pattern = f"(s{lbl})-[r:AGGREGATED]->(t)"
+                where = ["s.urn IN $sourceUrns"]
+                if target_urns:
+                    where.append("t.urn IN $targetUrns")
             where.append("s.urn <> t.urn")
             if resume:
                 # Strictly after the previous page's last row in the total
@@ -9273,7 +9317,7 @@ class FalkorDBProvider(GraphDataProvider):
                     "OR (s.urn = $lastSourceUrn AND t.urn > $lastTargetUrn))))"
                 )
             return (
-                f"MATCH {anchor}-[r:AGGREGATED]->(t) "
+                f"MATCH {pattern} "
                 f"WHERE {' AND '.join(where)} "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 # coalesce, not a bare r.weight: a null weight compares as
@@ -9322,9 +9366,12 @@ class FalkorDBProvider(GraphDataProvider):
             timeouts = 0
             while True:
                 limit = max(floor, page_limit)
-                params: Dict[str, Any] = {"sourceUrns": batch}
-                if target_urns:
-                    params["targetUrns"] = target_urns
+                if by_target:
+                    params: Dict[str, Any] = {"targetUrns": batch, "sourceUrns": source_urns}
+                else:
+                    params = {"sourceUrns": batch}
+                    if target_urns:
+                        params["targetUrns"] = target_urns
                 if last is not None:
                     params["lastWeight"] = int(last[2]) if last[2] else 0
                     params["lastSourceUrn"] = last[0]
@@ -9431,7 +9478,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE
         runs: List[Tuple[str, List[str]]] = []
-        for label, bucket in await self._label_buckets(source_urns):
+        for label, bucket in await self._label_buckets(target_urns if by_target else source_urns):
             for i in range(0, len(bucket), batch_size):
                 runs.append((label, bucket[i:i + batch_size]))
         batch_results = await asyncio.gather(*[
@@ -10027,7 +10074,20 @@ class FalkorDBProvider(GraphDataProvider):
         # Anchors label-qualified per source bucket — an unlabeled
         # ``s.urn IN $list`` is a full scan on builds without a
         # label-less URN index; the "" bucket keeps the unlabeled form.
+        # Per target bucket instead when the targets are far fewer
+        # (``_anchor_on_targets``), as the stored-cell read does.
+        by_target = _anchor_on_targets(source_urns, target_urns)
+        anchored = "targetUrns" if by_target else "sourceUrns"
+
         def _cypher_for(label: str) -> str:
+            if by_target:
+                return (
+                    f"MATCH (s)-[r]->(t{':' + label if label else ''}) "
+                    "WHERE t.urn IN $targetUrns AND s.urn IN $sourceUrns "
+                    "AND type(r) IN $ltypes AND s.urn <> t.urn "
+                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                    "count(r) AS weight, collect(DISTINCT type(r)) AS types"
+                )
             anchor = f"(s:{label})" if label else "(s)"
             if target_urns:
                 return (
@@ -10049,7 +10109,9 @@ class FalkorDBProvider(GraphDataProvider):
 
         async def _run_batch(label: str, batch: List[str]) -> list:
             base: Dict[str, Any] = {"ltypes": list(ltypes)}
-            if target_urns:
+            if by_target:
+                base["sourceUrns"] = source_urns
+            elif target_urns:
                 base["targetUrns"] = target_urns
 
             async def issue(sub: List[str]) -> list:
@@ -10057,7 +10119,7 @@ class FalkorDBProvider(GraphDataProvider):
                     record.degrade("timeout")
                     return []
                 result = await self._ro_query(
-                    _cypher_for(label), params={**base, "sourceUrns": sub},
+                    _cypher_for(label), params={**base, anchored: sub},
                     timeout=_within(timeout, deadline),
                 )
                 return result.result_set or []
@@ -10073,7 +10135,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE
         runs: List[Tuple[str, List[str]]] = []
-        for label, bucket in await self._label_buckets(source_urns):
+        for label, bucket in await self._label_buckets(target_urns if by_target else source_urns):
             for i in range(0, len(bucket), batch_size):
                 runs.append((label, bucket[i:i + batch_size]))
         batch_results = await asyncio.gather(*[_run_batch(l, b) for l, b in runs])
