@@ -266,6 +266,15 @@ describe('useExternalDegrees — what could not be counted', () => {
     expect(getNodeDegrees).toHaveBeenCalledTimes(1)
     expect(result.current.totals.size).toBe(0)
     expect(result.current.failed.size).toBe(0)
+    // No total is then evidence of none.
+    expect(result.current.uncountable).toBe(true)
+  })
+
+  it('a reader with no count at all says so; one that counts does not', async () => {
+    holder.current = {}
+    expect(render().result.current.uncountable).toBe(true)
+    holder.current = { getNodeDegrees: vi.fn(async (urns: string[]) => counted(urns)) }
+    expect(render().result.current.uncountable).toBe(false)
   })
 
   it('asks nothing while off', async () => {

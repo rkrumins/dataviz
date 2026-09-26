@@ -254,3 +254,52 @@ describe('selecting a closed logical group', () => {
     expect(ports('logical:grp').right).toBe('lineage:out')
   }, 30_000)
 })
+
+describe('selecting a collapsed container on a reader that cannot count', () => {
+  // A branch counts no degrees: a container there has nothing to say it has
+  // lineage, and selecting it is how to find out.
+  const onBranch = (cells: ReturnType<typeof rollUp>[], extra?: Record<string, unknown>) => {
+    const estate = anchoredPortsEstate()
+    return renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      aggregatedCells: cells,
+      wrapProvider: extra && ((p: GraphDataProvider) => ({
+        ...p,
+        getAggregatedEdges: async (req: AggregatedEdgeRequest) => {
+          const answer = await p.getAggregatedEdges(req)
+          const own = req.targetUrns === undefined || req.sourceUrns.length === 0
+          return own ? { ...answer, ...extra } : answer
+        },
+      }) as GraphDataProvider),
+    })
+  }
+
+  it('asks its roll-ups both ways, and draws to what they reach', async () => {
+    const h = await onBranch([rollUp('SRC.DB_A', 's9', 2), rollUp('s1', 'SRC.DB_A', 1)])
+    await h.settle()
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+
+    await waitFor(() => {
+      expect(asksOf(h)).toContainEqual([['SRC.DB_A'], []])
+      expect(asksOf(h)).toContainEqual([[], ['SRC.DB_A']])
+    }, { timeout: 8000 })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 's1', target: 'SRC.DB_A' }), { timeout: 8000 })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_A', target: 's9' }), { timeout: 8000 })
+  }, 30_000)
+
+  it('an answer cut at the derivation bound reads solid, never outside', async () => {
+    const h = await onBranch([rollUp('SRC.DB_A', 'far', 1)],
+      { truncated: true, stale: true, staleReason: 'derive_scope_cap', truncationReason: null })
+    await h.settle()
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+
+    await waitFor(() => expect(ports('SRC.DB_A').right).toBe('lineage:out'), { timeout: 8000 })
+    await h.settle()
+    await act(async () => { await new Promise(r => setTimeout(r, 1500)) })
+    expect(ports('SRC.DB_A').right).toBe('lineage:out')
+  }, 30_000)
+})

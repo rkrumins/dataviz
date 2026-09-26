@@ -57,6 +57,9 @@ export interface ExternalDegrees {
    *  flags asked for — being asked again. Each leaves the set when it is
    *  answered in full. */
   failed: ReadonlySet<string>
+  /** The reader cannot count at all (no route, or it answered 501): no
+   *  total is evidence of no lineage. */
+  uncountable: boolean
 }
 
 export function useExternalDegrees(enabled: boolean): ExternalDegrees {
@@ -100,7 +103,8 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
     }
   }, [provider])
 
-  const supported = enabled && typeof provider.getNodeDegrees === 'function' && unsupportedBy !== provider
+  const uncountable = typeof provider.getNodeDegrees !== 'function' || unsupportedBy === provider
+  const supported = enabled && !uncountable
 
   useEffect(() => {
     if (!supported) return
@@ -169,5 +173,5 @@ export function useExternalDegrees(enabled: boolean): ExternalDegrees {
     return () => clearTimeout(timer)
   }, [supported, provider, flowTypes, canvasVersion, cacheVersion, wake])
 
-  return { totals, failed }
+  return { totals, failed, uncountable }
 }

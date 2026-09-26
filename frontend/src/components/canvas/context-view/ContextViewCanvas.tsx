@@ -5248,7 +5248,7 @@ export function ContextViewCanvas({
   // whose lineage no line shows yet still shows it. Absent totals mean
   // UNKNOWN, never a false "no lineage" claim. A card whose count FAILED
   // says so on its ports until the hook's retry counts it.
-  const { totals: externalDegrees, failed: degreeFailures } = useExternalDegrees(showLineageFlow)
+  const { totals: externalDegrees, failed: degreeFailures, uncountable } = useExternalDegrees(showLineageFlow)
   // What the ports read (portTotals): a container's roll-up cells only while
   // it is closed, and a closed logical group's members summed.
   const { totals: lineagePortTotals, failed: lineagePortUnknown } = useMemo(() =>
@@ -5266,7 +5266,9 @@ export function ContextViewCanvas({
   // flows counted than drawn — the canvas asks for all of its roll-ups that
   // way (useContainerRollups). The projection places their far ends, and the
   // partner reveal above brings in the rows of other columns among them.
-  // A closed group selected asks for its container members, each on its own
+  // On a reader that cannot count (a branch), nothing says a container has
+  // lineage, and selecting it is how to find out: it asks both ways. A
+  // closed group selected asks for its container members, each on its own
   // counts: their lines are the group's. Each way of each container once per
   // selection; one opened, or gone, takes its cells. Never while a trace
   // holds the canvas. A cell to what the
@@ -5313,7 +5315,7 @@ export function ContextViewCanvas({
           const evidence = (total?.[way] ?? 0) + ((way === 'in' ? total?.rollupIn : total?.rollupOut) ?? 0)
             + (ports ? ports.left[way] + ports.right[way] + ports.held[way] : 0) + (outside?.[way] ?? 0)
           const drawnFlows = drawn[way].get(id) ?? 0
-          const undrawn = drawnFlows === 0 ? evidence > 0
+          const undrawn = drawnFlows === 0 ? evidence > 0 || uncountable
             : [...(outside?.columns.values() ?? [])].some(flows => flows[way] > 0)
               || (ports?.held[way] ?? 0) > 0 || (total?.[way] ?? 0) > drawnFlows
           const key = `${way}\n${urn}`
@@ -5334,7 +5336,7 @@ export function ContextViewCanvas({
     }
     void fetchContainerRollups(asks, urn => heldClosed(urnToIdMap.get(urn) ?? urn), inside)
   }, [selectedNodeIds, displayMap, drawnRows, expandedNodes, closedGroupOf, drawableLineageEdges, lineagePortTotals, nodePorts,
-    offCanvasByNode, urnToIdMap, fetchContainerRollups, traceWriteLocked])
+    offCanvasByNode, uncountable, urnToIdMap, fetchContainerRollups, traceWriteLocked])
 
   // The curated "outside this view" cue on each card, and the selected
   // card's chip: the flows the projection PLACED outside the view
