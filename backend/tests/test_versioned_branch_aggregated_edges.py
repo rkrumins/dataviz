@@ -213,3 +213,32 @@ def test_a_derivation_that_hits_no_bound_is_not_marked():
     sets it."""
     r = _agg(_provider(), EXPANDED)
     assert r.truncated is False and r.stale is False and r.stale_reason is None
+
+
+def _one_sided(sources, targets):
+    return _run(_provider().get_aggregated_edges_between(
+        source_urns=sources, target_urns=targets, granularity=None,
+        containment_edges=["CONTAINS"], lineage_edges=["FLOWS_TO"]))
+
+
+def test_a_container_asked_with_no_targets_answers_every_flow_out_of_it():
+    """Selecting a collapsed container asks for all of its roll-ups out, with
+    no targets named. This reader took the missing targets to mean "the
+    sources themselves", so it answered only pairs among the selected
+    containers (none here), marked complete, and the canvas drew nothing on
+    a branch, or on main while its projection lags. Each far end is named as
+    the flow's own end; the canvas places it through its chain."""
+    r = _one_sided(["snowflake"], None)
+    assert _cells(r) == {("snowflake", d): 1 for d in DASHBOARDS}
+    assert r.truncated is False and r.stale is False
+
+
+def test_a_container_asked_with_no_sources_answers_every_flow_into_it():
+    """The in-direction: no sources named, the targets set. This reader
+    answered nothing at all for an empty source list."""
+    r = _one_sided([], ["tableau"])
+    assert _cells(r) == {("sf_table", "tableau"): 4}
+    assert r.truncated is False and r.stale is False
+    assert _cells(_one_sided([], ["cfo"])) == {("sf_table", "cfo"): 1}
+    # Naming neither side still asks about nothing.
+    assert _one_sided([], None).aggregated_edges == []

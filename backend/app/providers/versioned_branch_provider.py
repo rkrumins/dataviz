@@ -407,16 +407,23 @@ class VersionedBranchProvider:
         Bounded, and honest about it: the descent stops at ``_DERIVE_SCOPE_CAP`` nodes —
         and a single edge read stops at that same cap — and either says
         ``truncated``/``stale`` with the bound that bit as the reason, never a short
-        answer that reads as a complete one, which was the whole defect."""
+        answer that reads as a complete one, which was the whole defect.
+
+        One side may be left open, as on the FalkorDB reader: no targets asks for
+        every flow out of the sources, no sources for every flow into the targets
+        (selecting a collapsed container asks both). No targets used to mean "the
+        sources themselves", which answered a selected container nothing and marked
+        it complete. The open side is not descended: its far end is named as the
+        flow's own end, and the canvas places it through its chain."""
         from backend.common.providers.pair_rules import ancestor_closure, cube_pairs
 
         srcs = [u for u in (source_urns or []) if u]
-        tgts = [u for u in (target_urns or []) if u] if target_urns else list(srcs)
+        tgts = [u for u in (target_urns or []) if u]
         # AGGREGATED is the derived layer itself: publishing a draft can commit
         # materialised rollups into the version log, and replaying those as raw
         # lineage would count every flow twice.
         ltypes = [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
-        if not srcs or not tgts or not ltypes:
+        if not (srcs or tgts) or not ltypes:
             return AggregatedEdgeResult(aggregatedEdges=[], totalSourceEdges=0)
         ctypes = [t for t in (containment_edges or []) if t]
 
@@ -425,13 +432,14 @@ class VersionedBranchProvider:
         # it is the `truncated`/`stale` flags AND the reason on the wire.
         bound: Optional[str] = None
 
-        async def _out_edges(urns: List[str], types: List[str]) -> List[GraphEdge]:
+        async def _edges(urns: List[str], types: List[str], *, into: bool = False) -> List[GraphEdge]:
             nonlocal bound
             out: List[GraphEdge] = []
             for i in range(0, len(urns), chunk):
+                part = urns[i:i + chunk]
                 rows = await self.get_edges(EdgeQuery(
-                    source_urns=urns[i:i + chunk], edge_types=types,
-                    limit=_DERIVE_SCOPE_CAP))
+                    **({"target_urns": part} if into else {"source_urns": part}),
+                    edge_types=types, limit=_DERIVE_SCOPE_CAP))
                 # A chunk that comes back AT the limit dropped edges we will
                 # never see, so everything built on it is short.
                 if len(rows) >= _DERIVE_SCOPE_CAP:
@@ -446,7 +454,7 @@ class VersionedBranchProvider:
         frontier = list(scope)
         while ctypes and frontier and not bound:
             nxt: List[str] = []
-            for e in await _out_edges(frontier, ctypes):
+            for e in await _edges(frontier, ctypes):
                 # Containment is a DAG — a node can have several parents, and the
                 # closure below dedupes on that set.
                 ps = parents.setdefault(e.target_urn, [])
@@ -465,8 +473,9 @@ class VersionedBranchProvider:
         asked_src, asked_tgt = set(srcs), set(tgts)
         memo: Dict[str, Dict[str, int]] = {}
         cells: Dict[Any, List[Any]] = {}
-        for e in await _out_edges(sorted(scope), ltypes):
-            if e.target_urn not in scope:
+        # With no sources named, the flows are the ones INTO the scope.
+        for e in await _edges(sorted(scope), ltypes, into=not srcs):
+            if tgts and e.target_urn not in scope:
                 continue
             for a, b in cube_pairs(
                 ancestor_closure(parents, e.source_urn, memo),
@@ -477,7 +486,7 @@ class VersionedBranchProvider:
                 # flow reaches the canvas through no other call.
                 include_leaf_mirror=True, s=e.source_urn, t=e.target_urn,
             ):
-                if a not in asked_src or b not in asked_tgt:
+                if (srcs and a not in asked_src) or (tgts and b not in asked_tgt):
                     continue
                 cell = cells.setdefault((a, b), [0, set()])
                 cell[0] += 1
