@@ -1,9 +1,11 @@
 /**
  * useEdgeProjection — silent-loss guards.
  *
- * 1. Drop counting: edges whose endpoints resolve to nothing on canvas
- *    are counted in `unresolvedEdgeCount` (any unresolved endpoint, not
- *    just both) so the canvas can surface "N connections not shown".
+ * 1. Drop counting: `unresolvedEdgeCount` counts the flows from a drawn row
+ *    whose other end is OUTSIDE the view, so the canvas can say "N flows
+ *    outside this view". An edge with neither end on a row has no row to
+ *    carry it and is not counted, and a view open to its whole data source
+ *    has no outside, so it counts none.
  * 2. Coverage-gated delegation: a rolled-up edge on an expanded,
  *    fully-loaded parent is only hidden (isDelegated) when finer
  *    child-level edges actually exist for the same pair. Container-own
@@ -35,6 +37,7 @@ function run(opts: {
   roots: HierarchyNode[]
   expandedNodes?: Set<string>
   parentMap?: Map<string, string>
+  openScope?: boolean
 }) {
   const flat: HierarchyNode[] = []
   const stack = [...opts.roots]
@@ -59,6 +62,7 @@ function run(opts: {
       traceContextSet: new Set(),
       isContainmentEdge: () => false,
       browseBundleParentMap: opts.parentMap,
+      openScope: opts.openScope,
     }),
   )
   return result.current
@@ -76,6 +80,23 @@ describe('useEdgeProjection — unresolved endpoint counting', () => {
     })
     expect(res.visibleLineageEdges).toHaveLength(1)
     expect(res.unresolvedEdgeCount).toBe(2)
+  })
+
+  it('does not count an edge with neither end drawn: no row carries it', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'ghost', 'phantom')],
+    })
+    expect(res.unresolvedEdgeCount).toBe(0)
+  })
+
+  it('counts nothing in a view open to its whole data source: nothing is outside it', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e2', 'a', 'ghost'), edge('e3', 'phantom', 'b')],
+      openScope: true,
+    })
+    expect(res.unresolvedEdgeCount).toBe(0)
   })
 
   it('reports zero when everything resolves', () => {

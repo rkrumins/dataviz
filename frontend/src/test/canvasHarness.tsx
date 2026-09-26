@@ -840,10 +840,10 @@ export async function renderCanvasWithTrace(
     connectPickerOpen: () =>
       [...document.querySelectorAll('h3')].some(h => h.textContent?.trim() === 'Connect'),
     missingConnections: () => {
-      // The chip reads "<n> flows outside this view" (curated) or
-      // "… not on canvas" (open). Absent entirely when the count is 0.
+      // The chip reads "<n> flows outside this view". Absent entirely when
+      // the count is 0.
       const label = [...document.querySelectorAll<HTMLElement>('span')]
-        .find(el => /^flows (outside this view|not on canvas)$/.test(el.textContent?.trim() ?? ''))
+        .find(el => el.textContent?.trim() === 'flows outside this view')
       const count = label?.previousElementSibling?.textContent?.trim()
       if (count === undefined) return null
       return Number(count.replace(/,/g, ''))

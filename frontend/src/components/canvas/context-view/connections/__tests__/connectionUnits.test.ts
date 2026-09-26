@@ -155,7 +155,6 @@ const KIND: Array<[string, RegExp[], string[]]> = [
       /downstream connection/,
     ],
     [
-      'flows not on canvas',
       'flows outside this view',
       'Large flow fan',
       // Adaptive's "strongest N of M" moved out of the chips into the lineage

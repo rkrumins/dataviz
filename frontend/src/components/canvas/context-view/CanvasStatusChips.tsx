@@ -5,8 +5,9 @@
  * explains why in its tooltip, and offers an action where one exists.
  *
  * Chips (each hidden when its count is zero):
- *  - "N flows not on canvas" — projected edges whose endpoints resolve to
- *    no rendered entity (unloaded or unassigned).
+ *  - "N flows outside this view" — flows from a drawn row whose other end
+ *    is outside the view. Only a curated view has an outside: a view open
+ *    to its whole data source counts none (useEdgeProjection).
  *  - "N entities not in any layer" — loaded nodes that matched no layer;
  *    popover lists them with click-through to the entity drawer.
  *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
@@ -26,9 +27,8 @@
  *
  * Every count here names its unit too; the words come from
  * `connections/connectionUnits.ts` so no two chips can drift apart. The one
- * exception is the unresolved chip: its number is mixed-granularity (one
- * per collapsed rollup in section A, one per raw edge in B and C), so it
- * names the kind and deliberately claims no unit.
+ * exception is the unresolved chip, which counts underlying flows (a
+ * roll-up weighs every flow it stands for) and says so in its own words.
  *
  * Visual language matches the column overflow chips: rounded-full glass,
  * backdrop blur, soft border, quiet colors.
@@ -78,7 +78,8 @@ export function CanvasStatusChips({
   onPreviewExternal,
   notFoundPlacements = [],
 }: {
-  /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
+  /** Flows from a drawn row whose other end is outside the view: none in a
+   *  view open to its whole data source (useEdgeProjection). */
   unresolvedEdgeCount: number
   /** Loaded nodes that render in no layer. */
   unassignedEntities: UnassignedEntity[]
@@ -256,31 +257,21 @@ export function CanvasStatusChips({
             <div>
               <p className="font-semibold mb-1">
                 {unresolvedEdgeCount.toLocaleString()} flow{unresolvedEdgeCount === 1 ? '' : 's'}{' '}
-                {viewScope === 'curated' ? 'lead outside this view' : 'not shown'}
+                lead outside this view
               </p>
-              {viewScope === 'curated' ? (
-                <p className="text-ink-muted">
-                  This view is a curated subset of the data source — these links
-                  reference entities that aren&apos;t part of the view&apos;s
-                  assignments. That&apos;s expected; add those entities to the
-                  view to see the flows.
-                </p>
-              ) : (
-                <p className="text-ink-muted">
-                  These edges reference entities that aren&apos;t loaded on the canvas
-                  or aren&apos;t assigned to any layer. Load or assign those entities
-                  to see the flows.
-                </p>
-              )}
+              <p className="text-ink-muted">
+                This view is a curated subset of the data source — these links
+                reference entities that aren&apos;t part of the view&apos;s
+                assignments. That&apos;s expected; add those entities to the
+                view to see the flows.
+              </p>
             </div>
           }
         >
           <div className={CHIP_CLASS}>
-            <Unlink className={cn('w-3 h-3', viewScope === 'curated' ? 'text-sky-400/80' : 'text-amber-500/80')} />
+            <Unlink className="w-3 h-3 text-sky-400/80" />
             <span className="tabular-nums">{unresolvedEdgeCount.toLocaleString()}</span>
-            <span className="text-ink-muted/70">
-              {viewScope === 'curated' ? 'flows outside this view' : 'flows not on canvas'}
-            </span>
+            <span className="text-ink-muted/70">flows outside this view</span>
           </div>
         </InfoTooltip>
       )}
