@@ -34,6 +34,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.raw_path_route import RawPathSegmentRoute
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
@@ -61,7 +62,10 @@ from backend.app.services.versioning.service import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# Matched on the RAW path so an encoded '/' stays inside its parameter — entity ids
+# carry URNs with paths (`…bucket/key…`, and edge ids built from two of them), which
+# the decoded path would split into a 404 (see RawPathSegmentRoute).
+router = APIRouter(route_class=RawPathSegmentRoute)
 
 
 # ── Admin feature flags (Admin → Features) ────────────────────────────────────
