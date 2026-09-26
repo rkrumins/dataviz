@@ -256,4 +256,22 @@ describe('useRevealPartners', () => {
 
     expect(useCanvasStore.getState().edges.some(e => e.id === 'f:p>x')).toBe(false)
   })
+
+  it('asked for anchored rows only, leaves a partner under a drawn row to the caller', async () => {
+    PARENTS.R = 'A'
+    PARENTS.p = 'R'
+    PARENTS.s = 'A'
+    seed(['A', 'R'], [contains('A', 'R')])
+    const p = provider()
+    const c = canvas(['A'], ['R'])
+
+    const result = reveal(p, c)
+    let outcome: { landed: string[]; missed: string[] } | undefined
+    await act(async () => { outcome = await result.current(['p', 's'], { anchoredOnly: true }) })
+
+    // s is a row of the anchored column; p's path stops at the drawn row R.
+    expect(p.getNodes).toHaveBeenCalledWith({ urns: ['s'], limit: 1 })
+    expect(c.setExpandedNodes).not.toHaveBeenCalled()
+    expect(outcome).toEqual({ landed: ['s'], missed: ['p'] })
+  })
 })

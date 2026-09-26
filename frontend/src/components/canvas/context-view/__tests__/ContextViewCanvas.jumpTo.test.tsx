@@ -48,4 +48,25 @@ describe('the drawer\'s Jump-to', () => {
     expect(await jumpTo('SRC.DB_A.t1')).toBe('revealed')
     expect(h.visibleCardIds()).toContain('SRC.DB_A.t1')
   }, 20_000)
+
+  it('brings in a row of an anchored column past its loaded page', async () => {
+    // s9 is a row of Staging the view holds but has not loaded. A page walk
+    // cannot reach it (it resumes the anchor's pager at its next page); its
+    // path can.
+    const estate = anchoredPortsEstate()
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+    })
+    act(() => { useCanvasStore.getState().openNodeDrawer('s2') })
+    await waitFor(() => expect(drawer.jumpTo).toBeDefined())
+    expect(h.visibleCardIds()).not.toContain('s9')
+
+    let outcome: unknown
+    await act(async () => { outcome = await drawer.jumpTo!('s9') })
+
+    expect(outcome).toBe('revealed')
+    expect(h.visibleCardIds()).toContain('s9')
+  }, 20_000)
 })

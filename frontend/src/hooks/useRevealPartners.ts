@@ -67,14 +67,20 @@ export interface RevealPartnersOutcome {
   missed: string[]
 }
 
+export interface RevealPartnersScope {
+  /** Only the partners whose path stops at a promoted anchor: rows of an
+   *  anchored column. The rest are left to the caller, at no cost. */
+  anchoredOnly?: boolean
+}
+
 export function useRevealPartners(
   opts: UseRevealPartnersOptions,
-): (partners: readonly string[]) => Promise<RevealPartnersOutcome> {
+): (partners: readonly string[], scope?: RevealPartnersScope) => Promise<RevealPartnersOutcome> {
   // Stable callback, latest options — in place before any effect can call it.
   const optsRef = useRef(opts)
   useLayoutEffect(() => { optsRef.current = opts })
 
-  return useCallback(async (partners: readonly string[]): Promise<RevealPartnersOutcome> => {
+  return useCallback(async (partners: readonly string[], scope?: RevealPartnersScope): Promise<RevealPartnersOutcome> => {
     const {
       provider, setExpandedNodes, markFirstPageHandled, chainOf, isVisible, isAnchor,
       containmentEdgeTypes, lineageEdgeTypes, settleMs = 1500,
@@ -111,6 +117,7 @@ export function useRevealPartners(
     for (const [partner, chain] of chains) {
       const stop = chain.findIndex(a => isVisible(a) || isAnchor(a))
       if (stop === -1) continue // nothing on its path is in this view
+      if (scope?.anchoredOnly && !isAnchor(chain[stop])) continue
       const path = chain.slice(0, stop + 1).reverse()
       path.forEach((level, i) => {
         spine.add(level)

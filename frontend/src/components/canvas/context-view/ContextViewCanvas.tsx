@@ -3718,6 +3718,8 @@ export function ContextViewCanvas({
     // the store holds and no column draws.
     isRendered: isDrawnRow,
   })
+  // The partner reveal, built far below with the chains it reads.
+  const revealPartnersRef = useRef<ReturnType<typeof useRevealPartners> | null>(null)
   const revealOnCanvas = useCallback(async (nodeId: string, revealOpts?: RevealOptions) => {
     if (traceWriteLocked()) {
       // Drawing: open the overlay's own chain. Still walking: there is
@@ -3726,8 +3728,14 @@ export function ContextViewCanvas({
       if (expandTraceChain(nodeId) && !revealOpts?.skipFocus) scrollHitIntoView(nodeId)
       return
     }
+    // A row of an anchored column past its loaded page is in the view, and
+    // the walk below cannot reach it: loading the anchor's children resumes
+    // its pager at the NEXT page. Its path can, as selecting a card brings
+    // its partners in. Anything else takes the walk, which then only
+    // focuses a row this brought in.
+    if (!isDrawnRow(nodeId)) await revealPartnersRef.current?.([nodeId], { anchoredOnly: true })
     return revealAndFocus(nodeId, revealOpts)
-  }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked])
+  }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked, isDrawnRow])
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed
   // ancestors), then walk each one through the SAME virtualizer-aware
@@ -4745,6 +4753,7 @@ export function ContextViewCanvas({
     containmentEdgeTypes,
     lineageEdgeTypes,
   })
+  useEffect(() => { revealPartnersRef.current = revealPartners })
   const partnersAskedRef = useRef<{ selection: string; asked: Set<string> }>({ selection: '', asked: new Set() })
   useEffect(() => {
     const selection = selectedNodeIds.join('\n')
