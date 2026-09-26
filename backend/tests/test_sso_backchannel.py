@@ -221,13 +221,11 @@ async def test_any_container_name_is_hoisted(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_sample_payload_signs_in_when_auth_time_is_not_required(monkeypatch):
+async def test_the_sample_payload_signs_in_whole(monkeypatch):
     """The literal gateway answer this cycle was asked about: numeric
     user_id, full_name, an entitlements object with empty groups and a
-    stray extra. It signs in whole once ``require_auth_time`` is
-    switched off — the payload carries no authentication-time claim,
-    and with the default posture that absence is refused, not the
-    shape."""
+    stray extra. It carries no authentication-time claim either, and
+    signs in whole — the re-auth ceiling then measures from the sign-in."""
     def handler(request):
         if request.url.path.endswith("/redeem"):
             return httpx.Response(200, json={"access_token": "gw-token-abc"})
@@ -239,9 +237,7 @@ async def test_the_sample_payload_signs_in_when_auth_time_is_not_required(monkey
         })
 
     _routes(monkeypatch, handler)
-    identity = await _provider(
-        require_auth_time=False,
-    ).fetch_identity("ambient-xyz")
+    identity = await _provider().fetch_identity("ambient-xyz")
     assert identity.external_id == "123"
     assert identity.email == "jonh@gmail.com"
     assert identity.groups == ()
@@ -354,11 +350,11 @@ async def test_claims_that_are_not_an_object_are_refused(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_claims_without_an_auth_time_are_refused_by_default(monkeypatch):
-    """``complete_sso_login`` falls back to "now" with a warning when
-    ``auth_time`` is absent, which quietly disables the 24h SSO re-auth
-    ceiling for every session this provider mints. Refusing here is what
-    keeps that ceiling meaningful."""
+async def test_claims_without_an_auth_time_still_sign_in(monkeypatch):
+    """A gateway reply with no authentication time used to be refused by
+    default, so a field renamed upstream locked out everyone on the
+    connection at once. It signs in; ``complete_sso_login`` measures the
+    re-auth ceiling from this sign-in and records that it had to."""
     def handler(request):
         if request.url.path.endswith("/redeem"):
             return httpx.Response(200, json={"access_token": "gw-token-abc"})
@@ -366,21 +362,9 @@ async def test_claims_without_an_auth_time_are_refused_by_default(monkeypatch):
                                          if k != "auth_time"})
 
     _routes(monkeypatch, handler)
-    with pytest.raises(BackchannelError, match="auth_time"):
-        await _provider().fetch_identity("ambient-xyz")
-
-
-@pytest.mark.asyncio
-async def test_an_operator_can_accept_claims_without_an_auth_time(monkeypatch):
-    def handler(request):
-        if request.url.path.endswith("/redeem"):
-            return httpx.Response(200, json={"access_token": "gw-token-abc"})
-        return httpx.Response(200, json={k: v for k, v in CLAIMS.items()
-                                         if k != "auth_time"})
-
-    _routes(monkeypatch, handler)
-    identity = await _provider(require_auth_time=False).fetch_identity("a-xyz")
+    identity = await _provider().fetch_identity("a-xyz")
     assert identity.email == "alice@corp.example"
+    assert identity.auth_time is None
 
 
 # ── the tokens stay opaque ───────────────────────────────────────────
@@ -538,7 +522,10 @@ def test_settings_survive_the_round_trip_from_a_row():
             "gateway_token_header": "Authorization",
             "gateway_headers": {"X-App-Id": "a"},
             "exchange_url": EXCHANGE, "liveness_grace_seconds": "120",
-            "timeout_seconds": "2.5", "require_auth_time": "false",
+            "timeout_seconds": "2.5",
+            # Retired, but still on rows saved before it was: it must
+            # parse, and change nothing.
+            "require_auth_time": "true",
         },
         claim_mapping={"email": ["mail"]}, linking_policy="allow_verified",
         button_label=None, button_icon=None,
@@ -549,7 +536,7 @@ def test_settings_survive_the_round_trip_from_a_row():
     assert s.gateway_headers == {"X-App-Id": "a"}
     assert s.liveness_grace_seconds == 120
     assert s.timeout_seconds == 2.5
-    assert s.require_auth_time is False
+    assert not hasattr(s, "require_auth_time")
     assert s.claim_mapping_override == {"email": ["mail"]}
     assert s.linking_policy == "allow_verified"
 

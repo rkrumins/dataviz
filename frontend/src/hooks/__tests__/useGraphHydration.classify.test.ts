@@ -1,12 +1,17 @@
 /**
- * useGraphHydration — a slow, shed or session-repair failure is 'slow', not
- * 'unavailable'.
+ * useGraphHydration — a slow, shed or gateway failure is 'slow', not
+ * 'unavailable'; an auth failure the fetch layer could not repair is
+ * 'session', neither of those.
  *
  * Regression under test: every failure that was not the literal string
  * PROVIDER_LOADING became 'unavailable' — "Graph service is unavailable" over
  * a FalkorDB that was serving. A 504 from a query over budget, a 429 from the
  * backend shedding the view's own burst, a 401 from a just-expired token and a
  * client-side timeout all did it. Only a backend-CONFIRMED outage may.
+ *
+ * And its sequel: the 401 / CSRF 403 then read as 'slow', so an SSO user
+ * whose session broke saw "taking longer than usual" on every view, forever,
+ * instead of the one thing that fixes it — a reload.
  *
  * Also pinned: the initial load runs its node batches through a bounded
  * pool instead of firing every batch at once.
@@ -56,7 +61,7 @@ vi.mock('@/config/polling', () => ({
   withJitter: (ms: number) => ms,
 }))
 
-import { useGraphHydration, worstHydrationFailure, toHydrationFailure } from '../useGraphHydration'
+import { useGraphHydration, worstHydrationFailure, toHydrationFailure, isHydrationFailure } from '../useGraphHydration'
 import { useCanvasStore } from '@/store/canvas'
 
 function apiError(status: number, code?: string) {
@@ -80,8 +85,6 @@ describe('useGraphHydration failure classification', () => {
     ['a 504 from a query over its budget', apiError(504, 'PROVIDER_TIMEOUT')],
     ['a 504 from the request-timeout middleware', apiError(504, 'REQUEST_TIMEOUT')],
     ['a 429 from load shedding', apiError(429, 'PROVIDER_BUSY')],
-    ['a 401 from an expired access token', apiError(401)],
-    ['a 403 from a CSRF token the fetch layer is repairing', apiError(403, 'csrf_failed')],
     ['a 502 gateway hiccup', apiError(502)],
     ['a client-side timeout', new TypeError('Request timed out after 30s (client-side limit)')],
   ])('%s is slow, never unavailable', async (_label, err) => {
@@ -89,6 +92,16 @@ describe('useGraphHydration failure classification', () => {
     const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
     await waitFor(() => expect(result.current.hydrationStatus).toBe('slow'))
     expect(result.current.hydrationError).toMatch(/taking longer/i)
+  })
+
+  it.each([
+    ['a 401 the silent refresh could not recover', apiError(401)],
+    ['a 403 csrf_failed the CSRF heal could not recover', apiError(403, 'csrf_failed')],
+  ])('%s is session, never slow or unavailable', async (_label, err) => {
+    mockProvider.getNodes.mockRejectedValue(err)
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('session'))
+    expect(result.current.hydrationError).toMatch(/session/i)
   })
 
   it('a backend-confirmed outage is unavailable', async () => {
@@ -157,5 +170,17 @@ describe('worstHydrationFailure', () => {
   it('reads the client breaker rejection and a dead backend as unavailable', () => {
     expect(toHydrationFailure(new Error('Provider unavailable (circuit open)'))).toBe('unavailable')
     expect(toHydrationFailure(new TypeError('Failed to fetch'))).toBe('unavailable')
+  })
+
+  it('a broken session outranks everything, even a confirmed outage — it is the one state the user can fix', () => {
+    expect(worstHydrationFailure([apiError(503, 'PROVIDER_UNAVAILABLE'), apiError(401)])).toBe('session')
+    expect(worstHydrationFailure([apiError(403, 'csrf_failed'), apiError(503, 'PROVIDER_UNAVAILABLE')])).toBe('session')
+    expect(worstHydrationFailure([apiError(504), apiError(401)])).toBe('session')
+  })
+})
+
+describe('isHydrationFailure', () => {
+  it('counts session, so the retry loop and the visibility/health re-triggers keep running', () => {
+    expect(isHydrationFailure('session')).toBe(true)
   })
 })

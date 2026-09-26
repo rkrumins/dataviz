@@ -12,7 +12,7 @@
  * forward the ``X-CSRF-Token`` header. The general apiClient does.
  */
 
-import { fetchWithTimeout } from './fetchWithTimeout'
+import { adoptEnvironmentId, fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const AUTH_API = '/api/v1/auth'
@@ -443,7 +443,7 @@ export async function loginWithBackchannel(
             },
         )
     }
-    return res.json() as Promise<SessionResponse>
+    return adoptSession((await res.json()) as SessionResponse)
 }
 
 /** Complete a back-channel sign-in with a handle the trigger returned. */
@@ -518,6 +518,21 @@ export interface PermissionClaims {
 
 // ── HTTP helper ───────────────────────────────────────────────────────
 
+/**
+ * Adopt the deployment a session response names, then hand it back.
+ *
+ * Every call here that establishes a session goes through this — the
+ * password, gateway, portal and invited-signup sign-ins, and ``/auth/me``
+ * — including the gateway's silent re-sign-in, which calls
+ * {@link loginWithBackchannel} directly. The session cookies it just set
+ * are read by an environment-scoped name, and this is the only place the
+ * page learns the name: an in-page sign-in never makes the bootstrap call.
+ */
+function adoptSession<T extends { environment_id?: string | null }>(resp: T): T {
+    adoptEnvironmentId(resp?.environment_id)
+    return resp
+}
+
 async function request<T>(url: string, init?: RequestInit & { skipAuthRefresh?: boolean }): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
@@ -549,9 +564,14 @@ export const authService = {
         user?: AuthUser | null
         redirectTo?: string | null
     }> {
-        return request<{ message: string }>(`${AUTH_API}/signup`, {
-            method: 'POST',
-            body: JSON.stringify(req),
+        return request<{ message: string; environmentId?: string | null }>(
+            `${AUTH_API}/signup`,
+            { method: 'POST', body: JSON.stringify(req) },
+        ).then((resp) => {
+            // Camel-cased like the rest of this DTO; the same field as
+            // ``SessionResponse.environment_id``.
+            adoptEnvironmentId(resp?.environmentId)
+            return resp
         })
     },
 
@@ -559,12 +579,12 @@ export const authService = {
         return request<SessionResponse>(`${AUTH_API}/login`, {
             method: 'POST',
             body: JSON.stringify(req),
-        })
+        }).then(adoptSession)
     },
 
     /** Validate the access cookie and return the current user. */
     me(): Promise<SessionResponse> {
-        return request<SessionResponse>(`${AUTH_API}/me`)
+        return request<SessionResponse>(`${AUTH_API}/me`).then(adoptSession)
     },
 
     /**
@@ -583,11 +603,6 @@ export const authService = {
     /** Revoke the refresh-token family and clear cookies. Idempotent. */
     logout(): Promise<{ ok: boolean }> {
         return request<{ ok: boolean }>(`${AUTH_API}/logout`, { method: 'POST' })
-    },
-
-    /** Rotate access + refresh cookies. Used by apiClient on 401. */
-    refresh(): Promise<SessionResponse> {
-        return request<SessionResponse>(`${AUTH_API}/refresh`, { method: 'POST' })
     },
 
     forgotPassword(email: string): Promise<{ message: string }> {
@@ -679,7 +694,7 @@ export const authService = {
         return request<SessionResponse>(
             `${AUTH_API}/${encodeURIComponent(providerSlug)}/browser-profile`,
             { method: 'POST', body: JSON.stringify({ payload }) },
-        )
+        ).then(adoptSession)
     },
 
     /** Apply an invite to the already-signed-in user. The SSO route

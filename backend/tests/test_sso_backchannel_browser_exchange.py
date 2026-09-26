@@ -472,15 +472,19 @@ async def test_a_live_upstream_token_lets_the_refresh_through():
 @pytest.mark.asyncio
 async def test_an_expired_upstream_token_ends_the_session():
     """The corporate token expired between renewals. The next refresh
-    ends the family — everywhere — and answers with the reauth envelope
-    the silent re-sign-in keys on."""
+    ends the family and answers with the reauth envelope the silent
+    re-sign-in keys on — and ends ONLY this session. The token that lapsed
+    belongs to this browser; the user's other sessions carry their own and
+    lapse on their own schedule. Killing them all made every expiry on one
+    device force a renewal on every other, as often as a short-lived
+    corporate token lapses."""
     killed: list = []
     store = InMemoryRefreshStore()
     token, claims = await _minted(store, idp_exp=int(time.time()) - 10)
 
     with pytest.raises(SsoReauthRequired):
         await _service(store, killed).refresh(token, ambient_cookies={})
-    assert killed == ["usr_1"]
+    assert killed == []
     assert store.revoked_family == claims.family_id
 
 
@@ -707,16 +711,14 @@ async def test_a_dry_run_verifies_without_writing(
 async def test_a_dry_run_names_the_missing_auth_time(
     test_client, db_session, registry, sso_events, monkeypatch,
 ):
-    """A rehearsal that succeeds without an authentication time only
-    happens on a row whose requirement is off — and then the ceiling
-    silently changes what it measures. The verdict states it, so the
-    operator learns it before real users sign in."""
+    """A sign-in without an authentication time succeeds, and the
+    re-auth ceiling then measures from the sign-in rather than from the
+    corporate authentication. The verdict states it, so the operator
+    learns it before real users sign in."""
     from backend.auth_service.core.tokens import create_dryrun_token
 
     _routes(monkeypatch)
-    row = await _make_row(
-        db_session, lifecycle="draft", require_auth_time=False,
-    )
+    row = await _make_row(db_session, lifecycle="draft")
     resp = await test_client.post(
         "/api/v1/auth/corp-browser/backchannel",
         json={"assertion": _assertion(auth_time=None)},

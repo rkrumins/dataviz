@@ -307,3 +307,48 @@ async def test_link_intent_binds_subject_to_intent_user(
     )
     assert ident is not None and ident.user_id == base.id
     assert any(e[0] == "user.identity.linked" for e in events)
+
+
+# ── An old auth_time is anchored, never born dead ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_stale_auth_time_is_anchored_so_the_session_survives_its_first_rotation(
+    svc_and_events, provider,
+):
+    """An IdP authentication older than the SSO re-auth ceiling used to
+    mint a session the first /refresh refused — minutes after sign-in.
+    The ceiling now measures from this sign-in, and the record says so."""
+    import time
+
+    svc, events = svc_and_events
+    stale = int(time.time()) - 2 * 24 * 3600
+
+    _user, tokens = await svc.complete_sso_login(
+        _identity(auth_time=stale), provider_id=provider.id,
+        provider_slug=provider.slug, linking_policy="strict",
+    )
+
+    login = next(p for t, p in events if t == "user.logged_in")
+    assert login["auth_time_asserted"] is True
+    assert login["auth_time_anchored"] is True
+    assert abs(login["auth_time"] - int(time.time())) <= 5
+    # The first renewal — the one that used to end the session.
+    await svc.refresh(tokens.refresh_token)
+
+
+@pytest.mark.asyncio
+async def test_a_recent_auth_time_is_kept_as_asserted(svc_and_events, provider):
+    import time
+
+    svc, events = svc_and_events
+    authenticated = int(time.time()) - 3600
+
+    await svc.complete_sso_login(
+        _identity(auth_time=authenticated), provider_id=provider.id,
+        provider_slug=provider.slug, linking_policy="strict",
+    )
+
+    login = next(p for t, p in events if t == "user.logged_in")
+    assert login["auth_time"] == authenticated
+    assert login["auth_time_anchored"] is False

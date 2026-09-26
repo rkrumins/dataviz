@@ -19,15 +19,17 @@
  * retries as if the 401 never happened; nothing navigates, nothing
  * flashes.
  *
- * A failure latches for {@link REAUTH_COOLDOWN_MS} (module state AND
- * sessionStorage, so a bounce to /login sees it too): a corporate IdP
- * that is genuinely down must not be hammered once per access lifetime,
- * and the user must land on a visible form with the reason — not in a
- * loop. Every path terminates: recovered, or signed out with an
- * explanation.
+ * A definitive failure latches for {@link REAUTH_COOLDOWN_MS} (module
+ * state AND sessionStorage, so a bounce to /login sees it too): a
+ * corporate IdP that is genuinely down must not be hammered once per
+ * access lifetime, and the user must land on a visible form with the
+ * reason — not in a loop. A transient one (our own completion answering
+ * 429 / 5xx, or not at all) is retried once and does not latch. Every path
+ * terminates: recovered, or on the sign-in page with an explanation.
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
 import {
+    BackchannelLoginError,
     loginWithBackchannel,
     type AuthUser,
     type LoginContext,
@@ -49,6 +51,19 @@ const FAILURE_MARKER = 'nx_bc_reauth_failed'
  *  re-sign-in must clear it, or the next genuine bounce to /login would
  *  find it spent and sit on the form. */
 const AUTO_SENTINEL = 'nx_portal_autologin_tried'
+
+/** Set by an explicit sign-out, cleared by the next sign-in. In
+ *  localStorage, not sessionStorage: every tab of the app shares it, so a
+ *  new tab — or a reload a minute later — cannot sign someone straight
+ *  back in with the corporate session they just signed out in front of.
+ *  A session that merely EXPIRED never sets it, so silent renewal is
+ *  untouched. */
+const SIGNED_OUT_MARKER = 'nx_signed_out'
+
+/** How long to wait before the one retry of a transient failure, before
+ *  jitter — long enough for a Retry-After-sized pause to clear, short
+ *  enough that nobody watching notices. */
+const TRANSIENT_RETRY_MS = 1_000
 
 let failedAtInMemory: number | null = null
 
@@ -99,11 +114,42 @@ function markReauthFailure(reason: string): void {
     }
 }
 
-/** True while the login page's silent attempt should stay quiet: it ran
- *  recently, or a recovery just failed. Time-based rather than forever —
- *  the old boolean sentinel meant the second expiry of the day landed
- *  every long-lived tab on the form for good. */
+/** An explicit sign-out: the login page's automatic sign-in stays off, in
+ *  every tab, until someone signs in on purpose. */
+export function markSignedOutByChoice(): void {
+    try {
+        window.localStorage.setItem(SIGNED_OUT_MARKER, String(Date.now()))
+    } catch {
+        // storage unavailable — the tab's own sentinel still holds it
+    }
+}
+
+/** A sign-in happened: automatic sign-in may run again next time. */
+export function clearSignedOutByChoice(): void {
+    try {
+        window.localStorage.removeItem(SIGNED_OUT_MARKER)
+    } catch {
+        // best-effort
+    }
+}
+
+function signedOutByChoice(): boolean {
+    try {
+        return window.localStorage.getItem(SIGNED_OUT_MARKER) !== null
+    } catch {
+        return false
+    }
+}
+
+/** True while the login page's silent attempt should stay quiet: the
+ *  person signed out on purpose, it ran recently, or a recovery just
+ *  failed. The last two are time-based rather than forever — the old
+ *  boolean sentinel meant the second expiry of the day landed every
+ *  long-lived tab on the form for good. The first lasts until a sign-in:
+ *  signing out is a statement of intent, and a password user who signs
+ *  out is not signed back in by opening a new tab either. */
 export function autoPortalAlreadyTried(): boolean {
+    if (signedOutByChoice()) return true
     if (readReauthFailure() !== null) return true
     try {
         const at = Number(window.sessionStorage.getItem(AUTO_SENTINEL))
@@ -179,8 +225,8 @@ async function hydrateAfterRecovery(user: AuthUser | undefined): Promise<void> {
  *
  * `'recovered'` — a fresh session exists; the caller reports the refresh
  * as having succeeded. `'failed'` — the browser's half was tried (or is
- * in cooldown) and did not produce a session; the caller signs out, and
- * the login page explains. `'not-applicable'` — this provider has no
+ * in cooldown) and did not produce a session; the caller takes the user
+ * to the sign-in page, which explains. `'not-applicable'` — this provider has no
  * browser half to run, or could not be resolved; the caller keeps its
  * existing navigation behaviour. `'gone'` — the catalog answered and
  * this slug is not in it (the connection was disabled or deleted, or
@@ -220,21 +266,75 @@ export async function attemptSilentReauth(
         return 'not-applicable'
     }
 
-    try {
+    let lastError: unknown
+    let transient = false
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (attempt > 0) {
+            await new Promise<void>((resolve) => setTimeout(
+                resolve, TRANSIENT_RETRY_MS + Math.floor(Math.random() * 1_000),
+            ))
+        }
         // The same composition the sign-in page runs — trigger, then
-        // exchange or handle — so recovery cannot drift from sign-in.
-        const body = await gatewaySignInBody(provider)
-        const { user } = await loginWithBackchannel(provider.slug, body, {
-            skipAuthRefresh: true,
-        })
-        await hydrateAfterRecovery(user)
-        clearReauthFailure()
-        clearAutoPortalSentinel()
-        return 'recovered'
-    } catch (err) {
-        markReauthFailure(
-            err instanceof Error ? err.message : 'The sign-in did not work.',
-        )
+        // exchange or handle — so recovery cannot drift from sign-in. A
+        // retry re-runs ALL of it: a browser-exchange assertion is
+        // single-use, so re-posting the one that just failed would be
+        // refused as a replay even when the failure was ours.
+        let body: Awaited<ReturnType<typeof gatewaySignInBody>>
+        try {
+            body = await gatewaySignInBody(provider)
+        } catch (err) {
+            // The browser's own call to the corporate host. Its failures
+            // are verdicts — see ``isTransientFailure``.
+            lastError = err
+            transient = false
+            break
+        }
+        try {
+            const { user } = await loginWithBackchannel(provider.slug, body, {
+                skipAuthRefresh: true,
+            })
+            await hydrateAfterRecovery(user)
+            clearReauthFailure()
+            clearAutoPortalSentinel()
+            return 'recovered'
+        } catch (err) {
+            lastError = err
+            transient = isTransientFailure(err)
+            if (!transient) break
+        }
+    }
+    if (transient) {
+        // Twice without an answer — rate-limited, a 5xx, the network, a
+        // gateway that timed out. Nothing was learned about the corporate
+        // session, so the cooldown is NOT latched: the login page this
+        // lands on gets its own automatic attempt, bounded by its own
+        // sentinel. Latching would make a 9am rush behind one corporate
+        // egress address cost everyone a click and a minute.
         return 'failed'
     }
+    markReauthFailure(
+        lastError instanceof Error ? lastError.message : 'The sign-in did not work.',
+    )
+    return 'failed'
+}
+
+/**
+ * Did the completion POST fail without saying anything about the corporate
+ * session?
+ *
+ * Called only on OUR half: the POST answering 429 or 5xx (``http_<status>``
+ * — the body was not our structured refusal), the gateway timing out behind
+ * it (``backchannel_unavailable``), or the POST never getting an answer. A
+ * refusal — no corporate session, the gateway saying no, an account-linking
+ * rule — is a verdict. So is any failure of the browser's own call to the
+ * corporate host, which never reaches here: that is usually a machine
+ * outside the domain or a CORS rule, and repeating it changes nothing.
+ */
+function isTransientFailure(err: unknown): boolean {
+    if (err instanceof BackchannelLoginError) {
+        return /^http_(429|5\d\d)$/.test(err.code)
+            || err.code === 'backchannel_unavailable'
+    }
+    return err instanceof TypeError
+        && /failed to fetch|networkerror|load failed|timed out/i.test(err.message)
 }

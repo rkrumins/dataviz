@@ -266,6 +266,29 @@ async def test_csrf_endpoint_leaves_a_valid_cookie_alone(
     assert _csrf_set_cookies(resp) == []
 
 
+async def test_csrf_endpoint_names_the_environment_it_healed_for(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch
+):
+    # The cookie this heals is named after the deployment
+    # (``nx_csrf_<env>``), and the page reads it by name. A page that never
+    # learned the suffix — an SSO sign-in completed on the page, which
+    # never runs the /me bootstrap — re-read the unscoped name after every
+    # heal and 403'd forever. The heal's own answer names the environment,
+    # so the repair can always finish itself.
+    from backend.auth_service.api import router as auth_router
+
+    await _login_cookie_user(test_client, db_session)
+
+    monkeypatch.setattr(auth_router, "AUTH_ENVIRONMENT_ID", "production")
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True, "environment_id": "production"}
+
+    monkeypatch.setattr(auth_router, "AUTH_ENVIRONMENT_ID", "")
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.json() == {"ok": True, "environment_id": None}
+
+
 async def test_csrf_endpoint_without_session_401s_and_mints_nothing(
     test_client: AsyncClient
 ):

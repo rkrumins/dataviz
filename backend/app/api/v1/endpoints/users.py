@@ -150,6 +150,9 @@ async def _admin_response(
         signupSource=getattr(user, "signup_source", None),
         identities=[_identity_ref(row) for row in identities],
         isSystemAccount=bool(getattr(user, "is_system_account", False)),
+        lastLoginAt=getattr(user, "last_login_at", None),
+        lastSeenAt=getattr(user, "last_seen_at", None),
+        lastActiveAt=getattr(user, "last_active_at", None),
     )
 
 
@@ -597,7 +600,9 @@ async def list_users(
     response: Response,
     status_filter: Optional[str] = Query(None, alias="status"),
     search: Optional[str] = Query(None, max_length=200),
-    sort: Literal["name", "email", "status", "role", "createdAt"] = Query("createdAt"),
+    sort: Literal[
+        "name", "email", "status", "role", "createdAt", "lastSeenAt", "lastLoginAt",
+    ] = Query("createdAt"),
     order: Literal["asc", "desc"] = Query("desc"),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
@@ -611,6 +616,8 @@ async def list_users(
     fetched the first page (with its default ``limit``) is how the admin
     table came to stop at fifty people. ``search`` covers what a row shows:
     name, email, id, role, and the providers the account signs in with.
+    ``lastSeenAt`` / ``lastLoginAt`` put accounts with no value last, in
+    either direction.
     """
     users = await user_repo.list_users(
         session, status=status_filter, limit=limit, offset=offset,

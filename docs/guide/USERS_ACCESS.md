@@ -111,6 +111,27 @@ it. A **System** chip leads the cell for break-glass accounts (below). The
 search box matches provider names too, so "everyone from Entra" is one
 query.
 
+Next to **Joined**, **Last seen** says how long ago each person last had the
+app open (hover it for the exact time, in UTC). Sort by it to find accounts
+nobody uses any more; accounts never seen sort last either way.
+
+Clicking a row opens that person's access drawer, which leads with an
+**Activity** block:
+
+| Field | What it means |
+|---|---|
+| **Joined** | When the account was created. |
+| **Last signed in** | The last successful sign-in of any kind — password, invite link, OIDC, SAML, portal, Enterprise Gateway, including the gateway's silent re-sign-in. |
+| **Last seen** | The last time they had the app open (made any signed-in request). |
+| **Last activity** | The last time they did something Activity analytics counts: opened a view, searched or traced, exported or published, or edited a view. |
+
+Each shows the exact time in UTC and how long ago it was. **Last seen** and
+**Last activity** are recorded to the nearest five minutes. All three
+"Last …" values start filling in from when this tracking was deployed, so
+**Not yet** means nothing has happened *since then*, not necessarily never.
+The exception is **Last signed in** for SSO users, which is backfilled from
+their linked identities' last sign-in.
+
 ### System accounts (break-glass)
 
 Marking an account as a **system account** (the shield button on its row)

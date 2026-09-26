@@ -33,9 +33,12 @@ from .core.config import (
     REFRESH_ADOPT_RECORDLESS,
     REFRESH_ROTATION_GRACE_SECONDS,
     SSO_SESSION_MAX_AGE_SECONDS,
+    sso_auth_time_is_stale,
 )
 from backend.common.identity_provenance import asserted_fields, build_snapshot
 
+from .activity import RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS
+from .activity import ActivityGate
 from .core.password import disabled_password_hash
 from .core.tokens import (
     create_access_token,
@@ -71,15 +74,22 @@ logger = logging.getLogger(__name__)
 _FALLBACK_REAUTH_URL = "/login"
 
 
-def _build_reauth_url(provider_slug: Optional[str], *, next_path: str) -> str:
+def _build_reauth_url(
+    provider_slug: Optional[str], *, next_path: str, force: bool = True,
+) -> str:
     """Compose the IdP-bound re-auth URL. ``force=1`` requests an IdP
-    re-authentication even when the IdP session is still warm."""
+    re-authentication even when the IdP session is still warm — right for
+    the daily re-auth ceiling, whose whole point is a fresh credential.
+    ``force=False`` lets the IdP's own session decide, which is what an
+    idle or absolute expiry wants: the same outcome as the user pressing
+    the provider's button on the sign-in page."""
     base = (
         f"/api/v1/auth/{provider_slug}/login"
         if provider_slug else _FALLBACK_REAUTH_URL
     )
     safe_next = next_path or "/"
-    return f"{base}?next={quote(safe_next, safe='/')}&force=1"
+    url = f"{base}?next={quote(safe_next, safe='/')}"
+    return f"{url}&force=1" if force else url
 
 
 @dataclass(frozen=True)
@@ -129,8 +139,8 @@ class _PendingLiveness:
 class _RefreshRejected(Exception):
     """Carries a refresh rejection out of the DB session scope.
 
-    Everything a rejection still has to do — revoke the family, kill live
-    access tokens, write the audit row — has to happen on a connection
+    Everything a rejection still has to do — revoke the family, write the
+    audit row — has to happen on a connection
     the request scope is no longer holding, and after that scope has
     rolled back. Raising this instead of the caller-facing error lets
     ``refresh`` unwind the session first and settle the consequences
@@ -141,14 +151,11 @@ class _RefreshRejected(Exception):
         self,
         error: Exception,
         *,
-        kill_sessions_for: Optional[str] = None,
         audit: Optional[tuple[str, dict]] = None,
     ):
         super().__init__(str(error))
         #: The error to re-raise at the caller once cleanup is done.
         self.error = error
-        #: User id whose live access tokens should be tombstoned, if any.
-        self.kill_sessions_for = kill_sessions_for
         #: ``(event_type, payload)`` to emit in its own transaction.
         self.audit = audit
 
@@ -181,7 +188,8 @@ class LocalIdentityService:
         provider_id)`` -> dict — Phase 3 group-target reconciler
         (handles both role_binding and group_membership targets).
       * ``session_killer(user_id)`` -> None — Phase 2.E
-        revoke-all-sessions hook.
+        revoke-all-sessions hook, for when an enterprise IdP withdraws
+        the session upstream.
       * ``session_revoker(sid)`` -> None — tombstone ONE session. The
         narrow sibling of ``session_killer``: sign-out on this device
         must not end the user's sessions on their other devices.
@@ -229,6 +237,9 @@ class LocalIdentityService:
         # mapping lookup, no writes.
         self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
+        # "Last seen" for Admin → Users, written from ``validate_session``
+        # at most once per person per window. See ``activity.py``.
+        self._seen_gate = ActivityGate()
         self._session_revoker = session_revoker
         # (url, *, provider_id=None) -> (bytes, content_type). Injected
         # by app startup, which binds the outbound guard and the
@@ -266,7 +277,28 @@ class LocalIdentityService:
             if orm is None or orm.deleted_at is not None or orm.status != "active":
                 return None
             roles = await self._user_repo.get_user_roles(session, orm.id)
+        await self._note_seen(orm.id)
         return _orm_to_user(orm, role=_primary_role(roles))
+
+    async def _note_seen(self, user_id: str) -> None:
+        """Stamp "last seen" — this is every authenticated request, so gated.
+
+        Its own session, after the read has closed, so a failed stamp can
+        never cost the request it rode in on: best-effort, logged, gone.
+        Optional on the repo, like every other write the stub repos in the
+        tests do not implement.
+        """
+        touch = getattr(self._user_repo, "touch_last_seen", None)
+        if touch is None or not self._seen_gate.opens(user_id):
+            return
+        try:
+            async with self._session_factory() as session:
+                await touch(
+                    session, user_id,
+                    resolution_seconds=ACTIVITY_RESOLUTION_SECONDS,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort by design
+            logger.warning("Could not record last-seen for %s: %s", user_id, exc)
 
     async def auth_config(self) -> AuthConfigSnapshot:
         """Expose the current platform posture to the routing layer.
@@ -476,14 +508,6 @@ class LocalIdentityService:
             user, tokens, liveness = await self._refresh_within_session(claims)
         except _RefreshRejected as rejection:
             await self._revoke_family_committed(claims.family_id)
-            if rejection.kill_sessions_for is not None and self._session_killer:
-                try:
-                    await self._session_killer(rejection.kill_sessions_for)
-                except Exception as exc:  # noqa: BLE001 — best-effort
-                    logger.warning(
-                        "session_killer failed during refresh rejection "
-                        "(user=%s): %s", rejection.kill_sessions_for, exc,
-                    )
             if rejection.audit is not None:
                 await self._emit_audit(*rejection.audit)
             raise rejection.error from None
@@ -504,6 +528,32 @@ class LocalIdentityService:
                 ambient_headers=ambient_headers or {},
             )
         return user, tokens
+
+    async def _expired_sso_session(
+        self, session, user_id: str, *, reason: str, elapsed_seconds: int,
+    ) -> "_RefreshRejected":
+        """The rejection for an SSO session past its idle or absolute ceiling.
+
+        The re-auth envelope, not a bare 401, and WITHOUT ``force`` — the
+        identity provider's own session decides whether a credential is
+        needed, exactly as if the user had pressed its button on the
+        sign-in page. That is the page this used to strand them on. Only
+        this session ends: the ceiling is this session's, and so is the
+        consequence.
+        """
+        provider_slug = await self._latest_identity_slug(session, user_id)
+        return _RefreshRejected(
+            SsoReauthRequired(
+                _build_reauth_url(provider_slug, next_path="/", force=False),
+                provider=provider_slug or "sso",
+            ),
+            audit=("user.sso_session_expired", {
+                "user_id": user_id,
+                "provider_slug": provider_slug,
+                "reason": reason,
+                "elapsed_seconds": elapsed_seconds,
+            }),
+        )
 
     async def _refresh_within_session(
         self, claims,
@@ -642,6 +692,15 @@ class LocalIdentityService:
             # killed with it: a session past its ceiling is over, and
             # leaving the rest of the chain live would let the next tab
             # walk straight back in.
+            #
+            # An SSO session is refused the way the re-auth ceiling refuses
+            # one, not with a bare 401 (``_expired_sso_session``): the
+            # person has an identity provider that can vouch for them
+            # again, and a bare 401 dead-ended them on the sign-in page —
+            # the "open it the next day" experience — to press the button
+            # that does exactly that. Only this session ends; the family
+            # was already revoked and nothing about the user's other
+            # sessions has changed.
             if SESSION_IDLE_MAX_SECONDS > 0:
                 # From the server's record, not the token's own claim —
                 # the same rule ``auth_time`` follows two blocks down,
@@ -659,6 +718,11 @@ class LocalIdentityService:
                         "family=%s idle=%ds",
                         claims.sub, claims.family_id, idle_seconds,
                     )
+                    if auth_time is not None:
+                        raise await self._expired_sso_session(
+                            session, orm.id, reason="idle",
+                            elapsed_seconds=idle_seconds,
+                        )
                     raise _RefreshRejected(
                         InvalidRefreshToken("session_idle"),
                     )
@@ -673,6 +737,11 @@ class LocalIdentityService:
                             "family=%s age=%ds",
                             claims.sub, claims.family_id, age_seconds,
                         )
+                        if auth_time is not None:
+                            raise await self._expired_sso_session(
+                                session, orm.id, reason="absolute",
+                                elapsed_seconds=age_seconds,
+                            )
                         raise _RefreshRejected(
                             InvalidRefreshToken("session_expired"),
                         )
@@ -698,11 +767,15 @@ class LocalIdentityService:
                 if is_sso_session else 0
             )
             if is_sso_session and sso_age > SSO_SESSION_MAX_AGE_SECONDS:
-                # Kill the family + every live access token across all
-                # tabs so the next request from any browser surface
-                # bounces to the IdP. The slug lookup needs the session,
-                # so resolve it here; the revocation, the session-killer
-                # (Redis) and the audit event all happen after this scope
+                # Kill THIS session's family so its next request bounces to
+                # the IdP. Tabs in the same browser share its cookies, which
+                # the refresh route clears, and recover through the shared
+                # refresh lock. The user's OTHER sessions are left alone:
+                # each carries its own auth_time and meets this ceiling on
+                # its own schedule. Tombstoning all of them here made every
+                # daily expiry on one device force a renewal on every other.
+                # The slug lookup needs the session, so resolve it here; the
+                # revocation and the audit event happen after this scope
                 # closes — see ``refresh``.
                 provider_slug = await self._latest_identity_slug(session, orm.id)
                 logger.info(
@@ -714,10 +787,10 @@ class LocalIdentityService:
                         _build_reauth_url(provider_slug, next_path="/"),
                         provider=provider_slug or "sso",
                     ),
-                    kill_sessions_for=orm.id,
                     audit=("user.sso_session_expired", {
                         "user_id": orm.id,
                         "provider_slug": provider_slug,
+                        "reason": "reauth_ceiling",
                         "auth_time": auth_time,
                         "elapsed_seconds": sso_age,
                     }),
@@ -740,6 +813,11 @@ class LocalIdentityService:
             # verification, and it exists only for tokens this
             # deployment minted with it.
             if claims.idp_exp is not None and int(time.time()) > claims.idp_exp:
+                # This browser's corporate token expired — a fact about this
+                # session alone, so only this session ends. A corporate token
+                # can live thirty minutes; tombstoning every other session
+                # each time one lapsed forced every other device to renew,
+                # on every expiry, for nothing its own token had done.
                 provider_slug = await self._latest_identity_slug(session, orm.id)
                 logger.info(
                     "Upstream credential expired (user=%s, slug=%s, "
@@ -751,7 +829,6 @@ class LocalIdentityService:
                         _build_reauth_url(provider_slug, next_path="/"),
                         provider=provider_slug or "sso",
                     ),
-                    kill_sessions_for=orm.id,
                     audit=("user.sso_session_ended_upstream", {
                         "user_id": orm.id,
                         "provider_slug": provider_slug,
@@ -927,6 +1004,38 @@ class LocalIdentityService:
                 "claim mapping.",
                 provider_id,
             )
+        # An asserted auth_time can be too OLD to use, which fails worse
+        # than a missing one: the session is refused at its first renewal
+        # — minutes from now — by the very ceiling it is measured against,
+        # and that refusal is the whole of the user's sign-in. It is
+        # routine for kinds that report the corporate portal's ORIGINAL
+        # login (a gateway's ``lastLogin``), where no upstream prompt
+        # exists to force a fresher one, so the user could never hold an
+        # SSO session at all. OIDC and SAML ask their IdP for a fresh
+        # authentication before reaching here (``_finish_sso_login``);
+        # arriving stale anyway means the IdP ignored that.
+        #
+        # Measured from this sign-in instead — the same fallback as a
+        # missing value, and never a way to outlive the upstream session:
+        # a gateway is re-asked on every renewal, a browser-exchange
+        # session is capped at the corporate token's own expiry, and the
+        # ceiling still ends this session within a day of now.
+        now = int(time.time())
+        auth_time_anchored = (
+            auth_time_asserted and sso_auth_time_is_stale(auth_time, now=now)
+        )
+        if auth_time_anchored:
+            logger.warning(
+                "IdP provider_id=%s asserted auth_time=%d, %ds ago — past the "
+                "%.1fh SSO re-auth ceiling, so a session measured from it "
+                "would end at its first renewal. Measuring from this sign-in "
+                "instead. Expected for gateway or portal connections that "
+                "report the portal's original login; for OIDC or SAML it "
+                "means the IdP ignored a forced re-authentication.",
+                provider_id, auth_time, now - auth_time,
+                SSO_SESSION_MAX_AGE_SECONDS / 3600,
+            )
+            auth_time = now
 
         claims_extra: dict = {}
         async with self._session_factory() as session:
@@ -1249,6 +1358,10 @@ class LocalIdentityService:
                     # IdP authentication. Recorded per-login so the
                     # question is answerable per provider after the fact.
                     "auth_time_asserted": auth_time_asserted,
+                    # True when the IdP's value was too old to survive the
+                    # ceiling's first check, so ``auth_time`` above is this
+                    # sign-in instead. See where it is set.
+                    "auth_time_anchored": auth_time_anchored,
                     "groups": idp_groups,
                     # How well we actually knew this person. Recorded on the
                     # login itself so the question is answerable later without
@@ -1908,7 +2021,26 @@ class LocalIdentityService:
             # confirm and the column is never read.
             idp_checked_at=int(time.time()) if idp_provider_id else None,
         )
+        if family_id is None:
+            await self._note_login(session, user_id)
         return token
+
+    async def _note_login(self, session, user_id: str) -> None:
+        """Stamp "last signed in" for Admin → Users.
+
+        Here because a new family is minted by exactly one thing — a
+        sign-in, of every kind: password, invite, each SSO kind, a
+        gateway's silent re-sign-in. In the login's own transaction, under
+        a savepoint so a failed stamp can never fail the sign-in.
+        """
+        touch = getattr(self._user_repo, "touch_last_login", None)
+        if touch is None:
+            return
+        try:
+            async with session.begin_nested():
+                await touch(session, user_id)
+        except Exception as exc:  # noqa: BLE001 — best-effort by design
+            logger.warning("Could not record last sign-in for %s: %s", user_id, exc)
 
     def _issue_tokens(
         self,

@@ -67,7 +67,6 @@ export interface BackchannelSettings {
     exchange_headers?: Record<string, string>
     exchange_claims_path?: string
     timeout_seconds?: number
-    require_auth_time?: boolean
     liveness_on_refresh?: boolean
     liveness_grace_seconds?: number
 }

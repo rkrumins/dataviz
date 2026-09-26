@@ -102,10 +102,16 @@ back to reactive 401 refresh, and an idle tab issues no request to take a 401 wi
 session lapses in precisely the way the keepalive exists to prevent — and the symptom is
 "`nx_access` is never replaced", with nothing in any log.
 
-The name is now scoped. The client learns the suffix from `environment_id` on the
-`GET /auth/me` response — the bootstrap call, which resolves before the keepalive is
-allowed to start — and falls back to the unscoped name when the field is absent, so a
-mid-rollout tab and a single-deployment install both keep working. Discovery failing is
+The name is now scoped. The client learns the suffix from `environment_id`, which every
+response that establishes, rotates or heals a session carries — `/login`, `/refresh`,
+`/me`, every SSO completion that answers in JSON, an invited signup, and the CSRF heal
+`GET /auth/csrf` — and falls back to the unscoped name until one answers, so a
+mid-rollout tab and a single-deployment install both keep working.
+
+It used to be `GET /auth/me` alone, on the premise that the bootstrap call precedes any
+write. An SSO sign-in completed on the page (the Enterprise Gateway, a portal) never makes
+it, so its tab read the unscoped `nx_csrf`, found nothing, and sent every write without its
+CSRF token — graph reads included, which are POSTs — until a reload. Discovery failing is
 survivable by construction: the scheduler already treats "no published expiry" as
 "probe again in 60s" rather than as an error.
 

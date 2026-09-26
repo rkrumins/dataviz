@@ -994,8 +994,11 @@ async def lifespan(_app: FastAPI):
         }
 
     # Phase 2.E: inject the session-killer (RevocationService). Called
-    # by the auth service when the SSO daily ceiling forces re-auth so
-    # every live access token across all tabs bounces to the IdP.
+    # by the auth service when an enterprise IdP withdraws a session on a
+    # liveness check — the corporate side ended it, so every live access
+    # token the user holds, in every browser, bounces to the IdP. A
+    # session reaching its OWN time limit (the daily re-auth ceiling, a
+    # corporate token's expiry) ends only that session.
     async def _kill_user_sessions(user_id: str) -> None:
         await get_revocation_service().revoke_all_user_sessions(user_id)
 

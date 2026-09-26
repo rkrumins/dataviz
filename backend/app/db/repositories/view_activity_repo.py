@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ViewActivityLogORM, ViewORM, view_is_live
-from backend.app.db.repositories import outbox_event_repo
+from backend.app.db.repositories import outbox_event_repo, user_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,8 @@ async def record_view_activity(
             },
         )
         await session.flush()
+        # A view edited is activity — "last activity" in Admin → Users.
+        await user_repo.note_activity(session, actor)
     except Exception:  # noqa: BLE001 — never fail the mutation on audit error
         logger.exception("record_view_activity failed (view=%s action=%s)", view_id, action)
 

@@ -498,8 +498,9 @@ The refresh JWT carries:
 * `jti` — unique per token; consumed on `/refresh`
 * `fam` — family id; persists across rotations
 * `exp` — wall-clock expiry (7 days)
-* `auth_time` — IdP-issued epoch (SSO only); propagates **unchanged**
-  through every rotation
+* `auth_time` — IdP-issued epoch (SSO only), or the sign-in instant when
+  the IdP's is missing or already too old to survive the ceiling;
+  propagates **unchanged** through every rotation
 
 When `/refresh` runs:
 
@@ -507,9 +508,9 @@ When `/refresh` runs:
    family** — reuse-detection (`refresh.check_and_record_rotation`).
 2. If the user is SSO (`auth_time IS NOT NULL`) and
    `now - auth_time > SSO_SESSION_MAX_AGE_SECONDS`:
-   * Revoke family.
-   * Kill all live access tokens (`session_killer`).
-   * Emit `user.sso_session_expired`.
+   * Revoke this session's family (the user's other sessions are left
+     to their own ceilings).
+   * Emit `user.sso_session_expired` (`reason: "reauth_ceiling"`).
    * Raise `SsoReauthRequired(login_url=…)` — router returns 401
      with structured body the frontend follows.
 3. Re-run the reconciler (`reconcile_sso_targets`) against the
@@ -1642,7 +1643,7 @@ Every admin endpoint is gated by `requires("system:admin")`.
 | `user.sso_linked` | auto-link branch | `user_id, email, provider_id, external_id, linking_policy, has_password, had_existing_identity` |
 | `user.sso_link_denied` | unsafe_auto_link | `email, provider_id, external_id, reason, deny_reasons, linking_policy, email_verified, existing_status` |
 | `user.sso_jit_blocked` | `allow_jit_provisioning=false` | `email, provider_id, external_id, reason` |
-| `user.sso_session_expired` | 24h ceiling | `user_id, provider_slug, auth_time, elapsed_seconds` |
+| `user.sso_session_expired` | 24h ceiling, or an SSO session's idle / absolute ceiling | `user_id, provider_slug, reason, elapsed_seconds` (+ `auth_time` for the 24h ceiling) |
 | `user.sso_login_failed` | any SSO callback failure | `ref, provider_slug, provider_id, reason` — the `ref` is what the user sees at `/login?ref=…`; the reason never leaves the audit log |
 | `user.identity.linked` | self-service link | `user_id, provider_id, external_id, via` |
 | `user.identity.unlinked` | self-service unlink | `user_id, identity_id, via` |

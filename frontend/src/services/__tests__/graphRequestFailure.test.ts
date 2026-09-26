@@ -3,8 +3,9 @@
  *
  * Pins the contract that fixes "Graph service is unavailable" over a healthy
  * FalkorDB: only a backend-confirmed outage is `unavailable` (and counts
- * toward the client breaker); a slow, shed, gateway or session failure is
- * `transient` and retried in place when the read is idempotent.
+ * toward the client breaker); a slow, shed or gateway failure is `transient`
+ * and retried in place when the read is idempotent; an auth failure the fetch
+ * layer could not repair is `session` — neither an outage nor slowness.
  */
 import { describe, expect, it } from 'vitest'
 
@@ -67,9 +68,13 @@ describe('classifyGraphFailure', () => {
     expect(classifyGraphFailure(new Error('PROVIDER_LOADING'))).toBe('warming')
   })
 
-  it('an expired session or a CSRF failure is never an outage', () => {
-    expect(classifyGraphFailure(apiError(401, { detail: 'Not authenticated' }))).toBe('transient')
-    expect(classifyGraphFailure(apiError(403, { detail: { error: 'csrf_failed' } }))).toBe('transient')
+  it('an expired session or a CSRF failure the fetch layer could not repair is a session problem — never an outage, never slow', () => {
+    expect(classifyGraphFailure(apiError(401, { detail: 'Not authenticated' }))).toBe('session')
+    expect(classifyGraphFailure(apiError(403, { detail: { error: 'csrf_failed' } }))).toBe('session')
+  })
+
+  it('a 403 for a missing permission is not a session problem', () => {
+    expect(classifyGraphFailure(apiError(403, { detail: { code: 'missing_permission' } }))).toBe('transient')
   })
 
   it('a client-side timeout is transient; no backend at all is unavailable', () => {
@@ -93,6 +98,7 @@ describe('isProviderOutageSignal — what the client breaker counts', () => {
       apiError(500, { detail: { code: 'GRAPH_QUERY_ERROR' } }),
       apiError(429, { detail: { code: 'PROVIDER_BUSY' } }),
       apiError(401, { detail: 'Not authenticated' }),
+      apiError(403, { detail: { error: 'csrf_failed' } }),
       new TypeError('Request timed out after 30s'),
     ]) {
       expect(isProviderOutageSignal(err)).toBe(false)
@@ -114,6 +120,7 @@ describe('isRetryableGraphFailure / retryDelayMs', () => {
     expect(isRetryableGraphFailure(apiError(500, {}))).toBe(false)
     expect(isRetryableGraphFailure(apiError(401, {}))).toBe(false)
     expect(isRetryableGraphFailure(apiError(403, {}))).toBe(false)
+    expect(isRetryableGraphFailure(apiError(403, { detail: { error: 'csrf_failed' } }))).toBe(false)
   })
 
   it('honours Retry-After (capped) and backs off otherwise, always with jitter', () => {

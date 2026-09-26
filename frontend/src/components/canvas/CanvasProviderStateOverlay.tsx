@@ -85,16 +85,20 @@ function UnavailableMark() {
   )
 }
 
-/** The three ways a load ends without data (see `HydrationStatus`):
+/** The five ways a load ends without data (see `HydrationStatus`):
  *  - `warming`     — the provider is loading its dataset after a restart.
  *  - `slow`        — the provider is reachable, but this view's requests were
  *                    too slow, were shed under load, or hit a transient
- *                    gateway / session hiccup. The canvas keeps retrying.
+ *                    gateway hiccup. The canvas keeps retrying.
  *  - `unavailable` — the backend confirmed the provider is unreachable.
  *  - `error`       — code threw while the view loaded (a bug, not the
  *                    provider); named as such so it is never mistaken for an
- *                    outage or a slow graph. */
-export type CanvasProviderState = 'warming' | 'slow' | 'unavailable' | 'error'
+ *                    outage or a slow graph.
+ *  - `session`     — the sign-in needs reconnecting: a 401 / CSRF 403 the
+ *                    fetch layer already tried to repair. The canvas keeps
+ *                    retrying, but a page reload is what reliably fixes it,
+ *                    so the overlay offers one. */
+export type CanvasProviderState = 'warming' | 'slow' | 'unavailable' | 'error' | 'session'
 
 export interface CanvasProviderStateOverlayProps {
   state: CanvasProviderState
@@ -106,6 +110,7 @@ const COPY: Record<CanvasProviderState, { title: string; status: string }> = {
   slow: { title: 'Taking a little longer than usual', status: 'Retrying automatically…' },
   unavailable: { title: 'Graph service is unavailable', status: 'Watching for recovery…' },
   error: { title: 'Something went wrong while loading', status: 'Retrying automatically…' },
+  session: { title: 'Reconnecting your session', status: 'Retrying automatically…' },
 }
 
 export interface CanvasProviderStatePillProps {
@@ -140,7 +145,8 @@ export const CanvasProviderStatePill = React.memo(function CanvasProviderStatePi
     : state === 'warming' ? 'Preparing your graph'
       : state === 'slow' ? 'Refreshing is taking longer than usual'
         : state === 'error' ? 'This view hit an error while refreshing'
-          : 'Graph service is unavailable'
+          : state === 'session' ? 'Reconnecting your session'
+            : 'Graph service is unavailable'
   const detail = calm
     ? 'showing what’s loaded · retrying automatically'
     : 'showing the last loaded data · watching for recovery'
@@ -189,7 +195,8 @@ export const CanvasProviderStateOverlay = React.memo(function CanvasProviderStat
   onRetry,
 }: CanvasProviderStateOverlayProps) {
   // Warming and slow share the calm, "still loading" treatment: neither is
-  // an outage, and alarming amber for a busy afternoon was the old bug.
+  // an outage, and alarming amber for a busy afternoon was the old bug. A
+  // session that needs reconnecting is calm too — nothing is down.
   const warming = state !== 'unavailable'
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center px-6">
@@ -240,6 +247,8 @@ export const CanvasProviderStateOverlay = React.memo(function CanvasProviderStat
                 <>The graph service is reachable, but this view is loading slowly right now. <span className="text-ink">Nothing has been lost</span> — we keep trying in the background and it fills in as soon as it answers.</>
               ) : state === 'error' ? (
                 <>The graph service answered, but this view hit an error while loading. <span className="text-ink">Nothing has been lost</span> — we keep retrying, and a refresh usually clears it. If it keeps happening, the details are in the browser console.</>
+              ) : state === 'session' ? (
+                <>Your data is safe — your sign-in just needs refreshing before this view can load. We keep retrying, and <span className="text-ink">reloading the page reconnects it straight away</span> (or takes you to sign in if your session has ended).</>
               ) : (
                 <>The graph service isn’t responding right now. <span className="text-ink">Nothing has been lost</span> — this view fills in the moment the service is back.</>
               )}
@@ -257,7 +266,24 @@ export const CanvasProviderStateOverlay = React.memo(function CanvasProviderStat
             {COPY[state].status}
           </div>
 
-          {onRetry && (
+          {state === 'session' ? (
+            // A reload is what reliably fixes this: bootstrap re-runs
+            // /auth/me, which re-mints the CSRF cookie, or lands on /login
+            // if the session really has ended. "Retry now" would only re-run
+            // the same requests through the same repair that just failed —
+            // the auto-retry is already doing that.
+            <button
+              onClick={() => window.location.reload()}
+              className={cn(
+                'group mt-1 inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold',
+                'transition-all duration-200 active:scale-[0.97]',
+                'bg-accent-lineage text-white shadow-lg shadow-accent-lineage/25 hover:brightness-110',
+              )}
+            >
+              <RefreshCw className="h-4 w-4 transition-transform duration-500 group-hover:rotate-180" />
+              Reload page
+            </button>
+          ) : onRetry && (
             <button
               onClick={onRetry}
               className={cn(

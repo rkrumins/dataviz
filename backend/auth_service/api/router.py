@@ -38,7 +38,7 @@ import os
 import secrets
 import time
 from typing import Callable, Optional
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import jwt as pyjwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -90,6 +90,7 @@ from ..core.config import (
     RATELIMIT_LOGIN_PER_ACCOUNT,
     RATELIMIT_LOGIN_PER_IP,
     RATELIMIT_REFRESH_PER_SESSION,
+    sso_auth_time_is_stale,
 )
 from ..core.tokens import (
     create_mock_identity_token,
@@ -265,12 +266,19 @@ class SessionResponse(BaseModel):
     #: Which deployment answered, so the SPA can resolve the
     #: environment-scoped cookie names it has to read by name.
     #:
-    #: Only ``nx_access_exp`` needs this today. It is read from
-    #: JavaScript to schedule token renewal, and it is scoped because two
-    #: deployments under one parent domain otherwise write the same name
-    #: into one jar — leaving each tab scheduling against the other's
-    #: token. ``/auth/me`` carries it because that is the bootstrap call,
-    #: made before the keepalive can start.
+    #: Two are read from JavaScript: ``nx_csrf``, mirrored into the
+    #: ``X-CSRF-Token`` header on every write, and ``nx_access_exp``, which
+    #: schedules token renewal. Both are scoped because two deployments
+    #: under one parent domain otherwise share one jar (see ``cookies.py``).
+    #:
+    #: EVERY response that establishes or rotates a session carries it —
+    #: /login, /refresh, /me and each SSO completion that answers in JSON —
+    #: and the SPA adopts it from each. It used to be read from /me alone,
+    #: on the reasoning that the bootstrap call precedes any write. An SSO
+    #: sign-in completed on the page (the Enterprise Gateway, a portal)
+    #: never makes that call, so its tab read the unscoped name, found
+    #: nothing, and sent every write — graph reads included, which are
+    #: POSTs — without its CSRF token.
     #:
     #: ``None`` when ``AUTH_ENVIRONMENT_ID`` is unset, which is also the
     #: case where the names are unscoped — so the client's fallback and
@@ -280,6 +288,15 @@ class SessionResponse(BaseModel):
 
 class _Ack(BaseModel):
     ok: bool = True
+
+
+class _CsrfHealed(_Ack):
+    """``GET /auth/csrf``'s answer: which environment the healed cookie
+    is named after. See ``SessionResponse.environment_id`` — a page that
+    has to repair its CSRF cookie is exactly a page that may not know the
+    name to read, and a heal that re-mints ``nx_csrf_<env>`` for a page
+    reading ``nx_csrf`` repairs nothing."""
+    environment_id: Optional[str] = None
 
 
 class ProviderSummary(BaseModel):
@@ -879,6 +896,7 @@ def _sso_failure_handler(
 async def _finish_sso_login(
     request: Request, *, svc, snap, slug: str, identity, next_path: str,
     fail, clear_flow: Optional[Callable[[Response], None]] = None,
+    reauth_forced: Optional[bool] = None,
 ) -> Response:
     """Everything between "we have a verified identity" and a response.
 
@@ -890,6 +908,13 @@ async def _finish_sso_login(
     this verbatim. It used to be copy-pasted, which is precisely why the
     dry-run reached two of the four: adding a step here meant remembering
     four call sites. Now it means one.
+
+    ``reauth_forced`` says whether this kind can ask its IdP for a fresh
+    authentication, and whether this flow already did: ``None`` for a kind
+    with no such lever (gateway, portal, custom), ``False`` for an OIDC or
+    SAML flow that has not asked yet, ``True`` for one that has. An
+    ``auth_time`` too old to survive the SSO re-auth ceiling's first check
+    earns one forced round trip while the flow can still ask for it.
     """
     rehearsal = await _dry_run_or_none(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
@@ -897,6 +922,37 @@ async def _finish_sso_login(
     )
     if rehearsal is not None:
         return rehearsal
+
+    # A session minted from this identity would be refused at its first
+    # renewal — the IdP's session is older than our re-auth ceiling and it
+    # answered without re-authenticating. OIDC ``max_age`` and SAML's
+    # AuthnInstant make that the IdP's call, not the user's. Ask it once,
+    # properly (``prompt=login`` / ``ForceAuthn``), instead of handing out
+    # a session that ends a few minutes from now. Not on a forced flow —
+    # the IdP ignoring the request is not fixed by repeating it, and
+    # ``complete_sso_login`` measures from this sign-in in that case.
+    # After the rehearsal, which must report what the real sign-in would
+    # do rather than bounce, and before the link intent, whose cookie has
+    # to survive the round trip.
+    auth_time = getattr(identity, "auth_time", None)
+    if (
+        reauth_forced is False
+        and isinstance(auth_time, int) and auth_time > 0
+        and sso_auth_time_is_stale(auth_time, now=int(time.time()))
+    ):
+        logger.info(
+            "SSO sign-in carried a stale auth_time (kind=%s, slug=%s, "
+            "age=%ds); asking the IdP for a fresh authentication",
+            snap.kind, slug, int(time.time()) - auth_time,
+        )
+        bounce = RedirectResponse(
+            f"/api/v1/auth/{quote(slug, safe='')}/login"
+            f"?next={quote(_safe_next(next_path), safe='/')}&force=1",
+            status_code=status.HTTP_302_FOUND,
+        )
+        if clear_flow is not None:
+            clear_flow(bounce)
+        return bounce
 
     link_intent_user_id = await _resolve_link_intent(
         request, svc, provider_id=snap.id,
@@ -1268,7 +1324,7 @@ async def me(request: Request, response: Response):
 # ── GET /auth/csrf ────────────────────────────────────────────────────
 
 
-@router.get("/csrf", response_model=_Ack)
+@router.get("/csrf", response_model=_CsrfHealed)
 async def csrf(request: Request, response: Response):
     """Repair ``nx_csrf`` for the current session, in place — no rotation.
 
@@ -1293,6 +1349,9 @@ async def csrf(request: Request, response: Response):
     401 when there is no live session to heal against, so the client falls
     through to the refresh / login path rather than looping here. Being a
     GET, it is a CSRF-safe method and needs no token of its own.
+
+    The answer names the environment the cookie is scoped to, so the
+    client can read the cookie it was just handed — see ``_CsrfHealed``.
     """
     svc = _identity_service(request)
     user = await svc.validate_session(read_access_cookie(request))
@@ -1306,7 +1365,7 @@ async def csrf(request: Request, response: Response):
             detail="Not authenticated",
         )
     _heal_csrf_cookie(request, response)
-    return _Ack()
+    return _CsrfHealed(environment_id=AUTH_ENVIRONMENT_ID or None)
 
 
 # ── GET /auth/diagnostics ─────────────────────────────────────────────
@@ -1669,6 +1728,7 @@ async def sso_login(
             code_verifier=flow["code_verifier"],
             next_path=flow["next"],
             provider_id=provider.provider_id,
+            force_reauth=force_flag,
         )
         resp = RedirectResponse(auth_url, status_code=status.HTTP_302_FOUND)
         set_oidc_cookie(resp, state_token)
@@ -1690,6 +1750,7 @@ async def sso_login(
         state_token = create_saml_state_token(
             relay_state=relay_state, next_path=next_path,
             provider_id=provider.provider_id, request_id=request_id,
+            force_reauth=force_flag,
         )
         resp = RedirectResponse(redirect_url, status_code=status.HTTP_302_FOUND)
         set_saml_cookie(resp, state_token)
@@ -1790,6 +1851,7 @@ async def oidc_callback(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
         next_path=flow.get("next"), fail=_fail,
         clear_flow=clear_oidc_cookie,
+        reauth_forced=bool(flow.get("force")),
     )
 
 
@@ -1864,6 +1926,7 @@ async def saml_acs(slug: str, request: Request):
         request, svc=svc, snap=snap, slug=slug, identity=identity,
         next_path=flow.get("next"), fail=_fail,
         clear_flow=clear_saml_cookie,
+        reauth_forced=bool(flow.get("force")),
     )
 
 
@@ -2129,9 +2192,13 @@ async def _backchannel_login_flow(
     corporate cookie and needs no JavaScript.
 
     ``force=1`` (the 24h SSO re-auth bounce) is accepted and has no
-    special effect — there is no upstream prompt to force. The bounce
-    still does its job, because the exchange re-asks the IdP and a
-    fresh ``auth_time`` comes back with the claims.
+    special effect — there is no upstream prompt to force. The exchange
+    does re-ask the IdP, but what comes back as ``auth_time`` is often the
+    corporate portal's ORIGINAL login (``lastLogin``), which can be days
+    old — so it is not assumed fresh. A value already past the ceiling is
+    measured from this sign-in instead (``complete_sso_login``), and the
+    gateway itself, re-asked on every renewal, decides when the session
+    ends.
 
     Login-CSRF applies here and is benign: a hostile page can navigate
     the user to this route and cause a session to be minted *as

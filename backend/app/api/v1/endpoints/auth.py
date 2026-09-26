@@ -57,6 +57,7 @@ router = APIRouter()
 # goes this way.
 from backend.auth_service.api.router import limiter
 from backend.auth_service.core.config import (
+    AUTH_ENVIRONMENT_ID,
     RATELIMIT_PASSWORD_RESET_PER_ACCOUNT,
     RATELIMIT_SENSITIVE_PER_IP,
 )
@@ -665,6 +666,7 @@ async def signup(
                 autoSignedIn=True,
                 user=user_dto,
                 redirectTo=_invite_landing(invite_workspace_id),
+                environmentId=AUTH_ENVIRONMENT_ID or None,
             )
         return SignUpResponse(message="Account created and activated. You can now sign in.")
     else:

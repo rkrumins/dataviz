@@ -144,12 +144,13 @@ For a gateway connection's browser exchange, the rehearsal verdict states
 which reply shape arrived (a signed token or bare JSON) and what judged it —
 the quickest way to see which rating a deployment's gateway earns.
 
-The verdict also says when the claims carried **no authentication time**. A
-sign-in can only get that far on a connection whose *Require an
-authentication time* toggle is off, and the line spells out the cost: the
+The verdict also says when the claims carried **no authentication time**.
+Such a sign-in is not refused; the line spells out what it means: the
 re-certification ceiling (24 hours by default, `SSO_SESSION_MAX_AGE_HOURS`)
 then measures from each sign-in instead of from the moment the person
-actually authenticated at the IdP.
+actually authenticated at the IdP. The same happens when the time is too old
+to use — a gateway reporting the portal's original login — and the login
+event records it as `auth_time_anchored: true`.
 
 ---
 
@@ -305,7 +306,7 @@ specifics (which URL, which path, which status).
 | `backchannel_token_absent` | Their reply did not contain a token where we were told to look | The path in the connection's settings does not match what they actually send. Rehearse and read the reply |
 | `backchannel_claims_absent` | Same, for the user details | Same fix |
 | `backchannel_claims_unmappable` | The details arrived, but the claim mapping could not produce an identity from them | Open the connection's **Claim mapping**, load the last assertion, and see which required field (subject, email) has no source |
-| `backchannel_auth_time_absent` | Their reply carried no authentication time | Ask them to include one. Turning the requirement off is possible and quietly disables the daily re-authentication ceiling for everyone on that connection |
+| `backchannel_auth_time_absent` | Only on failures recorded before this was retired: their reply carried no authentication time | Nothing — such sign-ins now succeed, with the daily re-authentication ceiling measured from each sign-in. Asking them to include the time makes it measure from their own sign-in |
 | `backchannel_jwt_invalid` | Their reply carried a signed token we could not accept — undecodable, wrong signature, unknown key, or an issuer/audience that fails the pins | Compare the connection's JWKS URL and pins against what their team publishes; the audit summary names the exact refusal |
 | `backchannel_jwt_expired` | The signed token in their reply had already expired | Clock skew or a cached answer on their side |
 | `backchannel_replayed` | A browser-delivered sign-in token was presented twice | Once is a harmless double submit; a pattern is replayed captured tokens — treat as an incident |

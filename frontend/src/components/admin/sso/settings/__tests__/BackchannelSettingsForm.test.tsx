@@ -144,7 +144,6 @@ describe('defaults', () => {
         // our session outliving the enterprise session — stays open for
         // anyone who does not go looking for the switch.
         expect(DEFAULT_BACKCHANNEL_SETTINGS.liveness_on_refresh).toBe(true)
-        expect(DEFAULT_BACKCHANNEL_SETTINGS.require_auth_time).toBe(true)
     })
 
     // Asserted by name rather than by counting. A count breaks whenever
@@ -153,16 +152,25 @@ describe('defaults', () => {
     const toggle = (name: RegExp) =>
         screen.getByRole('checkbox', { name }) as HTMLInputElement
 
-    it('has the two behaviour toggles on for a row never edited', () => {
+    it('has the liveness re-check on for a row never edited', () => {
         renderForm({})
         expect(toggle(/re-check with the provider/i).checked).toBe(true)
-        expect(toggle(/require an authentication time/i).checked).toBe(true)
     })
 
     it('respects an explicit false rather than treating it as unset', async () => {
-        renderForm({ liveness_on_refresh: false, require_auth_time: false })
+        renderForm({ liveness_on_refresh: false })
         expect(toggle(/re-check with the provider/i).checked).toBe(false)
-        expect(toggle(/require an authentication time/i).checked).toBe(false)
+    })
+
+    it('never offers to refuse a sign-in that carries no login time', () => {
+        // That switch locked out everyone on a connection the day their
+        // gateway renamed a field. A missing time is measured from the
+        // sign-in instead, and the form says so rather than asking.
+        renderForm({})
+        expect(
+            screen.queryByRole('checkbox', { name: /require an authentication time/i }),
+        ).not.toBeInTheDocument()
+        expect(screen.getByText(/counts from each sign-in here instead/i)).toBeInTheDocument()
     })
 })
 

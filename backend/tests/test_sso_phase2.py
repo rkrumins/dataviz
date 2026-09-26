@@ -331,7 +331,9 @@ async def test_refresh_raises_sso_reauth_after_ceiling():
         "/api/v1/auth/default-oidc/login"
     )
     assert "force=1" in exc_info.value.login_url
-    assert killed == ["usr_1"]
+    # This session's family ends; the user's other sessions carry their
+    # own auth_time and meet the ceiling on their own schedule.
+    assert killed == []
     assert store.revoked_family == "fam1"
 
 

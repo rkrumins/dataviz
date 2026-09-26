@@ -9,6 +9,85 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — SSO sessions that still work the next day
+
+### Fixed
+
+**After signing in with SSO, every graph could say "Taking a little longer than usual" and never
+load.** Signing out and back in with a password fixed it; for gateway users, signing in with SSO again
+did not. Four causes, each fixed where it starts:
+
+- **The page did not know which cookie held its CSRF token after an SSO sign-in on the page.** With
+  `AUTH_ENVIRONMENT_ID` set, the CSRF and expiry cookies carry the environment in their name
+  (`nx_csrf_production`), and the page learned it only from `GET /auth/me` on load or from a password
+  sign-in. The Enterprise Gateway's button and automatic sign-in, a portal sign-in, an invited signup
+  and the gateway's silent re-sign-in all started a session without it — so every write went out
+  without its CSRF token and was refused, graph reads included (they are POSTs), the CSRF repair could
+  not help, and renewal ahead of expiry was off. Every response that starts, renews or repairs a
+  session already named the environment in its body; the page now takes it from each, and the CSRF
+  repair (`GET /auth/csrf`) names it too, so a repair can always finish itself. This is also the
+  "CSRF token missing or invalid" that came and went.
+- **A gateway session could start already past the daily re-authentication limit.** The limit counts
+  from when the identity provider says the person signed in, and a gateway reports the corporate
+  portal's original login (`lastLogin`) — days old for many people. The session was refused at its
+  first renewal, minutes after sign-in, every time. No session now starts past the limit: OIDC and SAML
+  ask the identity provider for a fresh sign-in once (`prompt=login`, `ForceAuthn`); gateway, portal
+  and custom connections, which have no way to ask, and an identity provider that ignores the request,
+  count the limit from that sign-in. `user.logged_in` records `auth_time_anchored`.
+- **Loading permissions could renew the session by a route of its own**, missing the handling of the
+  re-authentication answer, so a session that could have been renewed silently ended at the sign-in
+  page instead. It now goes through the same renewal as everything else.
+- **The canvas showed a session problem as a slow graph**, retrying forever. A sign-in the page could
+  not repair now reads "Reconnecting your session", with a Reload button, and keeps retrying.
+
+**Coming back the next day ended an SSO session at the sign-in page.** An SSO session past the idle
+(12 h) or absolute (7 d) limit now goes back through its identity provider — silently for a gateway,
+and without forcing a password prompt for OIDC or SAML — instead of a dead end. Password sessions are
+unchanged.
+
+**A busy moment could sign gateway users out.** The gateway's silent re-sign-in treated a 429, a 5xx
+or a dropped connection as a refusal, which a 9am rush behind one corporate address produces. It now
+retries once; if the corporate side really says no, the sign-in page opens with the reason.
+
+**Signing out did not stick for gateway and portal users.** The automatic sign-in waited only a
+minute, in that tab only, so a new tab signed the person straight back in. It now waits, in every tab,
+until someone signs in.
+
+### Added
+
+**When each person last used the platform, in Admin → Users.** A sortable **Last seen** column, and an
+**Activity** block in the user drawer: Joined, Last signed in (any kind of sign-in), Last seen (had
+the app open) and Last activity (what Activity analytics counts). Last seen and last activity are
+recorded to five minutes, one conditional row update per person per window.
+
+### Changed
+
+- **A daily-limit expiry ends only that session.** The user's other browsers carry their own limits;
+  ending them all made every expiry on one device force a renewal on every other. An enterprise
+  identity provider withdrawing a session still ends all of them.
+- **A gateway reply with no sign-in time is never refused.** The *Require an authentication time*
+  setting is retired: one renamed field on the corporate side locked out everyone on the connection.
+  The daily limit counts from each sign-in instead, and the gateway still governs the session.
+- **`user.sso_session_expired` carries a `reason`** — `reauth_ceiling`, `idle` or `absolute`.
+
+### Upgrading
+
+- A migration adds `users.last_login_at`, `last_seen_at` and `last_active_at`, and backfills
+  `last_login_at` from each person's identity sign-ins. Password-only accounts fill in at their next
+  sign-in; the other two as people use the platform.
+- `require_auth_time` on existing gateway connections is ignored from now on; nothing to do.
+- Size `RATELIMIT_LOGIN_PER_IP` for your largest corporate egress address: the gateway's sign-in and
+  silent re-sign-in share that bucket.
+
+### Known limitations
+
+- A 403 for a missing permission still shows on the canvas as slow.
+- After re-authenticating, people land on the home page rather than the page they were on, as they do
+  after a password sign-in.
+- The Helm chart's `expiryMinutes` default is 60; the other deploy configs use 15.
+
+---
+
 ## [Unreleased] — Exports up to 50 GB, with downloads that resume
 
 ### Added

@@ -315,6 +315,16 @@ def _summary_sso_denied(p: dict) -> str:
     return f"Refused {who} from {slug}" + (f": {reasons}" if reasons else "")
 
 
+#: Why an SSO session ended, as ``user.sso_session_expired`` records it.
+#: Events written before the reason was recorded carry none and read as
+#: before.
+_SSO_EXPIRY_REASONS = {
+    "reauth_ceiling": ", daily re-authentication",
+    "idle": ", idle",
+    "absolute": ", maximum session age",
+}
+
+
 _EVENT_META: dict[str, tuple[str, callable]] = {
     # ── critical: role / identity changes / forced revocation
     "user.role_changed": ("critical", _summary_role_changed),
@@ -377,7 +387,9 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
         "info",
         lambda p: (
             f"SSO session expired for {p.get('user_id') or '?'} "
-            f"({p.get('provider_slug') or 'sso'}) — re-authentication required"
+            f"({p.get('provider_slug') or 'sso'}"
+            f"{_SSO_EXPIRY_REASONS.get(p.get('reason'), '')}) — "
+            "re-authentication required"
         ),
     ),
     # Degraded-trust logins. Warning, not info: each one is a login the

@@ -27,10 +27,8 @@ from backend.auth_service.providers import outbound
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
-#: Recent on purpose. A fixed timestamp made the first run of this file
-#: fail on the 24h SSO re-auth ceiling rather than on anything it was
-#: testing — which was the ceiling working, and worth keeping visible:
-#: it applies to this kind exactly as it does to the others.
+#: Recent, so every test here other than the one about old login times
+#: measures the SSO re-auth ceiling from a real authentication instant.
 IDENTITY = {
     "sub": "emp-100482",
     "email": "ada.lovelace@corporate.com",
@@ -194,20 +192,30 @@ async def test_it_still_ends_when_the_upstream_session_does(
 
 
 @pytest.mark.asyncio
-async def test_the_daily_re_auth_ceiling_applies_to_this_kind_too(
+async def test_a_gateway_reporting_an_old_login_is_anchored_not_born_dead(
     test_client, db_session, registry, sso_events, monkeypatch,
 ):
-    """Discovered by writing this file: the first version used a fixed
-    `auth_time` and failed here rather than where it was looking. That
-    was the ceiling working, and it is worth an assertion of its own —
-    a session cannot outrun it by being back-channel, and an operator
-    turning `require_auth_time` off quietly disables it for everyone on
-    the connection.
+    """The production failure, as the gateway actually shapes it.
+
+    The gateway reports the corporate portal's ORIGINAL login
+    (``lastLogin``), which for anyone whose portal session outlives a day
+    is more than a day old. Measured from that, the session was past the
+    24h re-auth ceiling before it existed: it was refused at its first
+    renewal a few minutes after sign-in, and ``force=1`` could not help —
+    there is no upstream prompt to force, so signing in again produced the
+    same doomed session. Gateway users could not hold an SSO session.
+
+    Now the ceiling runs from this sign-in, and the gateway — re-asked on
+    every renewal — is what decides when the session ends.
     """
-    stale = dict(IDENTITY, auth_time=int(time.time()) - 60 * 60 * 48)
+    from datetime import datetime, timedelta, timezone
+
+    two_days_ago = datetime.now(timezone.utc) - timedelta(hours=48)
+    reported = {k: v for k, v in IDENTITY.items() if k != "auth_time"}
+    reported["lastLogin"] = two_days_ago.isoformat()
 
     def _dispatch(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=stale)
+        return httpx.Response(200, json=reported)
 
     monkeypatch.setattr(
         outbound.httpx, "AsyncClient",
@@ -222,14 +230,69 @@ async def test_the_daily_re_auth_ceiling_applies_to_this_kind_too(
         cookies={"CORPSESSION": "session-abc"},
         follow_redirects=False,
     )
+    assert signin.status_code == 302, signin.text
     jar = {k: v for k, v in signin.cookies.items()}
 
     refreshed = await test_client.post(
         "/api/v1/auth/refresh",
         cookies={**jar, "CORPSESSION": "session-abc"},
     )
-    assert refreshed.status_code == 401
-    assert refreshed.json()["detail"]["error"] == "sso_reauth_required"
+    assert refreshed.status_code == 200, refreshed.text
+
+    # Still a ceiling — measured from now, and said so on the record.
+    logins = [p for t, p in sso_events if t == "user.logged_in"]
+    assert logins and logins[-1]["auth_time_anchored"] is True
+    assert logins[-1]["auth_time_asserted"] is True
+    assert abs(logins[-1]["auth_time"] - int(time.time())) <= 5
+
+    # And the upstream still governs: without the corporate session the
+    # next renewal ends it.
+    ended = await test_client.post(
+        "/api/v1/auth/refresh",
+        cookies={k: v for k, v in refreshed.cookies.items()},
+    )
+    assert ended.status_code == 401
+    assert ended.json()["detail"]["error"] == "sso_reauth_required"
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_that_sends_no_login_time_still_signs_in(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """Whatever the corporate side sends, the sign-in works. A reply
+    with no authentication time at all — a field renamed on their side —
+    used to be refused by default, locking out everyone on the
+    connection at once. Now the ceiling measures from the sign-in, the
+    record says so, and the gateway still governs the session."""
+    reported = {k: v for k, v in IDENTITY.items() if k != "auth_time"}
+
+    def _dispatch(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=reported)
+
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        lambda **kw: _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(_dispatch), **kw,
+        ),
+    )
+    await _make(db_session)
+
+    signin = await test_client.get(
+        "/api/v1/auth/corp-gateway/login",
+        cookies={"CORPSESSION": "session-abc"},
+        follow_redirects=False,
+    )
+    assert signin.status_code == 302, signin.text
+    assert "nx_access" in signin.cookies
+
+    logins = [p for t, p in sso_events if t == "user.logged_in"]
+    assert logins[-1]["auth_time_asserted"] is False
+
+    refreshed = await test_client.post(
+        "/api/v1/auth/refresh",
+        cookies={**dict(signin.cookies.items()), "CORPSESSION": "session-abc"},
+    )
+    assert refreshed.status_code == 200, refreshed.text
 
 
 @pytest.mark.asyncio
