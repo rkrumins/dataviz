@@ -31,17 +31,21 @@ function describe(tip: Tip): { lead: string; detail: string } {
       detail: 'Grey says neither direction yet. The port takes its colours when the count comes back.',
     }
   }
+  if (tip.view.kind === 'lineage') {
+    // No line of it drawn yet, so no count of lines to give.
+    return tip.view.dir === 'in'
+      ? { lead: 'Has incoming lineage — select it to draw its lines', detail: 'Upstream — data flows into this entity.' }
+      : { lead: 'Has outgoing lineage — select it to draw its lines', detail: 'Downstream — data flows out of this entity.' }
+  }
   if (tip.view.kind === 'beyond') {
-    // The count is the degree's — flows in the data, as the stubs say. A
-    // container whose own count is 0 is hollow for what its roll-up cells
-    // say of the rows inside it: that it has some, not how many.
+    // The count is the flows the canvas placed outside the view, as the
+    // stubs say.
     const n = tip.view.dir === 'in' ? tip.inCount : tip.outCount
-    const said = n > 0 ? formatUnitCount(n, 'flows') : 'Lineage inside it'
     const one = n <= 1
     return {
       lead: tip.view.dir === 'in'
-        ? `${said} ${one ? 'arrives' : 'arrive'} from entities outside this view`
-        : `${said} ${one ? 'leads' : 'lead'} to entities outside this view`,
+        ? `${formatUnitCount(n, 'flows')} ${one ? 'arrives' : 'arrive'} from entities outside this view`
+        : `${formatUnitCount(n, 'flows')} ${one ? 'leads' : 'lead'} to entities outside this view`,
       detail: 'None of its other ends is in this view — trace it to see where it leads.',
     }
   }

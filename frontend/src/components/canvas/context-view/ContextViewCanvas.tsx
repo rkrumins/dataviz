@@ -4880,8 +4880,8 @@ export function ContextViewCanvas({
   // exactly as lineRoute.ts attaches the lines themselves. Lineage into an
   // anchored column's rows that are not drawn is in the view too: it plugs
   // in on the side facing that column (unloadedColumnLines). Lineage whose
-  // far end has no known place yet keeps the card from reading hollow
-  // (unplacedLines), and so does lineage read only in part (partialLines).
+  // far end has no known place yet (unplacedLines), or read only in part
+  // (partialLines), is held: solid on the conventional side, never hollow.
   // Browse only, as the stubs are — a trace's wires are its own.
   const lineagePartial = useCanvasStore((s) => s.lineagePartial)
   const nodePorts = useMemo(() => {
@@ -5153,15 +5153,11 @@ export function ContextViewCanvas({
   // ports until the hook's retry counts it.
   const { totals: externalDegrees, failed: degreeFailures } = useExternalDegrees(showLineageFlow)
   // What the ports read (portTotals): a container's roll-up cells only while
-  // it is closed, a closed logical group's members summed, and no hollow
-  // port while a hidden flow type — one the totals count — could explain it.
-  const portHiddenTypes = overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes
-  const { totals: lineagePortTotals, failed: lineagePortUnknown } = useMemo(() => {
-    const counted = new Set(lineageEdgeTypes.map(t => t.toUpperCase()))
-    const hiddenCouldExplain = [...portHiddenTypes].some(t => counted.size === 0 || counted.has(t))
-    return portTotals([...renderByLayer.values()].flat(), externalDegrees, degreeFailures,
-      id => expandedForRender.has(id), hiddenCouldExplain)
-  }, [renderByLayer, externalDegrees, degreeFailures, expandedForRender, portHiddenTypes, lineageEdgeTypes])
+  // it is closed, and a closed logical group's members summed.
+  const { totals: lineagePortTotals, failed: lineagePortUnknown } = useMemo(() =>
+    portTotals([...renderByLayer.values()].flat(), externalDegrees, degreeFailures,
+      id => expandedForRender.has(id)),
+  [renderByLayer, externalDegrees, degreeFailures, expandedForRender])
   const showExternalCue = activeEntityScope === 'curated' && showMissingConnectionIndicators
   // Ambient per-node cue: external = total − internal(loaded), for every
   // loaded node with a KNOWN total. One O(E) pass builds internal
@@ -6544,6 +6540,7 @@ export function ContextViewCanvas({
                 externalCue={externalCueByNode}
                 lineageTotals={lineagePortTotals}
                 lineageUnknown={lineagePortUnknown}
+                lineageOutside={offCanvasByNode}
                 lineagePorts={nodePorts}
                 showLineageIndicators={showLineageFlow}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}

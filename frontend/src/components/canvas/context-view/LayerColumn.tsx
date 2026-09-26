@@ -190,6 +190,9 @@ interface LayerColumnProps {
   lineageTotals?: ReadonlyMap<string, { in: number; out: number }>
   /** Entities whose total could not be counted (being asked again). */
   lineageUnknown?: ReadonlySet<string>
+  /** Per row: flows the canvas placed outside this view (useEdgeProjection's
+   *  offCanvasByNode) — what makes a port hollow. */
+  lineageOutside?: ReadonlyMap<string, { in: number; out: number }>
   /** Where each card's lines plug in, by side and direction (lineagePorts.ts). */
   lineagePorts?: ReadonlyMap<string, NodePorts>
   /** Render the per-row ambient in/out hairlines (follows the lineage-
@@ -350,6 +353,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   externalCue,
   lineageTotals,
   lineageUnknown,
+  lineageOutside,
   lineagePorts,
   showLineageIndicators = false,
   showDensityGutter = false,
@@ -2796,6 +2800,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         portStrengthRight={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'right')) / lineageLogMax : 0}
                         lineageTotals={showLineageIndicators ? lineageTotals?.get(node.id) : undefined}
                         lineageUnknown={showLineageIndicators && (lineageUnknown?.has(node.id) ?? false)}
+                        lineageOutside={showLineageIndicators ? lineageOutside?.get(node.id) : undefined}
                         externalIn={showLineageIndicators ? (externalCue?.get(node.id)?.in ?? 0) : 0}
                         externalOut={showLineageIndicators ? (externalCue?.get(node.id)?.out ?? 0) : 0}
                       />

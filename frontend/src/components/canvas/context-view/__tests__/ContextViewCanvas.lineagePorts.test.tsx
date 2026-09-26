@@ -6,9 +6,12 @@
  *   solid   — its lineage reaches something in the view, on the side facing
  *             it: a row, a collapsed container (the roll-up), a row of an
  *             anchored column that is not loaded, or that column's anchor;
- *   hollow  — its lineage only leaves the view;
+ *             or it has lineage no line shows yet, on the conventional side
+ *             (incoming left, outgoing right);
+ *   hollow  — the lineage that way leads outside the view, and the canvas
+ *             placed it there;
  *   none    — it has none;
- *   unknown — its count failed (and it has no line of its own to say more).
+ *   unknown — its count failed (and nothing else says it has lineage).
  *
  * And only lineage that truly leaves the view is kept for a stub: none of it
  * names an anchor or a row the canvas draws.
@@ -141,7 +144,7 @@ describe('an anchored view: every card ends solid, hollow, none or unknown', () 
     }
   }, 20_000)
 
-  it('a card whose partner has no known place yet is neither solid nor hollow', async () => {
+  it('a card whose partner has no known place yet is solid, never hollow', async () => {
     const estate = anchoredPortsEstate()
     const h = await renderCanvasWithTrace(estate, {
       focus: 'SRC.raw_orders',
@@ -159,10 +162,10 @@ describe('an anchored view: every card ends solid, hollow, none or unknown', () 
     }, { timeout: 8000 })
     // `ghost` is no entity the chains know, so its place is still being asked.
     expect(h.chainRequests().flat()).toContain('ghost')
-    expect(ports('SRC.quiet')).toEqual({ left: null, right: null })
+    expect(ports('SRC.quiet')).toEqual({ left: null, right: 'lineage:out' })
   }, 20_000)
 
-  it('in a view open to its whole data source, an end no column holds is not outside', async () => {
+  it('in a view open to its whole data source, an end no column holds is not outside: solid', async () => {
     const estate = anchoredPortsEstate()
     const h = await renderCanvasWithTrace(estate, {
       focus: 'SRC.raw_orders',
@@ -177,13 +180,12 @@ describe('an anchored view: every card ends solid, hollow, none or unknown', () 
     })
     await waitFor(() => {
       expect(h.chainRequests().flat()).toContain('far')
-      // No edge of uncounted's is loaded at all, so it reads hollow as soon
-      // as the totals are in.
-      expect(ports('uncounted')).toEqual({ left: 'beyond:in', right: null })
+      // No edge of uncounted's is loaded at all: its total says it has some.
+      expect(ports('uncounted')).toEqual({ left: 'lineage:in', right: null })
     }, { timeout: 8000 })
     await h.settle()
     // `far` is a root no column holds: in the view, column unknown.
-    expect(ports('dash')).toEqual({ left: null, right: null })
+    expect(ports('dash')).toEqual({ left: 'lineage:in', right: null })
     expect([...(projection.offCanvas ?? new Map()).values()].some(l => l.in + l.out > 0)).toBe(false)
   }, 20_000)
 })
@@ -210,7 +212,7 @@ describe("a card's lineage into rows an anchored column has not drawn", () => {
 })
 
 describe('a card whose lineage sits below it, or that the reader hid', () => {
-  it('a closed container holding roll-up cells is hollow; open, it leaves that to its rows', async () => {
+  it('a closed container holding roll-up cells is solid; open, it leaves that to its rows', async () => {
     const estate = anchoredPortsEstate()
     const h = await renderCanvasWithTrace(estate, {
       focus: 'SRC.raw_orders',
@@ -225,12 +227,12 @@ describe('a card whose lineage sits below it, or that the reader hid', () => {
     await h.toggle('SRC.DB_B')
 
     await waitFor(() => {
-      expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'beyond:out' })
+      expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'lineage:out' })
     }, { timeout: 8000 })
     expect(ports('SRC.DB_B')).toEqual({ left: null, right: null })
   }, 20_000)
 
-  it('a card whose lineage was read only in part never reads hollow that way', async () => {
+  it('a card whose lineage was read only in part is solid that way, never hollow', async () => {
     const estate = anchoredPortsEstate()
     await renderCanvasWithTrace(estate, {
       focus: 'SRC.raw_orders',
@@ -248,11 +250,11 @@ describe('a card whose lineage sits below it, or that the reader hid', () => {
     // Its incoming read came back at the cap: the flows past it may reach the view.
     act(() => { useCanvasStore.getState().markLineagePartial({ in: ['dash'], out: [] }) })
     await waitFor(() => {
-      expect(ports('dash')).toEqual({ left: null, right: null })
+      expect(ports('dash')).toEqual({ left: 'lineage:in', right: null })
     }, { timeout: 8000 })
   }, 20_000)
 
-  it('a hidden flow type never makes a card hollow', async () => {
+  it('a hidden flow type never makes a card hollow, nor hides that it has lineage', async () => {
     const estate = anchoredPortsEstate()
     await renderCanvasWithTrace(estate, {
       focus: 'SRC.raw_orders',
@@ -267,39 +269,39 @@ describe('a card whose lineage sits below it, or that the reader hid', () => {
       expect(ports('dash')).toEqual({ left: 'beyond:in', right: null })
     }, { timeout: 8000 })
 
-    // Its total counts every type; with one hidden, that one could be all of it.
+    // Hidden, its flow is placed nowhere; its total still says it has one.
     act(() => { useConnectionVisibilityStore.getState().setHidden('harness-view', ['TRANSFORMS']) })
     try {
       await waitFor(() => {
-        expect(ports('dash')).toEqual({ left: null, right: null })
+        expect(ports('dash')).toEqual({ left: 'lineage:in', right: null })
       }, { timeout: 8000 })
     } finally {
       act(() => { useConnectionVisibilityStore.getState().setHidden('harness-view', []) })
     }
   }, 20_000)
 
-  it('a closed logical group reads its members: hollow from theirs', async () => {
+  it('a closed logical group reads its members: solid from theirs', async () => {
     const h = await renderCanvasWithTrace(groupedEstate(), {
       focus: 'solo',
       nodeDegrees: { 'g.a': { in: 0, out: 2 }, 'g.b': { in: 0, out: 0 } },
     })
     // Open, its members speak for themselves.
     await waitFor(() => {
-      expect(ports('g.a')).toEqual({ left: null, right: 'beyond:out' })
+      expect(ports('g.a')).toEqual({ left: null, right: 'lineage:out' })
     }, { timeout: 8000 })
     expect(ports('logical:grp')).toEqual({ left: null, right: null })
 
     await h.toggle('logical:grp')
     await waitFor(() => {
-      expect(ports('logical:grp')).toEqual({ left: null, right: 'beyond:out' })
+      expect(ports('logical:grp')).toEqual({ left: null, right: 'lineage:out' })
     }, { timeout: 8000 })
     expect(ports('solo')).toEqual({ left: null, right: null })
   }, 20_000)
 
-  it('a closed logical group whose member could not be counted says unknown', async () => {
+  it('a closed logical group whose member could not be counted, and no other has lineage, says unknown', async () => {
     const h = await renderCanvasWithTrace(groupedEstate(), {
       focus: 'solo',
-      nodeDegrees: { 'g.a': { in: 0, out: 2 }, 'g.b': 'fail' },
+      nodeDegrees: { 'g.a': { in: 0, out: 0 }, 'g.b': 'fail' },
     })
     await h.toggle('logical:grp')
     await waitFor(() => {

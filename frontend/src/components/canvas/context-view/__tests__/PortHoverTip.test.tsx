@@ -2,7 +2,8 @@
  * What a lineage port says on hover.
  *
  * A card whose lineage could not be counted says exactly that, and that the
- * canvas is asking again — never that data is "not loaded".
+ * canvas is asking again — never that data is "not loaded". A card with
+ * lineage no line shows yet says it has some, and how to draw it.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { useRef } from 'react'
@@ -45,12 +46,18 @@ describe('PortHoverTip', () => {
     expect(tip).not.toMatch(/load|canvas|render/i)
   })
 
-  it('a container whose only lineage outside sits below it says so, with no count', () => {
-    render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'beyond', 'data-dir': 'out', 'data-out': '0' }} />)
+  it('a solid port with no line yet says the card has lineage that way, and how to draw it', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'left', 'data-port': 'lineage', 'data-dir': 'in' }} />)
     fireEvent.pointerOver(screen.getByTestId('port'))
     const tip = screen.getByRole('tooltip').textContent
-    expect(tip).toContain('Lineage inside it leads to entities outside this view')
-    expect(tip).not.toMatch(/\b0\b/)
+    expect(tip).toContain('Has incoming lineage — select it to draw its lines')
+    expect(tip).not.toMatch(/outside|load|\d/i)
+  })
+
+  it('says which way on the outgoing side', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'lineage', 'data-dir': 'out' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    expect(screen.getByRole('tooltip').textContent).toContain('Has outgoing lineage — select it to draw its lines')
   })
 
   it('a solid port still counts its lines', () => {

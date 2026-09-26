@@ -94,11 +94,14 @@ interface FlatTreeItemProps {
   portStrengthLeft?: number
   portStrengthRight?: number
   /** Lineage in/out over the WHOLE graph (`/nodes/degree`); undefined = not
-   *  known. Shows a hollow port for lineage with nothing on this canvas. */
+   *  known. Shows a solid port for lineage no line on this canvas shows. */
   lineageTotals?: { in: number; out: number }
-  /** Counting `lineageTotals` failed and is being retried: with no line of
-   *  its own, the card's ports say its lineage is unknown. */
+  /** Counting `lineageTotals` failed and is being retried: with nothing
+   *  else to say it has lineage, the card's ports say it is unknown. */
   lineageUnknown?: boolean
+  /** Flows the canvas placed OUTSIDE this view, by direction: a hollow port
+   *  while none of that direction is in it. */
+  lineageOutside?: { in: number; out: number }
   /** Out-of-view lineage cue (curated views) — dashed marks in the
    *  lineage direction colours. */
   externalIn?: number
@@ -157,6 +160,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   portStrengthRight = 0,
   lineageTotals,
   lineageUnknown = false,
+  lineageOutside,
   externalIn = 0,
   externalOut = 0,
 }: FlatTreeItemProps) {
@@ -287,8 +291,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
   const personaMode = usePersonaMode()
   const displayName = resolveEntityName(node.data, personaMode, node.name)
-  const leftPort = portView('left', ports, lineageTotals, lineageUnknown)
-  const rightPort = portView('right', ports, lineageTotals, lineageUnknown)
+  const leftPort = portView('left', ports, lineageTotals, lineageUnknown, lineageOutside)
+  const rightPort = portView('right', ports, lineageTotals, lineageUnknown, lineageOutside)
   const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
@@ -981,19 +985,20 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           lines, the card's height, in the lineage direction colours —
           incoming, outgoing, or split when a side carries both
           (lineagePorts.ts). Solid: lines to entities on this canvas, glowing
-          brighter the more they carry. Hollow: lineage in the data, none of
-          it on this canvas. Grey: its lineage could not be counted. No rail:
-          no lineage that way. ── */}
+          brighter the more they carry — or, on the conventional side,
+          lineage no line shows yet. Hollow: lineage the canvas placed
+          outside this view. Grey: its lineage could not be counted. No
+          rail: no lineage that way. ── */}
       {leftPort && (
         <LineagePortGlyph
           side="left" view={leftPort} strength={portStrengthLeft}
-          counts={leftPort.kind === 'here' ? ports?.left : lineageTotals}
+          counts={leftPort.kind === 'here' ? ports?.left : lineageOutside}
         />
       )}
       {rightPort && (
         <LineagePortGlyph
           side="right" view={rightPort} strength={portStrengthRight}
-          counts={rightPort.kind === 'here' ? ports?.right : lineageTotals}
+          counts={rightPort.kind === 'here' ? ports?.right : lineageOutside}
         />
       )}
       {externalIn > 0 && (

@@ -61,25 +61,36 @@ describe('portView — what each side shows', () => {
     expect(portView('left', ports.get('src'), undefined)).toBeNull()
   })
 
-  it('lineage with nothing on this canvas: a hollow port on the conventional side', () => {
-    expect(portView('left', undefined, { in: 12, out: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
+  it('lineage no line shows yet: solid on the conventional side', () => {
+    expect(portView('left', undefined, { in: 12, out: 0 })).toEqual({ kind: 'lineage', dir: 'in' })
     expect(portView('right', undefined, { in: 12, out: 0 })).toBeNull()
+    expect(portView('right', undefined, { in: 0, out: 3 })).toEqual({ kind: 'lineage', dir: 'out' })
   })
 
-  it('no hollow port for a direction the canvas already shows', () => {
+  it('hollow only for lineage the canvas placed outside the view', () => {
+    expect(portView('left', undefined, { in: 12, out: 0 }, false, { in: 3, out: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
+    // Confirmed, it needs no total.
+    expect(portView('right', undefined, undefined, false, { in: 0, out: 2 })).toEqual({ kind: 'beyond', dir: 'out' })
+    // The other direction's outside says nothing about this one.
+    expect(portView('right', undefined, { in: 12, out: 1 }, false, { in: 3, out: 0 })).toEqual({ kind: 'lineage', dir: 'out' })
+  })
+
+  it('no marker for a direction the canvas already shows', () => {
     const ports = buildNodePorts([{ source: 'rep', target: 'src' }], layerOf)
-    // `src` has incoming on its right; its total in must not add a hollow
-    // incoming port on the left as well.
+    // `src` has incoming on its right; neither its total in nor its flows
+    // placed outside add an incoming port on the left as well.
     expect(portView('left', ports.get('src'), { in: 40, out: 0 })).toBeNull()
+    expect(portView('left', ports.get('src'), { in: 40, out: 0 }, false, { in: 5, out: 0 })).toBeNull()
   })
 
-  it('a line that stands aside still says the lineage is in view — no hollow port', () => {
+  it('a line that stands aside says the lineage is in view: never hollow, and no marker of its own', () => {
     const ports = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf)
-    expect(portView('right', ports.get('src'), { in: 0, out: 5 })).toBeNull()
-    expect(portView('left', ports.get('wh'), { in: 5, out: 0 })).toBeNull()
+    expect(portView('right', ports.get('src'), { in: 0, out: 0 }, false, { in: 0, out: 2 })).toEqual({ kind: 'lineage', dir: 'out' })
+    expect(portView('right', ports.get('src'), { in: 0, out: 0 })).toBeNull()
+    expect(portView('left', ports.get('wh'), { in: 0, out: 0 })).toBeNull()
   })
 
-  it('no lineage, or an unknown total: no port', () => {
+  it('no lineage, or a total still on its way: no port', () => {
     expect(portView('left', undefined, { in: 0, out: 0 })).toBeNull()
     expect(portView('right', undefined, undefined)).toBeNull()
   })
@@ -99,9 +110,19 @@ describe('portView — a card whose lineage could not be counted', () => {
     expect(portView('left', standing.get('src'), undefined, true)).toBeNull()
   })
 
+  it('never when anything else says it has lineage', () => {
+    expect(portView('left', undefined, undefined, true, { in: 2, out: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
+    expect(portView('right', undefined, undefined, true, { in: 2, out: 0 })).toBeNull()
+    const held = buildNodePorts(unplacedLines(new Map([['rep', {
+      in: 0, out: 0, inPartners: new Set<string>(), outPartners: new Set<string>(), columns: new Map(), unplaced: { in: 0, out: 1 },
+    }]])), () => undefined)
+    expect(portView('right', held.get('rep'), undefined, true)).toEqual({ kind: 'lineage', dir: 'out' })
+    expect(portView('left', held.get('rep'), undefined, true)).toBeNull()
+  })
+
   it('never once its total is known', () => {
     expect(portView('left', undefined, { in: 0, out: 0 }, true)).toBeNull()
-    expect(portView('left', undefined, { in: 3, out: 0 }, true)).toEqual({ kind: 'beyond', dir: 'in' })
+    expect(portView('left', undefined, { in: 3, out: 0 }, true)).toEqual({ kind: 'lineage', dir: 'in' })
   })
 })
 
@@ -151,21 +172,24 @@ describe('unloadedColumnLines — lineage into rows an anchored column has not d
   })
 })
 
-describe('unplacedLines — lineage whose far end is not placed yet never reads hollow', () => {
+describe('unplacedLines — lineage whose far end is not placed yet is solid, never hollow', () => {
   const held = (inN: number, outN: number): OffCanvasLineage => ({
     in: 0, out: 0, inPartners: new Set(), outPartners: new Set(), columns: new Map(), unplaced: { in: inN, out: outN },
   })
   const layerOfRow = (id: string) => (id === 'rep' ? 4 : undefined)
 
-  it('keeps that direction from reading hollow, and draws no port for it', () => {
+  it('says the card has lineage that way, on the conventional side, with no line of its own', () => {
     const ports = buildNodePorts(unplacedLines(new Map([['rep', held(0, 2)]])), layerOfRow)
-    expect(portView('right', ports.get('rep'), { in: 0, out: 2 })).toBeNull()
+    expect(ports.get('rep')!.right).toEqual({ in: 0, out: 0 })
+    expect(portView('right', ports.get('rep'), { in: 0, out: 2 }, false, { in: 0, out: 1 })).toEqual({ kind: 'lineage', dir: 'out' })
+    // With no total at all (a draft cannot count).
+    expect(portView('right', ports.get('rep'), undefined)).toEqual({ kind: 'lineage', dir: 'out' })
     expect(portView('left', ports.get('rep'), { in: 0, out: 2 })).toBeNull()
   })
 
   it('leaves the other direction to say what it knows', () => {
     const ports = buildNodePorts(unplacedLines(new Map([['rep', held(0, 2)]])), layerOfRow)
-    expect(portView('left', ports.get('rep'), { in: 1, out: 2 })).toEqual({ kind: 'beyond', dir: 'in' })
+    expect(portView('left', ports.get('rep'), { in: 1, out: 2 }, false, { in: 1, out: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
   })
 
   it('adds no line for a row with nothing held', () => {
@@ -174,10 +198,16 @@ describe('unplacedLines — lineage whose far end is not placed yet never reads 
 })
 
 describe('portView — a container whose lineage sits below it', () => {
-  it('roll-up cells say it has lineage: hollow when none of it is on the canvas', () => {
-    expect(portView('right', undefined, { in: 0, out: 0, rollupIn: 0, rollupOut: 1 })).toEqual({ kind: 'beyond', dir: 'out' })
-    expect(portView('left', undefined, { in: 0, out: 0, rollupIn: 1, rollupOut: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
+  it('roll-up cells say it has lineage: solid, never hollow on their own', () => {
+    // They cannot tell lineage between its own rows from lineage leaving it.
+    expect(portView('right', undefined, { in: 0, out: 0, rollupIn: 0, rollupOut: 1 })).toEqual({ kind: 'lineage', dir: 'out' })
+    expect(portView('left', undefined, { in: 0, out: 0, rollupIn: 1, rollupOut: 0 })).toEqual({ kind: 'lineage', dir: 'in' })
     expect(portView('left', undefined, { in: 0, out: 0, rollupIn: 0, rollupOut: 1 })).toBeNull()
+  })
+
+  it('hollow once what it holds is placed outside the view', () => {
+    expect(portView('right', undefined, { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }, false, { in: 0, out: 7 }))
+      .toEqual({ kind: 'beyond', dir: 'out' })
   })
 
   it('never when some of it is on the canvas', () => {
@@ -196,21 +226,27 @@ describe('portTotals — what each card reads for the lineage it has no line for
     const { totals } = portTotals(
       [group('logical:g', [entity('a'), entity('b'), group('logical:inner', [entity('c')])])],
       new Map([['a', { in: 1, out: 0 }], ['b', { in: 0, out: 2 }], ['c', { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }]]),
-      new Set(), closed, false,
+      new Set(), closed,
     )
     expect(totals.get('logical:g')).toEqual({ in: 1, out: 2, rollupIn: 0, rollupOut: 1 })
     expect(totals.get('logical:inner')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
-    expect(portView('right', undefined, totals.get('logical:g'))).toEqual({ kind: 'beyond', dir: 'out' })
+    expect(portView('right', undefined, totals.get('logical:g'))).toEqual({ kind: 'lineage', dir: 'out' })
   })
 
-  it('only once every member is counted; a member whose count failed makes it unknown', () => {
+  it("a member's lineage is the group's at once; unknown only when none has any and a count failed", () => {
     const roots = [group('logical:g', [entity('a'), entity('b')])]
-    const waiting = portTotals(roots, new Map([['a', { in: 1, out: 0 }]]), new Set(), closed, false)
-    expect(waiting.totals.has('logical:g')).toBe(false)
-    expect(waiting.failed.has('logical:g')).toBe(false)
-    const failed = portTotals(roots, new Map([['a', { in: 1, out: 0 }]]), new Set(['b']), closed, false)
-    expect(failed.totals.has('logical:g')).toBe(false)
-    expect(failed.failed.has('logical:g')).toBe(true)
+    const waiting = portTotals(roots, new Map([['a', { in: 1, out: 0 }]]), new Set(), closed)
+    expect(waiting.totals.get('logical:g')).toEqual({ in: 1, out: 0, rollupIn: 0, rollupOut: 0 })
+    const failed = portTotals(roots, new Map([['a', { in: 1, out: 0 }]]), new Set(['b']), closed)
+    expect(failed.totals.get('logical:g')).toEqual({ in: 1, out: 0, rollupIn: 0, rollupOut: 0 })
+    expect(failed.failed.has('logical:g')).toBe(false)
+
+    const nothingYet = portTotals(roots, new Map([['a', { in: 0, out: 0 }]]), new Set(), closed)
+    expect(nothingYet.totals.has('logical:g')).toBe(false)
+    expect(nothingYet.failed.has('logical:g')).toBe(false)
+    const nothingKnown = portTotals(roots, new Map([['a', { in: 0, out: 0 }]]), new Set(['b']), closed)
+    expect(nothingKnown.totals.has('logical:g')).toBe(false)
+    expect(nothingKnown.failed.has('logical:g')).toBe(true)
   })
 
   it('an open group, or an open container, leaves it to what it holds', () => {
@@ -218,7 +254,7 @@ describe('portTotals — what each card reads for the lineage it has no line for
     const { totals } = portTotals(
       [group('logical:g', [entity('a')]), entity('box', [entity('box.t')])],
       new Map([['a', { in: 1, out: 0 }], ['box', { in: 0, out: 0, rollupIn: 1, rollupOut: 1 }]]),
-      new Set(), open, false,
+      new Set(), open,
     )
     expect(totals.has('logical:g')).toBe(false)
     // Its own flows still count; its roll-up cells summarise rows it now shows.
@@ -226,24 +262,15 @@ describe('portTotals — what each card reads for the lineage it has no line for
     expect(portView('left', undefined, totals.get('box'))).toBeNull()
     expect(totals.get('a')).toEqual({ in: 1, out: 0 })
   })
-
-  it('a hidden flow type could explain any gap: no card reads hollow', () => {
-    const { totals, failed } = portTotals(
-      [entity('a'), entity('b')],
-      new Map([['a', { in: 3, out: 0 }]]), new Set(['b']), closed, true,
-    )
-    expect(portView('left', undefined, totals.get('a'))).toBeNull()
-    // A count that failed still says so.
-    expect(portView('left', undefined, totals.get('b'), failed.has('b'))).toEqual({ kind: 'unknown', dir: 'both' })
-  })
 })
 
-describe('partialLines — a row whose lineage was read only in part never reads hollow that way', () => {
+describe('partialLines — a row whose lineage was read only in part is solid that way, never hollow', () => {
   const layerOfRow = (id: string) => (id === 'rep' ? 4 : undefined)
 
-  it('keeps that direction from reading hollow, draws no port, and leaves the other alone', () => {
+  it('says the card has lineage that way, draws no line, and leaves the other alone', () => {
     const ports = buildNodePorts(partialLines({ in: new Set(), out: new Set(['rep']) }), layerOfRow)
-    expect(portView('right', ports.get('rep'), { in: 1, out: 3 })).toBeNull()
-    expect(portView('left', ports.get('rep'), { in: 1, out: 3 })).toEqual({ kind: 'beyond', dir: 'in' })
+    expect(ports.get('rep')!.right).toEqual({ in: 0, out: 0 })
+    expect(portView('right', ports.get('rep'), { in: 1, out: 3 }, false, { in: 1, out: 1 })).toEqual({ kind: 'lineage', dir: 'out' })
+    expect(portView('left', ports.get('rep'), { in: 1, out: 3 }, false, { in: 1, out: 1 })).toEqual({ kind: 'beyond', dir: 'in' })
   })
 })

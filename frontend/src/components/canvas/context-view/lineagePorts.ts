@@ -14,16 +14,23 @@
  * the Report cards on ABCDE had every line plugged into a bare left edge
  * and their only port on the right, and read as "lineage with no marker".
  *
- * The server's degree (`/nodes/degree`, the whole graph) says whether lineage
- * exists at all. Lineage with nothing on this canvas has no side to plug
- * into, so it takes the conventional one — incoming left, outgoing right —
- * as a HOLLOW port. An UNKNOWN total (not fetched yet, or its query failed)
- * is never read as zero, nor as some. Once counting has FAILED, and the card
- * has no line of its own to answer the question, the port says just that:
- * UNKNOWN, on both sides, in neither direction colour, until a retry counts
- * it. Not while the first count is still on its way — every card would flash.
- * A container's roll-up cells count as lineage too (NodeDegree): its own
- * flows may be none while the rows inside it have plenty.
+ * Lineage with no line on this canvas has no side to plug into, so it takes
+ * the conventional one — incoming left, outgoing right — SOLID: the card has
+ * lineage that way, and selecting it draws the lines. Anything that says so
+ * will do: the server's degree (`/nodes/degree`, the whole graph), a
+ * container's roll-up cells (NodeDegree: its own flows may be none while the
+ * rows inside it have plenty), a far end whose place is still being asked,
+ * a read that came back at its cap. None of them can say where the partners
+ * are — a row past a page, a row inside the card, a member of the same
+ * group — so none of them makes a port HOLLOW. Only the canvas placing that
+ * direction's flows outside the view does (`outside`), and then only while
+ * nothing of that direction is in it.
+ *
+ * An UNKNOWN total (not fetched yet, or its query failed) is never read as
+ * zero, nor as some. Once counting has FAILED, and nothing else says the
+ * card has lineage, the port says just that: UNKNOWN, on both sides, in
+ * neither direction colour, until a retry counts it. Not while the first
+ * count is still on its way — every card would flash.
  */
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import type { NodeDegree } from '@/providers/GraphDataProvider'
@@ -41,16 +48,20 @@ export interface NodePorts {
   right: SideLines
   /** Lines on the canvas that stand aside for their children's finer ones
    *  (delegated): not drawn, so no port — but the lineage IS in view, so
-   *  they keep the card from reading hollow. Lineage whose far end has no
-   *  known place yet counts here too (unplacedLines). */
+   *  they keep the card from reading hollow. */
   delegated: SideLines
+  /** Lineage with no line of its own yet: its far end has no known place
+   *  (unplacedLines), or its read came back at its cap (partialLines). The
+   *  card has lineage that way, and none of it is known to leave the view. */
+  held: SideLines
 }
 
 export interface PortView {
-  /** `here` — lines to entities on this canvas; `beyond` — lineage in the
-   *  data, none of it to anything on this canvas; `unknown` — its lineage
-   *  could not be counted. */
-  kind: 'here' | 'beyond' | 'unknown'
+  /** `here` — lines to entities on this canvas; `lineage` — lineage no line
+   *  shows yet (solid, on the conventional side); `beyond` — lineage the
+   *  canvas placed outside this view, none of that direction in it;
+   *  `unknown` — its lineage could not be counted. */
+  kind: 'here' | 'lineage' | 'beyond' | 'unknown'
   dir: 'in' | 'out' | 'both'
 }
 
@@ -62,20 +73,25 @@ export interface PortView {
  */
 export function buildNodePorts(
   /** `weight`: the lines one stands for (unloadedColumnLines); 1 if absent. */
-  lines: Iterable<{ source: string; target: string; isBidirectional?: boolean; isDelegated?: boolean; weight?: number }>,
+  lines: Iterable<{ source: string; target: string; isBidirectional?: boolean; isDelegated?: boolean; isHeld?: boolean; weight?: number }>,
   layerOf: (id: string) => number | undefined,
 ): Map<string, NodePorts> {
   const ports = new Map<string, NodePorts>()
   const at = (id: string): NodePorts => {
     let p = ports.get(id)
     if (!p) {
-      p = { left: { in: 0, out: 0 }, right: { in: 0, out: 0 }, delegated: { in: 0, out: 0 } }
+      p = { left: { in: 0, out: 0 }, right: { in: 0, out: 0 }, delegated: { in: 0, out: 0 }, held: { in: 0, out: 0 } }
       ports.set(id, p)
     }
     return p
   }
-  for (const { source, target, isBidirectional, isDelegated, weight = 1 } of lines) {
+  for (const { source, target, isBidirectional, isDelegated, isHeld, weight = 1 } of lines) {
     if (source === target) continue
+    if (isHeld) {
+      at(source).held.out++
+      at(target).held.in++
+      continue
+    }
     if (isDelegated) {
       at(source).delegated.out++
       at(target).delegated.in++
@@ -109,25 +125,33 @@ export function portView(
   total: NodeDegree | undefined,
   /** Counting this card's total failed; it is being asked again. */
   unknown = false,
+  /** Flows the canvas placed OUTSIDE this view (the projection's
+   *  offCanvasByNode): the only thing that makes a port hollow. */
+  outside?: { in: number; out: number },
 ): PortView | null {
   const here = ports?.[side]
   if (here && here.in + here.out > 0) {
     return { kind: 'here', dir: here.in > 0 && here.out > 0 ? 'both' : here.in > 0 ? 'in' : 'out' }
   }
-  if (!total) {
-    const anyLine = sideVolume(ports, 'left') + sideVolume(ports, 'right')
-      + (ports ? ports.delegated.in + ports.delegated.out : 0) > 0
-    return unknown && !anyLine ? { kind: 'unknown', dir: 'both' } : null
+  // Each direction speaks on its conventional side — incoming left,
+  // outgoing right — and only while none of it is drawn, on either side:
+  // some of it on the canvas already says it exists.
+  const dir = side === 'left' ? 'in' : 'out'
+  const drawn = (ports?.left[dir] ?? 0) + (ports?.right[dir] ?? 0)
+  const held = ports?.held[dir] ?? 0
+  const placedOutside = outside?.[dir] ?? 0
+  const counted = (total?.[dir] ?? 0) + ((dir === 'in' ? total?.rollupIn : total?.rollupOut) ?? 0)
+  if (drawn === 0) {
+    if (placedOutside > 0 && held + (ports?.delegated[dir] ?? 0) === 0) return { kind: 'beyond', dir }
+    // A line standing aside for its children's is theirs to show.
+    if (placedOutside + held + counted > 0) return { kind: 'lineage', dir }
   }
-  // Lineage with nothing on this canvas — only when NONE of that direction
-  // is here, on either side: some of it on the canvas already says it exists.
-  const canvasIn = (ports?.left.in ?? 0) + (ports?.right.in ?? 0) + (ports?.delegated.in ?? 0)
-  const canvasOut = (ports?.left.out ?? 0) + (ports?.right.out ?? 0) + (ports?.delegated.out ?? 0)
-  const hasIn = total.in > 0 || (total.rollupIn ?? 0) > 0
-  const hasOut = total.out > 0 || (total.rollupOut ?? 0) > 0
-  if (side === 'left' && hasIn && canvasIn === 0) return { kind: 'beyond', dir: 'in' }
-  if (side === 'right' && hasOut && canvasOut === 0) return { kind: 'beyond', dir: 'out' }
-  return null
+  if (!unknown || total) return null
+  // Its count failed: unknown, unless anything else says it has lineage.
+  const anything = sideVolume(ports, 'left') + sideVolume(ports, 'right')
+    + (ports ? ports.delegated.in + ports.delegated.out + ports.held.in + ports.held.out : 0)
+    + (outside ? outside.in + outside.out : 0) > 0
+  return anything ? null : { kind: 'unknown', dir: 'both' }
 }
 
 const NO_TOTALS: ReadonlyMap<string, NodeDegree> = new Map()
@@ -137,30 +161,24 @@ const NO_TOTALS: ReadonlyMap<string, NodeDegree> = new Map()
  *
  * Roll-up cells speak for a CLOSED container only. Open, its rows carry
  * their own lines and ports, and the cells it holds to them — its own flows,
- * summarised against itself — would read as lineage leaving the view.
+ * summarised against itself — would give it lineage of its own it has not.
  *
  * A logical group is no entity, so the server has no total for it. Closed,
  * it stands for its members (and a nested group's): its total is theirs,
- * summed, once every one is counted, and unknown when one's count failed.
- * Open, its members speak for themselves.
- *
- * A hidden flow type never turns a port hollow. The totals count every
- * type, so when one the reader hid could explain the gap, no card says its
- * lineage only leaves the view; a failed count still says so.
+ * summed. A member's lineage is the group's at once; with none found, it
+ * waits for every member, and is unknown when one's count failed. Open, its
+ * members speak for themselves.
  */
 export function portTotals<N extends { id: string; isLogical?: boolean; children: readonly N[] }>(
   roots: Iterable<N>,
   totals: ReadonlyMap<string, NodeDegree>,
   failed: ReadonlySet<string>,
   isOpen: (id: string) => boolean,
-  hiddenCouldExplain: boolean,
 ): { totals: ReadonlyMap<string, NodeDegree>; failed: ReadonlySet<string> } {
   const read = new Map<string, NodeDegree>()
-  if (!hiddenCouldExplain) {
-    totals.forEach((t, id) => {
-      read.set(id, isOpen(id) && (t.rollupIn !== undefined || t.rollupOut !== undefined) ? { in: t.in, out: t.out } : t)
-    })
-  }
+  totals.forEach((t, id) => {
+    read.set(id, isOpen(id) && (t.rollupIn !== undefined || t.rollupOut !== undefined) ? { in: t.in, out: t.out } : t)
+  })
   const failedGroups: string[] = []
   const sum = (group: N): NodeDegree | 'unknown' | undefined => {
     const acc = { in: 0, out: 0, rollupIn: 0, rollupOut: 0 }
@@ -175,10 +193,11 @@ export function portTotals<N extends { id: string; isLogical?: boolean; children
         acc.rollupIn += t.rollupIn ?? 0; acc.rollupOut += t.rollupOut ?? 0
       }
     }
-    const answer = unknown ? 'unknown' : uncounted ? undefined : acc
+    const found = acc.in + acc.out + acc.rollupIn + acc.rollupOut > 0
+    const answer = found ? acc : unknown ? 'unknown' : uncounted ? undefined : acc
     if (!isOpen(group.id)) {
       if (answer === 'unknown') failedGroups.push(group.id)
-      else if (answer && !hiddenCouldExplain) read.set(group.id, answer)
+      else if (answer) read.set(group.id, answer)
     }
     return answer
   }
@@ -227,18 +246,17 @@ const UNPLACED_END = 'unplaced:'
 
 /**
  * Lineage whose far end has no known place: still being asked, or never
- * found (the projection's `unplaced`). Nothing says it leaves the view, so
- * the card must not read hollow on its account, and nothing says where it
- * goes, so it draws no port: like a delegated line, one per row and
- * direction.
+ * found (the projection's `unplaced`). The card has lineage that way, and
+ * nothing says it leaves the view or where it goes: a held line (NodePorts),
+ * one per row and direction — solid on the conventional side, never hollow.
  */
 export function unplacedLines(
   offCanvas: ReadonlyMap<string, OffCanvasLineage>,
-): Array<{ source: string; target: string; isDelegated: true }> {
-  const lines: Array<{ source: string; target: string; isDelegated: true }> = []
+): Array<{ source: string; target: string; isHeld: true }> {
+  const lines: Array<{ source: string; target: string; isHeld: true }> = []
   offCanvas.forEach(({ unplaced }, row) => {
-    if (unplaced.out > 0) lines.push({ source: row, target: UNPLACED_END, isDelegated: true })
-    if (unplaced.in > 0) lines.push({ source: UNPLACED_END, target: row, isDelegated: true })
+    if (unplaced.out > 0) lines.push({ source: row, target: UNPLACED_END, isHeld: true })
+    if (unplaced.in > 0) lines.push({ source: UNPLACED_END, target: row, isHeld: true })
   })
   return lines
 }
@@ -246,15 +264,14 @@ export function unplacedLines(
 /**
  * Rows whose lineage was read only in part: priming them came back at its
  * cap that way (the store's `lineagePartial`), so flows past it may reach
- * rows in the view. Like unplaced lineage, they keep that direction from
- * reading hollow and draw no port.
+ * rows in the view. Like unplaced lineage, a held line.
  */
 export function partialLines(
   partial: { in: ReadonlySet<string>; out: ReadonlySet<string> },
-): Array<{ source: string; target: string; isDelegated: true }> {
-  const lines: Array<{ source: string; target: string; isDelegated: true }> = []
-  partial.out.forEach(row => lines.push({ source: row, target: UNPLACED_END, isDelegated: true }))
-  partial.in.forEach(row => lines.push({ source: UNPLACED_END, target: row, isDelegated: true }))
+): Array<{ source: string; target: string; isHeld: true }> {
+  const lines: Array<{ source: string; target: string; isHeld: true }> = []
+  partial.out.forEach(row => lines.push({ source: row, target: UNPLACED_END, isHeld: true }))
+  partial.in.forEach(row => lines.push({ source: UNPLACED_END, target: row, isHeld: true }))
   return lines
 }
 

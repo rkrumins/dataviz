@@ -28,10 +28,17 @@ const node = (id: string): HierarchyNode => ({
 })
 
 const outRight = (n: number): NodePorts => ({
-  left: { in: 0, out: 0 }, right: { in: 0, out: n }, delegated: { in: 0, out: 0 },
+  left: { in: 0, out: 0 }, right: { in: 0, out: n }, delegated: { in: 0, out: 0 }, held: { in: 0, out: 0 },
 })
 
-function renderColumn(lineagePorts: ReadonlyMap<string, NodePorts>, lineageUnknown?: ReadonlySet<string>) {
+function renderColumn(
+  lineagePorts: ReadonlyMap<string, NodePorts>,
+  lineageUnknown?: ReadonlySet<string>,
+  lineage?: {
+    totals?: ReadonlyMap<string, { in: number; out: number }>
+    outside?: ReadonlyMap<string, { in: number; out: number }>
+  },
+) {
   installJsdomLayout()
   const session = stubSession({})
   render(
@@ -56,6 +63,8 @@ function renderColumn(lineagePorts: ReadonlyMap<string, NodePorts>, lineageUnkno
           overscan={200}
           lineagePorts={lineagePorts}
           lineageUnknown={lineageUnknown}
+          lineageTotals={lineage?.totals}
+          lineageOutside={lineage?.outside}
           showLineageIndicators
         />
       </ViewRowSearchContext.Provider>
@@ -84,5 +93,17 @@ describe('LayerColumn — lineage ports', () => {
     expect(port('a', 'right')!.dataset.port).toBe('unknown')
     expect(port('b', 'left')).toBeNull()
     expect(port('b', 'right')).toBeNull()
+  })
+
+  it('a card is hollow only for flows the canvas placed outside; a total alone makes it solid', () => {
+    renderColumn(new Map(), undefined, {
+      totals: new Map([['a', { in: 0, out: 5 }], ['b', { in: 0, out: 5 }]]),
+      outside: new Map([['a', { in: 0, out: 2 }]]),
+    })
+    expect(port('a', 'right')!.dataset.port).toBe('beyond')
+    // The tip counts what leads outside, not the total.
+    expect(port('a', 'right')!.dataset.out).toBe('2')
+    expect(port('b', 'right')!.dataset.port).toBe('lineage')
+    expect(port('b', 'left')).toBeNull()
   })
 })

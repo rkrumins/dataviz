@@ -733,11 +733,12 @@
     --port-c: var(--port-out);
     background-color: rgb(var(--port-c));
   }
-  /* Solid — lines to entities on this canvas; busier sides glow brighter. */
+  /* Solid — lines to entities on this canvas; busier sides glow brighter.
+   * Lineage no line shows yet (`lineage`) is solid too, without the glow. */
   .nx-lineage-port[data-port="here"] .nx-lineage-port-body {
     box-shadow: 0 0 calc(2px + 6px * var(--port-strength, 0)) rgb(var(--port-c) / calc(0.3 + 0.45 * var(--port-strength, 0)));
   }
-  /* Hollow — lineage in the data, none of it to anything on this canvas. */
+  /* Hollow — lineage the canvas placed outside this view, none of it in it. */
   .nx-lineage-port[data-port="beyond"] .nx-lineage-port-body {
     background-color: var(--nx-bg-canvas);
     box-shadow: inset 0 0 0 1.25px rgb(var(--port-c));
