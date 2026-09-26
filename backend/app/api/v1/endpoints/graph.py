@@ -32,7 +32,7 @@ from backend.common.models.search import SearchQuery
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
-from backend.common.adapters import ProviderFailingOver
+from backend.common.adapters import ProviderBusy, ProviderFailingOver
 from backend.app.services.fair_share import get_fair_share
 from backend.app.config import resilience
 from backend.app.services.graph_cache import (
@@ -1254,8 +1254,10 @@ async def trace_expand_batch(
 
     Partial-success: pair-level failures are swallowed (with a logged warning)
     so the rest of the batch returns; total failure returns 404 with the
-    list of pair-level error messages in the response body. Shape matches
-    /trace/expand so the frontend's normalizeTraceV2 handles either."""
+    list of pair-level error messages in the response body. A shed pair is
+    not a failure: the batch answers 429 + Retry-After, as /trace/expand
+    does, and the client retries it. Shape matches /trace/expand so the
+    frontend's normalizeTraceV2 handles either."""
     import asyncio
     if not request.pairs:
         # Empty batch — return an empty payload. Use the first pair's URN as
@@ -1275,6 +1277,10 @@ async def trace_expand_batch(
         )
         try:
             return await engine.expand_aggregated_edge(req)
+        except ProviderBusy:
+            # "Ask again in a moment" for the whole batch, not a pair to drop:
+            # the rest would answer 200 as complete and be cached as such.
+            raise
         except Exception as exc:
             # Catch ALL exceptions per pair — provider unavailability, value
             # errors, missing URNs, etc. Surface to the response body so the
@@ -1285,7 +1291,15 @@ async def trace_expand_batch(
             return None
 
     async def compute_batch() -> TraceResult:
-        results = await asyncio.gather(*(run_one(p) for p in request.pairs))
+        tasks = [asyncio.ensure_future(run_one(p)) for p in request.pairs]
+        try:
+            results = await asyncio.gather(*tasks)
+        except ProviderBusy:
+            # gather does not stop the pairs still out: stop them, rather than
+            # leave them running against a store that just said it is full.
+            for t in tasks:
+                t.cancel()
+            raise
         return _merge_expand_results(results, request, pair_errors)
 
     # Response-cached like the single /trace/expand (this handler used to

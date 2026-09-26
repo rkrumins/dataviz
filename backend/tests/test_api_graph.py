@@ -793,6 +793,82 @@ async def test_rollups_on_a_reader_that_cannot_count_are_501(test_client: AsyncC
     assert resp.status_code == 501
 
 
+# ── POST /trace/expand-batch ──────────────────────────────────────────
+
+class _ExpandEngine:
+    """Drills each pair by its source: ``shed`` sheds, ``broken`` fails,
+    ``slow`` answers after 2 s unless cancelled first, anything else answers."""
+
+    provider = None
+
+    def __init__(self):
+        self.cancelled: List[str] = []
+
+    async def expand_aggregated_edge(self, req):
+        import asyncio
+        from backend.common.adapters import ProviderBusy
+        from backend.common.models.graph import TraceResult
+
+        if req.source_urn == "shed":
+            raise ProviderBusy("falkordb", "queue full", retry_after_seconds=7)
+        if req.source_urn == "broken":
+            raise ValueError("no such level")
+        if req.source_urn == "slow":
+            try:
+                await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                self.cancelled.append(req.source_urn)
+                raise
+        return TraceResult(
+            nodes=[GraphNode(urn=req.target_urn, displayName=req.target_urn, entityType="dataset")],
+            edges=[], focus=TraceFocus(urn=req.source_urn, level=0, entityType="dataset"),
+            effectiveLevel=1)
+
+
+async def _post_expand_batch(test_client: AsyncClient, engine, sources):
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    async def _override():
+        return engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    try:
+        return await test_client.post(
+            "/api/v1/test-ws/graph/trace/expand-batch",
+            json={"pairs": [{"sourceUrn": s, "targetUrn": f"t-{s}", "nextLevel": 1} for s in sources]},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+
+async def test_a_shed_pair_sheds_the_batch(test_client: AsyncClient):
+    """The canvas drills through this route. A shed pair was swallowed with
+    every other failure: its lineage was dropped and the rest answered 200
+    as complete, cached for the full TTL; with every pair shed it was a 404.
+    A shed is "ask again in a moment": 429 + Retry-After for the batch, which
+    the client retries, and the pairs still out are stopped rather than left
+    running against a store that just said it is full."""
+    import asyncio
+
+    engine = _ExpandEngine()
+    resp = await _post_expand_batch(test_client, engine, ["ok", "slow", "shed"])
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == "7"
+    await asyncio.sleep(0)
+    assert engine.cancelled == ["slow"]
+
+    # Every pair shed: 429, not "no pair could be expanded".
+    resp = await _post_expand_batch(test_client, _ExpandEngine(), ["shed"])
+    assert resp.status_code == 429
+
+
+async def test_a_pair_that_fails_otherwise_leaves_the_rest_answered(test_client: AsyncClient):
+    resp = await _post_expand_batch(test_client, _ExpandEngine(), ["ok", "broken"])
+    assert resp.status_code == 200
+    assert [n["urn"] for n in resp.json()["nodes"]] == ["t-ok"]
+
+
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────
 
 async def test_get_node_found(graph_client):
