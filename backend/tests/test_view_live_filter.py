@@ -28,6 +28,9 @@ ALLOWED = {
     "services/view_transfer/importing.py": 1,
     # What a draft changes in views, which includes the views waiting in it.
     "services/draft_views.py": 2,
+    # A view's library, by id, behind its route's access check: a view staged in a draft keeps
+    # its rules on that draft (``branchId``).
+    "services/view_library.py": 1,
 }
 
 

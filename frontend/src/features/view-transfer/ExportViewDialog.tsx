@@ -311,6 +311,7 @@ function WhatTravels({ withData = false }: { withData?: boolean }) {
         <p className="text-[11px] text-ink-muted leading-relaxed">
           <span className="font-semibold text-ink-secondary">Not included:</span>{' '}
           {withData ? '' : 'the graph data itself, '}who the view is shared with, favourites, draft changes to the view,
+          its saved queries (the Property Manager's Rules &amp; saved queries export takes those),
           and anyone's email address.{withData ? '' : ' Entities are named so the import can show what it didn\'t find.'}
         </p>
       </div>

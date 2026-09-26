@@ -15,6 +15,16 @@ performs:
   * ``deep_search_explain``   — compile-only, return Cypher + params
   * ``deep_search_discover``  — sample the graph, return queryable
                                 property/tag/edge metadata
+  * ``deep_search_values``    — one property's most common values, for
+                                the value picker
+
+and, optionally (outside the Protocol, so a provider without it still
+satisfies it):
+
+  * ``deep_search_session``   — the uncapped engine: run a request's share
+                                of a search session (``SearchRunContext``)
+                                and return its page. A provider without it
+                                is searched by ``deep_search``.
 
 ``CompileError`` lives here so the service layer can ``except`` it
 without importing from any provider module. Each provider re-exports
@@ -22,7 +32,8 @@ the same symbol.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, AsyncContextManager, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 from backend.common.models.search import SearchQuery, SearchResultPage
 
@@ -35,6 +46,31 @@ class CompileError(ValueError):
     to HTTP 400 with the message intact — the message is user-facing
     and tells the caller which feature to use instead.
     """
+
+
+class SearchFailed(RuntimeError):
+    """A search or count stopped on a read the engine could not recover
+    from (a part that ran out of time or memory is split first). Rule
+    counts report it as that rule's error; the other rules in the
+    request count on."""
+
+
+@dataclass(frozen=True)
+class SearchRunContext:
+    """What the uncapped engine needs from the request around it.
+
+    * ``data_version`` — the graph data the request reads (content
+      generation + FalkorDB generation); a session started on one version
+      is never served as another's answer;
+    * ``scope_hash`` — the resolved view scope, so a session can only ever
+      answer the scope it was planned for;
+    * ``admit`` — takes one fleet slot for the length of one statement.
+      The engine runs many statements per request, so it is admitted per
+      statement rather than once around the whole search.
+    """
+    data_version: str = ""
+    scope_hash: str = ""
+    admit: Optional[Callable[[], AsyncContextManager]] = None
 
 
 @runtime_checkable
@@ -73,5 +109,20 @@ class DeepSearchProvider(Protocol):
         missingContainment, tagValues, missingSearchableText, edges,
         elapsedMs}``. Powers the FE's property / value / tag / edge
         pickers.
+        """
+        ...
+
+    async def deep_search_values(
+        self,
+        *,
+        key: str,
+        entity_types: Optional[List[str]] = None,
+        q: str = "",
+        limit: int = 25,
+    ) -> Dict[str, Any]:
+        """A property's most common values across the given entity types
+        (all when None), optionally only those whose text contains ``q``.
+        Returns ``{key, values: [{value, count}], complete, truncated,
+        elapsedMs}``. Powers the value picker's suggestions.
         """
         ...

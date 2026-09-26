@@ -4,9 +4,11 @@ import json
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, PrivateAttr, RootModel
 
 logger = logging.getLogger(__name__)
@@ -28,10 +30,22 @@ from backend.app.providers.falkordb_provider import (
     _FAILOVER_RETRY_AFTER_S,
     CursorMismatchError,
 )
-from backend.common.models.search import SearchQuery
+from backend.common.models.search import (
+    SearchAncestorCountsRequest,
+    SearchCatalogRequest,
+    SearchCountsRequest,
+    SearchExportRequest,
+    SearchMembershipRequest,
+    SearchQuery,
+)
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.deep_search import (
+    CompileError,
+    SearchRunContext,
+    get_deep_search_settings,
+)
 from backend.common.adapters import ProviderBusy, ProviderFailingOver, ProviderUnavailable
 from backend.app.services.fair_share import get_fair_share
 from backend.app.config import resilience
@@ -89,6 +103,7 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 # SECURITY flag (signupEnabled, in auth.py) fails closed.
 require_trace = require_feature("traceEnabled")        # POST /trace*
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
+require_export = require_feature("graphExportEnabled")  # /search/exports*
 
 
 # ------------------------------------------------------------------ #
@@ -1808,9 +1823,17 @@ async def search_advanced(
         branch_id=branchId,
     )
     try:
-        page, eff_scope = await _bounded_compute(
-            engine, lambda: svc.search(query),
-        )()
+        if get_deep_search_settings().engine == "v2":
+            # The uncapped engine runs many statements per request, so it is
+            # admitted per statement, not once around the whole search.
+            page, eff_scope = await svc.search(query, run_context=SearchRunContext(
+                data_version=await _search_data_version(engine),
+                admit=_statement_admission(engine),
+            ))
+        else:
+            page, eff_scope = await _bounded_compute(
+                engine, lambda: svc.search(query),
+            )()
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
@@ -1820,6 +1843,38 @@ async def search_advanced(
         response.headers["X-Search-Dropped-URNs"] = str(len(eff_scope.dropped_urns))
     response.headers["X-Search-Scope-Hash"] = eff_scope.scope_hash
     return page
+
+
+def _statement_admission(engine: ContextEngine):
+    """``_bounded_compute``'s two slots — this process's and the fleet's —
+    as a context manager held for ONE statement, or None when the engine's
+    provider has no slot key (``_bounded_compute`` degrades the same way)."""
+    key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
+    if key is None:
+        return None
+
+    @asynccontextmanager
+    async def admit():
+        sem = await provider_manager.acquire_provider_slot(*key)
+        try:
+            async with provider_manager.fleet_slot(*key):
+                yield
+        finally:
+            sem.release()
+
+    return admit
+
+
+async def _search_data_version(engine: ContextEngine) -> str:
+    """The graph data a search reads: the published graph's content
+    generation (a draft searches the graph it is a draft of) and the
+    physical graph behind it. Never raises; "" when unknown."""
+    scope = _cache_scope(engine)
+    if scope is None:
+        return ""
+    published = replace(scope, branch_id="")
+    generation = await get_graph_cache().content_generation(published)
+    return f"{generation}.{published.graph_ns}"
 
 
 @router.post("/search/explain")
@@ -1916,6 +1971,277 @@ async def search_discover(
         # Same refusal arm as the other two search routes: a branch /
         # stale-main provider means its message for the caller.
         raise _map_not_implemented(engine, exc) from exc
+
+
+@router.get("/search/values")
+async def search_values(
+    request: Request,
+    viewId: str = Query(..., min_length=1),
+    key: str = Query(..., min_length=1, max_length=128),
+    q: str = Query("", max_length=256,
+                   description="Only values whose text contains this "
+                               "(case-insensitive)."),
+    limit: int = Query(25, ge=1, le=50),
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """The most common values of one property in a view — the value
+    picker's suggestions, counted over every entity of the view's types.
+    ``/search/discover`` reads 200 nodes per type, so on a large graph it
+    showed a property's values by accident ("I only ever see two").
+
+    Bounded to about 1.5 s: ``complete`` says whether every type was read,
+    ``truncated`` whether there were more distinct values than listed. What
+    a user picks is still compared exactly; only the list is bounded.
+
+    The values come from the view's entity TYPES, which for a view scoped
+    to a subtree is wider than the view — so, like ``/search/discover``, a
+    share-link identity is refused (``_guard_capability_scope``).
+    """
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
+    _guard_capability_scope(request)
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    svc = AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=dataSourceId,
+        branch_id=branchId,
+    )
+    try:
+        return await _bounded_compute(
+            engine, lambda: svc.values(view_id=viewId, key=key, q=q, limit=limit),
+        )()
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/membership", response_model_by_alias=True)
+async def search_membership(
+    body: SearchMembershipRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """Which of the entities on screen (at most 1,000 urns) match which
+    rules (at most 32) — what display rules paint, without downloading every
+    entity a rule matches. Only entities inside the view's scope ever match;
+    the scope is resolved here from ``scope.viewId``, like a search's.
+
+    A rule using ``withinHops`` or a path is refused in ``errors``: those
+    describe a route, not an entity.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.membership(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/counts", response_model_by_alias=True)
+async def search_counts(
+    body: SearchCountsRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """How many entities in the view match each rule — exactly, however
+    many. A count over a large view takes more than one request: send the
+    same body again with the returned ``sessions`` (rule id → sessionId)
+    until every count reads ``complete``. Each request runs about
+    ``waitMs``, sharing it among the counts that have got least far.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.counts(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/catalog", response_model_by_alias=True)
+async def search_catalog(
+    body: SearchCatalogRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """Every property the view's entities carry — on how many, stored as
+    which kinds, with which values — read from every entity in the view's
+    scope rather than a sample. A large view takes more than one request:
+    send the same body with the returned ``sessionId`` until ``status`` is
+    ``complete``. A complete catalog is kept, and served for a while after
+    the data changes (``stale`` + ``asOf``); ``refresh`` reads the view
+    again.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.catalog(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/exports", response_model_by_alias=True,
+             dependencies=[Depends(require_export)])
+async def search_export(
+    body: SearchExportRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+    user=Depends(get_optional_user),
+):
+    """Every entity in the view matching ``predicate``, written to a CSV or
+    NDJSON file — exactly, however many, each value as stored (a 64-bit
+    integer keeps its digits). A large export takes more than one request:
+    send the same body with the returned ``sessionId`` until ``status`` is
+    ``complete``; that answer carries a ``downloadToken`` for
+    ``GET /search/exports/{sessionId}/download``.
+    """
+    from backend.app.services.advanced_search_service import ValidationError
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.export(body, principal=_principal(user), run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except (ValidationError, CompileError) as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.get("/search/exports/{session_id}/download", dependencies=[Depends(require_export)])
+async def search_export_download(
+    session_id: str,
+    token: str = Query(..., max_length=2048),
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    # Function-scoped: given back before the body streams. The file streams from the object
+    # store alone, for as long as it takes, and holds no graph-read connection or admission.
+    _admission: None = Depends(_admit_graph_request, scope="function"),
+    session: AsyncSession = Depends(get_graph_read_db_session, scope="function"),
+    # The session the route's gate read the data source with (the same one, per request).
+    gate: AsyncSession = Depends(get_db_session),
+    user=Depends(get_optional_user),
+):
+    """A complete export, streamed as the file it is — for the person it
+    was exported for, for an hour after (``downloadToken``)."""
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.search_downloads import read_download_token
+    from backend.auth_service.core import config as auth_config
+
+    vouched = read_download_token(token, _principal(user),
+                                  [key for _kid, key in auth_config.JWT_VERIFICATION_KEYS])
+    if vouched is None or vouched[0] != session_id:
+        raise HTTPException(status_code=403,
+                            detail="This download link has expired — export the matches again.")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
+    engine = await get_context_engine(ws_id=ws_id, dataSourceId=dataSourceId, connectionId=None,
+                                      branchId=branchId, _admission=None, session=session,
+                                      user=user)
+    svc = AdvancedSearchService(engine, session=session, workspace_id=ws_id,
+                                data_source_id=dataSourceId, branch_id=branchId)
+    try:
+        opened = await svc.open_export(session_id, vouched[1])
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+    if opened is None:
+        raise HTTPException(status_code=404,
+                            detail="This export is no longer kept — export the matches again.")
+    # The gate's read is done: give its connection back now, not when the download ends.
+    await gate.commit()
+    answer, body = opened
+    media = "text/csv; charset=utf-8" if answer.format == "csv" else "application/x-ndjson"
+    return StreamingResponse(body, media_type=media, headers={
+        "Content-Disposition": f'attachment; filename="{answer.filename}"',
+        "Cache-Control": "no-store"})
+
+
+def _principal(user) -> str:
+    """Whose request this is, as a download token names them."""
+    return str(getattr(user, "id", "") or "anonymous")
+
+
+@router.post("/search/ancestor-counts", response_model_by_alias=True)
+async def search_ancestor_counts(
+    body: SearchAncestorCountsRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """How many of a search's matches each of these containers (at most
+    2,000 urns) holds, below it at any depth — read from the session the
+    search returned (``sessionId``), so any container on screen gets its
+    exact count, not only the fullest ones the ``ancestor`` facet lists.
+    The session must be this view's; ``expired`` when it is gone.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.ancestor_counts(body)
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+def _rule_service(body, request: Request, ws_id, data_source_id, branch_id,
+                  engine: ContextEngine, session: AsyncSession):
+    """The search service for a rules request, after the checks a search
+    makes: a workspace, and a share link kept inside its own view."""
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
+    _guard_capability_scope(request, body)
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    return AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=data_source_id,
+        branch_id=branch_id,
+    )
 
 
 # Process-level cache of the SearchQuery JSON Schema. It's static

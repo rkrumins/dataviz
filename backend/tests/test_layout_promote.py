@@ -305,16 +305,53 @@ def _with_rules(layout, rules):
     return {**layout, "displayRules": rules}
 
 
-class TestDisplayRulesMerge:
-    """``merge_display_rules_3way``: the opaque displayRules array follows the
-    same draft-wins rule as ``merge_scope_3way`` (whole-array value)."""
+def _rule(rule_id, value):
+    return {"id": rule_id, "op": "color", "value": value}
 
-    def test_draft_changed_wins_over_published(self):
-        # Draft edited the rules; published also moved → draft wins the conflict.
+
+class TestDisplayRulesMerge:
+    """``merge_display_rules_3way``: displayRules merge keyed by rule id, each
+    rule by the same draft-wins rule as a layer; the draft's order, then
+    rules only published has."""
+
+    def test_rules_added_on_both_sides_are_all_kept(self):
+        # Draft added a rule; published added another since the fork → both.
         f = _with_rules(_layout(), _dr("a"))
         p = _with_rules(_layout(), _dr("a", "pub"))
         d = _with_rules(_layout(), _dr("a", "draft"))
-        assert merge_display_rules_3way(f, p, d) == _dr("a", "draft")
+        assert merge_display_rules_3way(f, p, d) == _dr("a", "draft", "pub")
+
+    def test_edits_to_different_rules_both_survive(self):
+        f = _with_rules(_layout(), [_rule("a", 1), _rule("b", 1)])
+        p = _with_rules(_layout(), [_rule("a", 1), _rule("b", "pub")])
+        d = _with_rules(_layout(), [_rule("a", "draft"), _rule("b", 1)])
+        assert merge_display_rules_3way(f, p, d) == [_rule("a", "draft"), _rule("b", "pub")]
+
+    def test_draft_edit_wins_a_conflict_on_the_same_rule(self):
+        f = _with_rules(_layout(), [_rule("a", 1)])
+        p = _with_rules(_layout(), [_rule("a", "pub")])
+        d = _with_rules(_layout(), [_rule("a", "draft")])
+        assert merge_display_rules_3way(f, p, d) == [_rule("a", "draft")]
+
+    def test_draft_removal_wins_and_published_removal_holds(self):
+        # Draft removed b (published edited it: draft wins); published removed
+        # c, which the draft left alone → gone too. The draft's edit of a keeps it.
+        f = _with_rules(_layout(), [_rule("a", 1), _rule("b", 1), _rule("c", 1)])
+        p = _with_rules(_layout(), [_rule("a", 1), _rule("b", "pub")])
+        d = _with_rules(_layout(), [_rule("a", "draft"), _rule("c", 1)])
+        assert merge_display_rules_3way(f, p, d) == [_rule("a", "draft")]
+
+    def test_order_follows_the_draft(self):
+        f = _with_rules(_layout(), _dr("a", "b"))
+        p = _with_rules(_layout(), _dr("a", "b", "pub"))
+        d = _with_rules(_layout(), _dr("b", "a"))
+        assert merge_display_rules_3way(f, p, d) == _dr("b", "a", "pub")
+
+    def test_rules_without_ids_merge_as_one_value(self):
+        f = _with_rules(_layout(), [{"op": "color", "value": 1}])
+        p = _with_rules(_layout(), [{"op": "color", "value": 1}, _rule("pub", 1)])
+        d = _with_rules(_layout(), [{"op": "color", "value": "draft"}])
+        assert merge_display_rules_3way(f, p, d) == [{"op": "color", "value": "draft"}]
 
     def test_draft_untouched_takes_published_since_fork_change(self):
         # Draft left rules as forked → published's own since-fork change survives.

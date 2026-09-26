@@ -535,6 +535,10 @@ class VersionedBranchProvider:
         """Schema discovery — same gap as :meth:`deep_search`."""
         raise NotImplementedError(_NO_DEEP_SEARCH)
 
+    async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
+        """Value suggestions — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
     # ---- stats: counts + schema summaries over the composed branch state - #
     async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:
         """Node/edge counts + per-type breakdowns from the composed branch state.

@@ -1,6 +1,7 @@
 import { unwrapEnvelope } from '@/services/cacheEnvelope'
 import { getCircuitBreaker, classifyEndpoint } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { readJsonLossless } from '@/lib/losslessJson'
 import {
     isClientTimeout,
     isIdempotentGraphRead,
@@ -57,6 +58,17 @@ import type {
     SearchResultPage,
     SearchExplainResult,
     SearchDiscoverResult,
+    SearchValuesResult,
+    SearchMembershipRequest,
+    SearchMembershipResult,
+    SearchCountsRequest,
+    SearchCountsResult,
+    SearchAncestorCountsRequest,
+    SearchAncestorCountsResult,
+    SearchCatalogRequest,
+    SearchCatalogResult,
+    SearchExportRequest,
+    SearchExportResult,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -422,7 +434,9 @@ export class RemoteGraphProvider implements GraphDataProvider {
                     )
                 }
 
-                const data = await response.json() as T
+                // Lossless: an integer past 2^53 (ids, hashes) arrives as its exact
+                // digits instead of a rounded double nobody's graph holds.
+                const data = await readJsonLossless<T>(response)
 
                 // Cache GET responses; TTL is per-endpoint (hot read paths 30s,
                 // metadata 60s, default 2s) so a "expand all" doesn't re-fire
@@ -552,6 +566,94 @@ export class RemoteGraphProvider implements GraphDataProvider {
     }
 
     /**
+     * Which of these entities (the ones on screen, ≤ 1,000) match which
+     * display rules (≤ 32) — POST /search/membership. The server resolves
+     * the view's scope; an entity outside it never matches.
+     */
+    async searchMembership(
+        body: SearchMembershipRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchMembershipResult> {
+        return await this.fetch<SearchMembershipResult>('/search/membership', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+        })
+    }
+
+    /**
+     * Each display rule's exact total in the view — POST /search/counts.
+     * A large view takes several calls: send the returned sessions back
+     * until every count is complete (``services/ruleCounts.ts``).
+     */
+    async searchCounts(
+        body: SearchCountsRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchCountsResult> {
+        return await this.fetch<SearchCountsResult>('/search/counts', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /**
+     * Every property the view's entities carry — on how many, stored as
+     * which kinds, with which values — read from every entity in the view
+     * (POST /search/catalog). A large view takes several calls: send the
+     * returned session back until it is complete (``services/propertyCatalog``).
+     */
+    async searchCatalog(
+        body: SearchCatalogRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchCatalogResult> {
+        return await this.fetch<SearchCatalogResult>('/search/catalog', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /**
+     * How many of a finished search's matches each of these containers
+     * (≤ 2,000) holds — POST /search/ancestor-counts, read from the
+     * search's session. Answers for any container, not only the fullest
+     * ones the search's ``ancestor`` facet lists.
+     */
+    async searchAncestorCounts(
+        body: SearchAncestorCountsRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchAncestorCountsResult> {
+        return await this.fetch<SearchAncestorCountsResult>('/search/ancestor-counts', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+        })
+    }
+
+    /**
+     * Every match of a search, written to a CSV or NDJSON file on the
+     * server — POST /search/exports. A large export takes several calls:
+     * send the returned session back until it is complete
+     * (``services/searchExport.ts``); that answer carries a download token.
+     */
+    async searchExport(
+        body: SearchExportRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchExportResult> {
+        return await this.fetch<SearchExportResult>('/search/exports', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+        })
+    }
+
+    /** Where a complete export downloads from. The browser sends the
+     *  session cookie; ``token`` names the export and whose it is. */
+    searchExportDownloadUrl(sessionId: string, token: string): string {
+        return this.buildUrl(
+            `/search/exports/${encodeURIComponent(sessionId)}/download`, { token })
+    }
+
+    /**
      * Fetch the SearchQuery JSON Schema served by the backend.
      *
      * The body IS the canonical contract used by Ajv validation in the
@@ -600,6 +702,23 @@ export class RemoteGraphProvider implements GraphDataProvider {
             '/search/discover',
             { extraParams: { samplePerLabel: String(samplePerLabel) } },
         )
+    }
+
+    /**
+     * A property's most common values in a view — the value picker's
+     * suggestions, counted over every entity of the view's types (the
+     * discover sample above sees 200 nodes per type, so a property's
+     * values showed up by accident). Narrowed to values whose text contains
+     * `q`. Time-bounded server-side: `complete` / `truncated` say how far
+     * the count got.
+     */
+    async searchPropertyValues(
+        viewId: string, key: string, q = '', limit = 25, signal?: AbortSignal,
+    ): Promise<SearchValuesResult> {
+        return await this.fetch<SearchValuesResult>('/search/values', {
+            extraParams: { viewId, key, q, limit: String(limit) },
+            signal,
+        })
     }
 
     // ==========================================

@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, NamedTuple, Optional, Sequence, Set
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set
 
 from sqlalchemy import and_, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -662,6 +662,7 @@ async def update_view(
     if req.view_type is not None:
         row.view_type = req.view_type
     if req.config is not None:
+        _keep_config_display_rules(req.config, _load_config(row))
         row.config = json.dumps(req.config)
     # visibility is NOT written here: it is a security field with its own
     # authorization (publish gate) — see update_visibility. The endpoint
@@ -679,6 +680,50 @@ async def update_view(
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     return await _to_enriched_response(session, row)
+
+
+def _keep_display_rules(new_layout: Any, previous_layout: Any) -> None:
+    """Keep the stored ``displayRules`` on a replacement ``referenceLayout``,
+    whatever the replacement says about them.
+
+    Every layout writer replaces ``referenceLayout`` wholesale, and the rules
+    live inside it. A caller that edits layers — the View Wizard, a config
+    save built from its own copy of the layout — sent back the rules it had
+    read, or none: a copy read before someone changed a rule put the old
+    rules back, and a layout without the key deleted every rule on the view.
+    Rules are written only through the view's library
+    (``backend.app.services.view_library``), one rule at a time; every other
+    writer keeps the ones stored.
+    """
+    if not isinstance(new_layout, dict):
+        return
+    rules = previous_layout.get("displayRules") if isinstance(previous_layout, dict) else None
+    if isinstance(rules, list):
+        new_layout["displayRules"] = rules
+    else:
+        new_layout.pop("displayRules", None)
+
+
+def _keep_config_display_rules(new_config: Any, stored_config: Any) -> None:
+    """``_keep_display_rules`` for a whole replacement config. A config with
+    no referenceLayout of its own — a graph view's, which the wizard saves
+    with none — gets one to hold the stored rules, so a config save never
+    drops them."""
+    if not isinstance(new_config, dict):
+        return
+    stored = _base_reference_layout(stored_config)
+    layout = new_config.get("layout")
+    if isinstance(layout, dict) and isinstance(layout.get("referenceLayout"), dict):
+        target = layout["referenceLayout"]
+    elif isinstance(new_config.get("referenceLayout"), dict):
+        target = new_config["referenceLayout"]
+    elif isinstance(stored.get("displayRules"), list):
+        if not isinstance(layout, dict):
+            layout = new_config["layout"] = {}
+        target = layout["referenceLayout"] = {}
+    else:
+        return
+    _keep_display_rules(target, stored)
 
 
 async def _gate_node_ordering(session: AsyncSession, reference_layout: dict) -> dict:
@@ -713,9 +758,9 @@ async def update_view_layout(
     """Persist a view's layer layout in isolation.
 
     Only touches ``config["layout"]["referenceLayout"]`` (and, when
-    supplied, ``config["content"]["entityScope"]`` and
-    ``referenceLayout["displayRules"]``) — every other config key
-    (name/description/content/filters/...) is left untouched.
+    supplied, ``config["content"]["entityScope"]``) — every other config key
+    (name/description/content/filters/...) is left untouched, and so are the
+    view's display rules (see ``_keep_display_rules``).
 
     Raises ``ValueError`` if an assignment names a ``layerId`` that isn't
     one of the submitted layers' ids (the endpoint maps this to a 422).
@@ -730,6 +775,7 @@ async def update_view_layout(
     config = json.loads(row.config or "{}")
     if not isinstance(config, dict):
         config = {}
+    previous_layout = _base_reference_layout(config)
     layout = config.get("layout")
     if not isinstance(layout, dict):
         layout = {}
@@ -748,8 +794,7 @@ async def update_view_layout(
         content["entityScope"] = req.entity_scope
         config["content"] = content
 
-    if req.display_rules is not None:
-        layout["referenceLayout"]["displayRules"] = req.display_rules
+    _keep_display_rules(layout["referenceLayout"], previous_layout)
 
     layer_ids = {
         layer.get("id") for layer in req.reference_layout.get("layers", [])
@@ -897,8 +942,7 @@ async def update_overlay_layout(
     reference_layout = dict(await _gate_node_ordering(
         session, sanitize_node_ordering(req.reference_layout),
     ))
-    if req.display_rules is not None:
-        reference_layout["displayRules"] = req.display_rules
+    _keep_display_rules(reference_layout, json.loads(overlay.reference_layout or "{}"))
     overlay.reference_layout = json.dumps(reference_layout)
     if req.entity_scope is not None:
         overlay.entity_scope = req.entity_scope

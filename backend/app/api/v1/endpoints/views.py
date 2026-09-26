@@ -15,9 +15,11 @@ reverts scoping to legacy behaviour (auth requirements stay).
 """
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,10 +44,20 @@ from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services import view_access
+from backend.app.services import view_access, view_library
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
+from backend.common.models.view_library import (
+    DisplayRule,
+    ImportStrategy,
+    LibraryImportResult,
+    LibraryOrder,
+    LibraryPack,
+    SavedQuery,
+    SavedQueryInput,
+    ViewLibrary,
+)
 from backend.common.models.management import (
     ViewAccessInfo,
     ViewAudience,
@@ -1515,3 +1527,199 @@ async def record_visit(
         if not await view_access.can_read_view(session, ctx, view_orm):
             raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     await view_repo.record_view_visit(session, view_id, _user_id(user))
+
+
+# ---------------------------------------------------------------------------
+# The view's library: display rules and saved queries, and their pack
+# ---------------------------------------------------------------------------
+
+async def _library_view(
+    session: AsyncSession, view_id: str, user, claims: PermissionClaims,
+    *, edit: bool,
+) -> tuple[ViewORM, bool]:
+    """The view, if the caller may read it (404 otherwise, as ``get_view``),
+    and whether they may edit it — a write refuses with 403 when they may
+    not. With ``RBAC_ENFORCE_VIEWS`` off, anyone may do both, as for the
+    view's layout."""
+    view_orm = await _load_view_orm(session, view_id)
+    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+        return view_orm, True
+    ctx = await _viewer_context(session, user, claims)
+    if not await view_access.can_read_view(session, ctx, view_orm):
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    can_edit = await view_access.can_edit_view(session, ctx, view_orm)
+    if edit and not can_edit:
+        raise HTTPException(status_code=403, detail="Missing permission: workspace:view:edit")
+    return view_orm, can_edit
+
+
+def _library_refusal(exc: view_library.LibraryError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@router.get("/{view_id}/library", response_model=ViewLibrary)
+async def get_view_library(
+    view_id: str = Path(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The view's display rules — a draft's own on ``branchId`` once it has
+    changed its layout, else the published ones — and its saved queries,
+    with whether the caller may change them."""
+    view_orm, can_edit = await _library_view(session, view_id, user, claims, edit=False)
+    return await view_library.read_library(session, view_orm, branch_id, can_edit=can_edit)
+
+
+@router.put("/{view_id}/library/rules/{rule_id}", response_model=List[dict])
+async def put_view_rule(
+    view_id: str = Path(...),
+    rule_id: str = Path(..., min_length=1, max_length=128),
+    rule: DisplayRule = Body(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Add a display rule, or replace the one with this id where it stands.
+    Only this rule is written: rules others changed meanwhile are kept.
+    Returns the view's rules."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.put_rule(
+            session, view_id, branch_id, rule.model_copy(update={"id": rule_id}),
+        )
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)
+
+
+@router.delete("/{view_id}/library/rules/{rule_id}", response_model=List[dict])
+async def delete_view_rule(
+    view_id: str = Path(...),
+    rule_id: str = Path(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Remove a display rule (no error when it is already gone). Returns the
+    view's rules."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.delete_rule(session, view_id, branch_id, rule_id)
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)
+
+
+@router.put("/{view_id}/library/rules", response_model=List[dict])
+async def order_view_rules(
+    view_id: str = Path(...),
+    order: LibraryOrder = Body(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Put the view's display rules in the order ``ids`` names them; rules
+    it leaves out (added meanwhile) follow, in their order. Returns the
+    view's rules."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.order_rules(session, view_id, branch_id, order.ids)
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)
+
+
+@router.put("/{view_id}/library/queries/{query_id}", response_model=SavedQuery)
+async def put_view_query(
+    view_id: str = Path(...),
+    query_id: str = Path(..., min_length=1, max_length=128),
+    body: SavedQueryInput = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Save a query in the view's library under this id — a new one, or a
+    new name, description or search for one it has. Saved queries belong
+    to the view, whichever branch is open."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.put_query(
+            session, view_id, query_id, body, actor=_user_id(user),
+        )
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)
+
+
+@router.delete("/{view_id}/library/queries/{query_id}", status_code=204)
+async def delete_view_query(
+    view_id: str = Path(...),
+    query_id: str = Path(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Remove a saved query (no error when it is already gone)."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    await view_library.delete_query(session, view_id, query_id)
+
+
+@router.put("/{view_id}/library/queries", response_model=List[SavedQuery])
+async def order_view_queries(
+    view_id: str = Path(...),
+    order: LibraryOrder = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Put the view's saved queries in the order ``ids`` names them; any it
+    leaves out follow. Returns the view's saved queries."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    await view_library.order_queries(session, view_id, order.ids)
+    return await view_library.read_queries(session, view_id)
+
+
+@router.get("/{view_id}/library/export")
+async def export_view_library(
+    view_id: str = Path(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The view's display rules and saved queries as a pack — a JSON file to
+    import into another view. Anyone who can open the view can export it."""
+    view_orm, _ = await _library_view(session, view_id, user, claims, edit=False)
+    pack = await view_library.export_pack(session, view_orm, branch_id)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", view_orm.name or "").strip("-.") or "view"
+    return JSONResponse(
+        content=pack.model_dump(by_alias=True, mode="json", exclude_none=True),
+        headers={"Content-Disposition": f'attachment; filename="{stem[:80]}.library.json"'},
+    )
+
+
+@router.post("/{view_id}/library/import", response_model=LibraryImportResult)
+async def import_view_library(
+    view_id: str = Path(...),
+    pack: LibraryPack = Body(...),
+    strategy: ImportStrategy = Query("merge"),
+    dry_run: bool = Query(True, alias="dryRun"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What importing a pack would do, item by item (``dryRun``, the
+    default) — or do it. ``merge`` adds what the view doesn't have, ``copy``
+    adds everything, ``replace`` removes the view's rules and queries first.
+    Every item is checked as its kind is when saved; one that fails is
+    refused, and the rest still import."""
+    view_orm, can_edit = await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.import_pack(
+            session, view_orm, branch_id, pack, strategy=strategy, dry_run=dry_run,
+            actor=_user_id(user), can_edit=can_edit,
+        )
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)

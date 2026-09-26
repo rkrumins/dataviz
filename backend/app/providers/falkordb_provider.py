@@ -1518,6 +1518,13 @@ def resolve_falkordb_target(host: Optional[str], port: Optional[int]) -> Tuple[s
     return host, port
 
 
+def _text_properties(props: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The user properties free-text search reads: every one a node keeps —
+    natively or, past the native budget, in ``propertiesRaw``. A value kept
+    raw is still text a person searches for."""
+    return {k: v for k, v in (props or {}).items() if k not in _RESERVED_NODE_KEYS}
+
+
 def _compute_searchable_text(
     display_name: Optional[str],
     qualified_name: Optional[str],
@@ -1609,7 +1616,8 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     "urnSource", "nameSource",
     # The versioning projector's content fingerprint, SET on every node it writes
     # (``n.gvHash``) so its in-place reconcile can tell what changed. Bookkeeping:
-    # unreserved, it read back as a user property on every projected node.
+    # unreserved, it read back as a user property on every projected node — and a
+    # canvas save wrote the browser's rounded copy of the 19-digit int64 back over it.
     "gvHash",
 })
 
@@ -1818,12 +1826,13 @@ async def reserve_platform_property_names(
 #: frees one: a source whose nodes carry thousands of per-node metadata keys
 #: spends the graph's 65,533 ids on keys that appear once, after which no
 #: rollup can be written or indexed and the graph can only be recreated. The
-#: budget keeps the names that carry the graph native (searchable,
-#: indexable) and puts the long tail where the Properties panel still shows
-#: it and only search predicates cannot reach it. Counted against every name
-#: the graph has registered, platform names included. Applies as a graph is
-#: written, and a name already registered stays native — so raising it
-#: takes full effect only on a recreated graph.
+#: budget keeps the names that carry the graph native (indexable, and
+#: compared by Cypher) and puts the long tail in ``propertiesRaw``, where the
+#: Properties panel shows it and search compares it from the JSON text —
+#: exactly, but without an index (``falkordb_search.raw_properties``).
+#: Counted against every name the graph has registered, platform names
+#: included. Applies as a graph is written, and a name already registered
+#: stays native — so raising it takes full effect only on a recreated graph.
 #:
 #: 50,000, not the 8,000 this shipped with, because
 #: :func:`reserve_platform_property_names` now stakes the platform's own
@@ -1831,7 +1840,7 @@ async def reserve_platform_property_names(
 #: platform, and its only remaining job is to stop a graph reaching the
 #: ceiling, where the store refuses every further new name — no rollup
 #: write, no index — and the graph can only be recreated. What a demoted key
-#: actually costs is searchability, not memory or the value itself: a
+#: actually costs is search speed, not memory or the value itself: a
 #: registered name that appears on few nodes costs almost nothing, because a
 #: FalkorDB entity's attribute set is sized by the attributes PRESENT on it,
 #: not by the names the graph has registered — so a generous default is
@@ -6461,6 +6470,71 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return await execute_deep_search(self, query, deadline_ms=deadline_ms)
 
+    #: Read by ``AdvancedSearchService.search``: this provider runs the
+    #: uncapped engine (``deep_search_session``).
+    supports_search_sessions = True
+
+    async def deep_search_session(self, query, *, context):
+        """The uncapped engine: run this request's share of a search
+        session and return its page. See ``falkordb_search/engine.py``."""
+        from .falkordb_search.engine import execute_session_search
+        await self._ensure_connected()
+        return await execute_session_search(self, query, context=context)
+
+    async def deep_search_count(self, query, *, context, advance=True):
+        """A rule's exact total, in as many requests as the scan takes.
+        See ``falkordb_search/engine.py``."""
+        from .falkordb_search.engine import execute_count_session
+        await self._ensure_connected()
+        return await execute_count_session(self, query, context=context, advance=advance)
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        """Which of ``urns`` match which rule, inside ``scope``. See
+        ``falkordb_search/membership.py``."""
+        from .falkordb_search.membership import evaluate_membership
+        await self._ensure_connected()
+        admit = context.admit
+
+        async def run(cypher, params):
+            if admit is None:
+                return await self._ro_query(cypher, params=params)
+            async with admit():
+                return await self._ro_query(cypher, params=params)
+
+        return await evaluate_membership(self, scope, items, urns, run=run, timeout_s=5.0,
+                                         data_version=context.data_version)
+
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False):
+        """Every property in ``scope``, exactly, in as many requests as the
+        scan takes. See ``falkordb_search/catalog.py``."""
+        from .falkordb_search.catalog import execute_catalog_session
+        await self._ensure_connected()
+        return await execute_catalog_session(self, scope, context=context, wait_ms=wait_ms,
+                                             session_id=session_id, refresh=refresh)
+
+    async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
+                                 session_id=None):
+        """Every match of ``query``, written to a file, in as many requests
+        as the scan takes. See ``falkordb_search/export.py``."""
+        from .falkordb_search.export import execute_export_session
+        await self._ensure_connected()
+        return await execute_export_session(self, query, context=context, fmt=fmt,
+                                            columns=columns, wait_ms=wait_ms,
+                                            session_id=session_id)
+
+    async def deep_search_export_open(self, session_id, *, context):
+        """A complete export of ``context``'s scope, to stream — or None."""
+        from .falkordb_search.export import open_export
+        return await open_export(self, session_id, scope_hash=context.scope_hash)
+
+    async def deep_search_ancestor_counts(self, session_id, urns, *, context):
+        """How many of a search's matches each container holds, from the
+        session's tally. See ``falkordb_search/engine.py``."""
+        from .falkordb_search.engine import read_ancestor_counts
+        await self._ensure_connected()
+        return await read_ancestor_counts(self, session_id, urns, scope_hash=context.scope_hash)
+
     async def deep_search_explain(self, query):
         """Compile-only path. Mirrors ``deep_search`` (lazy import to
         avoid the circular load order)."""
@@ -6474,6 +6548,14 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return await discover_native_property_keys(
             self, sample_per_label=sample_per_label,
+        )
+
+    async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
+        """A property's most common values. Mirrors ``deep_search``."""
+        from .falkordb_deep_search import suggest_property_values
+        await self._ensure_connected()
+        return await suggest_property_values(
+            self, key=key, entity_types=entity_types, q=q, limit=limit,
         )
 
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
@@ -14906,8 +14988,8 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> None:
         logger.warning(
             "%s on %s: %d property key(s) stored as values in propertiesRaw "
-            "rather than as node properties — shown in the Properties panel, "
-            "not reachable by search predicates. The graph holds %d of the %d "
+            "rather than as node properties — shown in the Properties panel and "
+            "searched from that text, without an index. The graph holds %d of the %d "
             "native property names FALKORDB_NATIVE_PROPERTY_BUDGET allows. "
             "Most common first: %s",
             where, self._graph_name, len(demoted), len(native), budget, demoted[:5],
@@ -15091,7 +15173,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "level": self._get_node_level(node.entity_type),
                 "searchableText": _compute_searchable_text(
                     node.display_name, node.qualified_name,
-                    node.description, native_props, tags=node.tags,
+                    node.description, _text_properties(node.properties), tags=node.tags,
                 ),
             })
 
@@ -15264,7 +15346,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "lastSyncedAt": node.last_synced_at or "",
                 "searchableText": _compute_searchable_text(
                     node.display_name, node.qualified_name,
-                    node.description, native_props, tags=node.tags,
+                    node.description, _text_properties(node.properties), tags=node.tags,
                 ),
             }
             if node.child_count is not None:

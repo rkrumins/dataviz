@@ -13,18 +13,12 @@
  * persisted. FalkorDB already stores arbitrary JSON property bags (scalars +
  * flat scalar-lists as native node props, complex values in a `propertiesRaw`
  * JSON blob — see falkordb_provider._split_user_properties), so these values
- * round-trip as-is once the write path below lands.
+ * round-trip as-is.
  *
- * TODO(backend): Drawer edits currently stage as `update_entity` with a no-op
- * apply hook. To persist edits, mirror the existing edge PATCH pattern:
- *   1. `PATCH /api/v1/{wsId}/graph/nodes/{urn}` route in
- *      backend/app/api/v1/endpoints/graph.py (mirror PATCH /edges/{id})
- *   2. `GraphDataProvider.update_node(urn, payload)` (mirror `update_edge`),
- *      implemented for FalkorDB (Neo4j/Spanner can follow).
- *   3. `RemoteGraphProvider.updateNode` + replace the `apply` console.warn
- *      below with the call.
- * Payload persists the editable surface: `properties` + descriptive fields
- * (displayName, description, qualifiedName, sourceSystem, layerAssignment, tags).
+ * An edit is kept only as a change in the view's draft (useEntityEditing):
+ * Stage Changes stages it, and Review & Save commits it to the draft as
+ * /graph/changes ops (stagedChangesToOps). A data source without version
+ * control is read-only here — there is no direct write to an external graph.
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
@@ -55,6 +49,8 @@ import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
 import { useResolveGraph, useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
 import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
@@ -204,9 +200,12 @@ export function EntityDrawer({
   // surfaces: when the admin turns version control off, the queries stop and the
   // History section disappears (undefined ids disable the hooks).
   const versioningEnabled = useFeature('versioningEnabled')
-  // Independent switch: OFF means every canvas is view-only even with versioning on
-  // (POST /nodes/create, /edges, PATCH/DELETE /edges, /changes all 403 server-side).
-  const editModeEnabled = useFeature('editModeEnabled')
+  // An edit is kept only as a change in this view's draft: where there is none (or the source has
+  // no version control) the Edit tab stays, disabled with the reason; where editing isn't offered
+  // at all (switched off, a read-only view, a ghost, a locked surface) it goes.
+  const editing = useEntityEditing()
+  const editOffered = !isGhost && !writesLocked && editing.offered
+  const canEdit = editOffered && !editing.blocked
   const entityHistory = useEntityHistory(
     versioningEnabled ? historyWsId : undefined,
     versioningEnabled ? historyGraphId : undefined,
@@ -383,9 +382,7 @@ export function EntityDrawer({
       return
     }
 
-    // Multi-field edit — stage as update_entity. Apply hook is a stub until
-    // the backend ships PATCH /api/v1/{wsId}/graph/nodes/{urn}; see the file
-    // header for the full backlog.
+    // Multi-field edit — stage as update_entity (saved to the draft by stagedChangesToOps).
     stagedChanges.stageOrReplace(
       (c) => c.type === 'update_entity' && c.targetId === selectedNode.id,
       {
@@ -397,17 +394,6 @@ export function EntityDrawer({
         summary: `Edit ${changedKeys.length} field${changedKeys.length === 1 ? '' : 's'} on '${previousLabel || selectedNode.id}'`,
         discard: () => {
           useCanvasStore.getState().updateNode(selectedNode.id, previousData)
-        },
-        apply: async () => {
-          // TODO(backend): replace with
-          //   await authFetch(`/api/v1/${wsId}/graph/nodes/${urn}`, {
-          //     method: 'PATCH', body: JSON.stringify({ properties: after })
-          //   })
-          // once the endpoint and provider methods land.
-          console.warn(
-            '[update_entity] TODO: PATCH /api/v1/{wsId}/graph/nodes/{urn} not yet implemented',
-            { targetId: selectedNode.id, urn: previousData.urn, changedKeys },
-          )
         },
       },
     )
@@ -725,7 +711,11 @@ export function EntityDrawer({
               icon={LucideIcons.Eye}
               label="View"
             />
-            {!isGhost && versioningEnabled && editModeEnabled && !writesLocked && (
+            {editOffered && (editing.blocked ? (
+              <HoverTip label={editing.blocked} className="flex-1 flex">
+                <ModeTab active={false} disabled icon={LucideIcons.Pencil} label="Edit" />
+              </HoverTip>
+            ) : (
               <ModeTab
                 active={viewMode === 'edit'}
                 onClick={() => setViewMode('edit')}
@@ -733,7 +723,7 @@ export function EntityDrawer({
                 label="Edit"
                 badge={hasChanges ? '•' : undefined}
               />
-            )}
+            ))}
             <ModeTab
               active={viewMode === 'json'}
               onClick={openJsonView}
@@ -759,7 +749,7 @@ export function EntityDrawer({
                 ) : showSaved ? (
                   <div className="px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/20 text-green-500 text-xs flex items-center gap-2">
                     <LucideIcons.CheckCircle className="w-4 h-4" />
-                    Changes saved successfully
+                    Staged — Review &amp; Save to keep it
                   </div>
                 ) : hasChanges ? (
                   <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-500 text-xs flex items-center gap-2">
@@ -813,7 +803,7 @@ export function EntityDrawer({
               rawJson={rawJson}
               jsonError={jsonError}
               onChange={handleRawJsonChange}
-              canEdit={!isGhost && versioningEnabled && editModeEnabled && !writesLocked}
+              canEdit={canEdit}
             />
           )}
         </div>
@@ -859,10 +849,10 @@ export function EntityDrawer({
               </button>
               <button
                 onClick={handleSave}
-                disabled={!hasChanges || !!jsonError}
+                disabled={!hasChanges || !!jsonError || !canEdit}
                 className={cn(
                   "px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors duration-150",
-                  hasChanges && !jsonError
+                  hasChanges && !jsonError && canEdit
                     ? "bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25"
                     : "bg-white/5 text-ink-muted cursor-not-allowed"
                 )}
@@ -912,21 +902,25 @@ function ActionButton({ icon: Icon, label, primary, active, onClick }: ActionBut
 
 interface ModeTabProps {
   active: boolean
-  onClick: () => void
+  onClick?: () => void
+  disabled?: boolean
   icon: React.ComponentType<{ className?: string }>
   label: string
   badge?: string
 }
 
-function ModeTab({ active, onClick, icon: Icon, label, badge }: ModeTabProps) {
+function ModeTab({ active, onClick, disabled, icon: Icon, label, badge }: ModeTabProps) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       className={cn(
         "flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-150 duration-200",
         active
           ? "bg-white/10 text-ink shadow-sm"
-          : "text-ink-muted hover:text-ink hover:bg-white/5"
+          : disabled
+            ? "text-ink-muted opacity-50"
+            : "text-ink-muted hover:text-ink hover:bg-white/5"
       )}
     >
       <Icon className="w-4 h-4" />

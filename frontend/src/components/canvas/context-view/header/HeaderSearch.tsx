@@ -167,9 +167,11 @@ export function HeaderSearch() {
       rows: topMatches(result.hits),
       count: result.totalCount ?? result.candidateCount ?? null,
       // "More than this" is what the plus means, so it belongs only to a
-      // count that IS a floor. A truncated run the server still counted
+      // count that IS a floor: a truncated run the server could not count,
+      // or a scan still running. A truncated run the server still counted
       // exactly has nothing more than its total.
-      plus: result.truncated === true && result.totalCount == null,
+      plus: (result.truncated === true && result.totalCount == null)
+        || result.status === 'running',
       answered: true,
     }
   }, [view, resultMatchesQuick])
@@ -643,8 +645,13 @@ function StatusLine({ landingNote }: { landingNote: string | null }) {
     // singular at one like any other exact number.
     const plus = result.truncated === true && result.totalCount == null
     const matches = count === 1 && !plus ? 'match' : 'matches'
-    return `${count.toLocaleString()}${plus ? '+' : ''} ${matches}`
-      + ` · ${layers.size} ${layers.size === 1 ? 'layer' : 'layers'}`
+    const inLayers = ` · ${layers.size} ${layers.size === 1 ? 'layer' : 'layers'}`
+    if (result.status === 'running') {
+      const { scanned = 0, total = 0 } = result.progress ?? {}
+      const pct = total > 0 ? Math.min(99, Math.floor((scanned / total) * 100)) : 0
+      return `${count.toLocaleString()} found so far · scanning ${pct}%${inLayers}`
+    }
+    return `${count.toLocaleString()}${plus ? '+' : ''} ${matches}${inLayers}`
   })()
 
   if (!line) return null

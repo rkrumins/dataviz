@@ -976,6 +976,17 @@ class GraphCache:
             except Exception:                       # noqa: BLE001 — treat as a miss
                 return None
 
+    async def content_generation(self, scope: CacheScope) -> str:
+        """The scope's content generation — what a search session records as
+        the data it read, so it is never served as the answer on other data.
+        "" when the coordination Redis cannot say (a session then simply
+        cannot tell versions apart, which is today's behaviour everywhere
+        else the counter is unreachable)."""
+        try:
+            return await self._get_generation(scope)
+        except Exception:                           # noqa: BLE001 — never a hard dep
+            return ""
+
     # ─── Internals ────────────────────────────────────────────────────
 
     async def _get_generation(
