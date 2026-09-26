@@ -32,10 +32,11 @@ function describe(tip: Tip): { lead: string; detail: string } {
     }
   }
   if (tip.view.kind === 'lineage') {
-    // No line of it drawn yet, so no count of lines to give.
+    // No line of it drawn yet, so no count of lines to give. Nor a promise
+    // of lines: its partners may be rows inside it, or of a hidden type.
     return tip.view.dir === 'in'
-      ? { lead: 'Has incoming lineage — select it to draw its lines', detail: 'Upstream — data flows into this entity.' }
-      : { lead: 'Has outgoing lineage — select it to draw its lines', detail: 'Downstream — data flows out of this entity.' }
+      ? { lead: 'Has incoming lineage', detail: 'Upstream — data flows into this entity. Selecting it draws the lines this view can show.' }
+      : { lead: 'Has outgoing lineage', detail: 'Downstream — data flows out of this entity. Selecting it draws the lines this view can show.' }
   }
   if (tip.view.kind === 'beyond') {
     // The count is the flows the canvas placed outside the view, as the

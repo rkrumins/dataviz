@@ -46,18 +46,21 @@ describe('PortHoverTip', () => {
     expect(tip).not.toMatch(/load|canvas|render/i)
   })
 
-  it('a solid port with no line yet says the card has lineage that way, and how to draw it', () => {
+  it('a solid port with no line yet says the card has lineage that way, and what selecting it does', () => {
     render(<Scroller port={{ 'data-lineage-port': 'left', 'data-port': 'lineage', 'data-dir': 'in' }} />)
     fireEvent.pointerOver(screen.getByTestId('port'))
     const tip = screen.getByRole('tooltip').textContent
-    expect(tip).toContain('Has incoming lineage — select it to draw its lines')
-    expect(tip).not.toMatch(/outside|load|\d/i)
+    expect(tip).toContain('Has incoming lineage')
+    // Its partners may be inside it, or of a hidden type: no promise of lines.
+    expect(tip).toContain('Selecting it draws the lines this view can show.')
+    expect(tip).not.toMatch(/draw its lines|outside|load|\d/i)
   })
 
   it('says which way on the outgoing side', () => {
     render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'lineage', 'data-dir': 'out' }} />)
     fireEvent.pointerOver(screen.getByTestId('port'))
-    expect(screen.getByRole('tooltip').textContent).toContain('Has outgoing lineage — select it to draw its lines')
+    expect(screen.getByRole('tooltip').textContent).toContain('Has outgoing lineage')
+    expect(screen.getByRole('tooltip').textContent).toContain('Downstream — data flows out of this entity.')
   })
 
   it('a solid port still counts its lines', () => {
