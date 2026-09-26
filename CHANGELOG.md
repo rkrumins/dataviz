@@ -22,6 +22,17 @@ Resume and `curl -C -` send. Close the dialog while the file is being prepared a
 export again; the file is kept for a day. A data source without version control still streams its
 live graph as before.
 
+**Clicking a relationship opens its details, the way clicking an entity does.** A line on the canvas
+opens the relationship drawer. It shows the relationship's type and what it means, the two entities
+it joins, its confidence, its properties, and who created and last changed it and when, with its
+full revision history. Either end is one click away, on the same Back and Forward trail as the
+entity drawer, so a walk can go from an entity to a relationship and on to the next entity. In a
+draft, a lineage relationship's properties can be edited (staged with the rest of the canvas's
+changes and saved in Review & Save) and the relationship deleted. A line that stands for several
+relationships (a bundle, or one rolled up from children) opens as a connection that lists them at
+the entities they really join, and each opens on the same trail. Combined flows, hierarchy links and
+relationships on the published graph are read-only, and say why.
+
 ### Changed
 
 - **One export can be 50 GB** (`GRAPH_EXPORT_MAX_BYTES`, was 20 GiB).
@@ -30,6 +41,9 @@ live graph as before.
   bytes, until the finished summary replaces it; a finished one says whether its file is still
   `kept`. `POST …/exports` takes a `filename` for the download.
 - **A stored export downloads uncompressed**, so that the browser knows its size and can resume it.
+- **A click on a line opens the relationship drawer instead of the Edge Explorer.** The Explorer is
+  one click away from the drawer. Its cards gain an "Open details" button, and their pencil opens the
+  drawer in Edit.
 
 ### Fixed
 
@@ -42,6 +56,13 @@ live graph as before.
   private draft, or of a view you can't read, was yours to download. Each now checks again what
   creating the export checked: an export you may not read is a 404, and missing from the list.
 - The download of an export whose file was swept now says so (404) instead of failing once started.
+- **Editing an edge's properties in the Edge Explorer crashed** before anything was staged, and
+  would have saved the canvas's own fields (`version`, `label`) as if they were properties. Edge
+  properties are now edited in the relationship drawer and saved as the properties the edit changed,
+  added or removed — so removing a property now removes it.
+- **History for an entity or relationship whose id holds a `/` returned 404.** The versioning routes
+  now keep an encoded `/` inside the id, as the graph routes already did — which covers a
+  relationship id made from two URNs with paths.
 
 ### Upgrading
 
@@ -58,6 +79,12 @@ same. Exports are kept in the object store for a day: keep it on a mount
 - **A download longer than the load balancer allows one response is cut** (an hour, on the GKE
   manifests), and has to be resumed: the browser's Resume, or `curl -C -`.
 - **Exports aren't compressed**, on the server or on the way: a 50 GB CSV is 50 GB to download.
+- **A relationship's history shows its properties as one row** per revision, as an entity's does,
+  not one row per property.
+- **A change on the main line names whoever published it**, not whoever made it in their draft.
+- **Only a relationship's properties are edited**; its confidence and type are shown, not changed.
+- **A line summarising a trace, or a combined flow drawn between two containers, lists no
+  relationships** — it says what it stands for. Expand either end to see them.
 
 ---
 

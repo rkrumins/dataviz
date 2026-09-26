@@ -54,15 +54,16 @@ import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
-import { useResolveGraph, useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
-import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
+import { useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
-import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
+import { useBranchStore } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Section } from './DrawerSection'
+import { DrawerTrailNav } from './DrawerTrailNav'
+import { useDrawerHistoryScope } from './useDrawerHistoryScope'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 
 // ============================================
@@ -132,43 +133,17 @@ export function EntityDrawer({
   const updateNode = useCanvasStore((s) => s.updateNode)
   const clearSelection = useCanvasStore((s) => s.clearSelection)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
-  const drawerBackStep = useCanvasStore((s) => s.drawerBack)
-  const drawerForwardStep = useCanvasStore((s) => s.drawerForward)
-  const canDrawerBack = useCanvasStore((s) => s.drawerHistory.cursor > 0)
-  const canDrawerForward = useCanvasStore(
-    (s) => s.drawerHistory.cursor < s.drawerHistory.entries.length - 1)
-  // Retracing is a move on the CANVAS too: the drawer showing an entity the
-  // board is not looking at is how people lose their place. Select it (so the
-  // canvas highlight follows) and reveal it, exactly as clicking a neighbour
-  // row does — the reveal is best-effort and never blocks the panel swap.
-  const stepDrawer = useCallback((step: () => void) => {
-    step()
-    const target = useCanvasStore.getState().drawerNodeId
-    if (!target) return
-    useCanvasStore.getState().selectNode(target)
-    void onFocusNode?.(target)
-  }, [onFocusNode])
-  const drawerBack = useCallback(() => stepDrawer(drawerBackStep), [stepDrawer, drawerBackStep])
-  const drawerForward = useCallback(() => stepDrawer(drawerForwardStep), [stepDrawer, drawerForwardStep])
   const schema = useSchemaStore((s) => s.schema)
   const mode = usePersonaStore((s) => s.mode)
 
-  // Versioning context for the per-entity History section — resolve the active view's data source
-  // to its graph (cached; the same resolve the canvas versioning bar uses). Null when version
-  // control isn't enabled, in which case the History section hides.
-  const activeView = useActiveView()
-  const resolve = useResolveGraph(activeView?.workspaceId, activeView?.dataSourceId ?? null, activeView?.id ?? null)
-  // Version history is a membership-gated surface and has no meaning for
-  // a read-only shared viewer (no drafts, no commits they can act on) —
-  // withholding the ids keeps every versioning query from firing.
-  const readOnlyView = useViewExecutionContext()?.readOnly ?? false
-  const historyWsId = readOnlyView ? undefined : activeView?.workspaceId
-  const historyGraphId = readOnlyView ? null : (resolve.data?.graphId ?? null)
-  const historyMainBranch = resolve.data?.mainBranchId ?? null
-  // The active draft (if any), so the History section also shows this branch's unmerged commits.
-  // Scoped by the active view's id (branch-per-view) so this never shows another view's draft
-  // commits on the same data source.
-  const historyBranchId = useEffectiveBranchId(activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
+  // Versioning context for the per-entity History section. Null ids when version control isn't
+  // enabled or the viewer is read-only, in which case the History section hides.
+  const {
+    wsId: historyWsId,
+    graphId: historyGraphId,
+    mainBranchId: historyMainBranch,
+    branchId: historyBranchId,
+  } = useDrawerHistoryScope()
 
   // The drawer is sticky: it shows whichever entity it was last opened on
   // (drawerNodeId), independent of canvas highlight selection. It stays open
@@ -236,6 +211,10 @@ export function EntityDrawer({
   // Unsaved-changes guard: confirm before closing or switching nodes.
   const [confirmClose, setConfirmClose] = useState(false)
   const [pendingSwitchId, setPendingSwitchId] = useState<string | null>(null)
+  // A trail step held while there are unsaved edits. A step can land on a
+  // relationship, which swaps this drawer out entirely — the revert-on-switch
+  // effect below never gets to run, so the step is gated before it happens.
+  const [pendingStep, setPendingStep] = useState<(() => void) | null>(null)
   const prevIdRef = useRef<string | null>(null)
   const bypassGuardRef = useRef(false)
 
@@ -452,7 +431,11 @@ export function EntityDrawer({
   const discardAndProceed = useCallback(() => {
     bypassGuardRef.current = true
     setHasChanges(false)
-    if (pendingSwitchId) {
+    if (pendingStep) {
+      const step = pendingStep
+      setPendingStep(null)
+      step()
+    } else if (pendingSwitchId) {
       const target = pendingSwitchId
       setPendingSwitchId(null)
       useCanvasStore.getState().openNodeDrawer(target)
@@ -461,12 +444,18 @@ export function EntityDrawer({
       closeNodeDrawer()
       clearSelection()
     }
-  }, [pendingSwitchId, confirmClose, closeNodeDrawer, clearSelection])
+  }, [pendingStep, pendingSwitchId, confirmClose, closeNodeDrawer, clearSelection])
 
   const keepEditing = useCallback(() => {
     setPendingSwitchId(null)
+    setPendingStep(null)
     setConfirmClose(false)
   }, [])
+
+  const guardStep = useCallback((step: () => void) => {
+    if (hasChanges) setPendingStep(() => step)
+    else step()
+  }, [hasChanges])
 
   // Get external URL
   const externalUrl = useMemo(() => {
@@ -510,12 +499,12 @@ export function EntityDrawer({
       >
         <div className="w-[clamp(420px,32vw,560px)] h-full flex flex-col overflow-hidden">
         {/* Unsaved-changes guard */}
-        {(confirmClose || pendingSwitchId) && (
+        {(confirmClose || pendingSwitchId || pendingStep) && (
           <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/40 backdrop-blur-sm p-6">
             <div className="w-full max-w-xs rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl p-5">
               <h4 className="text-sm font-semibold text-ink">Unsaved changes</h4>
               <p className="text-xs text-ink-muted mt-1.5">
-                You have unsaved property changes. {pendingSwitchId ? 'Switch entity' : 'Close'} and discard them?
+                You have unsaved property changes. {pendingSwitchId || pendingStep ? 'Switch entity' : 'Close'} and discard them?
               </p>
               <div className="flex items-center justify-end gap-2 mt-4">
                 <button onClick={keepEditing} className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors">
@@ -538,47 +527,9 @@ export function EntityDrawer({
           {/* Type Badge & Close */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
-              {/* The trail. Following lineage from here is a WALK — a
-                  consumer, then its consumer — and a walk you cannot retrace
-                  is one people stop taking. Rendered only once there is
-                  somewhere to go, so a drawer opened on one entity carries no
-                  dead controls. */}
-              {(canDrawerBack || canDrawerForward) && (
-                <div className="flex items-center gap-0.5 mr-0.5">
-                  <button
-                    type="button"
-                    onClick={drawerBack}
-                    disabled={!canDrawerBack}
-                    aria-label="Back to the previous entity"
-                    title="Back"
-                    className={cn(
-                      'p-1.5 rounded-lg transition-colors duration-150',
-                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                      canDrawerBack
-                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
-                        : 'text-ink-muted opacity-40 cursor-not-allowed',
-                    )}
-                  >
-                    <LucideIcons.ChevronLeft className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={drawerForward}
-                    disabled={!canDrawerForward}
-                    aria-label="Forward to the next entity"
-                    title="Forward"
-                    className={cn(
-                      'p-1.5 rounded-lg transition-colors duration-150',
-                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                      canDrawerForward
-                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
-                        : 'text-ink-muted opacity-40 cursor-not-allowed',
-                    )}
-                  >
-                    <LucideIcons.ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
+              {/* The trail — shared with the relationship drawer, so one walk
+                  can cross a relationship and come back. */}
+              <DrawerTrailNav onFocusNode={onFocusNode} guard={guardStep} />
               <span
                 className="px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide"
                 style={{ backgroundColor: colors.bg, color: colors.text }}
@@ -890,7 +841,7 @@ interface ActionButtonProps {
   onClick?: () => void
 }
 
-function ActionButton({ icon: Icon, label, primary, active, onClick }: ActionButtonProps) {
+export function ActionButton({ icon: Icon, label, primary, active, onClick }: ActionButtonProps) {
   return (
     <button
       onClick={onClick}
@@ -918,7 +869,7 @@ interface ModeTabProps {
   badge?: string
 }
 
-function ModeTab({ active, onClick, icon: Icon, label, badge }: ModeTabProps) {
+export function ModeTab({ active, onClick, icon: Icon, label, badge }: ModeTabProps) {
   return (
     <button
       onClick={onClick}
@@ -959,7 +910,7 @@ const TIMESTAT_TONES = {
   },
 } as const
 
-function TimeStat({ icon, label, iso, tone, loading, live, overrideValue, emptyText }: {
+export function TimeStat({ icon, label, iso, tone, loading, live, overrideValue, emptyText }: {
   icon: React.ReactNode
   label: string
   iso?: string

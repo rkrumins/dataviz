@@ -75,6 +75,8 @@ import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
+import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
+import { targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
@@ -402,6 +404,7 @@ export function ContextViewCanvas({
   // Set form for the columns, which ask "is this row selected?" per row.
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  const drawerEdge = useCanvasStore((s) => s.drawerEdge)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
   const clearEdgeFetchFailures = useCanvasStore((s) => s.clearEdgeFetchFailures)
@@ -762,12 +765,13 @@ export function ContextViewCanvas({
       // Implementation handled by the existing moveToLayer function
     },
     onCloseEdgePanel: () => {
-      if (isEdgePanelOpen) { closeEdgePanel(); return true }
+      // The Explorer is only on screen when neither drawer is.
+      if (isEdgePanelOpen && !drawerNodeId && !drawerEdge) { closeEdgePanel(); return true }
       return false
     },
     onCloseEntityDrawer: () => {
       if (isStagedPanelOpen) { closeStagedChangesPanel(); return true }
-      if (drawerNodeId) { closeNodeDrawer(); clearSelection(); return true }
+      if (drawerNodeId || drawerEdge) { closeNodeDrawer(); clearSelection(); return true }
       return false
     },
     // ESC exits an active trace before any other panel close — gives the
@@ -1411,7 +1415,7 @@ export function ContextViewCanvas({
 
 
   // Edge details
-  const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
+  const { isOpen: isEdgePanelOpen, close: closeEdgePanel } = useEdgeDetailPanel()
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
   const ontologyMetadata = useMemo(() => ({ edgeTypeMetadata }), [edgeTypeMetadata])
   const selectEdge = useCanvasStore((s) => s.selectEdge)
@@ -1858,7 +1862,15 @@ export function ContextViewCanvas({
     const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
     const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
     return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
-  }, [drawerNodeId, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+  }, [drawerNodeId, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+
+  // A relationship the drawer shows was resolved from THIS view's lines. Leaving
+  // the view (or this canvas) closes it, trail and all, rather than carrying a
+  // snapshot of lines that are no longer drawn into another view.
+  useEffect(() => () => {
+    const s = useCanvasStore.getState()
+    if (s.drawerEdge || s.drawerHistory.entries.some(e => e.kind === 'edge')) s.closeNodeDrawer()
+  }, [activeView?.id])
 
   // ─── Node sort modes ────────────────────────────────────────────────────────
   // Persisted state: view-wide `defaultNodeSortMode` + per-layer `nodeSortMode`
@@ -5220,10 +5232,21 @@ export function ContextViewCanvas({
 
   const clearSelection = useCanvasStore((s) => s.clearSelection)
 
+  // A click on a line opens what it stands for in the relationship drawer —
+  // resolved NOW, against the lines as drawn, because a line's id does not
+  // outlive the next expand, drill or filter.
+  const handleEdgeClick = useCallback((lineId: string) => {
+    const line = visibleLineageEdges.find(e => e.id === lineId)
+    if (!line) return
+    const { edges: storeEdges, openEdgeDrawer } = useCanvasStore.getState()
+    selectEdge(lineId)
+    openEdgeDrawer(targetFromLine(line as DrawnLine, (id) => storeEdges.find(e => e.id === id)))
+  }, [visibleLineageEdges, selectEdge])
+
   // Drill-down: double-click an AGGREGATED edge to fetch finer-level lineage
   // between the two ancestors and merge it into the canvas. The trace store
   // tracks each drilldown by `${sourceUrn}->${targetUrn}@${atLevel}` so collapse
-  // can revert. Single-click still selects/opens the EdgeDetailPanel.
+  // can revert. Single-click opens the relationship drawer (handleEdgeClick).
   const handleEdgeDoubleClick = useCallback(async (edgeId: string) => {
     // Resolve the bundle from the projected edges first — bundle ids look
     // like `bundle-${sourceId}->${targetId}` and are not in the canvas
@@ -5258,6 +5281,14 @@ export function ContextViewCanvas({
           && (((trySource.data?.childCount as number) ?? trySource.children?.length ?? 0) > 0)
         const targetHasChildren = !!tryTarget && !openNow.has(bundle.target)
           && (((tryTarget.data?.childCount as number) ?? tryTarget.children?.length ?? 0) > 0)
+        if (sourceHasChildren || targetHasChildren) {
+          // The two clicks of this double-click opened the drawer on the line
+          // being drilled. The drill replaces that line — don't leave its drawer behind.
+          const open = useCanvasStore.getState().drawerEdge
+          if (open && (open.kind === 'connection' ? open.id : open.lineId) === edgeId) {
+            useCanvasStore.getState().closeNodeDrawer()
+          }
+        }
         if (sourceHasChildren) await toggleNode(bundle.source)
         if (targetHasChildren) await toggleNode(bundle.target)
         // If neither side had unrevealed children, fall through and let the
@@ -6146,9 +6177,8 @@ export function ContextViewCanvas({
               nodes={renderFlat}
               edges={effectiveLineageEdges}
               expandedNodes={expandedForRender}
-              selectEdge={selectEdge}
-              isEdgePanelOpen={isEdgePanelOpen}
-              toggleEdgePanel={toggleEdgePanel}
+              onEdgeClick={handleEdgeClick}
+              openLineId={drawerEdge ? (drawerEdge.kind === 'connection' ? drawerEdge.id : drawerEdge.lineId ?? null) : null}
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={overlay.active}
               traceResult={overlay.active ? nativeTraceResult : trace.result}
@@ -6459,7 +6489,20 @@ export function ContextViewCanvas({
             onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && drawerEdge && (
+          <RelationshipDrawer
+            key="relationship-drawer"
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable}
+            writesLocked={traceActive}
+            resolveNode={resolveTraceNode}
+            onFocusNode={revealOnCanvas}
+            onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
+            onDeleteEdge={canvasWritable ? interactions.deleteEdge : undefined}
+            onStartEditing={canManage && versioningEnabled && canEnterEdit && editModeEnabled && !traceActive ? handleEnterEdit : undefined}
+          />
+        )}
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}

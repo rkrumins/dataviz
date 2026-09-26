@@ -40,6 +40,34 @@ describe('stagedChangesToOps', () => {
     expect(ops).toEqual([{ op: 'update', kind: 'edge', id: 'e2', payload: { confidence: 0.9 } }])
   })
 
+  it('sends an edited property bag as a diff: changed and added keys, removed keys as the delete marker', () => {
+    const ops = stagedChangesToOps([
+      sc({
+        type: 'edit_edge', targetId: 'e2',
+        before: { properties: { owner: 'ana', sla: '1h', note: 'x' } },
+        after: { properties: { owner: 'bo', sla: '1h', tier: 'gold' } },
+      }),
+    ])
+    expect(ops).toEqual([{
+      op: 'update', kind: 'edge', id: 'e2',
+      payload: { properties: { owner: 'bo', tier: 'gold', note: '__nx_prop_delete__' } },
+    }])
+  })
+
+  it('sends nothing for a property edit that changed nothing', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'edit_edge', targetId: 'e2', before: { properties: { a: 1 } }, after: { properties: { a: 1 } } }),
+    ])
+    expect(ops).toEqual([])
+  })
+
+  it('sends a property edit with no concurrency token when the edit was read without one', () => {
+    const [op] = stagedChangesToOps([
+      sc({ type: 'edit_edge', targetId: 'e2', before: { properties: {} }, after: { properties: { a: 1 } } }),
+    ])
+    expect(op.baseVersion).toBeUndefined()
+  })
+
   it('maps a root create_entity to a node create op (ref=tempUrn, no urn — backend mints); excludes layer changes', () => {
     const ops = stagedChangesToOps([
       sc({ type: 'create_entity', targetUrn: 'urn:staged:new', after: { entityType: 'Table', displayName: 'X', tags: ['pii'], properties: { p: 1 } } }),

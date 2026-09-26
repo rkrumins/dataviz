@@ -455,3 +455,51 @@ describe('useEdgeProjection — a multi-type roll-up is one combined flow', () =
     expect(bundles(res)[0].types).toEqual(['AGGREGATED'])
   })
 })
+
+describe('useEdgeProjection — a line knows which relationships it stands for', () => {
+  type Member = { id: string; _origSource: string; _origTarget: string }
+  const members = (line: unknown): Member[] =>
+    ((line as { data?: { members?: Member[] } }).data?.members ?? [])
+  const ends = (m: Member) => `${m.id}:${m._origSource}->${m._origTarget}`
+
+  it('a direct edge is its own single member', () => {
+    const res = run({ roots: [hNode('a'), hNode('b')], edges: [edge('e1', 'a', 'b')] })
+    expect(members(bundles(res)[0]).map(ends)).toEqual(['e1:a->b'])
+  })
+
+  it('a rolled-up member keeps the endpoints it names, not the cards that draw it', () => {
+    const c1 = hNode('c1')
+    c1.depth = 1
+    const res = run({ roots: [hNode('p', [c1]), hNode('b')], edges: [edge('e1', 'c1', 'b')] })
+    const pb = bundles(res).find(e => e.source === 'p' && e.target === 'b')
+    expect(members(pb).map(ends)).toEqual(['e1:c1->b'])
+  })
+
+  it('a collapsed aggregate and an expanded drill carry their own urns', () => {
+    const agg = run({ roots: [hNode('a'), hNode('b')], aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]) })
+    expect(members(bundles(agg)[0]).map(ends)).toEqual(['agg1:a->b'])
+
+    const c1 = hNode('c1')
+    c1.depth = 1
+    const drill = run({
+      roots: [hNode('p', [c1]), hNode('b')],
+      aggregatedEdges: new Map([expandedEntry('agg2', [{ id: 'd1', sourceUrn: 'c1', targetUrn: 'b', edgeType: 'FLOWS_TO' }])]),
+    })
+    expect(members(bundles(drill)[0]).map(ends)).toEqual(['d1:c1->b'])
+  })
+
+  it('a bidirectional line carries both directions', () => {
+    const res = run({ roots: [hNode('a'), hNode('b')], edges: [edge('e1', 'a', 'b'), edge('e2', 'b', 'a')] })
+    expect(bundles(res)).toHaveLength(1)
+    expect(members(bundles(res)[0]).map(ends).sort()).toEqual(['e1:a->b', 'e2:b->a'])
+  })
+
+  it('a member of a hidden type is not listed', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'a', 'b', 'FLOWS_TO'), edge('e2', 'a', 'b', 'PRODUCES')],
+      hiddenEdgeTypes: new Set(['PRODUCES']),
+    })
+    expect(members(bundles(res)[0]).map(m => m.id)).toEqual(['e1'])
+  })
+})

@@ -20,6 +20,7 @@ beforeEach(() => {
     selectedNodeIds: [],
     selectedEdgeIds: [],
     drawerNodeId: null,
+    drawerEdge: null,
   })
 })
 

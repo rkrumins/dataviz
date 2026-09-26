@@ -89,9 +89,8 @@ export function LineageFlowOverlay({
   nodes,
   edges,
   expandedNodes,
-  selectEdge,
-  isEdgePanelOpen,
-  toggleEdgePanel,
+  onEdgeClick,
+  openLineId = null,
   triggerRedrawRef,
   isTracing = false,
   traceResult = null,
@@ -117,9 +116,10 @@ export function LineageFlowOverlay({
   nodes: any[],
   edges: any[],
   expandedNodes: Set<string>,
-  selectEdge: (id: string) => void,
-  isEdgePanelOpen: boolean,
-  toggleEdgePanel: () => void,
+  /** A line was clicked — the canvas opens what it stands for. */
+  onEdgeClick: (id: string) => void,
+  /** The line the relationship drawer is open on; drawn highlighted. */
+  openLineId?: string | null,
   triggerRedrawRef?: React.MutableRefObject<(() => void) | null>
   isTracing?: boolean,
   traceResult?: any | null,
@@ -1054,7 +1054,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, tints])
+  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, tints])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -1572,9 +1572,8 @@ export function LineageFlowOverlay({
   }, [])
   const handleHitClick = useCallback((edgeId: string, e: React.MouseEvent) => {
     e.stopPropagation()
-    selectEdge(edgeId)
-    if (!isEdgePanelOpen) toggleEdgePanel()
-  }, [selectEdge, isEdgePanelOpen, toggleEdgePanel])
+    onEdgeClick(edgeId)
+  }, [onEdgeClick])
   const handleHitDoubleClick = useCallback((edgeId: string, e: React.MouseEvent) => {
     if (!onEdgeDoubleClick) return
     e.stopPropagation()
@@ -1737,6 +1736,8 @@ export function LineageFlowOverlay({
           const isHighlighted = isThisEdgeHovered
             || hoveredEdgeId === edge.source || hoveredEdgeId === edge.target
             || isConnectedToSelected
+            // The line the relationship drawer is open on glows (nothing dims for it).
+            || edge.id === openLineId
           // Spotlight focus modes:
           // - Click-highlight (a node is selected): edges connected to it stay
           //   full, others fade to 8%.

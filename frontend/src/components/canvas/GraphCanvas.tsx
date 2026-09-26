@@ -47,6 +47,8 @@ import { AggregatedEdge } from './edges/AggregatedEdge'
 import { CanvasControls } from './CanvasControls'
 import { EdgeLegend } from './EdgeLegend'
 import { EntityDrawer } from '../panels/EntityDrawer'
+import { RelationshipDrawer } from '../panels/RelationshipDrawer'
+import { targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
@@ -139,6 +141,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  const drawerEdge = useCanvasStore((s) => s.drawerEdge)
+  const openEdgeDrawer = useCanvasStore((s) => s.openEdgeDrawer)
   // 3. Schema / ontology
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
@@ -168,6 +172,12 @@ export function GraphCanvas({ className }: { className?: string }) {
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   useDisplayRuleEngine(activeView?.id ?? null)
+  // A relationship the drawer shows was resolved from THIS view's lines —
+  // leaving the view (or this canvas) closes it, trail and all.
+  useEffect(() => () => {
+    const s = useCanvasStore.getState()
+    if (s.drawerEdge || s.drawerHistory.entries.some((e) => e.kind === 'edge')) s.closeNodeDrawer()
+  }, [activeView?.id])
 
   // Viewport-aware node filtering for large graphs
   const [viewportBounds, setViewportBounds] = useState<{ x: number; y: number; zoom: number } | null>(null)
@@ -410,6 +420,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   const allVisibleEdges = useMemo(() => {
     const result: Array<typeof rawEdges[0] & { _isContainment: boolean; _isProjected: boolean }> = []
     const seen = new Set<string>() // Deduplicate projected edges
+    const linesByKey = new Map<string, (typeof result)[number]>()
 
     for (const edge of rawEdges) {
       const edgeType = normalizeEdgeType(edge)
@@ -426,20 +437,29 @@ export function GraphCanvas({ className }: { className?: string }) {
         const visibleTarget = findVisibleAncestor(edge.target)
 
         if (visibleSource && visibleTarget && visibleSource !== visibleTarget) {
-          // Deduplicate: multiple underlying edges may project to the same visible pair
+          // Deduplicate: multiple underlying edges may project to the same visible pair.
+          // The line keeps every one of them as a member, so it can say which
+          // relationships it stands for (the relationship drawer lists them).
           const projectedKey = `${visibleSource}->${visibleTarget}:${edgeType}`
-          if (seen.has(projectedKey)) continue
+          const drawn = linesByKey.get(projectedKey)
+          if (drawn) {
+            (drawn.data as { members: LineageEdgeType[] }).members.push(edge)
+            continue
+          }
           seen.add(projectedKey)
 
           const isProjected = visibleSource !== edge.source || visibleTarget !== edge.target
-          result.push({
+          const line = {
             ...edge,
             id: isProjected ? `proj:${edge.id}` : edge.id,
             source: visibleSource,
             target: visibleTarget,
+            data: { ...edge.data, members: [edge] },
             _isContainment: false,
             _isProjected: isProjected,
-          })
+          }
+          linesByKey.set(projectedKey, line)
+          result.push(line)
         }
       }
     }
@@ -1014,9 +1034,15 @@ export function GraphCanvas({ className }: { className?: string }) {
   const onPaneClick = useCallback(() => clearSelection(), [clearSelection])
 
   // Edge click
+  // A click opens what the line stands for in the relationship drawer — one
+  // relationship, or the several a projected line folds together.
   const onEdgeClick: EdgeMouseHandler = useCallback(
-    (_, edge) => selectEdge(edge.id),
-    [selectEdge],
+    (_, edge) => {
+      selectEdge(edge.id)
+      const line = allVisibleEdges.find((e) => e.id === edge.id) ?? edge
+      openEdgeDrawer(targetFromLine(line as DrawnLine, (id) => rawEdges.find((e) => e.id === id)))
+    },
+    [selectEdge, openEdgeDrawer, allVisibleEdges, rawEdges],
   )
 
   // Edge context menu — uses ref because interactions is defined later
@@ -1250,13 +1276,19 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
     },
     onCloseEdgePanel: () => {
-      if (isEdgePanelOpen) {
+      // Hidden behind the relationship drawer, the Explorer is not what Esc closes.
+      if (isEdgePanelOpen && !drawerEdge) {
         closeEdgePanel()
         return true
       }
       return false
     },
     onCloseEntityDrawer: () => {
+      if (drawerEdge) {
+        useCanvasStore.getState().closeNodeDrawer()
+        clearSelection()
+        return true
+      }
       if (selectedNodeId) {
         clearSelection()
         return true
@@ -1548,7 +1580,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         <BuildPanel onClose={() => useHierarchyBuilderStore.getState().close()} />
       )}
       <AnimatePresence>
-        {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && isEdgePanelOpen && (
           <EdgeDetailPanel
             isOpen={isEdgePanelOpen}
             onClose={closeEdgePanel}
@@ -1565,6 +1597,10 @@ export function GraphCanvas({ className }: { className?: string }) {
           onFocusNode={revealAndFocus}
           onLocateMany={locateManyOnCanvas}
         />
+      )}
+      {/* Read-only here: this canvas has no save path for graph edits. */}
+      {!builderOpen && !buildOpen && drawerEdge && (
+        <RelationshipDrawer onFocusNode={revealAndFocus} onLocateMany={locateManyOnCanvas} />
       )}
       </div>{/* end canvas + right-rail row */}
 

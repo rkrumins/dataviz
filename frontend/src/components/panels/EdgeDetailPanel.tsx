@@ -36,7 +36,7 @@ import {
     Check,
     Pencil,
     Trash2,
-    Save,
+    PanelRightOpen,
 } from 'lucide-react'
 import { useCanvasStore, type LineageEdge, type LineageNode } from '@/store/canvas'
 import {
@@ -49,8 +49,10 @@ import { useSchemaStore, useContainmentEdgeTypes, useEdgeTypeMetadataMap, useRel
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { PropertyEditor } from '@/components/panels/PropertyEditor'
-import { patchEdge, deleteEdge as apiDeleteEdge } from '@/services/edgeApi'
+import { deleteEdge as apiDeleteEdge } from '@/services/edgeApi'
+import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
+import { edgeKind } from '@/services/ontologyPreflightService'
+import { targetFromEdge } from '@/lib/drawerEdgeTarget'
 import { useFeature } from '@/store/features'
 import { cn } from '@/lib/utils'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
@@ -685,12 +687,6 @@ function EdgeCard({
     const color = edgeVisual.strokeColor
     const EdgeIcon = GitBranch  // Generic fallback; icon resolution TBD in Phase 4d
 
-    // Inline edit state — toggles between read-only properties view and
-    // PropertyEditor. Changes optimistically update the canvas and stage an
-    // `edit_edge` change; the apply hook PATCHes the backend at Save Blueprint.
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    const [isEditing, setIsEditing] = useState(false)
-
     // PATCH/DELETE /edges/{id} both 403 server-side when either flag is off — don't
     // offer edit/delete controls that would fail (same dual-flag gate as EntityDrawer).
     // eslint-disable-next-line react-hooks/rules-of-hooks
@@ -698,41 +694,15 @@ function EdgeCard({
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const editModeEnabled = useFeature('editModeEnabled')
     const canEditEdge = versioningEnabled && editModeEnabled
+    // Only a raw lineage relationship is edited by hand — roll-ups and
+    // hierarchy links are maintained elsewhere (the drawer says where).
+    const relationshipTypes = useViewRelationshipTypes()
+    const containmentTypes = useViewContainmentEdgeTypes()
+    const isLineage = edgeKind(normalizeEdgeType(edge), relationshipTypes, containmentTypes) === 'lineage'
 
-    // Server-rejected immutable keys — we hide them in the editor and never
-    // include them in the PATCH payload. The backend ignores edge type changes,
-    // and `isAggregated` / `sourceEdgeCount` / `sourceEdges` are client-only.
+    // Immutable and client-only keys — not shown among the card's data. The type
+    // cannot change, and `isAggregated` / `sourceEdgeCount` / `sourceEdges` are client-only.
     const IMMUTABLE_EDGE_KEYS = ['edgeType', 'relationship', 'isAggregated', 'sourceEdgeCount', 'sourceEdges', 'animated']
-
-    const stageEdgeEdit = (newData: Record<string, any>) => {
-        const previousData: Record<string, any> = { ...(edge.data ?? {}) }
-        // Optimistic visual update.
-        useCanvasStore.getState().updateEdge(edge.id, newData as any)
-        const stagedChanges = useStagedChangesStore.getState()
-        const sourceLabel = (sourceNode?.data.label as string) || edge.source
-        const targetLabel = (targetNode?.data.label as string) || edge.target
-        stagedChanges.stageOrReplace(
-            (c) => c.type === 'edit_edge' && c.targetId === edge.id,
-            {
-                type: 'edit_edge',
-                targetId: edge.id,
-                before: previousData,
-                after: { ...newData },
-                summary: `Edit edge '${sourceLabel}' → '${targetLabel}'`,
-                discard: () => {
-                    useCanvasStore.getState().updateEdge(edge.id, previousData as any)
-                },
-                apply: async (ctx) => {
-                    const propsToSend: Record<string, unknown> = {}
-                    for (const [k, v] of Object.entries(newData)) {
-                        if (IMMUTABLE_EDGE_KEYS.includes(k)) continue
-                        propsToSend[k] = v
-                    }
-                    await patchEdge(ctx.wsId, edge.id, propsToSend)
-                },
-            },
-        )
-    }
 
     const stageEdgeDelete = () => {
         // Capture the full edge for restore-on-discard, then drop it locally.
@@ -825,21 +795,29 @@ function EdgeCard({
                     <Highlighter className="w-3 h-3" />
                 </button>
 
-                {/* Edit button — expands the card and switches to PropertyEditor */}
-                {canEditEdge && (
+                {/* Details — the relationship drawer: what it is, its properties, its history */}
+                <button
+                    onClick={(e) => {
+                        e.stopPropagation()
+                        useCanvasStore.getState().openEdgeDrawer(targetFromEdge(edge))
+                    }}
+                    className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/5 transition-colors"
+                    title="Open details"
+                    aria-label="Open relationship details"
+                >
+                    <PanelRightOpen className="w-3 h-3" />
+                </button>
+
+                {/* Edit — opens the relationship drawer in Edit, where the edit is staged */}
+                {canEditEdge && isLineage && (
                     <button
                         onClick={(e) => {
                             e.stopPropagation()
-                            if (!isExpanded) onToggleExpand()
-                            setIsEditing((v) => !v)
+                            useCanvasStore.getState().openEdgeDrawer(targetFromEdge(edge), { edit: true })
                         }}
-                        className={cn(
-                            "w-6 h-6 flex items-center justify-center rounded transition-colors",
-                            isEditing
-                                ? "bg-accent-lineage/15 text-accent-lineage"
-                                : "text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/5"
-                        )}
-                        title={isEditing ? "Done editing" : "Edit properties"}
+                        className="w-6 h-6 flex items-center justify-center rounded transition-colors text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/5"
+                        title="Edit properties"
+                        aria-label="Edit relationship properties"
                     >
                         <Pencil className="w-3 h-3" />
                     </button>
@@ -941,45 +919,27 @@ function EdgeCard({
                                 </div>
                             )}
 
-                            {/* Properties — read-only by default; PropertyEditor swap on Edit.
-                                Immutable keys (edgeType, isAggregated, …) are filtered
-                                out of the editor so the user can't try to PATCH them. */}
+                            {/* The canvas copy's data, read-only — the relationship's own
+                                properties, history and editing are in its drawer (Open details). */}
                             {(() => {
-                                const editableData: Record<string, any> = {}
+                                const shownData: Record<string, any> = {}
                                 if (edge.data) {
                                     for (const [k, v] of Object.entries(edge.data)) {
                                         if (IMMUTABLE_EDGE_KEYS.includes(k)) continue
-                                        editableData[k] = v
+                                        shownData[k] = v
                                     }
                                 }
-                                const hasEditable = Object.keys(editableData).length > 0
-                                if (!hasEditable && !isEditing) return null
+                                if (Object.keys(shownData).length === 0) return null
                                 return (
                                     <div className="text-2xs">
                                         <div className="flex items-center justify-between mb-1">
                                             <span className="text-ink-muted">Properties</span>
-                                            {isEditing && (
-                                                <span className="text-accent-lineage flex items-center gap-1">
-                                                    <Save className="w-3 h-3" />
-                                                    Staged on edit
-                                                </span>
-                                            )}
                                         </div>
-                                        {isEditing ? (
-                                            <div onClick={(e) => e.stopPropagation()}>
-                                                <PropertyEditor
-                                                    value={editableData}
-                                                    onChange={(next) => stageEdgeEdit(next as Record<string, any>)}
-                                                    bare
-                                                />
-                                            </div>
-                                        ) : hasEditable ? (
-                                            <div className="font-mono bg-black/5 dark:bg-white/5 p-2 rounded text-ink-secondary overflow-x-auto text-2xs">
-                                                {Object.entries(editableData).map(([k, v]) => (
-                                                    <div key={k}>{k}: {JSON.stringify(v)}</div>
-                                                ))}
-                                            </div>
-                                        ) : null}
+                                        <div className="font-mono bg-black/5 dark:bg-white/5 p-2 rounded text-ink-secondary overflow-x-auto text-2xs">
+                                            {Object.entries(shownData).map(([k, v]) => (
+                                                <div key={k}>{k}: {JSON.stringify(v)}</div>
+                                            ))}
+                                        </div>
                                     </div>
                                 )
                             })()}

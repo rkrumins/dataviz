@@ -61,6 +61,39 @@ export interface LineageEdge extends Edge {
   }
 }
 
+/** One relationship a drawn line stands for, with its ORIGINAL endpoints (a
+ *  rolled-up line is drawn between ancestors of the real ones). */
+export interface EdgeMemberRef {
+  id: string
+  source: string
+  target: string
+  edgeType: string
+  /** A materialized AGGREGATED roll-up, not an authored relationship. */
+  rollup: boolean
+}
+
+/** What the relationship drawer shows: one relationship, or a drawn line that
+ *  stands for several (a connection). `lineId` is the line it was opened from,
+ *  so the canvas can mark it. */
+export type DrawerEdgeTarget =
+  | { kind: 'relationship'; id: string; source: string; target: string; edgeType: string; lineId?: string }
+  | {
+      kind: 'connection'
+      /** The drawn line's id. */
+      id: string
+      source: string
+      target: string
+      types: string[]
+      /** How many flows the line stands for — its drawn weight, not a member count. */
+      weight: number
+      bidirectional?: boolean
+      /** The line carries no member list (a trace summary wire, a roll-up line). */
+      summaryOnly?: boolean
+      members: EdgeMemberRef[]
+    }
+
+export type DrawerEntry = { kind: 'node'; id: string } | { kind: 'edge'; target: DrawerEdgeTarget }
+
 /**
  * Where one parent's child pager stands: `offset` is where the next page starts
  * and `hasMore` whether there is one — both as the SERVER said on the last page,
@@ -212,14 +245,26 @@ interface CanvasState {
   // don't close it; only an explicit close (X) does.
   drawerNodeId: string | null
   openNodeDrawer: (id: string) => void
+  /** Closes THE drawer — whichever of node or relationship it shows — and its trail. */
   closeNodeDrawer: () => void
+  /**
+   * The relationship the drawer shows instead of a node (the two are exclusive).
+   * A SNAPSHOT taken when the line was clicked, not a line id: drawn-line ids are
+   * rebuilt on every expand, drill and filter, so an id would stop resolving the
+   * moment the reader followed the relationship anywhere.
+   */
+  drawerEdge: DrawerEdgeTarget | null
+  openEdgeDrawer: (target: DrawerEdgeTarget, opts?: { edit?: boolean }) => void
+  /** Set by an "edit this relationship" entry point; the drawer takes it once. */
+  drawerEdgeEditRequest: boolean
+  consumeDrawerEdgeEditRequest: () => boolean
   /**
    * The drawer's own back/forward trail. Following lineage from the drawer —
    * a consumer, then its consumer, then back — is a WALK, and a walk you
    * cannot retrace is one people stop taking. `cursor` indexes `entries`;
    * -1 is an empty trail.
    */
-  drawerHistory: { entries: string[]; cursor: number }
+  drawerHistory: { entries: DrawerEntry[]; cursor: number }
   drawerBack: () => void
   drawerForward: () => void
 
@@ -528,7 +573,7 @@ export const useCanvasStore = create<CanvasState>()(
         // the canvas. A multi-selection never touches the drawer, so it is
         // not a move.
         ...(!multi && !id.startsWith('logical:')
-          ? { drawerNodeId: id, drawerHistory: pushDrawerHistory(state.drawerHistory, id) }
+          ? { drawerNodeId: id, drawerEdge: null, drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }) }
           : {}),
       })),
       selectEdge: (id, multi = false) => set((state) => ({
@@ -551,7 +596,7 @@ export const useCanvasStore = create<CanvasState>()(
           // One node set this way reads as a plain click and opens the sticky
           // drawer; a set of several must not, because the drawer shows ONE
           // entity and a selection of five is not one entity.
-          ...(next.length === 1 ? { drawerNodeId: next[0] } : {}),
+          ...(next.length === 1 ? { drawerNodeId: next[0], drawerEdge: null } : {}),
         }
       }),
       multiSelectArmed: false,
@@ -561,17 +606,36 @@ export const useCanvasStore = create<CanvasState>()(
 
       // Sticky entity drawer
       drawerNodeId: null,
+      drawerEdge: null,
+      drawerEdgeEditRequest: false,
       drawerHistory: { entries: [], cursor: -1 },
       openNodeDrawer: (id) => set((state) => ({
         drawerNodeId: id,
-        drawerHistory: pushDrawerHistory(state.drawerHistory, id),
+        drawerEdge: null,
+        drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }),
       })),
-      closeNodeDrawer: () => set({ drawerNodeId: null, drawerHistory: { entries: [], cursor: -1 } }),
+      openEdgeDrawer: (target, opts) => set((state) => ({
+        drawerEdge: target,
+        drawerNodeId: null,
+        drawerEdgeEditRequest: opts?.edit === true,
+        drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'edge', target }),
+      })),
+      consumeDrawerEdgeEditRequest: () => {
+        const requested = get().drawerEdgeEditRequest
+        if (requested) set({ drawerEdgeEditRequest: false })
+        return requested
+      },
+      closeNodeDrawer: () => set({
+        drawerNodeId: null,
+        drawerEdge: null,
+        drawerEdgeEditRequest: false,
+        drawerHistory: { entries: [], cursor: -1 },
+      }),
       drawerBack: () => set((state) => {
         const cursor = state.drawerHistory.cursor - 1
         if (cursor < 0) return {}
         return {
-          drawerNodeId: state.drawerHistory.entries[cursor]!,
+          ...showDrawerEntry(state.drawerHistory.entries[cursor]!),
           drawerHistory: { ...state.drawerHistory, cursor },
         }
       }),
@@ -579,7 +643,7 @@ export const useCanvasStore = create<CanvasState>()(
         const cursor = state.drawerHistory.cursor + 1
         if (cursor >= state.drawerHistory.entries.length) return {}
         return {
-          drawerNodeId: state.drawerHistory.entries[cursor]!,
+          ...showDrawerEntry(state.drawerHistory.entries[cursor]!),
           drawerHistory: { ...state.drawerHistory, cursor },
         }
       }),
@@ -788,12 +852,25 @@ function enrichAll(
  *  was ahead of it, the way every back/forward history does; re-opening the
  *  entity already shown is not a move. */
 function pushDrawerHistory(
-  history: { entries: string[]; cursor: number },
-  id: string,
-): { entries: string[]; cursor: number } {
-  if (history.entries[history.cursor] === id) return history
-  const entries = [...history.entries.slice(0, history.cursor + 1), id]
+  history: { entries: DrawerEntry[]; cursor: number },
+  entry: DrawerEntry,
+): { entries: DrawerEntry[]; cursor: number } {
+  if (sameDrawerEntry(history.entries[history.cursor], entry)) return history
+  const entries = [...history.entries.slice(0, history.cursor + 1), entry]
   return { entries, cursor: entries.length - 1 }
+}
+
+const drawerEntryKey = (e: DrawerEntry): string =>
+  e.kind === 'node' ? `node:${e.id}` : `edge:${e.target.kind}:${e.target.id}`
+
+const sameDrawerEntry = (a: DrawerEntry | undefined, b: DrawerEntry): boolean =>
+  !!a && drawerEntryKey(a) === drawerEntryKey(b)
+
+/** What the drawer shows for a trail entry — a node or a relationship, never both. */
+function showDrawerEntry(e: DrawerEntry): Pick<CanvasState, 'drawerNodeId' | 'drawerEdge' | 'drawerEdgeEditRequest'> {
+  return e.kind === 'node'
+    ? { drawerNodeId: e.id, drawerEdge: null, drawerEdgeEditRequest: false }
+    : { drawerNodeId: null, drawerEdge: e.target, drawerEdgeEditRequest: false }
 }
 
 /** A logical grouping (`logical:<id>`) is a visual container the view config

@@ -15,13 +15,8 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { useBranches, useEntityHistory } from '../hooks/useVersioning'
 import { deriveFieldDeltas, labelForPayload, type GraphChange } from '../model/changeModel'
-import { ownerName } from '../model/branchVocab'
+import { actorName } from '../model/branchVocab'
 import { EntityDiff } from './EntityDiff'
-
-// A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
-// that failed to resolve to a name (which falls back to 'Unknown' via ownerName).
-const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
-  typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
 
 type Version = {
   commit_id?: string
@@ -74,7 +69,7 @@ function Timeline({ rows, dotCls, userNames }: { rows: Row[]; dotCls: string; us
             <p className="text-[11px] text-ink-muted flex items-center gap-1.5 flex-wrap">
               <op.Icon className={cn('w-3 h-3', op.cls)} />
               <span className={cn('font-medium', op.cls)}>{op.label}</span>
-              <span>by {actorLabel(v.actor, userNames)}</span>
+              <span>by {actorName(v.actor, userNames)}</span>
               <span>·</span>
               <span>{v.created_at ? timeAgo(v.created_at) : ''}</span>
             </p>

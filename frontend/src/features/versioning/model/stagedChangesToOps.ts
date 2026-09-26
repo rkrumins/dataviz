@@ -21,6 +21,23 @@ const IMMUTABLE_EDGE_KEYS = new Set([
 const asObj = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
 
+/** The value that REMOVES a property in an update patch — the backend's `rowmodel.PROP_DELETE`,
+ *  stripped by `_patch_payload` on both the plain and the three-way-merge path. An update is
+ *  merged onto the stored value, so leaving a key out keeps it: this is the only way to drop one. */
+const PROP_DELETE = '__nx_prop_delete__'
+
+/** The keys a property edit changed, added or removed (removed → `PROP_DELETE`). */
+function propertiesPatch(before: Record<string, unknown>, after: Record<string, unknown>): Record<string, unknown> {
+  const patch: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(after)) {
+    if (JSON.stringify(before[k]) !== JSON.stringify(v)) patch[k] = v
+  }
+  for (const k of Object.keys(before)) {
+    if (!(k in after)) patch[k] = PROP_DELETE
+  }
+  return patch
+}
+
 /** The OCC token (`version` content-hash) the entity was read at, for optimistic concurrency.
  * Looks on the staged `before` (node/edge as read) or its nested `edge`. Absent ⇒ the backend
  * falls back to a plain patch (no OCC) — so this is safe even before hydration carries `version`. */
@@ -111,7 +128,17 @@ export function stagedChangesToOps(
         for (const [k, v] of Object.entries(after)) {
           if (!IMMUTABLE_EDGE_KEYS.has(k)) payload[k] = v
         }
-        ops.push({ op: 'update', kind: 'edge', id: c.targetId, payload, baseVersion: versionOf(c.before) })
+        // An edited property bag goes as a DIFF against what was read: the backend deep-merges
+        // `properties`, so resending the whole bag would copy main's later values into the draft,
+        // and a key left out is kept, never removed.
+        if ('properties' in after) {
+          const patch = propertiesPatch(asObj(asObj(c.before).properties), asObj(after.properties))
+          if (Object.keys(patch).length > 0) payload.properties = patch
+          else delete payload.properties
+        }
+        if (Object.keys(payload).length > 0) {
+          ops.push({ op: 'update', kind: 'edge', id: c.targetId, payload, baseVersion: versionOf(c.before) })
+        }
         break
       }
       case 'delete_edge':
