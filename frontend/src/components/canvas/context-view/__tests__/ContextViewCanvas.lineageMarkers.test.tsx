@@ -13,7 +13,7 @@ import { act, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
-import { anchoredPortsEstate } from '@/test/fixtures/traceEstates'
+import { anchoredPortsEstate, groupedEstate, splitChildEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
 import { useCanvasStore } from '@/store/canvas'
 
@@ -99,5 +99,86 @@ describe('a curated anchored view: in view is never "outside"', () => {
     await waitFor(() => {
       expect(selectedChip()).toMatch(/Selected: 1↑ 0↓ outside this view/)
     }, { timeout: 8000 })
+  }, 30_000)
+
+  it("a partner in the row's own column, past its page: solid on the conventional side, no cue", async () => {
+    const h = await renderCanvasWithTrace(anchoredPortsEstate(), {
+      focus: 'SRC.raw_orders',
+      browseHolds: holds(),
+      ancestorChains: true,
+      nodeDegrees: { s2: { in: 0, out: 1 } },
+      flows: [{ sourceUrn: 's2', targetUrn: 's9' }],
+      // The row against its own anchor: the row summarised against itself.
+      aggregatedCells: [{ sourceUrn: 's2', targetUrn: 'STG' }],
+    })
+    await waitFor(() => {
+      expect(ports('s2')).toEqual({ left: null, right: 'lineage:out' })
+    }, { timeout: 8000 })
+    await settled(h)
+    expect(ports('s2')).toEqual({ left: null, right: 'lineage:out' })
+    expect(cues('s2')).toEqual([])
+  }, 30_000)
+})
+
+describe('lineage that stays inside what the card stands for', () => {
+  it('a closed container whose lineage runs between its own rows is solid both ways', async () => {
+    const h = await renderCanvasWithTrace(anchoredPortsEstate(), {
+      focus: 'SRC.raw_orders',
+      browseHolds: holds(),
+      ancestorChains: true,
+      nodeDegrees: {
+        // No flow of its own; its roll-up cells run to its own rows.
+        'SRC.DB_A': { in: 0, out: 0, rollupIn: 1, rollupOut: 1 },
+        'SRC.DB_B.t2': { in: 0, out: 1 },
+      },
+    })
+    await waitFor(() => {
+      expect(ports('SRC.DB_A')).toEqual({ left: 'lineage:in', right: 'lineage:out' })
+    }, { timeout: 8000 })
+    await settled(h)
+    expect(ports('SRC.DB_A')).toEqual({ left: 'lineage:in', right: 'lineage:out' })
+    expect(cues('SRC.DB_A')).toEqual([])
+
+    // A row one level down follows the same rule; the open container
+    // above it, with no lineage of its own, leaves that to it.
+    await h.toggle('SRC.DB_B')
+    await waitFor(() => {
+      expect(ports('SRC.DB_B.t2')).toEqual({ left: null, right: 'lineage:out' })
+    }, { timeout: 8000 })
+    expect(ports('SRC.DB_B')).toEqual({ left: null, right: null })
+  }, 30_000)
+
+  it('a closed logical group whose members reach only each other is solid both ways', async () => {
+    const h = await renderCanvasWithTrace(groupedEstate(), {
+      focus: 'solo',
+      nodeDegrees: { 'g.a': { in: 0, out: 1 }, 'g.b': { in: 1, out: 0 } },
+    })
+    act(() => { useCanvasStore.getState().addGraph([], [flow('g.a', 'g.b')] as never) })
+    await waitFor(() => {
+      expect(ports('g.a')).toEqual({ left: 'here:out', right: null })
+    }, { timeout: 8000 })
+
+    await h.toggle('logical:grp')
+    await waitFor(() => {
+      expect(ports('logical:grp')).toEqual({ left: 'lineage:in', right: 'lineage:out' })
+    }, { timeout: 8000 })
+    expect(ports('solo')).toEqual({ left: null, right: null })
+  }, 30_000)
+
+  it('a closed container whose lineage runs through a child drawn in another column is solid', async () => {
+    const h = await renderCanvasWithTrace(splitChildEstate(), {
+      focus: 'R',
+      ancestorChains: true,
+      nodeDegrees: { P: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }, 'P.C': { in: 0, out: 1 }, R: { in: 1, out: 0 } },
+      aggregatedCells: [{ sourceUrn: 'P', targetUrn: 'R' }, { sourceUrn: 'P.C', targetUrn: 'R' }],
+      flows: [{ sourceUrn: 'P.C', targetUrn: 'R' }],
+    })
+    await waitFor(() => {
+      expect(ports('P.C')).toEqual({ left: 'here:out', right: null })
+      expect(ports('R')).toEqual({ left: 'here:in', right: null })
+      expect(ports('P')).toEqual({ left: null, right: 'lineage:out' })
+    }, { timeout: 8000 })
+    await settled(h)
+    expect(ports('P')).toEqual({ left: null, right: 'lineage:out' })
   }, 30_000)
 })
