@@ -5219,15 +5219,19 @@ export function ContextViewCanvas({
         provider.getEdges({ sourceUrns: [urn], edgeTypes: types, limit: 200 }),
         provider.getEdges({ targetUrns: [urn], edgeTypes: types, limit: 200 }),
       ])
-      const loaded = new Set(useCanvasStore.getState().nodes.map(n => n.id))
+      // Outside is where the projection placed a far end, not "not in the
+      // store": a row of an anchored column past its loaded page is not
+      // loaded, and is in the view. A partner with no place yet is not
+      // listed either.
+      const outside = offCanvasByNode.get(urn)
       const partners = new Map<string, { direction: 'in' | 'out'; edgeType: string }>()
       for (const e of outEdges) {
         const p = e.targetUrn
-        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'out', edgeType: e.edgeType ?? '' })
+        if (p && p !== urn && outside?.outPartners.has(p) && !partners.has(p)) partners.set(p, { direction: 'out', edgeType: e.edgeType ?? '' })
       }
       for (const e of inEdges) {
         const p = e.sourceUrn
-        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'in', edgeType: e.edgeType ?? '' })
+        if (p && p !== urn && outside?.inPartners.has(p) && !partners.has(p)) partners.set(p, { direction: 'in', edgeType: e.edgeType ?? '' })
       }
       const partnerUrns = [...partners.keys()].slice(0, 100)
       const named = partnerUrns.length > 0
@@ -5248,7 +5252,7 @@ export function ContextViewCanvas({
       // Preview is advisory — fail closed to "no preview", never block the lens.
       setExternalPreview({ nodeId: urn, loading: false, records: [] })
     }
-  }, [selectedNodeId, lineageEdgeTypes, provider, openLens])
+  }, [selectedNodeId, lineageEdgeTypes, provider, openLens, offCanvasByNode])
 
   // A stub's click. Its lineage leaves the view, so there is nothing to bring
   // in: the Focus Lens on its row shows where it goes — with the external

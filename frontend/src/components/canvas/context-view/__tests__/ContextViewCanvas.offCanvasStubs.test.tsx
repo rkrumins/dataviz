@@ -38,7 +38,7 @@ vi.mock('../LineageFlowOverlay', async (original) => {
 
 beforeEach(() => {
   useAuthStore.setState({ permissions: { global: ['system:admin'], ws: {} } } as never)
-  usePreferencesStore.setState({ showMissingConnectionIndicators: true } as never)
+  usePreferencesStore.setState({ showMissingConnectionIndicators: true, externalLineagePreview: false } as never)
   overlay.offCanvas = undefined
   overlay.onOpen = undefined
 })
@@ -159,5 +159,35 @@ describe('a stub\'s click', () => {
     act(() => { overlay.onOpen!('dash') })
 
     expect(await screen.findByRole('dialog', { name: /Connections of dash/ })).toBeInTheDocument()
+  }, 20_000)
+})
+
+describe('the external preview', () => {
+  it('lists only the partners outside the view, never a row the view holds', async () => {
+    usePreferencesStore.setState({ externalLineagePreview: true } as never)
+    const estate = anchoredPortsEstate()
+    // Into dash: from `far`, held by nothing, and from s9, a row of Staging
+    // past its loaded page.
+    const into = [{ sourceUrn: 'far', targetUrn: 'dash' }, { sourceUrn: 's9', targetUrn: 'dash' }]
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      flows: into,
+    })
+    act(() => {
+      useCanvasStore.getState().addGraph([], into.map(f => flow(f.sourceUrn, f.targetUrn)) as never)
+    })
+    await h.settle()
+    await waitFor(() => expect(overlay.offCanvas?.get('dash')?.columns.get('stg')?.inPartners.has('s9')).toBe(true),
+      { timeout: 8000 })
+
+    act(() => { overlay.onOpen!('dash') })
+
+    const heading = await screen.findByText('Outside this view')
+    const preview = heading.closest('div.border-dashed')!
+    await waitFor(() => expect(preview.textContent).toContain('1 entity'))
+    expect(preview.textContent).toContain('far')
+    expect(preview.textContent).not.toContain('s9')
   }, 20_000)
 })
