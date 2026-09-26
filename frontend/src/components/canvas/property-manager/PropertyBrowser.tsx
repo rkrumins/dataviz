@@ -13,6 +13,8 @@
  * Lifecycle operations are staged IN-SESSION (``propertyDraftStore``) and
  * surfaced optimistically over the catalogue — there is no backend
  * node-property write yet, so the copy makes clear nothing is persisted.
+ * They are offered only where an entity edit could be kept, in a draft
+ * (``useEntityEditing``); elsewhere they are disabled and say why.
  */
 import { motion } from 'framer-motion'
 import {
@@ -23,8 +25,10 @@ import { useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
+import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import {
     usePropertyCatalogOverlay, usePropertyDraftStore, usePropertyOps,
     type CatalogOverlayEntry, type PropertyOp,
@@ -86,6 +90,11 @@ export function PropertyBrowser({
 
     const pendingOps = usePropertyOps()
     const overlay = usePropertyCatalogOverlay()
+    // Where editing isn't offered the change actions go; where it is but
+    // can't be kept yet, they stay disabled with the reason.
+    const editing = useEntityEditing()
+    const change = (mode: PropertyDialogMode, key?: string) =>
+        editing.offered ? () => setDialog({ mode, key }) : undefined
 
     const properties = useMemo(() => catalog?.properties ?? [], [catalog])
     const tags = useMemo(() => catalog?.tags ?? [], [catalog])
@@ -168,7 +177,7 @@ export function PropertyBrowser({
         return (
             <div className="flex flex-col gap-3">
                 {pendingOps.length > 0 && <PendingChanges ops={pendingOps} />}
-                <EmptyHero onNew={() => setDialog({ mode: 'create' })} />
+                <EmptyHero onNew={change('create')} blocked={editing.blocked} />
                 {dialogEl}
             </div>
         )
@@ -196,14 +205,22 @@ export function PropertyBrowser({
                     />
                 </div>
                 <SortToggle sort={sort} onChange={setSort} />
-                <button
-                    type="button"
-                    onClick={() => setDialog({ mode: 'create' })}
-                    title="Define a new property and apply it to matched entities"
-                    className="shrink-0 inline-flex items-center gap-1.5 px-2.5 h-9 rounded-lg text-[12px] font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors"
-                >
-                    <Plus className="w-3.5 h-3.5" /> New
-                </button>
+                {editing.offered && (
+                    <HoverTip
+                        label="Define a new property and apply it to matched entities"
+                        detail={editing.blocked ?? undefined}
+                        className="shrink-0 inline-flex"
+                    >
+                        <button
+                            type="button"
+                            onClick={() => setDialog({ mode: 'create' })}
+                            disabled={!!editing.blocked}
+                            className="inline-flex items-center gap-1.5 px-2.5 h-9 rounded-lg text-[12px] font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors disabled:opacity-50 disabled:shadow-none disabled:hover:bg-accent-lineage"
+                        >
+                            <Plus className="w-3.5 h-3.5" /> New
+                        </button>
+                    </HoverTip>
+                )}
             </div>
 
             {/* Properties */}
@@ -218,8 +235,9 @@ export function PropertyBrowser({
                                 key={`new-${key}`}
                                 propertyKey={key}
                                 stagedValue={stagedValueByKey.get(key)}
-                                onUpdate={() => setDialog({ mode: 'update', key })}
-                                onRemove={() => setDialog({ mode: 'remove', key })}
+                                onUpdate={change('update', key)}
+                                onRemove={change('remove', key)}
+                                blocked={editing.blocked}
                                 onCreateRule={() => onCreateRuleFromPredicate({ kind: 'hasProperty', key, negate: false }, key)}
                             />
                         ))}
@@ -231,8 +249,9 @@ export function PropertyBrowser({
                                 exact={catalog.status === 'complete'}
                                 onSearch={search}
                                 overlay={overlay.get(property.key)}
-                                onUpdate={() => setDialog({ mode: 'update', key: property.key })}
-                                onRemove={() => setDialog({ mode: 'remove', key: property.key })}
+                                onUpdate={change('update', property.key)}
+                                onRemove={change('remove', property.key)}
+                                blocked={editing.blocked}
                                 onCreateRule={() => onCreateRuleFromPredicate(
                                     { kind: 'hasProperty', key: property.key, negate: false }, property.key)}
                                 onCopy={() => copyKey(property.key)}
@@ -320,7 +339,17 @@ function SortToggle({ sort, onChange }: { sort: SortMode; onChange: (s: SortMode
 // Empty / first-run hero
 // ---------------------------------------------------------------------------
 
-function EmptyHero({ onNew }: { onNew: () => void }) {
+function EmptyHero({ onNew, blocked }: { onNew?: () => void; blocked: string | null }) {
+    const cta = onNew && (
+        <button
+            type="button"
+            onClick={onNew}
+            disabled={!!blocked}
+            className="relative inline-flex items-center gap-1.5 px-3.5 h-9 rounded-lg text-[12.5px] font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors disabled:opacity-50 disabled:shadow-none disabled:hover:bg-accent-lineage"
+        >
+            <Plus className="w-4 h-4" /> Create your first property
+        </button>
+    )
     return (
         <motion.div
             initial={{ opacity: 0, y: 6 }}
@@ -344,13 +373,7 @@ function EmptyHero({ onNew }: { onNew: () => void }) {
                     ones are used, and clean up in bulk. Changes stage in-session — nothing is saved yet.
                 </p>
             </div>
-            <button
-                type="button"
-                onClick={onNew}
-                className="relative inline-flex items-center gap-1.5 px-3.5 h-9 rounded-lg text-[12.5px] font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors"
-            >
-                <Plus className="w-4 h-4" /> Create your first property
-            </button>
+            {cta && (blocked ? <HoverTip label={blocked} className="relative inline-flex">{cta}</HoverTip> : cta)}
         </motion.div>
     )
 }
@@ -455,7 +478,7 @@ function valuePredicate(key: string, v: SearchCatalogValue): Predicate {
 }
 
 function PropertyRow({
-    property, entities, exact, overlay, onUpdate, onRemove, onCreateRule, onCopy, onSearch,
+    property, entities, exact, overlay, onUpdate, onRemove, blocked, onCreateRule, onCopy, onSearch,
 }: {
     property: SearchCatalogProperty
     /** Entities in the view — what coverage is a share of. */
@@ -463,8 +486,9 @@ function PropertyRow({
     /** The catalog is complete: its counts are exact, not "so far". */
     exact: boolean
     overlay?: CatalogOverlayEntry
-    onUpdate: () => void
-    onRemove: () => void
+    onUpdate?: () => void
+    onRemove?: () => void
+    blocked: string | null
     onCreateRule: () => void
     onCopy: () => void
     onSearch?: SearchHandler
@@ -524,8 +548,8 @@ function PropertyRow({
                         <div className="ml-auto shrink-0 flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                 <RowAction icon={<Copy className="w-3 h-3" />} label="Copy the name" onClick={onCopy} />
-                                <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} />
-                                <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger />
+                                {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} blocked={blocked} />}
+                                {onRemove && <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger blocked={blocked} />}
                                 <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
                             </div>
                             <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg text-ink-muted group-hover:bg-glass transition-colors">
@@ -662,12 +686,13 @@ function PropertyRow({
 
 /** A property staged in this session that no entity carries yet. */
 function PendingNewRow({
-    propertyKey, stagedValue, onUpdate, onRemove, onCreateRule,
+    propertyKey, stagedValue, onUpdate, onRemove, blocked, onCreateRule,
 }: {
     propertyKey: string
     stagedValue?: string
-    onUpdate: () => void
-    onRemove: () => void
+    onUpdate?: () => void
+    onRemove?: () => void
+    blocked: string | null
     onCreateRule: () => void
 }) {
     return (
@@ -679,8 +704,8 @@ function PendingNewRow({
                         <span className="font-mono text-[12.5px] truncate text-ink" title={propertyKey}>{propertyKey}</span>
                         <PendingBadge label="new" tone="emerald" />
                         <div className="ml-auto shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-                            <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} />
-                            <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger />
+                            {onUpdate && <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} blocked={blocked} />}
+                            {onRemove && <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger blocked={blocked} />}
                             <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
                         </div>
                     </div>
@@ -703,21 +728,27 @@ function PendingBadge({ label, tone }: { label: string; tone: 'emerald' | 'amber
     )
 }
 
-function RowAction({ icon, label, onClick, danger }: { icon: React.ReactNode; label: string; onClick: () => void; danger?: boolean }) {
-    return (
+/** A row's icon action. ``blocked`` disables it, and its tooltip says why. */
+function RowAction({ icon, label, onClick, danger, blocked }: {
+    icon: React.ReactNode; label: string; onClick: () => void; danger?: boolean; blocked?: string | null
+}) {
+    const button = (
         <button
             type="button"
             onClick={onClick}
-            title={label}
+            disabled={!!blocked}
+            title={blocked ? undefined : label}
             aria-label={label}
             className={cn(
-                'inline-flex items-center justify-center w-6 h-6 rounded-md transition-colors',
-                danger ? 'text-ink-muted hover:text-rose-400 hover:bg-rose-500/10' : 'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10',
+                'inline-flex items-center justify-center w-6 h-6 rounded-md transition-colors disabled:opacity-40',
+                blocked ? 'text-ink-muted'
+                    : danger ? 'text-ink-muted hover:text-rose-400 hover:bg-rose-500/10' : 'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10',
             )}
         >
             {icon}
         </button>
     )
+    return blocked ? <HoverTip label={label} detail={blocked} className="inline-flex">{button}</HoverTip> : button
 }
 
 

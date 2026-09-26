@@ -10,6 +10,9 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { PropertyCatalogState } from '@/hooks/usePropertyCatalog'
+import {
+    NO_DRAFT, NO_VERSION_CONTROL, type EntityEditing,
+} from '@/features/versioning/hooks/useEntityEditing'
 import type { SearchCatalogProperty, SearchCatalogResult } from '@/types/search'
 
 import { PropertyBrowser } from '../PropertyBrowser'
@@ -17,6 +20,7 @@ import { PropertyBrowser } from '../PropertyBrowser'
 
 const notify = vi.fn()
 let state: PropertyCatalogState
+let editing: EntityEditing
 
 vi.mock('@/hooks/usePropertyCatalog', () => ({
     usePropertyCatalog: () => state,
@@ -26,6 +30,10 @@ vi.mock('@/components/ui/notifications', () => ({
 }))
 vi.mock('../PropertyOperationDialog', () => ({
     PropertyOperationDialog: () => <div>operation dialog</div>,
+}))
+vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/features/versioning/hooks/useEntityEditing')>()),
+    useEntityEditing: () => editing,
 }))
 
 
@@ -89,7 +97,10 @@ function card(key: string): HTMLElement {
 
 
 describe('PropertyBrowser', () => {
-    beforeEach(() => notify.mockReset())
+    beforeEach(() => {
+        notify.mockReset()
+        editing = { offered: true, blocked: null }
+    })
 
     it('lists every property, most carried first, with its exact coverage and values', () => {
         renderBrowser()
@@ -193,5 +204,59 @@ describe('PropertyBrowser', () => {
         renderBrowser({ catalog: null, unavailable: true })
         expect(screen.getByText(/aren't available for this view here/)).toBeInTheDocument()
         expect(screen.queryByText(/Create your first property/)).not.toBeInTheDocument()
+    })
+})
+
+
+describe('PropertyBrowser — a property is changed only in a draft', () => {
+    beforeEach(() => { editing = { offered: true, blocked: null } })
+
+    it('offers New, Update and Remove while a draft is open', async () => {
+        renderBrowser()
+        const owner = within(card('owner'))
+        expect(owner.getByRole('button', { name: 'Update' })).toBeEnabled()
+        expect(owner.getByRole('button', { name: 'Remove' })).toBeEnabled()
+        await userEvent.setup().click(screen.getByRole('button', { name: 'New' }))
+        expect(screen.getByText('operation dialog')).toBeInTheDocument()
+    })
+
+    it('disables them on a data source without version control, and says why', async () => {
+        editing = { offered: true, blocked: NO_VERSION_CONTROL }
+        renderBrowser()
+        const user = userEvent.setup()
+        const create = screen.getByRole('button', { name: 'New' })
+        expect(create).toBeDisabled()
+        await user.hover(create.parentElement!)
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_VERSION_CONTROL)
+        await user.unhover(create.parentElement!)
+
+        const owner = within(card('owner'))
+        const update = owner.getByRole('button', { name: 'Update' })
+        expect(update).toBeDisabled()
+        expect(owner.getByRole('button', { name: 'Remove' })).toBeDisabled()
+        await user.hover(update.parentElement!)
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_VERSION_CONTROL)
+        // Reading, searching and rules are not edits to the graph.
+        expect(owner.getByRole('button', { name: 'Create rule' })).toBeEnabled()
+        expect(owner.getByRole('button', { name: 'Copy the name' })).toBeEnabled()
+    })
+
+    it('says why on the first-property call to action too', async () => {
+        editing = { offered: true, blocked: NO_DRAFT }
+        renderBrowser({ catalog: catalog({ properties: [], tags: [] }) })
+        const cta = screen.getByRole('button', { name: /Create your first property/ })
+        expect(cta).toBeDisabled()
+        await userEvent.setup().hover(cta.parentElement!)
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_DRAFT)
+    })
+
+    it('offers no change at all where editing is off', () => {
+        editing = { offered: false, blocked: NO_DRAFT }
+        renderBrowser()
+        expect(screen.queryByRole('button', { name: 'New' })).not.toBeInTheDocument()
+        const owner = within(card('owner'))
+        expect(owner.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument()
+        expect(owner.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
+        expect(owner.getByRole('button', { name: 'Create rule' })).toBeEnabled()
     })
 })
