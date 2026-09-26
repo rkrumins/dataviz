@@ -18,6 +18,12 @@
  * asks nothing. A failed or cut-short round is asked again on
  * lookupRetryDelayMs, MAX_ATTEMPTS rounds in a row at most, then on the next
  * change. It raises no banner: what it could not learn stays as it was.
+ *
+ * Another graph or level starts empty, at once: its cells are no fact about
+ * this one, and an answer that lands for a graph the canvas has left is
+ * never shown. An invalidation asks everything again, and keeps showing the
+ * cells it had until a whole answer replaces them, so a resync that fails
+ * does not turn every row facing a holder hollow.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
@@ -37,15 +43,18 @@ const MAX_ATTEMPTS = 5
 const NONE: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
 
 interface HolderLedger {
-  /** The graph, level and cache version the cells are of. */
+  /** The graph and level the cells are of. */
   scope: string
+  /** The cache version they were asked at. */
+  version: number
   /** Rows whose cells with every holder in `holders` are known. */
   rows: Set<string>
   holders: Set<string>
   cells: Map<string, AggregatedEdgeInfo>
 }
 
-const emptyLedger = (scope: string): HolderLedger => ({ scope, rows: new Set(), holders: new Set(), cells: new Map() })
+const emptyLedger = (scope: string, version: number, cells?: Map<string, AggregatedEdgeInfo>): HolderLedger =>
+  ({ scope, version, rows: new Set(), holders: new Set(), cells: new Map(cells) })
 
 function chunked(urns: string[]): string[][] {
   const chunks: string[][] = []
@@ -59,12 +68,12 @@ export function useHolderRollups(granularity: string | null): {
 } {
   const provider = useGraphProvider()
   const cacheVersion = useAggregatedEdgesCacheVersion(provider?.scopeKey)
-  const scope = `${provider?.scopeKey ?? ''}:${granularity}:${cacheVersion}`
+  const scope = `${provider?.scopeKey ?? ''}:${granularity}`
   const [holderEdges, setHolderEdges] = useState<ReadonlyMap<string, AggregatedEdgeInfo>>(NONE)
 
-  const ledgerRef = useRef<HolderLedger>(emptyLedger(''))
+  const ledgerRef = useRef<HolderLedger>(emptyLedger('', 0))
   const wantedRef = useRef<{ rows: string[]; holders: string[] }>({ rows: [], holders: [] })
-  const askerRef = useRef<{ provider: GraphDataProvider; granularity: string | null; scope: string } | null>(null)
+  const askerRef = useRef<{ provider: GraphDataProvider; granularity: string | null; scope: string; version: number } | null>(null)
   // One round at a time; a change that arrives meanwhile runs it again.
   const runningRef = useRef(false)
   const againRef = useRef(false)
@@ -80,7 +89,13 @@ export function useHolderRollups(granularity: string | null): {
     const round = async () => {
       const asker = askerRef.current
       if (!asker) return
-      if (ledgerRef.current.scope !== asker.scope) ledgerRef.current = emptyLedger(asker.scope)
+      const prev = ledgerRef.current
+      // Another graph or level: nothing it knew holds. An invalidation: all
+      // of it is asked again, its cells shown until replaced.
+      let changed = prev.scope !== asker.scope && prev.cells.size > 0
+      if (prev.scope !== asker.scope || prev.version !== asker.version) {
+        ledgerRef.current = emptyLedger(asker.scope, asker.version, prev.scope === asker.scope ? prev.cells : undefined)
+      }
       const ledger = ledgerRef.current
       const { rows, holders } = wantedRef.current
       const rowSet = new Set(rows)
@@ -89,12 +104,12 @@ export function useHolderRollups(granularity: string | null): {
       // What left takes its cells, and asks nothing.
       for (const r of ledger.rows) if (!rowSet.has(r)) ledger.rows.delete(r)
       for (const h of ledger.holders) if (!holderSet.has(h)) ledger.holders.delete(h)
-      let changed = false
       for (const [id, c] of ledger.cells) {
         const kept = (rowSet.has(c.sourceUrn) && holderSet.has(c.targetUrn))
           || (holderSet.has(c.sourceUrn) && rowSet.has(c.targetUrn))
         if (!kept) { ledger.cells.delete(id); changed = true }
       }
+      if (changed) publish(ledger)
 
       // New rows against every holder; the rows already asked against the
       // new holders. With no holders at all, a row has nothing to ask.
@@ -106,7 +121,6 @@ export function useHolderRollups(granularity: string | null): {
       if (newHolders.length > 0) for (const chunk of chunked([...ledger.rows])) asks.push({ rows: chunk, holders: newHolders, forRows: false })
       if (asks.length === 0) {
         newHolders.forEach(h => ledger.holders.add(h))
-        if (changed) publish(ledger)
         return
       }
 
@@ -116,14 +130,28 @@ export function useHolderRollups(granularity: string | null): {
       ])
       const settled = await mapWithConcurrency(legs, CONCURRENCY, leg =>
         asker.provider.getAggregatedEdges({ sourceUrns: leg.sourceUrns, targetUrns: leg.targetUrns, granularity: asker.granularity }))
-      // A new graph, level or invalidation while this was out: dropped.
-      if (ledgerRef.current !== ledger) return
+      // A new graph, level or invalidation while this was out: dropped, and
+      // the round that change asked for runs next.
+      const latest = askerRef.current
+      if (latest?.scope !== ledger.scope || latest.version !== ledger.version) return
 
       // What an answer says is kept, cut short or not; only a whole answer
-      // to both legs makes its rows (or its new holders) known.
+      // to both legs makes its rows (or its new holders) known, and is the
+      // whole truth about them: a cell an invalidation carried over that it
+      // no longer names goes.
       const whole = asks.map(() => true)
       settled.forEach((s, n) => {
         if (s.status === 'rejected' || s.value.truncated) whole[legs[n].i] = false
+      })
+      asks.forEach((a, i) => {
+        if (!whole[i]) return
+        const R = new Set(a.rows)
+        const H = new Set(a.holders)
+        for (const [id, c] of ledger.cells) {
+          if ((R.has(c.sourceUrn) && H.has(c.targetUrn)) || (H.has(c.sourceUrn) && R.has(c.targetUrn))) ledger.cells.delete(id)
+        }
+      })
+      settled.forEach(s => {
         if (s.status === 'fulfilled') for (const c of s.value.aggregatedEdges) ledger.cells.set(c.id, c)
       })
       asks.forEach((a, i) => { if (a.forRows && whole[i]) a.rows.forEach(r => ledger.rows.add(r)) })
@@ -152,10 +180,10 @@ export function useHolderRollups(granularity: string | null): {
 
   const fetchHolders = useCallback((rows: string[], holders: string[]): Promise<void> => {
     if (!provider) return Promise.resolve()
-    askerRef.current = { provider, granularity, scope }
+    askerRef.current = { provider, granularity, scope, version: cacheVersion }
     wantedRef.current = { rows, holders }
     return sync()
-  }, [provider, granularity, scope, sync])
+  }, [provider, granularity, scope, cacheVersion, sync])
 
   return { holderEdges, fetchHolders }
 }

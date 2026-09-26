@@ -17,7 +17,7 @@ vi.mock('@/providers/GraphProviderContext', async (original) => ({
   useGraphProvider: () => holder.current,
 }))
 
-import { invalidateAggregatedEdges } from '../useAggregatedLineage'
+import { invalidateAggregatedEdges, invalidateAggregatedEdgesForScope } from '../useAggregatedLineage'
 import { useHolderRollups } from '../useHolderRollups'
 
 interface Ask { sourceUrns: string[]; targetUrns?: string[]; granularity: string | null }
@@ -28,7 +28,7 @@ const cell = (s: string, t: string) => ({
 
 /** A graph whose roll-ups are `flows`: an ask for S × T answers the flows
  *  from S to T. `fail` rejects, and `cut` truncates, the asks it matches. */
-function graph(flows: Array<[string, string]>, opts: { fail?: (ask: Ask) => boolean; cut?: (ask: Ask) => boolean } = {}) {
+function graph(flows: Array<[string, string]>, opts: { fail?: (ask: Ask) => boolean; cut?: (ask: Ask) => boolean; scopeKey?: string } = {}) {
   const asks: Ask[] = []
   const getAggregatedEdges = vi.fn(async (req: Ask) => {
     const ask = { ...req, sourceUrns: [...req.sourceUrns], targetUrns: [...(req.targetUrns ?? [])] }
@@ -42,7 +42,7 @@ function graph(flows: Array<[string, string]>, opts: { fail?: (ask: Ask) => bool
       truncated: opts.cut?.(ask) ?? false,
     }
   })
-  holder.current = { scopeKey: 'ws:ds:main:', getAggregatedEdges }
+  holder.current = { scopeKey: opts.scopeKey ?? 'ws:ds:main:', getAggregatedEdges }
   return asks
 }
 
@@ -178,5 +178,71 @@ describe('useHolderRollups — failures', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
     }
     expect(asks).toHaveLength(5 * 2)
+  })
+})
+
+describe('useHolderRollups — a graph the canvas has left', () => {
+  it('a switch to another graph drops the old cells at once, with nothing to ask', async () => {
+    graph(FLOWS)
+    const hook = render('dataset')
+    await ask(hook, ['r1', 'r2'], ['A'])
+    expect(shown(hook.result.current.holderEdges)).toEqual(['agg-A-r2', 'agg-r1-A'])
+
+    graph([], { scopeKey: 'ws:ds:draft-1:' })
+    hook.rerender({ g: 'dataset' })
+    await ask(hook, ['r1', 'r2'], [])
+    expect(shown(hook.result.current.holderEdges)).toEqual([])
+  })
+
+  it("an answer for a graph it has left is never shown", async () => {
+    const release: Array<() => void> = []
+    holder.current = {
+      scopeKey: 'ws:ds:main:',
+      getAggregatedEdges: vi.fn((req: Ask) => new Promise(resolve => {
+        release.push(() => resolve({
+          aggregatedEdges: req.sourceUrns.includes('r1') ? [cell('r1', 'A')] : [], totalSourceEdges: 0,
+        }))
+      })),
+    }
+    const hook = render('dataset')
+    let first!: Promise<void>
+    act(() => { first = hook.result.current.fetchHolders(['r1'], ['A']) })
+
+    // The canvas moves to a draft with no holders while main's answer is out.
+    graph([], { scopeKey: 'ws:ds:draft-1:' })
+    hook.rerender({ g: 'dataset' })
+    act(() => { void hook.result.current.fetchHolders(['r1'], []) })
+    await act(async () => { while (release.length) release.shift()!(); await first })
+    expect(shown(hook.result.current.holderEdges)).toEqual([])
+  })
+})
+
+describe('useHolderRollups — an invalidation', () => {
+  it('asks again, and a resync that fails keeps the cells it had', async () => {
+    let failing = false
+    const asks = graph(FLOWS, { fail: () => failing })
+    const hook = render()
+    await ask(hook, ['r1', 'r2'], ['A'])
+
+    failing = true
+    act(() => invalidateAggregatedEdgesForScope('ws:ds:main:'))
+    hook.rerender({ g: null })
+    asks.length = 0
+    await ask(hook, ['r1', 'r2'], ['A'])
+    expect(pairsOf(asks)).toEqual(['A > r1,r2', 'r1,r2 > A'])
+    expect(shown(hook.result.current.holderEdges)).toEqual(['agg-A-r2', 'agg-r1-A'])
+  })
+
+  it('a fresh answer still drops a cell it no longer names', async () => {
+    const flows: Array<[string, string]> = [['r1', 'A'], ['A', 'r2']]
+    graph(flows)
+    const hook = render()
+    await ask(hook, ['r1', 'r2'], ['A'])
+
+    flows.splice(0, 1)
+    act(() => invalidateAggregatedEdgesForScope('ws:ds:main:'))
+    hook.rerender({ g: null })
+    await ask(hook, ['r1', 'r2'], ['A'])
+    expect(shown(hook.result.current.holderEdges)).toEqual(['agg-A-r2'])
   })
 })
