@@ -235,6 +235,12 @@ class AdminUserResponse(BaseModel):
     # Break-glass: keeps password sign-in under SSO enforcement, and
     # forced sign-out sweeps skip it.
     is_system_account: bool = Field(False, alias="isSystemAccount")
+    # When this person last used the platform — see ``UserORM``. NULL until
+    # the thing first happens; "last seen" and "last activity" are recorded
+    # to five minutes.
+    last_login_at: Optional[str] = Field(default=None, alias="lastLoginAt")
+    last_seen_at: Optional[str] = Field(default=None, alias="lastSeenAt")
+    last_active_at: Optional[str] = Field(default=None, alias="lastActiveAt")
 
 
 class AdminUserStatsResponse(BaseModel):

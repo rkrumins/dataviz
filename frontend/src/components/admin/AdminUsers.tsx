@@ -44,6 +44,7 @@ import { UserAvatar } from '@/components/ui/UserAvatar'
 import { logoFor } from '@/components/admin/sso/IdpLogos'
 import { presetById } from '@/components/admin/sso/vendorPresets'
 import { cn } from '@/lib/utils'
+import { formatUtc, timeAgo as timeAgoUtc } from '@/lib/timeAgo'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { AccessSummary } from '@/components/access/AccessSummary'
 import { ROLE_NAMES } from '@/lib/roleNames'
@@ -54,7 +55,7 @@ import { PageContainer } from '@/components/layout/PageContainer'
 // entry. Mirrors the backend rules so the modal can drive the
 // workspace-picker + email-required UX before the request is sent.
 type StatusFilter = 'all' | 'pending' | 'active' | 'suspended'
-type SortField = 'name' | 'email' | 'status' | 'role' | 'createdAt'
+type SortField = 'name' | 'email' | 'status' | 'role' | 'createdAt' | 'lastSeenAt'
 type SortDir = 'asc' | 'desc'
 type ModalType =
     | { kind: 'reject'; userId: string; name: string }
@@ -998,6 +999,7 @@ export function AdminUsers() {
                                 <th className="text-left px-5 py-3"><span className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Sign-in</span></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Role" field="role" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Joined" field="createdAt" current={sortField} dir={sortDir} onSort={handleSort} /></th>
+                                <th className="text-left px-5 py-3"><SortHeader label="Last seen" field="lastSeenAt" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-right px-5 py-3"><span className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Actions</span></th>
                             </tr>
                         </thead>
@@ -1101,6 +1103,19 @@ export function AdminUsers() {
                                         <td className="px-5 py-4">
                                             <p className="text-sm text-ink-secondary">{formatDate(user.createdAt)}</p>
                                             <p className="text-[11px] text-ink-muted mt-0.5">{timeAgo(user.createdAt)}</p>
+                                        </td>
+
+                                        {/* Last seen — last had the app open. Relative,
+                                            with the exact instant on hover; null until
+                                            tracking has seen them (or an older server). */}
+                                        <td className="px-5 py-4">
+                                            {user.lastSeenAt ? (
+                                                <p className="text-sm text-ink-secondary whitespace-nowrap" title={formatUtc(user.lastSeenAt)}>
+                                                    {timeAgoUtc(user.lastSeenAt)}
+                                                </p>
+                                            ) : (
+                                                <p className="text-sm text-ink-muted whitespace-nowrap">Not yet</p>
+                                            )}
                                         </td>
 
                                         {/* Actions — clicks must not bubble to the row's drawer-open handler. */}
@@ -1561,6 +1576,32 @@ export function AdminUsers() {
                                 >
                                     <X className="w-4 h-4" />
                                 </button>
+                            </div>
+                            {/* Activity — from the row itself (a deep link
+                                only opens a drawer for a row on the page), so
+                                it shows at once, ahead of the access call.
+                                "Not yet": nothing since tracking began. */}
+                            <div className="px-5 py-3 border-b border-glass-border shrink-0">
+                                <p className="text-[10px] uppercase tracking-wider font-bold text-ink-muted">Activity</p>
+                                <dl className="mt-1.5 space-y-1 text-[11px]">
+                                    {([
+                                        ['Joined', accessUser.createdAt],
+                                        ['Last signed in', accessUser.lastLoginAt],
+                                        ['Last seen', accessUser.lastSeenAt],
+                                        ['Last activity', accessUser.lastActiveAt],
+                                    ] as const).map(([label, at]) => (
+                                        <div key={label} className="flex items-baseline gap-3">
+                                            <dt className="w-24 shrink-0 text-ink-muted">{label}</dt>
+                                            <dd className="min-w-0 truncate text-ink-secondary">
+                                                {at ? (
+                                                    <>{formatUtc(at)} <span className="text-ink-muted">· {timeAgoUtc(at)}</span></>
+                                                ) : (
+                                                    <span className="text-ink-muted">Not yet</span>
+                                                )}
+                                            </dd>
+                                        </div>
+                                    ))}
+                                </dl>
                             </div>
                             {/* Body: show skeleton placeholders while the
                                 /users/{id}/access call is in flight, so the

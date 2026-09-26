@@ -1445,6 +1445,11 @@ async def record_view_visit(
         payload=json.dumps({"viewId": view_id}),
     ))
     await session.flush()
+    # Opening a view is the commonest thing anyone does here — it is what
+    # "last activity" in Admin → Users mostly records. Gated, so almost
+    # every open costs nothing more.
+    from backend.app.db.repositories import user_repo
+    await user_repo.note_activity(session, user_id)
 
 
 async def list_recent_views(

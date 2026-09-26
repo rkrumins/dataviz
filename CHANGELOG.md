@@ -53,6 +53,13 @@ retries once; if the corporate side really says no, the sign-in page opens with 
 minute, in that tab only, so a new tab signed the person straight back in. It now waits, in every tab,
 until someone signs in.
 
+### Added
+
+**When each person last used the platform, in Admin → Users.** A sortable **Last seen** column, and an
+**Activity** block in the user drawer: Joined, Last signed in (any kind of sign-in), Last seen (had
+the app open) and Last activity (what Activity analytics counts). Last seen and last activity are
+recorded to five minutes, one conditional row update per person per window.
+
 ### Changed
 
 - **A daily-limit expiry ends only that session.** The user's other browsers carry their own limits;
@@ -65,6 +72,9 @@ until someone signs in.
 
 ### Upgrading
 
+- A migration adds `users.last_login_at`, `last_seen_at` and `last_active_at`, and backfills
+  `last_login_at` from each person's identity sign-ins. Password-only accounts fill in at their next
+  sign-in; the other two as people use the platform.
 - `require_auth_time` on existing gateway connections is ignored from now on; nothing to do.
 - Size `RATELIMIT_LOGIN_PER_IP` for your largest corporate egress address: the gateway's sign-in and
   silent re-sign-in share that bucket.

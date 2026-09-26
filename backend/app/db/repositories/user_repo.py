@@ -12,9 +12,13 @@ import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import select, func, delete, or_
+from sqlalchemy import select, func, delete, or_, update
 
 from backend.common.display_name import resolve_display_name
+from backend.auth_service.activity import (
+    RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS,
+    ActivityGate,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -361,7 +365,13 @@ _USER_SORTS = {
     "status": UserORM.status,
     "role": _ROLE_SHOWN,
     "createdAt": UserORM.created_at,
+    "lastSeenAt": UserORM.last_seen_at,
+    "lastLoginAt": UserORM.last_login_at,
 }
+#: Sorts over a column that is NULL until something first happens. Postgres
+#: puts NULLs first in a descending sort and SQLite last; "never seen" is
+#: least interesting either way, so it goes last in both directions.
+_NULLS_LAST_SORTS = frozenset({"lastSeenAt", "lastLoginAt"})
 
 
 def _user_list_filters(status: Optional[str], search: Optional[str]) -> list:
@@ -405,18 +415,102 @@ async def list_users(
     order: str = "desc",
 ) -> list[UserORM]:
     key = _USER_SORTS[sort]
+    ordered = key.desc() if order == "desc" else key.asc()
+    if sort in _NULLS_LAST_SORTS:
+        ordered = ordered.nulls_last()
     stmt = (
         select(UserORM)
         .where(*_user_list_filters(status, search))
         # ``id`` breaks ties, so rows that sort equal (a bulk import shares
         # one ``created_at``) can't straddle a page boundary differently on
         # every request and appear twice or not at all.
-        .order_by(key.desc() if order == "desc" else key.asc(), UserORM.id)
+        .order_by(ordered, UserORM.id)
         .limit(limit)
         .offset(offset)
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+# ── When someone last used the platform ─────────────────────────────
+#
+# Stamped on paths that run constantly — every sign-in, every authenticated
+# request, every product event — so each is ONE conditional UPDATE and
+# nothing else. ``updated_at`` is set to itself, which suppresses its
+# ``onupdate``: that column means "the account was edited", and neither a
+# sign-in nor a page view is an edit.
+
+
+async def _touch(
+    session: AsyncSession, user_id: str, column, *,
+    resolution_seconds: int = 0,
+) -> None:
+    now = datetime.now(timezone.utc)
+    stmt = update(UserORM).where(UserORM.id == user_id)
+    if resolution_seconds > 0:
+        # The cluster-wide throttle: a row stamped inside the window
+        # matches nothing and writes nothing, however many workers ask.
+        # ISO-8601 UTC text compares correctly as text.
+        cutoff = (now - timedelta(seconds=resolution_seconds)).isoformat()
+        stmt = stmt.where(or_(column.is_(None), column < cutoff))
+    await session.execute(
+        stmt.values({column.key: now.isoformat(), "updated_at": UserORM.updated_at})
+        .execution_options(synchronize_session=False)
+    )
+
+
+async def touch_last_login(session: AsyncSession, user_id: str) -> None:
+    """A sign-in of any kind just succeeded. Also counts as being seen."""
+    now = datetime.now(timezone.utc).isoformat()
+    await session.execute(
+        update(UserORM)
+        .where(UserORM.id == user_id)
+        .values(last_login_at=now, last_seen_at=now, updated_at=UserORM.updated_at)
+        .execution_options(synchronize_session=False)
+    )
+
+
+async def touch_last_seen(
+    session: AsyncSession, user_id: str, *, resolution_seconds: int,
+) -> None:
+    """An authenticated request — at most one write per resolution window."""
+    await _touch(
+        session, user_id, UserORM.last_seen_at,
+        resolution_seconds=resolution_seconds,
+    )
+
+
+async def touch_last_active(
+    session: AsyncSession, user_id: str, *, resolution_seconds: int,
+) -> None:
+    """A product action — at most one write per resolution window."""
+    await _touch(
+        session, user_id, UserORM.last_active_at,
+        resolution_seconds=resolution_seconds,
+    )
+
+
+_active_gate = ActivityGate()
+
+
+async def note_activity(session: AsyncSession, actor_id: Optional[str]) -> None:
+    """Stamp "last activity" from a product-event write site.
+
+    Called wherever a row that Activity analytics counts is written — so
+    "last activity" means exactly what "active user" means there. Gated in
+    this process first, so nearly every call does no I/O. Inside the
+    caller's transaction, under a savepoint: the stamp commits with the
+    action it records, and a failed stamp can never fail that action.
+    """
+    if not actor_id or not _active_gate.opens(actor_id):
+        return
+    try:
+        async with session.begin_nested():
+            await touch_last_active(
+                session, actor_id, resolution_seconds=ACTIVITY_RESOLUTION_SECONDS,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort by design
+        logger.warning("Could not record last activity for %s: %s", actor_id, exc)
 
 
 async def count_users(

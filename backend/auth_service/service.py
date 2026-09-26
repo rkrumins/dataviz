@@ -37,6 +37,8 @@ from .core.config import (
 )
 from backend.common.identity_provenance import asserted_fields, build_snapshot
 
+from .activity import RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS
+from .activity import ActivityGate
 from .core.password import disabled_password_hash
 from .core.tokens import (
     create_access_token,
@@ -235,6 +237,9 @@ class LocalIdentityService:
         # mapping lookup, no writes.
         self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
+        # "Last seen" for Admin → Users, written from ``validate_session``
+        # at most once per person per window. See ``activity.py``.
+        self._seen_gate = ActivityGate()
         self._session_revoker = session_revoker
         # (url, *, provider_id=None) -> (bytes, content_type). Injected
         # by app startup, which binds the outbound guard and the
@@ -272,7 +277,28 @@ class LocalIdentityService:
             if orm is None or orm.deleted_at is not None or orm.status != "active":
                 return None
             roles = await self._user_repo.get_user_roles(session, orm.id)
+        await self._note_seen(orm.id)
         return _orm_to_user(orm, role=_primary_role(roles))
+
+    async def _note_seen(self, user_id: str) -> None:
+        """Stamp "last seen" — this is every authenticated request, so gated.
+
+        Its own session, after the read has closed, so a failed stamp can
+        never cost the request it rode in on: best-effort, logged, gone.
+        Optional on the repo, like every other write the stub repos in the
+        tests do not implement.
+        """
+        touch = getattr(self._user_repo, "touch_last_seen", None)
+        if touch is None or not self._seen_gate.opens(user_id):
+            return
+        try:
+            async with self._session_factory() as session:
+                await touch(
+                    session, user_id,
+                    resolution_seconds=ACTIVITY_RESOLUTION_SECONDS,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort by design
+            logger.warning("Could not record last-seen for %s: %s", user_id, exc)
 
     async def auth_config(self) -> AuthConfigSnapshot:
         """Expose the current platform posture to the routing layer.
@@ -1995,7 +2021,26 @@ class LocalIdentityService:
             # confirm and the column is never read.
             idp_checked_at=int(time.time()) if idp_provider_id else None,
         )
+        if family_id is None:
+            await self._note_login(session, user_id)
         return token
+
+    async def _note_login(self, session, user_id: str) -> None:
+        """Stamp "last signed in" for Admin → Users.
+
+        Here because a new family is minted by exactly one thing — a
+        sign-in, of every kind: password, invite, each SSO kind, a
+        gateway's silent re-sign-in. In the login's own transaction, under
+        a savepoint so a failed stamp can never fail the sign-in.
+        """
+        touch = getattr(self._user_repo, "touch_last_login", None)
+        if touch is None:
+            return
+        try:
+            async with session.begin_nested():
+                await touch(session, user_id)
+        except Exception as exc:  # noqa: BLE001 — best-effort by design
+            logger.warning("Could not record last sign-in for %s: %s", user_id, exc)
 
     def _issue_tokens(
         self,
