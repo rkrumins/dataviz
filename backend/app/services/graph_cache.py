@@ -288,6 +288,8 @@ _ENABLED_ENDPOINTS = {
 #: its ``grain=coarse`` page only (``trace_closure_coarse`` reads incident
 #: rollup cells) — the fine walk reads raw lineage, but both grains share one
 #: endpoint namespace, so the endpoint is scoped to the stricter of the two.
+#: ``nodes-degree`` likewise for its ``includeRollups`` answers (roll-up
+#: presence), which is every answer the canvas asks for.
 _ROLLUP_ENDPOINTS = frozenset({
     ENDPOINT_AGGREGATED,
     ENDPOINT_TRACE,
@@ -295,6 +297,7 @@ _ROLLUP_ENDPOINTS = frozenset({
     ENDPOINT_TRACE_CLOSURE,
     ENDPOINT_CANVAS_BOOTSTRAP,
     ENDPOINT_CANVAS_EXPAND,
+    ENDPOINT_NODES_DEGREE,
 })
 
 

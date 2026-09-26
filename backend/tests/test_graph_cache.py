@@ -24,6 +24,7 @@ from backend.app.services.graph_cache import (
     ENDPOINT_AGGREGATED,
     ENDPOINT_CHILDREN,
     ENDPOINT_LAYER_ASSIGNMENT,
+    ENDPOINT_NODES_DEGREE,
     ENDPOINT_TOP_LEVEL,
     ENDPOINT_TRACE,
     ENDPOINT_TRACE_CLOSURE,
@@ -3076,6 +3077,30 @@ async def test_a_rollup_rebuild_leaves_the_hierarchy_reads_cached() -> None:
         "a rollup rebuild moved no node, edge or containment relationship, and "
         "must not throw away the hierarchy cache"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_rollup_rebuild_refreshes_the_degree_totals() -> None:
+    """``/nodes/degree`` with ``includeRollups`` reads roll-up presence out of
+    the :AGGREGATED layer. Keyed on content alone, a source opened before its
+    first rebuild kept "no roll-ups" on every container for the full TTL."""
+    redis = _shared_bus()
+    cache = GraphCache(redis)
+    scope = CacheScope("ws1", "ds1")
+    degrees = AsyncMock(return_value=_Result(value=1, children=[1]))
+    params = {"urns": ["a"], "edgeTypes": None, "includeRollups": True}
+
+    async def read() -> None:
+        await cache.get_or_compute(
+            scope=scope, endpoint=ENDPOINT_NODES_DEGREE, params=params,
+            compute=degrees, model_cls=_Result,
+        )
+
+    await read()
+    await cache.bump_rollup_generation(scope)
+    await read()
+
+    assert degrees.await_count == 2, "a rebuilt roll-up layer was answered from cache"
 
 
 @pytest.mark.asyncio
