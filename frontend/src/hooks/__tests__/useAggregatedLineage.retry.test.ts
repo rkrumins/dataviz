@@ -29,7 +29,7 @@ import {
 const SCOPE = 'ws:ds:main:'
 
 interface Ask { sourceUrns: string[]; targetUrns?: string[]; granularity: string | null }
-interface Answer { aggregatedEdges: ReturnType<typeof pair>[]; totalSourceEdges: number; truncated?: boolean }
+interface Answer { aggregatedEdges: ReturnType<typeof pair>[]; totalSourceEdges: number; truncated?: boolean; stale?: boolean; staleReason?: string | null }
 
 const pair = (s: string, t: string) => ({
   id: `agg-${s}-${t}`, sourceUrn: s, targetUrn: t, edgeCount: 1, edgeTypes: ['FLOWS_TO'], confidence: 1, sourceEdgeIds: [],
@@ -193,11 +193,10 @@ describe('useAggregatedLineage — the rows a failed chunk was about are asked a
     await wait(1999)
     expect(g.asks).toHaveLength(2)
     await wait(1)
+    // Only the leg that failed: their flows out. The flows into them were
+    // answered by the first chunk's own flows out.
     const retry = g.asks.slice(2).map(a => ({ s: sorted(a.sourceUrns), t: sorted(a.targetUrns) }))
-    expect(retry).toEqual([
-      { s: SECOND_CHUNK, t: ROWS },
-      { s: ROWS.slice(0, 500), t: SECOND_CHUNK },
-    ])
+    expect(retry).toEqual([{ s: SECOND_CHUNK, t: ROWS }])
     expect(shown(hook.result.current.aggregatedEdges)).toEqual(pairsAmong(FLOWS, ROWS))
     expect(hook.result.current.error).toBeNull()
   })
@@ -282,6 +281,77 @@ describe('useAggregatedLineage — the rows a failed chunk was about are asked a
     await act(async () => { await hook.result.current.retryAggregated() })
     expect(sorted(g.asks[before].sourceUrns)).toEqual(SECOND_CHUNK)
     expect(shown(hook.result.current.aggregatedEdges)).toEqual(pairsAmong(FLOWS, ROWS))
+    expect(hook.result.current.error).toBeNull()
+  })
+})
+
+describe('useAggregatedLineage — only the leg that failed is asked again', () => {
+  it("a row whose flows in failed is asked those alone, and a later page still learns its flows out", async () => {
+    vi.useFakeTimers()
+    const flows: Array<[string, string]> = [['a', 'c'], ['c', 'd']]
+    let failures = 1
+    const intoC = (a: Ask) => a.targetUrns?.length === 1 && a.targetUrns[0] === 'c'
+    const g = graph(flows, a => (intoC(a) && failures-- > 0 ? Promise.reject(new Error('504')) : undefined))
+    const hook = render()
+    await ask(hook, ['a', 'b'])
+    await ask(hook, ['a', 'b', 'c'])
+    expect(shown(hook.result.current.aggregatedEdges)).toEqual([])
+
+    // c's own flows out are known, so a new page asks c about it.
+    await ask(hook, ['a', 'b', 'c', 'd'])
+    expect(shown(hook.result.current.aggregatedEdges)).toEqual(['agg-c-d'])
+
+    const before = g.asks.length
+    await wait(2000)
+    const retry = g.asks.slice(before).map(a => ({ s: sorted(a.sourceUrns), t: sorted(a.targetUrns) }))
+    expect(retry).toEqual([{ s: ['a', 'b', 'c', 'd'], t: ['c'] }])
+    expect(shown(hook.result.current.aggregatedEdges)).toEqual(['agg-a-c', 'agg-c-d'])
+  })
+})
+
+describe('useAggregatedLineage — the banners say what is still missing', () => {
+  it('a row cut short under pressure is no cap, and keeps its reason until it is answered', async () => {
+    vi.useFakeTimers()
+    let cutting = true
+    graph([['a', 'b']], a => (cutting && a.sourceUrns.includes('b')
+      ? Promise.resolve({ aggregatedEdges: [], totalSourceEdges: 0, truncated: true, stale: true, staleReason: 'timeout' })
+      : undefined))
+    const hook = render()
+    await ask(hook, ['a', 'b'])
+    const flags = () => ({ truncated: hook.result.current.truncated, staleReason: hook.result.current.staleReason })
+    expect(flags()).toEqual({ truncated: false, staleReason: 'timeout' })
+
+    // A page that answers in full meanwhile: the rows are still missing, and still why.
+    await ask(hook, ['a', 'b', 'c'])
+    expect(flags()).toEqual({ truncated: false, staleReason: 'timeout' })
+
+    cutting = false
+    await wait(2000)
+    expect(flags()).toEqual({ truncated: false, staleReason: null })
+    expect(shown(hook.result.current.aggregatedEdges)).toEqual(['agg-a-b'])
+  })
+
+  it('the error goes once the rows it was about leave, though no line of theirs was known', async () => {
+    vi.useFakeTimers()
+    graph([['r0001', 'r0002']], a => (inSecondChunk(a) ? Promise.reject(new Error('504 Gateway Timeout')) : undefined))
+    const hook = render()
+    await ask(hook, ROWS)
+    for (const backoff of [2000, 4000, 8000, 16000]) await wait(backoff)
+    expect(hook.result.current.error).toBe('504 Gateway Timeout')
+
+    await ask(hook, ROWS.slice(0, 500))
+    expect(hook.result.current.error).toBeNull()
+  })
+
+  it('the error goes once the rows it was about are purged', async () => {
+    vi.useFakeTimers()
+    graph(FLOWS, a => (inSecondChunk(a) ? Promise.reject(new Error('504 Gateway Timeout')) : undefined))
+    const hook = render()
+    await ask(hook, ROWS)
+    for (const backoff of [2000, 4000, 8000, 16000]) await wait(backoff)
+    expect(hook.result.current.error).toBe('504 Gateway Timeout')
+
+    act(() => hook.result.current.purgeEdgesIncidentToUrns(SECOND_CHUNK))
     expect(hook.result.current.error).toBeNull()
   })
 })

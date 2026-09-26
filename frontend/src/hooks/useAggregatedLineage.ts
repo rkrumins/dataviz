@@ -360,7 +360,11 @@ function mergeAggregatedResults(results: AggregatedEdgeResult[]): AggregatedEdge
 // uncovered, and the pairs the rest answered stay. Those rows wait for the
 // ledger's own backoff (lookupRetryDelayMs, or the circuit breaker's window
 // when the open breaker refused them), not the next page, and are asked
-// MAX_ATTEMPTS times in all. Only then is there an `error` to show.
+// MAX_ATTEMPTS times in all. Only then is there an `error` to show. A row
+// is asked again only the leg it missed — its flows out, or its flows in —
+// and a row whose flows out are known answers its part of a later page's
+// flows in meanwhile. A cut-short row keeps why it was cut, so the canvas
+// can tell a size cap (no reason) from a read that gave up.
 
 /** Asks per row before its roll-ups are given up on, until Retry. */
 const MAX_ATTEMPTS = 5
@@ -374,8 +378,21 @@ interface PairLedger {
     covered: Set<string>
     /** The known pairs, by the server's own id (agg-{source}-{target}). */
     pairs: Map<string, AggregatedEdgeInfo>
-    /** Uncovered rows whose last ask failed (its message) or was cut short (null). */
-    misses: Map<string, { attempts: number; error: string | null }>
+    /** Uncovered rows whose last ask failed or was cut short. */
+    misses: Map<string, Miss>
+}
+
+interface Miss {
+    attempts: number
+    /** Its last failure's message, or null when it came back cut short. */
+    error: string | null
+    /** The legs still unanswered: its flows out (row × every row), its
+     *  flows in (every row whose flows out are known × row). */
+    legs: { in: boolean; out: boolean }
+    /** Why a cut-short answer was cut (its staleReason and detail); none
+     *  is the server's size cap. */
+    reason: string | null
+    detail: AggregatedDegradedDetail | null
 }
 
 const emptyLedger = (scope: string, version: number, pairs?: Map<string, AggregatedEdgeInfo>): PairLedger =>
@@ -386,11 +403,16 @@ function scopeVersion(scopeKey: string | undefined): number {
 }
 
 /** Forget the rows `gone` names: they are no longer covered or missed, and
- *  every pair touching one goes. True when a pair went. */
+ *  every pair touching one goes. True when a pair or a miss went. */
 function forgetRows(ledger: PairLedger, gone: (urn: string) => boolean): boolean {
-    for (const urn of ledger.covered) if (gone(urn)) ledger.covered.delete(urn)
-    for (const urn of ledger.misses.keys()) if (gone(urn)) ledger.misses.delete(urn)
     let dropped = false
+    for (const urn of ledger.covered) if (gone(urn)) ledger.covered.delete(urn)
+    for (const urn of ledger.misses.keys()) {
+        if (gone(urn)) {
+            ledger.misses.delete(urn)
+            dropped = true
+        }
+    }
     for (const [id, p] of ledger.pairs) {
         if (gone(p.sourceUrn) || gone(p.targetUrn)) {
             ledger.pairs.delete(id)
@@ -478,6 +500,9 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
     // Bumped per call. A one-sided (non-ledger) answer that lands after a
     // newer call is cached, never shown.
     const requestSeqRef = useRef(0)
+    // What the ledger's latest answers said about their freshness.
+    const latestFlagsRef = useRef<{ staleReason: string | null; degradedDetail: AggregatedDegradedDetail | null }>(
+        { staleReason: null, degradedDetail: null })
 
     useEffect(() => () => clearTimeout(retryTimerRef.current), [])
 
@@ -507,19 +532,31 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         setMaterializationTriggered(result.materializationTriggered ?? false)
     }, [])
 
-    // The ledger's pairs; whether some row's answer was cut short; and, only
-    // once a row's asks are used up, why some are missing.
-    const showLedger = useCallback((ledger: PairLedger) => {
-        showPairs([...ledger.pairs.values()])
-        let cut = false
+    // What the missing rows say: whether one was cut at the size cap; why
+    // one was cut short otherwise, while the latest answers say nothing of
+    // it; and, only once a row's asks are used up, why some are missing.
+    const showMisses = useCallback((ledger: PairLedger) => {
+        let capped = false
+        let reason: string | null = null
+        let detail: AggregatedDegradedDetail | null = null
         let failure: string | null = null
         ledger.misses.forEach(m => {
-            if (m.error === null) cut = true
-            else if (m.attempts >= MAX_ATTEMPTS) failure ??= m.error
+            if (m.error === null) {
+                if (m.reason === null) capped = true
+                reason ??= m.reason
+                detail ??= m.detail
+            } else if (m.attempts >= MAX_ATTEMPTS) failure ??= m.error
         })
-        setTruncated(cut)
+        setTruncated(capped)
+        setStaleReason(latestFlagsRef.current.staleReason ?? reason)
+        setDegradedDetail(latestFlagsRef.current.degradedDetail ?? detail)
         setError(failure)
-    }, [showPairs])
+    }, [])
+
+    const showLedger = useCallback((ledger: PairLedger) => {
+        showPairs([...ledger.pairs.values()])
+        showMisses(ledger)
+    }, [showPairs, showMisses])
 
     // Bring the ledger up to the rows in rowsRef: forget the rows that left,
     // then ask about the new ones, and the missed ones once their backoff is up.
@@ -551,12 +588,21 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 return !miss || (retrying && miss.attempts < MAX_ATTEMPTS)
             })
             if (added.length === 0) return
+            // Each leg where it is unanswered: a new row needs both, a missed
+            // row the one it missed. Flows in come from every row whose flows
+            // out are known (covered, or missed on its flows in alone); the
+            // rows asked their flows out now answer the rest.
+            const outRows = added.filter(urn => ledger.misses.get(urn)?.legs.out ?? true)
+            const inRows = added.filter(urn => ledger.misses.get(urn)?.legs.in ?? true)
+            const inSources = [...rows].filter(urn => ledger.covered.has(urn) || ledger.misses.get(urn)?.legs.out === false)
             const all = [...rows]
             const allHash = urnSetHash(all)
-            const addedHash = urnSetHash(added)
+            const inHash = urnSetHash(inRows)
             const asks = [
-                ...chunked(added).map(sources => ({ sources, targets: all, targetHash: allHash, out: true })),
-                ...chunked([...ledger.covered]).map(sources => ({ sources, targets: added, targetHash: addedHash, out: false })),
+                ...chunked(outRows).map(sources => ({ sources, targets: all, targetHash: allHash, out: true })),
+                ...(inRows.length > 0
+                    ? chunked(inSources).map(sources => ({ sources, targets: inRows, targetHash: inHash, out: false }))
+                    : []),
             ]
 
             setIsLoading(true)
@@ -573,45 +619,56 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 const now = where()
                 if (ledgerRef.current !== ledger || now.scope !== ledger.scope || now.version !== ledger.version) return
 
-                // The rows an ask was about: an out ask's sources, or every
-                // added row for an in ask. A full answer to (S, T) is the
-                // whole truth about S × T, so what it no longer names goes,
-                // including what an invalidated ledger carried over.
-                const unanswered = new Map<string, string | null>()
+                // The rows an ask was about: an out ask's sources, or the
+                // rows an in ask asked about; each misses that leg when the
+                // ask failed or came back cut short. A full answer to (S, T)
+                // is the whole truth about S × T, so what it no longer names
+                // goes, including what an invalidated ledger carried over.
+                const missed = new Map<string, Miss>()
+                const noteMiss = (urn: string, out: boolean, error: string | null, cut?: AggregatedEdgeResult) => {
+                    const m = missed.get(urn) ?? { attempts: 0, error: null, legs: { in: false, out: false }, reason: null, detail: null }
+                    m.legs[out ? 'out' : 'in'] = true
+                    if (error !== null) m.error = error
+                    if (cut) {
+                        m.reason ??= cut.staleReason ?? null
+                        m.detail ??= cut.degradedDetail ?? null
+                    }
+                    missed.set(urn, m)
+                }
                 const answeredOut = new Set<string>()
                 const answeredIn = new Set<string>()
                 const fulfilled: AggregatedEdgeResult[] = []
                 let refused = false
                 settled.forEach((s, i) => {
                     const { sources, out } = asks[i]
-                    const about = out ? sources : added
+                    const about = out ? sources : inRows
                     if (s.status === 'rejected') {
                         const message = s.reason instanceof Error ? s.reason.message : 'Failed to fetch some aggregated edges'
-                        about.forEach(urn => unanswered.set(urn, message))
+                        about.forEach(urn => noteMiss(urn, out, message))
                         if (classifyGraphFailure(s.reason) === 'unavailable') refused = true
                         return
                     }
                     fulfilled.push(s.value)
                     if (s.value.truncated) {
-                        about.forEach(urn => { if (!unanswered.has(urn)) unanswered.set(urn, null) })
+                        about.forEach(urn => noteMiss(urn, out, null, s.value))
                     } else {
                         sources.forEach(urn => (out ? answeredOut : answeredIn).add(urn))
                     }
                 })
-                const addedSet = new Set(added)
+                const inSet = new Set(inRows)
                 for (const [id, p] of ledger.pairs) {
-                    if (answeredOut.has(p.sourceUrn) || (answeredIn.has(p.sourceUrn) && addedSet.has(p.targetUrn))) {
+                    if (answeredOut.has(p.sourceUrn) || (answeredIn.has(p.sourceUrn) && inSet.has(p.targetUrn))) {
                         ledger.pairs.delete(id)
                     }
                 }
                 for (const r of fulfilled) for (const agg of r.aggregatedEdges) ledger.pairs.set(agg.id, agg)
                 for (const urn of added) {
-                    const error = unanswered.get(urn)
-                    if (error === undefined) {
+                    const m = missed.get(urn)
+                    if (m === undefined) {
                         ledger.covered.add(urn)
                         ledger.misses.delete(urn)
                     } else {
-                        ledger.misses.set(urn, { attempts: (ledger.misses.get(urn)?.attempts ?? 0) + 1, error })
+                        ledger.misses.set(urn, { ...m, attempts: (ledger.misses.get(urn)?.attempts ?? 0) + 1 })
                     }
                 }
                 // Rows that left while this was out.
@@ -620,6 +677,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
                 if (fulfilled.length > 0) {
                     const merged = mergeAggregatedResults(fulfilled)
                     noteMaterializedEpoch(merged.lastMaterializedAt)
+                    latestFlagsRef.current = { staleReason: merged.staleReason ?? null, degradedDetail: merged.degradedDetail ?? null }
                     showFlags(merged)
                 }
                 showLedger(ledger)
@@ -650,9 +708,11 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         }
     }, [showLedger, showFlags])
 
-    // Ask again, now, about the rows whose asks were used up (the banner's Retry).
+    // Ask again, now, about the rows whose asks were used up (the banner's
+    // Retry): the legs they missed, as many times again.
     const retryAggregated = useCallback(() => {
-        ledgerRef.current.misses.clear()
+        ledgerRef.current.misses.forEach(m => { m.attempts = 0 })
+        retryDueRef.current = true
         return syncPairs()
     }, [syncPairs])
 
@@ -925,6 +985,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         currentTargetUrnsRef.current = undefined
         ledgerRef.current = emptyLedger('', 0)
         rowsRef.current = new Set()
+        latestFlagsRef.current = { staleReason: null, degradedDetail: null }
         clearTimeout(retryTimerRef.current)
         retryTimerRef.current = undefined
         setTruncated(false)
@@ -942,8 +1003,9 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         const urnSet = urns instanceof Set ? urns : new Set(urns)
         if (urnSet.size === 0) return
         // The ledger forgets them too, so they are asked about again if
-        // they come back before the next sync sees them leave.
-        forgetRows(ledgerRef.current, urn => urnSet.has(urn))
+        // they come back before the next sync sees them leave; and what it
+        // says is missing is said again without them.
+        if (forgetRows(ledgerRef.current, urn => urnSet.has(urn))) showMisses(ledgerRef.current)
         setAggregatedEdges(prev => {
             let removed = 0
             const next = new Map(prev)
@@ -955,7 +1017,7 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
             }
             return removed > 0 ? next : prev
         })
-    }, [])
+    }, [showMisses])
 
     // Get edge count
     const getEdgeCount = useCallback((aggregatedEdgeId: string) => {
