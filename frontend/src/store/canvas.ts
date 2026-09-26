@@ -154,6 +154,12 @@ interface CanvasState {
    *  result was almost certainly truncated server-side. */
   edgesTruncated: boolean
   setEdgesTruncated: (edgesTruncated: boolean) => void
+  /** Rows whose lineage was read only in part, by direction: priming them
+   *  came back at its cap (primeLineageFor), so the flows past it are
+   *  unknown and their ports never claim that lineage only leaves the view.
+   *  Cleared by setGraph. */
+  lineagePartial: { in: ReadonlySet<string>; out: ReadonlySet<string> }
+  markLineagePartial: (partial: { in: readonly string[]; out: readonly string[] }) => void
 
   // Node-fetch integrity — some batches of the initial load failed after
   // their retries while others succeeded. The canvas renders what arrived
@@ -389,6 +395,17 @@ export const useCanvasStore = create<CanvasState>()(
       clearEdgeFetchFailures: () => set({ edgeFetchFailures: 0, lastEdgeError: null }),
       edgesTruncated: false,
       setEdgesTruncated: (edgesTruncated) => set({ edgesTruncated }),
+      lineagePartial: { in: new Set(), out: new Set() },
+      markLineagePartial: (partial) => {
+        // Nothing to mark is no update: every update re-renders the canvas.
+        if (partial.in.length === 0 && partial.out.length === 0) return
+        set((state) => ({
+          lineagePartial: {
+            in: partial.in.length > 0 ? new Set([...state.lineagePartial.in, ...partial.in]) : state.lineagePartial.in,
+            out: partial.out.length > 0 ? new Set([...state.lineagePartial.out, ...partial.out]) : state.lineagePartial.out,
+          },
+        }))
+      },
       nodeFetchFailures: 0,
       missingEntityCount: 0,
       noteNodeFetchFailure: (batches, entities) => set({
@@ -475,6 +492,7 @@ export const useCanvasStore = create<CanvasState>()(
           graphGeneration: state.graphGeneration + 1,
           childPaging: {},
           typeFeeds: {},
+          lineagePartial: { in: new Set(), out: new Set() },
         }
       }),
 

@@ -230,6 +230,28 @@ describe('a card whose lineage sits below it, or that the reader hid', () => {
     expect(ports('SRC.DB_B')).toEqual({ left: null, right: null })
   }, 20_000)
 
+  it('a card whose lineage was read only in part never reads hollow that way', async () => {
+    const estate = anchoredPortsEstate()
+    await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      nodeDegrees: { dash: { in: 1, out: 0 } },
+    })
+    act(() => {
+      useCanvasStore.getState().addGraph([], [flow('far', 'dash')] as never)
+    })
+    await waitFor(() => {
+      expect(ports('dash')).toEqual({ left: 'beyond:in', right: null })
+    }, { timeout: 8000 })
+
+    // Its incoming read came back at the cap: the flows past it may reach the view.
+    act(() => { useCanvasStore.getState().markLineagePartial({ in: ['dash'], out: [] }) })
+    await waitFor(() => {
+      expect(ports('dash')).toEqual({ left: null, right: null })
+    }, { timeout: 8000 })
+  }, 20_000)
+
   it('a hidden flow type never makes a card hollow', async () => {
     const estate = anchoredPortsEstate()
     await renderCanvasWithTrace(estate, {

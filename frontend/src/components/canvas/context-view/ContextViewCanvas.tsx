@@ -251,7 +251,7 @@ import { generateKeyBetween } from '@/utils/orderKeys'
 import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { bySignificance } from './lineDensity'
-import { buildNodePorts, columnEndLayer, portTotals, unloadedColumnLines, unplacedLines } from './lineagePorts'
+import { buildNodePorts, columnEndLayer, partialLines, portTotals, unloadedColumnLines, unplacedLines } from './lineagePorts'
 import { PortHoverTip } from './PortHoverTip'
 import { LineageGuide } from './LineageGuide'
 import { zoomScalesPercentages } from '@/lib/cssZoom'
@@ -4819,16 +4819,18 @@ export function ContextViewCanvas({
   // anchored column's rows that are not drawn is in the view too: it plugs
   // in on the side facing that column (unloadedColumnLines). Lineage whose
   // far end has no known place yet keeps the card from reading hollow
-  // (unplacedLines). Browse only, as the stubs are — a trace's wires are its
-  // own.
+  // (unplacedLines), and so does lineage read only in part (partialLines).
+  // Browse only, as the stubs are — a trace's wires are its own.
+  const lineagePartial = useCanvasStore((s) => s.lineagePartial)
   const nodePorts = useMemo(() => {
     const layerOrdinal = new Map(sortedLayers.map((l, i) => [l.id, i]))
     return buildNodePorts(
       overlay.active ? visibleLineageEdges
-        : [...visibleLineageEdges, ...unloadedColumnLines(offCanvasByNode), ...unplacedLines(offCanvasByNode)],
+        : [...visibleLineageEdges, ...unloadedColumnLines(offCanvasByNode), ...unplacedLines(offCanvasByNode),
+          ...partialLines(lineagePartial)],
       (id) => nodeLayerIndexMap.get(id) ?? layerOrdinal.get(columnEndLayer(id) ?? ''),
     )
-  }, [visibleLineageEdges, overlay.active, offCanvasByNode, nodeLayerIndexMap, sortedLayers])
+  }, [visibleLineageEdges, overlay.active, offCanvasByNode, lineagePartial, nodeLayerIndexMap, sortedLayers])
 
   const nodeStubCounts = useMemo(() => {
     const counts = new Map<string, { in: number; out: number }>()

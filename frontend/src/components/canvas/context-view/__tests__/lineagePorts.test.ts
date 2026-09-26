@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { OffCanvasFlows, OffCanvasLineage } from '@/hooks/useEdgeProjection'
-import { buildNodePorts, columnEndLayer, portTotals, portView, sideVolume, unloadedColumnLines, unplacedLines } from '../lineagePorts'
+import { buildNodePorts, columnEndLayer, partialLines, portTotals, portView, sideVolume, unloadedColumnLines, unplacedLines } from '../lineagePorts'
 
 // Columns left to right: Source 0, Warehouse 3, Report 4.
 const layer: Record<string, number> = { src: 0, wh: 3, rep: 4, rep2: 4 }
@@ -235,5 +235,15 @@ describe('portTotals — what each card reads for the lineage it has no line for
     expect(portView('left', undefined, totals.get('a'))).toBeNull()
     // A count that failed still says so.
     expect(portView('left', undefined, totals.get('b'), failed.has('b'))).toEqual({ kind: 'unknown', dir: 'both' })
+  })
+})
+
+describe('partialLines — a row whose lineage was read only in part never reads hollow that way', () => {
+  const layerOfRow = (id: string) => (id === 'rep' ? 4 : undefined)
+
+  it('keeps that direction from reading hollow, draws no port, and leaves the other alone', () => {
+    const ports = buildNodePorts(partialLines({ in: new Set(), out: new Set(['rep']) }), layerOfRow)
+    expect(portView('right', ports.get('rep'), { in: 1, out: 3 })).toBeNull()
+    expect(portView('left', ports.get('rep'), { in: 1, out: 3 })).toEqual({ kind: 'beyond', dir: 'in' })
   })
 })

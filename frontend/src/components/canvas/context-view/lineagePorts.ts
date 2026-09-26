@@ -243,6 +243,21 @@ export function unplacedLines(
   return lines
 }
 
+/**
+ * Rows whose lineage was read only in part: priming them came back at its
+ * cap that way (the store's `lineagePartial`), so flows past it may reach
+ * rows in the view. Like unplaced lineage, they keep that direction from
+ * reading hollow and draw no port.
+ */
+export function partialLines(
+  partial: { in: ReadonlySet<string>; out: ReadonlySet<string> },
+): Array<{ source: string; target: string; isDelegated: true }> {
+  const lines: Array<{ source: string; target: string; isDelegated: true }> = []
+  partial.out.forEach(row => lines.push({ source: row, target: UNPLACED_END, isDelegated: true }))
+  partial.in.forEach(row => lines.push({ source: UNPLACED_END, target: row, isDelegated: true }))
+  return lines
+}
+
 /** Lines meeting one side — the port's size and glow scale with it. */
 export function sideVolume(ports: NodePorts | undefined, side: PortSide): number {
   const s = ports?.[side]

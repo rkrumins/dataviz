@@ -1671,7 +1671,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             [...pageIds],
                             lineageEdgeTypes,
                             containmentEdgeTypes,
-                        ).then((extra) => {
+                        ).then(({ edges: extra, partial }) => {
                             // stale(), not only the signal: flows read for a graph
                             // that has since been replaced do not belong in the new one.
                             if (stale()) return
@@ -1682,6 +1682,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             const kept = extra.filter((e) =>
                                 [e.source, e.target].every((end) => !pageIds.has(end) || held.has(end)))
                             if (kept.length > 0) useCanvasStore.getState().addGraph([], kept)
+                            // Rows whose read came back at its cap: more flows than arrived.
+                            useCanvasStore.getState().markLineagePartial(partial)
                         }).catch((e) => {
                             console.warn('[children] lineage priming failed', e)
                         })
