@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Collection, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
-from sqlalchemy import Boolean, Text, bindparam, insert, select, func, delete, text, update, or_, tuple_
+from sqlalchemy import Boolean, Text, bindparam, insert, select, func, delete, null, text, update, or_, tuple_
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -87,6 +87,7 @@ class _Stored(NamedTuple):
     kind: str                       # "node" | "edge"
     content_hash: str
     urn: Optional[str]              # nodes only
+    type: Optional[str]             # a node's entityType, an edge's edgeType
 
 
 class _Head(NamedTuple):
@@ -96,6 +97,7 @@ class _Head(NamedTuple):
     content_hash: str
     live: bool                      # not deleted, and not an empty payload
     urn: Optional[str]              # a node head's urn, from its version row
+    type: Optional[str]             # a live head's entityType / edgeType, from its version row
 # Entity heads written per statement. Each column goes as one array parameter (unnest), so the
 # statements' text never changes: compiled and prepared once, whatever the batch.
 _HEAD_BATCH = 5000
@@ -216,6 +218,16 @@ class GraphTooLargeToSync(RuntimeError):
         self.entities = entities
         self.limit = limit
         self.estimated_bytes = int(entities * _SYNC_BYTES_PER_ENTITY)
+
+
+class DiffTooLarge(RuntimeError):
+    """A draft changes more entities than its Changes tree lays out (``DIFF_TREE_MAX_CHANGES``):
+    its summary is counts only, and the tree has no children to page through."""
+
+    def __init__(self, changed: int, limit: int):
+        super().__init__(f"this draft changes {changed} entities; the tree lists up to {limit}")
+        self.changed = changed
+        self.limit = limit
 
 
 class NotUpToDate(RuntimeError):
@@ -3802,8 +3814,15 @@ class GraphVersioningService:
         """Hierarchical counterpart of :meth:`diff_branch_vs_base` — the draft's changes as a
         containment tree for the canvas Changes panel. Built on the same O(draft) change set,
         augmented with the *unchanged* containment ancestors of the changed nodes so edits nest
-        under their real container (a column under its table) without composing full state."""
+        under their real container (a column under its table) without composing full state.
+
+        A draft past ``DIFF_TREE_MAX_CHANGES`` is counted, not laid out: the same counts and a
+        per-type rollup of the changed entities, from the narrow change index, with no groups and
+        ``tooLarge`` saying so."""
         async with self._session() as s:
+            counted = await self._count_if_too_large(s, graph_id, branch_id, containment_edge_types, viewer)
+            if counted is not None:
+                return counted
             merged, theirs = await self._branch_diff_states(
                 s, graph_id, branch_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
@@ -3813,12 +3832,52 @@ class GraphVersioningService:
         self, *, graph_id: str, branch_id: str, container_key: str, containment_edge_types,
         limit: int = 200, offset: int = 0, viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
-        """One container's direct children in a draft's hierarchical diff (lazy-load step)."""
+        """One container's direct children in a draft's hierarchical diff (lazy-load step).
+        :class:`DiffTooLarge` for a draft the tree doesn't lay out."""
         async with self._session() as s:
+            counted = await self._count_if_too_large(s, graph_id, branch_id, containment_edge_types, viewer)
+            if counted is not None:
+                raise DiffTooLarge(counted["tooLarge"]["changed"], counted["tooLarge"]["limit"])
             merged, theirs = await self._branch_diff_states(
                 s, graph_id, branch_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
+
+    async def _count_if_too_large(self, s, graph_id, branch_id, containment_edge_types, viewer):
+        """The Changes summary of a draft past ``DIFF_TREE_MAX_CHANGES`` — or ``None`` for one the
+        tree can lay out. Classified like :meth:`diff_branch_vs_base` from hashes; the impact
+        rollup counts the changed entities by type (the tree's also counts their containers)."""
+        branch = await self._get_branch(s, graph_id, branch_id)
+        await self._assert_branch_readable(s, branch, viewer)
+        changed = await s.scalar(select(func.count()).select_from(EntityHeadORM).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id)) or 0
+        if changed <= config.DIFF_TREE_MAX_CHANGES:
+            return None
+        heads = await self._head_index(s, graph_id, branch_id)
+        main_id = await self._main_branch_id(s, graph_id)
+        before = await self._hashes_at(s, graph_id, main_id, list(heads), branch.base_commit_seq or 0)
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        counts = {"added": 0, "modified": 0, "removed": 0}
+        entity_counts = {"added": 0, "modified": 0, "removed": 0}
+        edge_counts = {"added": 0, "modified": 0, "removed": 0}
+        impact: Dict[str, int] = {}
+        for eid, h in heads.items():
+            b = before.get(eid)
+            status = ("added" if b is None and h.live else
+                      "removed" if b is not None and not h.live else
+                      "modified" if b is not None and b.content_hash != h.content_hash else None)
+            if status is None:
+                continue
+            counts[status] += 1
+            typ = h.type if h.live else b.type
+            if h.kind == "node":
+                entity_counts[status] += 1
+                impact[typ or "Other"] = impact.get(typ or "Other", 0) + 1
+            elif (typ or "").upper() not in cset:            # a relationship, not structure
+                edge_counts[status] += 1
+        return {"groups": [], "groupTotal": 0, "counts": counts, "entityCounts": entity_counts,
+                "edgeCounts": edge_counts, "impact": impact,
+                "tooLarge": {"changed": changed, "limit": config.DIFF_TREE_MAX_CHANGES}}
 
     async def diff_commit_summary(
         self, *, graph_id: str, commit_id: str, containment_edge_types, limit: int = 200,
@@ -5852,19 +5911,19 @@ class GraphVersioningService:
         out: Dict[str, _Stored] = {}
         id_list = list(ids)
         for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
-            urn = model.urn if kind == "node" else None
+            named = ((model.urn, model.entity_type) if kind == "node"
+                     else (null().label("urn"), model.edge_type))
             for chunk in _chunks(id_list, _IN_LIST_MAX):
                 stmt = (
-                    select(model.entity_id, model.op, model.content_hash,
-                           *([urn] if urn is not None else []))
+                    select(model.entity_id, model.op, model.content_hash, *named)
                     .where(model.graph_id == graph_id, model.branch_id == branch_id,
                            model.entity_id.in_(chunk), model.commit_seq <= seq)
                     .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
                     .distinct(model.entity_id)
                 )
-                for eid, op, chash, *rest in (await s.execute(stmt)).all():
+                for eid, op, chash, urn, typ in (await s.execute(stmt)).all():
                     if op != "delete" and chash != _HASH_EMPTY:
-                        out[eid] = _Stored(kind, chash, rest[0] if rest else None)
+                        out[eid] = _Stored(kind, chash, urn, typ)
         return out
 
     async def _head_index(self, s, graph_id: str, branch_id: str) -> Dict[str, "_Head"]:
@@ -5872,14 +5931,17 @@ class GraphVersioningService:
         the urn from a node head's version row. What a draft changed, at any draft size."""
         rows = (await s.execute(
             select(EntityHeadORM.entity_id, EntityHeadORM.entity_kind, EntityHeadORM.head_version_id,
-                   EntityHeadORM.content_hash, EntityHeadORM.is_tombstone, NodeVersionORM.urn)
+                   EntityHeadORM.content_hash, EntityHeadORM.is_tombstone, NodeVersionORM.urn,
+                   func.coalesce(NodeVersionORM.entity_type, EdgeVersionORM.edge_type))
             .select_from(EntityHeadORM)
             .outerjoin(NodeVersionORM, (NodeVersionORM.graph_id == EntityHeadORM.graph_id)
                        & (NodeVersionORM.id == EntityHeadORM.head_version_id))
+            .outerjoin(EdgeVersionORM, (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+                       & (EdgeVersionORM.id == EntityHeadORM.head_version_id))
             .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id)
         )).all()
-        return {eid: _Head(kind, vid, chash, not tomb and chash != _HASH_EMPTY, urn)
-                for eid, kind, vid, chash, tomb, urn in rows}
+        return {eid: _Head(kind, vid, chash, not tomb and chash != _HASH_EMPTY, urn, typ)
+                for eid, kind, vid, chash, tomb, urn, typ in rows}
 
     async def _current_values(
         self, s, graph_id: str, branch_id: str, ids, as_of_seq: Optional[int] = None,

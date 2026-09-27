@@ -51,6 +51,7 @@ from backend.app.services.versioning.service import (
     AccessDenied,
     ApprovalRequired,
     ConcurrencyError,
+    DiffTooLarge,
     GraphVersioningService,
     MergeConflict,
     NotUpToDate,
@@ -454,6 +455,10 @@ def _domain_errors():
             "title": exc.title, "message": str(exc)})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
+    except DiffTooLarge as exc:
+        raise HTTPException(status_code=409, detail={
+            "type": "too_large_for_tree", "changed": exc.changed, "limit": exc.limit,
+            "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -948,6 +953,9 @@ class DiffSummaryResponse(_ApiModel):
     entity_counts: Dict[str, int] = Field(default_factory=dict, alias="entityCounts")
     edge_counts: Dict[str, int] = Field(default_factory=dict, alias="edgeCounts")
     impact: Dict[str, int]
+    # ``{changed, limit}`` when the draft changes more entities than the tree lays out: counts
+    # only, no groups, and its children route answers 409 ``too_large_for_tree``.
+    too_large: Optional[Dict[str, int]] = Field(default=None, alias="tooLarge")
 
 
 class DiffChildrenResponse(_ApiModel):

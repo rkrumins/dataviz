@@ -235,6 +235,8 @@ export interface DiffSummaryResponse {
   entityCounts?: { added: number; modified: number; removed: number }
   edgeCounts?: { added: number; modified: number; removed: number }
   impact: Record<string, number>
+  /** A draft with more changes than the tree lists: counts only, no groups. */
+  tooLarge?: { changed: number; limit: number }
 }
 
 export interface DiffChildrenResponse {
