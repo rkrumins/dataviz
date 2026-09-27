@@ -27,16 +27,16 @@ import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Collection, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Collection, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
-from sqlalchemy import Boolean, Text, bindparam, insert, select, func, delete, text, update, or_, tuple_
+from sqlalchemy import Boolean, Text, bindparam, insert, select, func, delete, null, text, update, or_, tuple_
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from . import config, db
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
-from backend.common.property_patch import apply_patch, strip_deletes
+from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
 from .merge import three_way_merge
@@ -78,6 +78,26 @@ _NODE_DENORM = {
 # content_hash of the empty/absent state — exactly what a tombstone (deleted) head row stores, and
 # the pre-image a "create" logically reads (the entity was absent). Used by the head CAS below.
 _HASH_NONE = content_hash(None)
+# ...and of an empty payload, which diffs read as absent (no urn, no type: not a live entity).
+_HASH_EMPTY = content_hash({})
+
+
+class _Stored(NamedTuple):
+    """An entity's stored value on a branch at a seq, without its payload (:meth:`_hashes_at`)."""
+    kind: str                       # "node" | "edge"
+    content_hash: str
+    urn: Optional[str]              # nodes only
+    type: Optional[str]             # a node's entityType, an edge's edgeType
+
+
+class _Head(NamedTuple):
+    """An entity a branch changed, without its payload (:meth:`_head_index`)."""
+    kind: str
+    version_id: str
+    content_hash: str
+    live: bool                      # not deleted, and not an empty payload
+    urn: Optional[str]              # a node head's urn, from its version row
+    type: Optional[str]             # a live head's entityType / edgeType, from its version row
 # Entity heads written per statement. Each column goes as one array parameter (unnest), so the
 # statements' text never changes: compiled and prepared once, whatever the batch.
 _HEAD_BATCH = 5000
@@ -198,6 +218,16 @@ class GraphTooLargeToSync(RuntimeError):
         self.entities = entities
         self.limit = limit
         self.estimated_bytes = int(entities * _SYNC_BYTES_PER_ENTITY)
+
+
+class DiffTooLarge(RuntimeError):
+    """A draft changes more entities than its Changes tree lays out (``DIFF_TREE_MAX_CHANGES``):
+    its summary is counts only, and the tree has no children to page through."""
+
+    def __init__(self, changed: int, limit: int):
+        super().__init__(f"this draft changes {changed} entities; the tree lists up to {limit}")
+        self.changed = changed
+        self.limit = limit
 
 
 class NotUpToDate(RuntimeError):
@@ -1072,7 +1102,10 @@ class GraphVersioningService:
                 s, graph_id, graph, draft, main_id, dict(resolutions or {})
             )
             if conflicts:
-                return {"clean": False, "conflicts": conflicts}
+                # The draft's own value of each conflicting entity, to resolve from — just those.
+                seeds = await self._current_values(
+                    s, graph_id, branch_id, sorted({c["entity_id"] for c in conflicts}))
+                return {"clean": False, "conflicts": conflicts, "seeds": seeds}
 
             # What arrived from main in (from_seq, to_seq] — the record of what this pull brought in.
             incoming = await self._incoming_from_main(s, graph_id, main_id, from_seq, to_seq)
@@ -3501,7 +3534,10 @@ class GraphVersioningService:
                     a.update({eid: v for eid, v in base_a.items() if v is not None})
             return diff_states(a, b)
 
-    async def diff_branch_vs_base(self, *, graph_id: str, branch_id: str, viewer: Optional[Viewer] = None) -> Dict[str, object]:
+    async def diff_branch_vs_base(
+        self, *, graph_id: str, branch_id: str, viewer: Optional[Viewer] = None,
+        payloads: str = "all",
+    ) -> Dict[str, object]:
         """UI-shaped net diff of a draft against its base (``main`` at the branch
         point): full node/edge payloads with before/after, classified
         added/removed/modified. This is the shape the canvas diff overlay needs —
@@ -3512,12 +3548,19 @@ class GraphVersioningService:
         diff: a draft numbers its commits in its own seq space, so the change set is
         the entities the draft wrote rows for (bounded by draft size). ``before`` is
         each entity's value on ``main`` at the branch point; ``after`` its effective
-        value on the draft (base overlaid with the draft's edits)."""
+        value on the draft (base overlaid with the draft's edits).
+
+        ``payloads="changes"`` classifies the same way from content hashes, without loading a
+        modified entity's payloads: a modified entry is its ``entityId`` and ``kind`` alone, while
+        added and removed entries keep the payload the canvas draws them from. It is what the
+        draft bar needs — counts and which nodes to ring — at any draft size."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
             main_id = await self._main_branch_id(s, graph_id)
             base_seq = branch.base_commit_seq or 0
+            if payloads == "changes":
+                return await self._diff_changes_vs_base(s, graph_id, branch_id, main_id, base_seq)
             changed: set = set()
             for model in (NodeVersionORM, EdgeVersionORM):
                 rows = (await s.execute(
@@ -3550,6 +3593,32 @@ class GraphVersioningService:
                 modified.append({"entityId": eid, "kind": kind, "before": b, "after": a})
         return {"added": added, "removed": removed, "modified": modified}
 
+    async def _diff_changes_vs_base(self, s, graph_id, branch_id, main_id, base_seq) -> Dict[str, object]:
+        """:meth:`diff_branch_vs_base` with ``payloads="changes"``: the draft's heads against
+        main's content hashes at the branch point. An empty payload counts as absent, as there."""
+        heads = await self._head_index(s, graph_id, branch_id)
+        before = await self._hashes_at(s, graph_id, main_id, list(heads), base_seq)
+        added_refs: Dict[str, tuple] = {}
+        removed_ids: List[str] = []
+        modified: List[dict] = []
+        for eid, h in heads.items():
+            b = before.get(eid)                              # live at the branch point
+            if b is None and h.live:
+                added_refs[eid] = (h.kind, graph_id, h.version_id)
+            elif b is not None and not h.live:
+                removed_ids.append(eid)
+            elif b is not None and b.content_hash != h.content_hash:
+                modified.append({"entityId": eid, "kind": b.kind})
+        after = await self._payloads_by_version(s, added_refs.values())
+        gone = await self._values_at(s, graph_id, main_id, removed_ids, base_seq)
+        return {
+            "added": [{"entityId": eid, "kind": kind, "after": after[vid]}
+                      for eid, (kind, _, vid) in added_refs.items() if after.get(vid)],
+            "removed": [{"entityId": eid, "kind": before[eid].kind, "before": gone[eid]}
+                        for eid in removed_ids if gone.get(eid)],
+            "modified": modified,
+        }
+
     async def branch_overlay_delta(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
         """The draft's patch set vs **main at the draft's fork point**, **reader-shaped** for a
         read-overlay (:class:`DraftOverlayProvider`): the draft's effective nodes/edges to upsert
@@ -3564,29 +3633,28 @@ class GraphVersioningService:
         entities are removed, main-modified/deleted ones restored to their fork-point value — for
         every entity the draft did not itself touch. Without this a draft silently reflects changes
         it never merged (a commit-less "pull"). Edge endpoints are urns (node ``entity_id`` == urn),
-        so no extra resolution is needed by the caller."""
+        so no extra resolution is needed by the caller.
+
+        A node the draft MODIFIED comes as ``nodesModified`` — its urn and entity id, never its
+        payload: a reader loads the payloads of just the nodes it is about to serve
+        (:meth:`overlay_payloads`), so a draft that changed 100k nodes costs each read a page of
+        payloads, not 100k of them. A node the draft created comes whole (``nodesUpsert``: a reader
+        lists those itself), and one it removed as its urn."""
+        empty = {"nodesUpsert": [], "nodesModified": [], "nodesRemove": [], "edgesUpsert": [],
+                 "edgesRemove": [], "nodesNew": []}
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             if getattr(branch, "status", None) == "merged":
                 # Everything the draft changed is IN main now: reading it as main ⊕ its edits
                 # applied them twice — each added child counted again in its parent's count (a
                 # "Load 2 more" that loads nothing in a tab still showing the published draft).
-                return {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [],
-                        "nodesNew": []}
+                return empty
             main_id = await self._main_branch_id(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             base_seq = branch.base_commit_seq or 0
             head_seq = graph.main_head_commit_seq if graph is not None else base_seq
-            changed: set = set()
-            for model in (NodeVersionORM, EdgeVersionORM):
-                rows = (await s.execute(
-                    select(model.entity_id).where(
-                        model.graph_id == graph_id, model.branch_id == branch_id,
-                    ).distinct()
-                )).scalars().all()
-                changed.update(rows)
-            empty = {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [],
-                     "nodesNew": []}
+            heads = await self._head_index(s, graph_id, branch_id)
+            changed: set = set(heads)
             # Fork-point isolation: entities MAIN advanced in (base_seq, head] since this draft forked,
             # minus the draft's own touched set (its edits already win via the delta below). The overlay
             # applies on a LIVE main (head) read, so without this a draft silently reflects any change
@@ -3597,8 +3665,17 @@ class GraphVersioningService:
                     s, graph_id, main_id, base_seq, head_seq)) - changed
             if not changed and not advanced:
                 return empty                       # no draft edits AND up to date → pure pass-through
-            before = await self._values_at(s, graph_id, main_id, changed, base_seq) if changed else {}
-            after = await self._current_values(s, graph_id, branch_id, list(changed)) if changed else {}
+            node_ids = [eid for eid, h in heads.items() if h.kind == "node"]
+            edge_ids = [eid for eid, h in heads.items() if h.kind != "node"]
+            # Nodes: which the draft created, modified or removed, from hashes — payloads only for the
+            # created ones. Edges: as they were, with before/after values.
+            base_nodes = await self._hashes_at(s, graph_id, main_id, node_ids, base_seq)
+            created = {eid: heads[eid].version_id for eid in node_ids
+                       if heads[eid].live and eid not in base_nodes}
+            created_payloads = await self._payloads_by_version(
+                s, [("node", graph_id, vid) for vid in created.values()])
+            before = await self._values_at(s, graph_id, main_id, edge_ids, base_seq) if edge_ids else {}
+            after = await self._current_values(s, graph_id, branch_id, edge_ids) if edge_ids else {}
             # For the rewind: each advanced entity's value at the fork point (base) vs main head.
             rewind_base: Dict[str, Optional[dict]] = {}
             rewind_head: Dict[str, Optional[dict]] = {}
@@ -3616,35 +3693,37 @@ class GraphVersioningService:
                     rewind_base = await self._values_at(s, graph_id, main_id, advanced, base_seq)
                     rewind_head = await self._values_at(s, graph_id, main_id, advanced, head_seq)
         nodes_upsert: List[dict] = []
+        nodes_modified: List[dict] = []    # {urn, entityId}: the reader loads the payload it serves
         nodes_remove: List[dict] = []
         edges_upsert: List[dict] = []
         edges_remove: List[dict] = []
         nodes_new: List[str] = []          # urns the draft CREATED (absent in main@base) vs merely modified
-        for eid in changed:
-            # A degenerate empty payload ({}) is not a live entity (no urn/entityType/endpoints) —
-            # normalize it to absent so it reads as a deletion, never as a node that fails GraphNode
-            # validation downstream (the reported 500) or shows as an empty diff row. Guards against
-            # any pre-existing malformed row as well as a freshly-corrupt one.
+        # A degenerate empty payload ({}) is not a live entity (no urn/entityType/endpoints) — it reads
+        # as absent (``_Head.live``, ``_hashes_at``), so as a deletion, never as a node that fails
+        # GraphNode validation downstream (the reported 500) or shows as an empty diff row.
+        for eid in node_ids:
+            h, b = heads[eid], base_nodes.get(eid)
+            if not h.live:
+                if b is not None:                          # removed on the draft
+                    nodes_remove.append({"entityId": eid, "urn": b.urn or f"gv:{eid}"})
+            elif b is None:                                # created in the draft — not present in main
+                p = created_payloads.get(h.version_id)
+                if p:
+                    urn = p.get("urn") or f"gv:{eid}"
+                    nodes_upsert.append(_graphnode_dict(eid, urn, p))
+                    nodes_new.append(urn)
+            else:                                          # modified → loaded when a read serves it
+                nodes_modified.append({"entityId": eid, "urn": h.urn or b.urn or f"gv:{eid}"})
+        for eid in edge_ids:
             b, a = before.get(eid) or None, after.get(eid) or None
             if b is None and a is None:
                 continue
-            eff = a if a is not None else b
-            is_edge = _is_edge_payload(eff or {})
             if a is None:                                  # removed on the draft → carry its before value
-                if is_edge:
-                    src, tgt = _edge_src_tgt(b)
-                    edges_remove.append(_graphedge_dict(eid, b, {src: src, tgt: tgt}))
-                else:
-                    nodes_remove.append(_graphnode_dict(eid, (b or {}).get("urn") or f"gv:{eid}", b))
+                src, tgt = _edge_src_tgt(b)
+                edges_remove.append(_graphedge_dict(eid, b, {src: src, tgt: tgt}))
             else:                                          # added/modified → the draft's effective value
-                if is_edge:
-                    src, tgt = _edge_src_tgt(a)
-                    edges_upsert.append(_graphedge_dict(eid, a, {src: src, tgt: tgt}))
-                else:
-                    urn = a.get("urn") or f"gv:{eid}"
-                    nodes_upsert.append(_graphnode_dict(eid, urn, a))
-                    if b is None:                          # created in the draft — not present in main
-                        nodes_new.append(urn)
+                src, tgt = _edge_src_tgt(a)
+                edges_upsert.append(_graphedge_dict(eid, a, {src: src, tgt: tgt}))
         # ── Fork-point rewind ── undo main's post-fork advances so the read reflects main@base_seq
         # ⊕ the draft (never live main). For each entity main changed after the fork that the draft
         # did NOT touch: main-ADDED (absent at base) → REMOVE it from the read; main-DELETED (absent
@@ -3673,8 +3752,25 @@ class GraphVersioningService:
                     nodes_new.append(urn)                  # as "new" so the provider surfaces the restore
             else:                                          # node absent at fork, present on head → main added → hide
                 nodes_remove.append(_graphnode_dict(eid, (hv or {}).get("urn") or f"gv:{eid}", hv))
-        return {"nodesUpsert": nodes_upsert, "nodesRemove": nodes_remove,
+        return {"nodesUpsert": nodes_upsert, "nodesModified": nodes_modified, "nodesRemove": nodes_remove,
                 "edgesUpsert": edges_upsert, "edgesRemove": edges_remove, "nodesNew": nodes_new}
+
+    async def overlay_version(self, *, graph_id: str, branch_id: str) -> tuple:
+        """What a draft's :meth:`branch_overlay_delta` depends on: the draft's head and branch point,
+        main's head, and the draft's status. Equal versions give equal deltas, so a reader may
+        reuse one across requests instead of recomputing it for each."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            graph = await s.get(GraphORM, graph_id)
+            return (branch.head_commit_id, branch.base_commit_seq,
+                    getattr(graph, "main_head_commit_seq", None), getattr(branch, "status", None))
+
+    async def overlay_payloads(self, *, graph_id: str, branch_id: str, entity_ids: Sequence[str]) -> List[dict]:
+        """The draft's current value of each of ``entity_ids``, reader-shaped — the modified nodes
+        (:meth:`branch_overlay_delta`'s ``nodesModified``) a read loads for the page it serves."""
+        async with self._session() as s:
+            values = await self._current_values(s, graph_id, branch_id, list(entity_ids))
+        return [_graphnode_dict(eid, v.get("urn") or f"gv:{eid}", v) for eid, v in values.items() if v]
 
     async def aggregated_overlay_adjust(
         self, *, graph_id: str, branch_id: str, source_urns: Sequence[str],
@@ -3723,8 +3819,15 @@ class GraphVersioningService:
         """Hierarchical counterpart of :meth:`diff_branch_vs_base` — the draft's changes as a
         containment tree for the canvas Changes panel. Built on the same O(draft) change set,
         augmented with the *unchanged* containment ancestors of the changed nodes so edits nest
-        under their real container (a column under its table) without composing full state."""
+        under their real container (a column under its table) without composing full state.
+
+        A draft past ``DIFF_TREE_MAX_CHANGES`` is counted, not laid out: the same counts and a
+        per-type rollup of the changed entities, from the narrow change index, with no groups and
+        ``tooLarge`` saying so."""
         async with self._session() as s:
+            counted = await self._count_if_too_large(s, graph_id, branch_id, containment_edge_types, viewer)
+            if counted is not None:
+                return counted
             merged, theirs = await self._branch_diff_states(
                 s, graph_id, branch_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
@@ -3734,12 +3837,62 @@ class GraphVersioningService:
         self, *, graph_id: str, branch_id: str, container_key: str, containment_edge_types,
         limit: int = 200, offset: int = 0, viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
-        """One container's direct children in a draft's hierarchical diff (lazy-load step)."""
+        """One container's direct children in a draft's hierarchical diff (lazy-load step).
+        :class:`DiffTooLarge` for a draft the tree doesn't lay out."""
         async with self._session() as s:
+            counted = await self._count_if_too_large(s, graph_id, branch_id, containment_edge_types, viewer)
+            if counted is not None:
+                raise DiffTooLarge(counted["tooLarge"]["changed"], counted["tooLarge"]["limit"])
             merged, theirs = await self._branch_diff_states(
                 s, graph_id, branch_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
+
+    async def branch_change_count(self, *, graph_id: str, branch_id: str) -> int:
+        """How many entities a draft has changed (its own heads) — one indexed count, to decide
+        whether it publishes inside a request or as a job."""
+        async with self._session() as s:
+            return await self._change_count(s, graph_id, branch_id)
+
+    @staticmethod
+    async def _change_count(s, graph_id: str, branch_id: str) -> int:
+        return await s.scalar(select(func.count()).select_from(EntityHeadORM).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id)) or 0
+
+    async def _count_if_too_large(self, s, graph_id, branch_id, containment_edge_types, viewer):
+        """The Changes summary of a draft past ``DIFF_TREE_MAX_CHANGES`` — or ``None`` for one the
+        tree can lay out. Classified like :meth:`diff_branch_vs_base` from hashes; the impact
+        rollup counts the changed entities by type (the tree's also counts their containers)."""
+        branch = await self._get_branch(s, graph_id, branch_id)
+        await self._assert_branch_readable(s, branch, viewer)
+        changed = await self._change_count(s, graph_id, branch_id)
+        if changed <= config.DIFF_TREE_MAX_CHANGES:
+            return None
+        heads = await self._head_index(s, graph_id, branch_id)
+        main_id = await self._main_branch_id(s, graph_id)
+        before = await self._hashes_at(s, graph_id, main_id, list(heads), branch.base_commit_seq or 0)
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        counts = {"added": 0, "modified": 0, "removed": 0}
+        entity_counts = {"added": 0, "modified": 0, "removed": 0}
+        edge_counts = {"added": 0, "modified": 0, "removed": 0}
+        impact: Dict[str, int] = {}
+        for eid, h in heads.items():
+            b = before.get(eid)
+            status = ("added" if b is None and h.live else
+                      "removed" if b is not None and not h.live else
+                      "modified" if b is not None and b.content_hash != h.content_hash else None)
+            if status is None:
+                continue
+            counts[status] += 1
+            typ = h.type if h.live else b.type
+            if h.kind == "node":
+                entity_counts[status] += 1
+                impact[typ or "Other"] = impact.get(typ or "Other", 0) + 1
+            elif (typ or "").upper() not in cset:            # a relationship, not structure
+                edge_counts[status] += 1
+        return {"groups": [], "groupTotal": 0, "counts": counts, "entityCounts": entity_counts,
+                "edgeCounts": edge_counts, "impact": impact,
+                "tooLarge": {"changed": changed, "limit": config.DIFF_TREE_MAX_CHANGES}}
 
     async def diff_commit_summary(
         self, *, graph_id: str, commit_id: str, containment_edge_types, limit: int = 200,
@@ -4400,24 +4553,16 @@ class GraphVersioningService:
         tombstone → None.  Used as the 'ours' side of a rebase merge."""
         heads = await self._heads(s, graph_id, branch_id)
         out: Dict[str, Optional[dict]] = {}
-        node_ids, edge_ids, kindvid = [], [], {}
+        refs, kindvid = [], {}
         for eid, h in heads.items():
             if h.is_tombstone:
                 out[eid] = None
             else:
                 kindvid[eid] = h.head_version_id
-                (node_ids if h.entity_kind == "node" else edge_ids).append(h.head_version_id)
-        payload_by_vid: Dict[str, dict] = {}
-        if node_ids:
-            for r in (await s.execute(select(NodeVersionORM).where(
-                NodeVersionORM.graph_id == graph_id, NodeVersionORM.id.in_(node_ids)
-            ))).scalars():
-                payload_by_vid[r.id] = r.payload
-        if edge_ids:
-            for r in (await s.execute(select(EdgeVersionORM).where(
-                EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.id.in_(edge_ids)
-            ))).scalars():
-                payload_by_vid[r.id] = r.payload
+                refs.append((h.entity_kind, graph_id, h.head_version_id))
+        # Chunked: a draft can change more entities than one statement may name (asyncpg caps a
+        # statement at 32,767 parameters) — a large import or a bulk property change.
+        payload_by_vid = await self._payloads_by_version(s, refs)
         for eid, vid in kindvid.items():
             out[eid] = payload_by_vid.get(vid)
         return out
@@ -4477,7 +4622,9 @@ class GraphVersioningService:
         changed = set(own) | set(resolutions)
         changed |= await self._changed_in_window(s, graph_id, main_id, base_seq, head_seq)
         base = await self._values_at(s, graph_id, main_id, changed, base_seq)
-        theirs = await self._values_at(s, graph_id, main_id, changed, head_seq)
+        # Up to date (always so at publish and merge, whose gates demand it): main's side IS the
+        # base — one copy of every changed payload fewer to hold.
+        theirs = base if head_seq == base_seq else await self._values_at(s, graph_id, main_id, changed, head_seq)
         ours = {eid: base.get(eid) for eid in changed}
         ours.update(own)
 
@@ -5469,6 +5616,13 @@ class GraphVersioningService:
         for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed."""
         return apply_patch(base, patch)
 
+    @staticmethod
+    def _compose_patches(first: dict, second: dict) -> dict:
+        """Two partial updates of ONE entity in one batch, as the one patch they make in order
+        (see ``backend.common.property_patch.compose_patches``): a removal stays a removal until
+        it meets the stored value."""
+        return compose_patches(first, second)
+
     async def _payloads_by_content_hash(
         self, s, graph_id: str, eid_to_token: Mapping[str, str], kind_by_entity: Mapping[str, str]
     ) -> Dict[str, dict]:
@@ -5723,6 +5877,45 @@ class GraphVersioningService:
                 for eid, op, payload in (await s.execute(stmt)).all():
                     out[eid] = None if op == "delete" else payload
         return out
+
+    async def _hashes_at(self, s, graph_id, branch_id, ids, seq) -> Dict[str, "_Stored"]:
+        """:meth:`_values_at` without the payloads: a :class:`_Stored` per id live at ``seq``
+        (deleted, absent and empty-payload ids omitted) — whether a value changed, and what it is
+        called, told without loading it."""
+        out: Dict[str, _Stored] = {}
+        id_list = list(ids)
+        for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
+            named = ((model.urn, model.entity_type) if kind == "node"
+                     else (null().label("urn"), model.edge_type))
+            for chunk in _chunks(id_list, _IN_LIST_MAX):
+                stmt = (
+                    select(model.entity_id, model.op, model.content_hash, *named)
+                    .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                           model.entity_id.in_(chunk), model.commit_seq <= seq)
+                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                    .distinct(model.entity_id)
+                )
+                for eid, op, chash, urn, typ in (await s.execute(stmt)).all():
+                    if op != "delete" and chash != _HASH_EMPTY:
+                        out[eid] = _Stored(kind, chash, urn, typ)
+        return out
+
+    async def _head_index(self, s, graph_id: str, branch_id: str) -> Dict[str, "_Head"]:
+        """A branch's own heads without their payloads: a :class:`_Head` per entity it changed —
+        the urn from a node head's version row. What a draft changed, at any draft size."""
+        rows = (await s.execute(
+            select(EntityHeadORM.entity_id, EntityHeadORM.entity_kind, EntityHeadORM.head_version_id,
+                   EntityHeadORM.content_hash, EntityHeadORM.is_tombstone, NodeVersionORM.urn,
+                   func.coalesce(NodeVersionORM.entity_type, EdgeVersionORM.edge_type))
+            .select_from(EntityHeadORM)
+            .outerjoin(NodeVersionORM, (NodeVersionORM.graph_id == EntityHeadORM.graph_id)
+                       & (NodeVersionORM.id == EntityHeadORM.head_version_id))
+            .outerjoin(EdgeVersionORM, (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+                       & (EdgeVersionORM.id == EntityHeadORM.head_version_id))
+            .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id)
+        )).all()
+        return {eid: _Head(kind, vid, chash, not tomb and chash != _HASH_EMPTY, urn, typ)
+                for eid, kind, vid, chash, tomb, urn, typ in rows}
 
     async def _current_values(
         self, s, graph_id: str, branch_id: str, ids, as_of_seq: Optional[int] = None,

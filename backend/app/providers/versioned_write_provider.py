@@ -87,6 +87,14 @@ class VersionedWriteProvider:
             raise AttributeError(name)
         return getattr(self._inner, name)
 
+    # The ontology's edge classification is a read like any other; private
+    # names are never delegated, so these two are forwarded by hand.
+    def _get_containment_edge_types(self):
+        return self._inner._get_containment_edge_types()
+
+    def _get_lineage_edge_types(self):
+        return self._inner._get_lineage_edge_types()
+
     def set_containment_edge_types(self, edge_types, from_ontology: bool = False) -> None:
         """Intercept the engine's ontology push-down (``__getattr__`` would otherwise send it
         straight to the inner provider): keep a copy so every recorded commit can enforce

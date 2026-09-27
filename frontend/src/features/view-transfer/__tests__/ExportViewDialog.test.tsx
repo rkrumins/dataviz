@@ -149,6 +149,13 @@ describe('ExportViewDialog', () => {
     await waitFor(() => expect(exportViews).toHaveBeenCalledTimes(2))
   })
 
+  it('says saved queries stay behind, and what takes them', () => {
+    renderDialog()
+    // They are the view's library, not its design: the library's own export moves them.
+    expect(screen.getByText(/its saved queries/)).toHaveTextContent(
+      "the Property Manager's Rules & saved queries export")
+  })
+
   it("won't send more views than a file can hold", async () => {
     renderDialog(Array.from({ length: 201 }, (_, i) => ({ id: `v${i}`, name: `View ${i}` })))
     expect(screen.getByRole('button', { name: /Download/ })).toBeDisabled()

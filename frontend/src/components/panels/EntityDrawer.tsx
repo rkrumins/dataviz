@@ -20,6 +20,8 @@
  * as first read (`stagedChangesToOps`): changed fields, set properties, and each
  * removed property named in `unsetProperties`. Where a field lives — top-level or
  * in `properties` — is decided by `lib/nodeFields`.
+ * Where editing is offered but can't be kept (no draft, or no version control)
+ * the Edit tab is disabled with the reason (useEntityEditing).
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
@@ -52,6 +54,8 @@ import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
 import { useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { useEntityEditing, NO_VERSION_CONTROL } from '@/features/versioning/hooks/useEntityEditing'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
 import { useBranchStore } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
@@ -182,9 +186,11 @@ export function EntityDrawer({
   // surfaces: when the admin turns version control off, the queries stop and the
   // History section disappears (undefined ids disable the hooks).
   const versioningEnabled = useFeature('versioningEnabled')
-  // Independent switch: OFF means every canvas is view-only even with versioning on
-  // (POST /nodes/create, /edges, PATCH/DELETE /edges, /changes all 403 server-side).
-  const editModeEnabled = useFeature('editModeEnabled')
+  // An edit is kept only as a change in this view's draft: where there is none (or the source has
+  // no version control) the Edit tab stays, disabled with the reason; where editing isn't offered
+  // at all (switched off, a read-only view, a ghost, a locked surface) it goes.
+  const editing = useEntityEditing()
+  const editOffered = !isGhost && !writesLocked && editing.offered
   const entityHistory = useEntityHistory(
     versioningEnabled ? historyWsId : undefined,
     versioningEnabled ? historyGraphId : undefined,
@@ -354,7 +360,7 @@ export function EntityDrawer({
   // The user's own properties. The bag can also hold reserved names the reader mirrors into it
   // (`childCount`) — they are node fields, never shown, edited or removed as properties.
   const propertiesBag: Record<string, any> = userProperties(formData.properties)
-  const editable = canEdit && !isGhost && versioningEnabled && editModeEnabled && !writesLocked
+  const editable = canEdit && editOffered
 
   // NOTE: no local <AnimatePresence> here. The drawer is conditionally
   // rendered inside ContextViewCanvas's right-rail AnimatePresence, which
@@ -565,7 +571,7 @@ export function EntityDrawer({
                 label="Edit"
                 badge={hasChanges ? '•' : undefined}
               />
-            ) : onStartEditing && !isGhost && !writesLocked && versioningEnabled && editModeEnabled ? (
+            ) : onStartEditing && editOffered && editing.blocked !== NO_VERSION_CONTROL ? (
               // The published graph is never edited in place — say where editing happens.
               <ModeTab
                 active={false}
@@ -573,6 +579,10 @@ export function EntityDrawer({
                 icon={LucideIcons.GitBranchPlus}
                 label="Edit in a draft"
               />
+            ) : editOffered && editing.blocked ? (
+              <HoverTip label={editing.blocked} className="flex-1 flex">
+                <ModeTab active={false} disabled icon={LucideIcons.Pencil} label="Edit" />
+              </HoverTip>
             ) : null}
             <ModeTab
               active={viewMode === 'json'}
@@ -739,21 +749,25 @@ export function ActionButton({ icon: Icon, label, primary, active, onClick }: Ac
 
 interface ModeTabProps {
   active: boolean
-  onClick: () => void
+  onClick?: () => void
+  disabled?: boolean
   icon: React.ComponentType<{ className?: string }>
   label: string
   badge?: string
 }
 
-export function ModeTab({ active, onClick, icon: Icon, label, badge }: ModeTabProps) {
+export function ModeTab({ active, onClick, disabled, icon: Icon, label, badge }: ModeTabProps) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       className={cn(
         "flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-150 duration-200",
         active
           ? "bg-white/10 text-ink shadow-sm"
-          : "text-ink-muted hover:text-ink hover:bg-white/5"
+          : disabled
+            ? "text-ink-muted opacity-50"
+            : "text-ink-muted hover:text-ink hover:bg-white/5"
       )}
     >
       <Icon className="w-4 h-4" />

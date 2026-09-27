@@ -23,6 +23,7 @@ import { AlertTriangle, ArrowRight, Check, ChevronDown, ChevronRight, GitPullReq
 import { cn } from '@/lib/utils'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { reloadViewLibrary } from '@/store/viewLibraryStore'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { getView, listViews, type View } from '@/services/viewApiService'
 import {
@@ -405,6 +406,8 @@ export function BatchImport({ steps, onBackToFile, onClose }: {
           batchId,
           ...(staged(e) ? { stage: true } : {}),
         })
+        // Its display rules are the file's: a canvas that has it open reads them again.
+        reloadViewLibrary(result.viewId)
         setEntry(e.view.index, { run: {
           state: 'done', viewId: result.viewId, version: result.version?.version ?? null,
           matchRate: result.report.summary.matchRate, verified: result.integrity.verified,

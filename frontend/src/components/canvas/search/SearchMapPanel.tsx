@@ -50,6 +50,9 @@ import {
     useAdvancedSearch,
     type UseAdvancedSearchResult,
 } from '@/hooks/useAdvancedSearch'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { useFeature } from '@/store/features'
 import {
     DEFAULT_DRAFT_OPTIONS,
     readPersistedCanvasFilterMode,
@@ -60,9 +63,12 @@ import {
     useSearchStore,
     type RecentQueryEntry,
 } from '@/store/searchStore'
+import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
+import type { SavedViewQuery } from '@/services/viewLibraryService'
 import type { AncestorRef } from '@/types/search'
 
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
+import { ExportMatchesDialog } from './panel/ExportMatchesDialog'
 import { LibraryPopover } from './panel/LibraryPopover'
 import { MatchBar } from './panel/MatchBar'
 import { NoViewState } from './panel/NoViewState'
@@ -223,6 +229,8 @@ function PanelInner({
     const togglePinRecent = useSearchStore((s) => s.togglePinRecent)
     const removeRecent = useSearchStore((s) => s.removeRecent)
     const promoteToMine = useSearchStore((s) => s.promoteToMine)
+    const saveViewQuery = useViewLibraryStore((s) => s.saveQuery)
+    const canSaveToView = useLibraryCanEdit()
     const stepFocus = useSearchStore((s) => s.stepFocus)
     const setCanvasFilterMode = useSearchStore((s) => s.setCanvasFilterMode)
 
@@ -234,6 +242,9 @@ function PanelInner({
     // see SaveQueryDialog for the framer-motion portal rationale and
     // LibraryPopover for the lifecycle handoff.
     const [saveTarget, setSaveTarget] = useState<RecentQueryEntry | null>(null)
+    const [exportOpen, setExportOpen] = useState(false)
+    const exportEnabled = useFeature('graphExportEnabled')
+    const provider = useGraphProvider()
 
     const openAdvanced = useCallback((tab: DrawerTab = 'options') => {
         setAdvancedTab(tab)
@@ -336,6 +347,11 @@ function PanelInner({
         setLibraryOpen(false)
     }, [commitDraft])
 
+    const handleLoadSaved = useCallback((query: SavedViewQuery) => {
+        commitDraft(query.predicate)
+        setLibraryOpen(false)
+    }, [commitDraft])
+
     /**
      * "Search inside this group" — the result-pane action that used to
      * be a hidden drill frame.
@@ -404,6 +420,11 @@ function PanelInner({
         ? (view.result.candidateCount ?? null)
         : null
     const showResultsSection = hasReportableView(view)
+    // Every match, to a file — a search's matches, not a path search's routes.
+    const canExport = exportEnabled
+        && provider instanceof RemoteGraphProvider
+        && view.kind === 'results'
+        && !view.result.paths
 
     // Resolve the focused match's ancestor path from the current
     // result page. Stepping (J/K) only updates ``focusedMatchIndex``;
@@ -474,7 +495,7 @@ function PanelInner({
                 onTogglePinRecent={togglePinRecent}
                 onRemoveRecent={removeRecent}
                 onSaveAs={setSaveTarget}
-                viewId={viewId}
+                onLoadSaved={handleLoadSaved}
                 activeDraft={Boolean(draftPredicate)}
             >
                 <div>
@@ -503,9 +524,14 @@ function PanelInner({
             {saveTarget && (
                 <SaveQueryDialog
                     entry={saveTarget}
+                    canSaveToView={canSaveToView}
                     onCancel={() => setSaveTarget(null)}
-                    onSave={(name, description) => {
-                        promoteToMine(saveTarget.timestamp, name, description)
+                    onSave={async (name, description, destination) => {
+                        if (destination === 'view') {
+                            await saveViewQuery({ name, description, predicate: saveTarget.predicate })
+                        } else {
+                            promoteToMine(saveTarget.timestamp, name, description)
+                        }
                         setSaveTarget(null)
                     }}
                 />
@@ -547,6 +573,11 @@ function PanelInner({
                                     countIsExact={countIsExact}
                                     deadlineExceeded={deadlineExceeded}
                                     candidateCount={candidateCount}
+                                    scanning={view.kind === 'results'
+                                        && view.result.status === 'running'}
+                                    progress={view.kind === 'results'
+                                        ? view.result.progress ?? null
+                                        : null}
                                     onFrame={canFrame
                                         ? () => onFrameMatches?.(frameTargetUrns)
                                         : undefined}
@@ -556,6 +587,8 @@ function PanelInner({
                                     onClear={view.kind === 'results' || view.kind === 'error'
                                         ? handleClear
                                         : undefined}
+                                    onExport={canExport ? () => setExportOpen(true) : undefined}
+                                    unit={view.kind === 'results' && view.result.paths ? 'path' : 'match'}
                                     viewId={viewId}
                                 />
                                 <ResultsPane
@@ -570,6 +603,14 @@ function PanelInner({
                                     isLoadingAll={isLoadingAll}
                                     onCancelLoadAll={cancelLoadAll}
                                 />
+                                {exportOpen && view.kind === 'results' && (
+                                    <ExportMatchesDialog
+                                        viewId={viewId}
+                                        query={view.query}
+                                        matchCount={countIsExact ? resultsCount : null}
+                                        onClose={() => setExportOpen(false)}
+                                    />
+                                )}
                             </div>
                         )}
                     </div>

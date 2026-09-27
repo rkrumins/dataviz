@@ -92,6 +92,11 @@ vi.mock('@/features/versioning/components/PublishDraftDialog', () => ({
   ),
 }))
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
+const reloadLibraryMock = vi.fn()
+vi.mock('@/store/viewLibraryStore', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/store/viewLibraryStore')>()),
+  reloadViewLibrary: (...args: unknown[]) => reloadLibraryMock(...args),
+}))
 // Steps swap at once. Under framer-motion's AnimatePresence, an import that answers in the same
 // render the previous step finishes leaving mounts its progress already leaving, and framer-motion 11
 // never plays an exit for a child that mounts absent: the step then never changes (Node 20, as in CI).
@@ -319,6 +324,8 @@ describe('ViewWizard — Import journey', () => {
     // An update keeps the view's current name unless the file's was chosen, and leaves visibility alone.
     expect(request.metadata.name).toBe('Finance (UAT)')
     expect(request.metadata.visibility).toBeUndefined()
+    // Its design is the file's now, display rules and all: a canvas that has it open reads them again.
+    await waitFor(() => expect(reloadLibraryMock).toHaveBeenCalledWith('view_uat'))
   })
 
   it('sends a view that changed since it was reviewed back to be checked again', async () => {
@@ -474,6 +481,9 @@ describe('ViewWizard — importing every view of a file', () => {
     expect(created.batchId).toBe(updated.batchId)
     expect(created.requestId).not.toBe(updated.requestId)
     expect(await screen.findAllByText(/integrity verified/)).toHaveLength(2)
+    // Each view's design is the file's now: a canvas that has one open reads its rules again.
+    expect(reloadLibraryMock).toHaveBeenCalledWith('view_uat')
+    expect(reloadLibraryMock).toHaveBeenCalledWith('view_new')
   })
 
   it('maps a type that isn’t here once, for every view from that source', async () => {

@@ -343,8 +343,11 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "GET /graph/export/plan and /stream — the same for a data source without version control",
             "POST /graphs/{id}/exports — start an export job",
             "GET /graphs/{id}/exports/{job}/download — take the file",
+            "POST /graph/search/exports and GET /graph/search/exports/{id}/download — write, then "
+            "take, every match of a search",
         ),
-        ui_surfaces=("Export controls on the canvas and the context-view menu",),
+        ui_surfaces=("Export controls on the canvas and the context-view menu",
+                     "Export on a search's matches"),
         still_allowed=(
             "Reading, filtering and tracing every graph in the product",
             "Exports already downloaded are not recalled — this stops NEW ones",

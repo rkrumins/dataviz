@@ -22,6 +22,9 @@
  */
 import type { EdgeClass, GroupPredicate, Predicate } from '@/types/search'
 
+import { arityOf, operatorLabel, predicateType } from '../typed/operators'
+import { describeDuration } from '../typed/valueCodec'
+
 
 /**
  * Kinds that semantically behave like a toggle in the UI: at most one
@@ -559,18 +562,27 @@ function describeCondition(p: Predicate): ActiveConditionChip {
                 label: `Layer: ${p.layerAssignment}`,
                 canEditInline: true,
             }
-        case 'hasProperty':
+        case 'hasProperty': {
+            const name = p.keyMatch === 'contains' ? `*${p.key}*`
+                : p.keyMatch === 'prefix' ? `${p.key}*` : p.key
             return {
                 kind: 'hasProperty',
-                label: p.negate ? `no ${p.key}` : `has ${p.key}`,
+                label: p.negate ? `no ${name}` : `has ${name}`,
                 canEditInline: true,
             }
-        case 'property':
+        }
+        case 'property': {
+            const op = p.op ?? 'eq'
+            const arity = arityOf(op)
+            const value = arity === 'none' ? ''
+                : arity === 'duration' ? ` ${describeDuration(p.value) ?? '…'}`
+                    : ` ${formatValue(p.value)}`
             return {
                 kind: 'property',
-                label: `${p.key} ${p.op ?? '='} ${formatValue(p.value)}`,
+                label: `${p.key} ${operatorLabel(op, predicateType(p))}${value}`,
                 canEditInline: false,
             }
+        }
         case 'isOrphan':
             return { kind: 'isOrphan', label: 'No lineage', canEditInline: true }
         case 'isLeaf':

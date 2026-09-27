@@ -21,12 +21,21 @@ and that's enforced here — before any Cypher is generated.
 from __future__ import annotations
 
 import logging
+import time
+from contextlib import nullcontext
+from dataclasses import replace
 from typing import Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.services.context_engine import ContextEngine
-from backend.app.services.deep_search import CompileError, get_deep_search_settings
+from backend.app.services.deep_search import (
+    CompileError,
+    SearchFailed,
+    SearchRunContext,
+    get_deep_search_settings,
+)
+from backend.app.services.search_downloads import mint_download_token
 from backend.app.services.view_scope import (
     EffectiveViewScope,
     ViewNotFound,
@@ -36,15 +45,42 @@ from backend.app.services.view_scope import (
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import (
     SEARCH_SCOPE_ENTITY_TYPES_MAX,
+    EdgeGroupPredicate,
+    EdgePropertyPredicate,
     GroupPredicate,
+    MatchAllPredicate,
+    PathPredicate,
+    PropertyPredicate,
     ScopeDiagnostics,
+    SearchAncestorCountsRequest,
+    SearchAncestorCountsResult,
+    SearchCatalogRequest,
+    SearchCatalogResult,
+    SearchCountsRequest,
+    SearchCountsResult,
+    SearchExportRequest,
+    SearchExportResult,
+    SearchMembershipRequest,
+    SearchMembershipResult,
+    SearchOptions,
+    SearchProgress,
     SearchQuery,
     SearchResultPage,
+    SearchRuleCount,
+    SearchRuleItem,
     SearchScope,
     TextPredicate,
+    WithinHopsPredicate,
+    export_columns,
 )
+from backend.common.search_semantics import SemanticsError, resolve_predicate
 
 logger = logging.getLogger(__name__)
+
+#: The longest a counts request moves its counts on, whatever wait it asks
+#: for: the last count's unit may run its whole budget past it, and the
+#: request must still end inside the request timeout.
+_COUNTS_WAIT_S = 5.0
 
 
 # Predicate-tree caps now live in DeepSearchSettings (env-overridable).
@@ -99,7 +135,35 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$") -> int:
                 child, depth=depth + 1, path=f"{path}.children[{i}]",
             )
         return total
+    _validate_comparisons(predicate, path)
     return 1  # leaf
+
+
+def _validate_comparisons(predicate, path: str) -> None:
+    """Resolve every typed comparison up front (``search_semantics``), so
+    a value that cannot be compared the way it asks — "abc" as a number,
+    ``between`` with one end — is a 400 naming the condition, not a
+    compile error with no idea where it came from."""
+    if isinstance(predicate, PropertyPredicate):
+        _resolve_or_raise(predicate, path)
+    elif (isinstance(predicate, (WithinHopsPredicate, PathPredicate))
+            and predicate.edge_predicate is not None):
+        _validate_edge_comparisons(predicate.edge_predicate, f"{path}.edgePredicate")
+
+
+def _validate_edge_comparisons(predicate, path: str) -> None:
+    if isinstance(predicate, EdgeGroupPredicate):
+        for i, child in enumerate(predicate.children):
+            _validate_edge_comparisons(child, f"{path}.children[{i}]")
+    elif isinstance(predicate, EdgePropertyPredicate):
+        _resolve_or_raise(predicate, path)
+
+
+def _resolve_or_raise(predicate, path: str) -> None:
+    try:
+        resolve_predicate(predicate)
+    except SemanticsError as exc:
+        raise ValidationError(f"{path} ({predicate.key}): {exc}") from exc
 
 
 def _count_and_validate(query: SearchQuery) -> int:
@@ -231,6 +295,31 @@ def _reject_unbounded_text_any(
     )
 
 
+def _validate_items(items) -> None:
+    """Each rule's predicate, held to the same caps and typed checks as a
+    search's — with the path naming the rule."""
+    max_leaves = get_deep_search_settings().max_leaf_count
+    for i, item in enumerate(items):
+        leaves = _validate_predicate(item.predicate, path=f"$.items[{i}].predicate")
+        if leaves > max_leaves:
+            raise ValidationError(
+                f"$.items[{i}].predicate has {leaves} leaves (max {max_leaves})")
+
+
+def _returns_hits(query: SearchQuery) -> bool:
+    """Whether a search is one the uncapped engine runs: it returns hits,
+    and it isn't a path search (a different statement and response)."""
+    if query.options.results not in ("hits", "both"):
+        return False
+
+    def has_path(p) -> bool:
+        if isinstance(p, PathPredicate):
+            return True
+        return isinstance(p, GroupPredicate) and any(has_path(c) for c in p.children)
+
+    return not has_path(query.predicate)
+
+
 def _empty_page(query: SearchQuery) -> SearchResultPage:
     """Construct a zero-results ``SearchResultPage`` for short-circuit cases.
 
@@ -262,7 +351,7 @@ def _stamp_resolved_scope(
     output, never the client's request, before the compiler runs.
 
     Roots are stamped in ``view`` mode only — the compiler reads them
-    nowhere else (``_collect_scope_urn_sets``), and stamping them in
+    nowhere else (``_scope_urn_sets_with_depths``), and stamping them in
     ``visible`` / ``data_source`` mode would push a large view over the
     root cap for a clamp that is never applied.
 
@@ -365,6 +454,7 @@ class AdvancedSearchService:
         query: SearchQuery,
         *,
         deadline_ms: Optional[int] = None,
+        run_context: Optional[SearchRunContext] = None,
     ) -> Tuple[SearchResultPage, EffectiveViewScope]:
         """Run a search; return the page plus the resolved scope.
 
@@ -372,6 +462,11 @@ class AdvancedSearchService:
         to set the ``X-Search-Dropped-URNs`` header and to populate the
         audit-log row (so the audit trail records what was *actually*
         searched, not what the client asked for).
+
+        With a ``run_context`` (``DEEP_SEARCH_ENGINE=v2``), a search that
+        returns hits runs on the uncapped engine when the provider has it;
+        everything else — and every search on a provider without it — runs
+        ``deep_search`` inside one admission, as the endpoint used to wrap it.
         """
         _count_and_validate(query)
 
@@ -414,12 +509,13 @@ class AdvancedSearchService:
         )
 
         try:
-            page = await self._engine.provider.deep_search(
-                query, deadline_ms=deadline_ms,
-            )
+            page = await self._run(query, eff_scope, deadline_ms, run_context)
+            extra_notes = [entity_types_note] if entity_types_note else []
+            if page.scope_diagnostics is not None:
+                # Notes the engine carried out (a plan's, a facet's failure).
+                extra_notes.extend(page.scope_diagnostics.notes)
             page.scope_diagnostics = self._build_scope_diagnostics(
-                eff_scope,
-                extra_notes=[entity_types_note] if entity_types_note else None,
+                eff_scope, extra_notes=extra_notes or None,
             )
             return page, eff_scope
         except CompileError as exc:
@@ -437,6 +533,212 @@ class AdvancedSearchService:
             # existing graph endpoints translate this to 400.
             raise ValidationError(str(exc)) from exc
 
+    async def _run(
+        self,
+        query: SearchQuery,
+        eff_scope: EffectiveViewScope,
+        deadline_ms: Optional[int],
+        run_context: Optional[SearchRunContext],
+    ) -> SearchResultPage:
+        provider = self._engine.provider
+        if (run_context is not None and _returns_hits(query)
+                and getattr(provider, "supports_search_sessions", False)):
+            return await provider.deep_search_session(
+                query, context=replace(run_context, scope_hash=eff_scope.scope_hash),
+            )
+        op = self._provider_op("deep_search")
+        admit = run_context.admit if run_context is not None else None
+        async with (admit() if admit is not None else nullcontext()):
+            return await op(query, deadline_ms=deadline_ms)
+
+    async def membership(
+        self,
+        request: SearchMembershipRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+    ) -> SearchMembershipResult:
+        """Which of the requested (on-screen) entities match which rules,
+        inside the view's scope — resolved here, never taken from the
+        client."""
+        _validate_items(request.items)
+        scope, _eff = await self._rule_scope(request.scope)
+        if scope is None:
+            return SearchMembershipResult(matches={item.id: [] for item in request.items})
+        op = self._provider_op("deep_search_membership")
+        context = run_context or SearchRunContext()
+        out = await op(scope, [(item.id, item.predicate) for item in request.items],
+                       request.urns, context=context)
+        return SearchMembershipResult(
+            matches=out["matches"], errors=out["errors"],
+            data_version=context.data_version or None, elapsed_ms=out["elapsedMs"],
+        )
+
+    async def counts(
+        self,
+        request: SearchCountsRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+    ) -> SearchCountsResult:
+        """Each rule's exact total in the view. A large view takes several
+        requests; each one first reads where every count has got to (no
+        work), then moves on the least advanced counts until its wait is
+        spent — so many rules all progress, none starve."""
+        started = time.monotonic()
+        _validate_items(request.items)
+        scope, eff = await self._rule_scope(request.scope)
+        if scope is None:
+            return SearchCountsResult(counts={
+                item.id: SearchRuleCount(count=0, status="complete") for item in request.items})
+        op = self._provider_op("deep_search_count")
+        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
+        deadline = started + min(request.wait_ms / 1000.0, _COUNTS_WAIT_S)
+
+        def query_of(item: SearchRuleItem, wait_ms: int, session: Optional[str]) -> SearchQuery:
+            return SearchQuery(predicate=item.predicate, scope=scope,
+                               options=SearchOptions(results="hits", wait_ms=wait_ms,
+                                                     session_id=session))
+
+        answers: dict = {}
+        errors: dict = {}
+        for item in request.items:
+            try:
+                answers[item.id] = await op(
+                    query_of(item, 0, request.sessions.get(item.id)),
+                    context=context, advance=False)
+            except CompileError as exc:
+                errors[item.id] = str(exc)
+
+        def done(item: SearchRuleItem) -> float:
+            progress = answers[item.id].get("progress") or {}
+            total = progress.get("total") or 0
+            return (progress.get("scanned") or 0) / total if total else 0.0
+
+        pending = sorted((i for i in request.items
+                          if i.id in answers and answers[i.id]["status"] != "complete"),
+                         key=done)
+        for n, item in enumerate(pending):
+            wait_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            if n and not wait_ms:
+                break        # the first always moves; the rest wait their turn
+            session = answers[item.id]["sessionId"] or request.sessions.get(item.id)
+            try:
+                answers[item.id] = await op(query_of(item, wait_ms, session), context=context)
+            except CompileError as exc:
+                # One rule's failure is its own: the others count on. A rule
+                # the engine can't count says why, in the user's terms.
+                errors[item.id] = str(exc)
+            except SearchFailed:
+                # What the graph said stays in the log, not on the page.
+                logger.warning("rule %s could not be counted", item.id, exc_info=True)
+                errors[item.id] = "The graph could not finish counting this rule. Try again later."
+
+        counts = {}
+        for item in request.items:
+            if item.id in errors:
+                counts[item.id] = SearchRuleCount(count=0, status="complete",
+                                                  error=errors[item.id])
+                continue
+            answer = answers[item.id]
+            counts[item.id] = SearchRuleCount(
+                count=answer["count"], status=answer["status"],
+                session_id=answer["sessionId"],
+                progress=(SearchProgress(**answer["progress"])
+                          if answer.get("progress") else None),
+            )
+        return SearchCountsResult(counts=counts, data_version=context.data_version or None,
+                                  elapsed_ms=int((time.monotonic() - started) * 1000))
+
+    async def catalog(
+        self,
+        request: SearchCatalogRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+    ) -> SearchCatalogResult:
+        """Every property the view's entities carry, exactly — in the view's
+        scope, resolved here as a search's is."""
+        scope, eff = await self._rule_scope(request.scope)
+        if scope is None:
+            return SearchCatalogResult(session_id="", status="complete")
+        op = self._provider_op("deep_search_catalog")
+        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
+        out = await op(scope, context=context, wait_ms=request.wait_ms,
+                       session_id=request.session_id, refresh=request.refresh)
+        return SearchCatalogResult.model_validate(out)
+
+    async def export(
+        self,
+        request: SearchExportRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+        principal: str = "",
+    ) -> SearchExportResult:
+        """Every entity in the view matching the request's predicate, written
+        to a file — exactly, however many, in the view's scope resolved here
+        as a search's is. A large export takes more than one request; the
+        answer that completes it carries a download token for ``principal``."""
+        leaves = _validate_predicate(request.predicate, path="$.predicate")
+        max_leaves = get_deep_search_settings().max_leaf_count
+        if leaves > max_leaves:
+            raise ValidationError(f"$.predicate has {leaves} leaves (max {max_leaves})")
+        scope, eff = await self._rule_scope(request.scope)
+        if scope is None:
+            # Every root the client named lies outside the view: nothing.
+            return SearchExportResult(session_id="", status="complete", format=request.format,
+                                      columns=export_columns(request.columns))
+        op = self._provider_op("deep_search_export")
+        context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
+        query = SearchQuery(predicate=request.predicate, scope=scope,
+                            options=SearchOptions(results="hits"))
+        out = await op(query, context=context, fmt=request.format, columns=request.columns,
+                       wait_ms=request.wait_ms, session_id=request.session_id)
+        result = SearchExportResult.model_validate(out)
+        if result.status == "complete" and result.session_id:
+            from backend.auth_service.core import config as auth_config
+            result.download_token = mint_download_token(
+                result.session_id, eff.scope_hash, principal, auth_config.JWT_SECRET_KEY)
+        return result
+
+    async def open_export(self, session_id: str, scope_hash: str):
+        """A complete export of this view's ``scope_hash`` — its answer and
+        its bytes to stream — or None when there is none (expired, never
+        finished, another scope's)."""
+        op = self._provider_op("deep_search_export_open")
+        opened = await op(session_id, context=SearchRunContext(scope_hash=scope_hash))
+        if opened is None:
+            return None
+        answer, body = opened
+        return SearchExportResult.model_validate(answer), body
+
+    async def ancestor_counts(
+        self,
+        request: SearchAncestorCountsRequest,
+        *,
+        run_context: Optional[SearchRunContext] = None,
+    ) -> SearchAncestorCountsResult:
+        """How many of a search's matches each requested container holds,
+        from the search's session — which must have been planned for this
+        view's scope, resolved here as the search resolved it."""
+        eff_scope = await self._resolve_scope(request.scope)
+        await self._guard_view_data_source(eff_scope)
+        op = self._provider_op("deep_search_ancestor_counts")
+        context = replace(run_context or SearchRunContext(), scope_hash=eff_scope.scope_hash)
+        out = await op(request.session_id, list(dict.fromkeys(u for u in request.urns if u)),
+                       context=context)
+        return SearchAncestorCountsResult.model_validate(out)
+
+    async def _rule_scope(self, requested: SearchScope):
+        """The resolved scope a rule is evaluated in, or None when every root
+        the client named lies outside the view (then nothing matches —
+        never a widened search)."""
+        client_requested_urns = bool(requested.root_urns)
+        eff_scope = await self._resolve_scope(requested)
+        await self._guard_view_data_source(eff_scope)
+        stamped, _note = _stamp_resolved_scope(
+            SearchQuery(predicate=MatchAllPredicate(), scope=requested), eff_scope)
+        if client_requested_urns and not eff_scope.root_urns:
+            return None, eff_scope
+        return stamped.scope, eff_scope
+
     async def explain(self, query: SearchQuery):
         """Compile-only path. Returns the generated Cypher + bound params
         without executing.
@@ -453,13 +755,22 @@ class AdvancedSearchService:
             query, entity_types_capped=entity_types_note is not None,
         )
         try:
-            result = await self._engine.provider.deep_search_explain(query)
+            result = await self._provider_op("deep_search_explain")(query)
         except CompileError as exc:
             raise ValidationError(str(exc)) from exc
         # Attach the resolved-scope summary so the dev panel can show
         # the user *what their search actually scopes to*. Critical
         # for debugging "why didn't this return anything" — answer is
         # often "your view doesn't contain these URNs".
+        if (isinstance(result, dict) and get_deep_search_settings().engine == "v2"
+                and _returns_hits(query)
+                and getattr(self._engine.provider, "supports_search_sessions", False)):
+            result.setdefault("notes", []).append(
+                "Runs on the uncapped engine: this predicate is evaluated over the "
+                "whole scope in chunks (label ID bands, a walk from the view's "
+                "roots, or the canvas URNs), each counting and ranking its own "
+                "matches. The candidate cap applies only to facets."
+            )
         if isinstance(result, dict):
             result["resolvedScope"] = {
                 "viewId": eff_scope.view_id,
@@ -478,9 +789,39 @@ class AdvancedSearchService:
         graph, per entity-type label. Diagnostic counterpart to the
         predicate compiler — answers "what can I actually query?".
         """
-        return await self._engine.provider.deep_search_discover(
+        return await self._provider_op("deep_search_discover")(
             sample_per_label=sample_per_label,
         )
+
+    async def values(self, *, view_id: str, key: str, q: str = "", limit: int = 25):
+        """A property's most common values in a view — what the value
+        picker lists (``GET /search/values``). Read over the view's entity
+        types; the view is resolved like a search's, and a view of another
+        data source is refused the same way."""
+        eff_scope = await self._resolve_scope(SearchScope(view_id=view_id, scope_mode="view"))
+        await self._guard_view_data_source(eff_scope)
+        return await self._provider_op("deep_search_values")(
+            key=key,
+            entity_types=sorted(eff_scope.entity_type_allow_list) or None,
+            q=q,
+            limit=limit,
+        )
+
+    def _provider_op(self, name: str):
+        """The active provider's deep-search method, or ``NotImplementedError``
+        (the route's 501) when it has none.
+
+        Only FalkorDB and the stub implement the Protocol. Neo4j, Spanner and
+        DataHub simply lack the methods, and the circuit-breaker proxy lets
+        the lookup's ``AttributeError`` through — so the route answered 500
+        for what is a plain "not supported on this data source". Resolving
+        the method first keeps a genuine ``AttributeError`` inside a search
+        a 500, as it should be.
+        """
+        op = getattr(self._engine.provider, name, None)
+        if op is None:
+            raise NotImplementedError()
+        return op
 
     def _build_scope_diagnostics(
         self,
@@ -509,8 +850,10 @@ class AdvancedSearchService:
             )
 
         lineage: list[str] = []
+        lineage_known = False
         try:
             lineage = sorted(provider._get_lineage_edge_types())
+            lineage_known = True
         except ProviderConfigurationError:
             notes.append(
                 "Ontology was not resolved for this provider; lineage "
@@ -522,7 +865,9 @@ class AdvancedSearchService:
             # Non-FalkorDB provider — diagnostic info just unavailable.
             pass
 
-        if not lineage and "edge classification is unknown" not in (notes[-1] if notes else ""):
+        # Only a provider that answered "none" has no lineage edge types —
+        # one that couldn't say is not reported as having none.
+        if lineage_known and not lineage:
             notes.append(
                 "No edge types are flagged is_lineage in the active "
                 "ontology. Lineage-aware predicates (IsOrphan, "

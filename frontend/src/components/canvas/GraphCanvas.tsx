@@ -53,6 +53,8 @@ import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
+import { useViewLibrary } from '@/hooks/useViewLibrary'
+import { useEffectiveBranchId } from '@/store/branchStore'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
@@ -178,6 +180,10 @@ export function GraphCanvas({ className }: { className?: string }) {
     const s = useCanvasStore.getState()
     if (s.drawerEdge || s.drawerHistory.entries.some((e) => e.kind === 'edge')) s.closeNodeDrawer()
   }, [activeView?.id])
+  // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
+  const libraryBranchId = useEffectiveBranchId(
+    activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
+  useViewLibrary(activeView?.id ?? null, libraryBranchId)
 
   // Viewport-aware node filtering for large graphs
   const [viewportBounds, setViewportBounds] = useState<{ x: number; y: number; zoom: number } | null>(null)

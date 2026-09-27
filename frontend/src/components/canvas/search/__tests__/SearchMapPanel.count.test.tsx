@@ -29,7 +29,7 @@ const HIT = {
     ancestorPath: [],
 }
 
-function resultsView(result: Record<string, unknown>): PanelView {
+function resultsView(result: Record<string, unknown>, options?: Record<string, unknown>): PanelView {
     return {
         kind: 'results',
         template: {},
@@ -39,6 +39,7 @@ function resultsView(result: Record<string, unknown>): PanelView {
         query: {
             predicate: { kind: 'text', target: 'any', value: 'orders', match: 'substring' },
             scope: { viewId: 'view-1' },
+            ...(options ? { options } : {}),
         },
         result: {
             truncated: false, deadlineExceeded: false, cacheHit: false,
@@ -48,7 +49,7 @@ function resultsView(result: Record<string, unknown>): PanelView {
     } as unknown as PanelView
 }
 
-function renderPanel(result: Record<string, unknown>) {
+function renderPanel(result: Record<string, unknown>, options?: Record<string, unknown>) {
     const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
     render(
         <ProviderOverride value={{
@@ -60,7 +61,7 @@ function renderPanel(result: Record<string, unknown>) {
                 open
                 onClose={vi.fn()}
                 viewId="view-1"
-                session={stubAdvanced({ view: resultsView(result) })}
+                session={stubAdvanced({ view: resultsView(result, options) })}
             />
         </ProviderOverride>,
     )
@@ -109,5 +110,59 @@ describe('SearchMapPanel — the headline count', () => {
         renderPanel({ totalCount: 0, candidateCount: 0, hits: [] })
 
         expect(hero().textContent).toBe('0')
+    })
+})
+
+
+describe('SearchMapPanel — a search still scanning the view', () => {
+    const scanning = {
+        status: 'running', countStatus: 'lowerBound', candidateCount: 1234,
+        progress: { scanned: 64, total: 100, matched: 1234 },
+    }
+
+    it('says what it has found so far, and how far through the view it is', () => {
+        renderPanel(scanning)
+
+        // Found so far is a number that only grows — never a floor with a plus.
+        expect(hero().textContent).toBe('1,234')
+        expect(screen.getByText('found')).toBeInTheDocument()
+        expect(screen.getByText('· scanning 64%')).toBeInTheDocument()
+        expect(screen.getByRole('progressbar', { name: 'Scanning the view for matches' }))
+            .toHaveAttribute('aria-valuenow', '64')
+        expect(listHeadline('1,234 found so far')).toBeInTheDocument()
+        // The groups are not counted yet, so nothing may claim they are.
+        expect(screen.queryByText(/Group counts are exact/)).not.toBeInTheDocument()
+    })
+
+    it('reads as a plain exact count once the scan is done', () => {
+        renderPanel({ ...scanning, status: 'complete', countStatus: 'exact', totalCount: 1300 })
+
+        expect(hero().textContent).toBe('1,300')
+        expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+        expect(listHeadline('1,300 matches')).toBeInTheDocument()
+    })
+})
+
+
+describe('SearchMapPanel — how far the group counts go', () => {
+    // Forty matches, one listed: the groups are either the server's
+    // counts over all forty or a rollup of the one hit on the page.
+    const finished = { status: 'complete', totalCount: 40, candidateCount: 40 }
+    const withFacet = { aggregations: [{ by: 'ancestor', maxBuckets: 20000 }] }
+
+    it('calls the group counts exact when the container facet came back', () => {
+        renderPanel({ ...finished, aggregates: [[]] }, withFacet)
+        expect(screen.getByText(/Group counts are exact\./)).toBeInTheDocument()
+    })
+
+    it('says they cover only the listed matches without it', () => {
+        renderPanel(finished)
+        expect(screen.getByText(/Group counts cover only the matches listed\./)).toBeInTheDocument()
+        expect(screen.queryByText(/Group counts are exact/)).not.toBeInTheDocument()
+    })
+
+    it('says so too when the facet was asked for but did not come back', () => {
+        renderPanel({ ...finished, aggregates: [] }, withFacet)
+        expect(screen.queryByText(/Group counts are exact/)).not.toBeInTheDocument()
     })
 })

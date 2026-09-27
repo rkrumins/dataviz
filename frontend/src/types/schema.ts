@@ -465,6 +465,9 @@ export interface DisplayRuleConfig {
   enabled: boolean;
   /** ISO timestamp — set at creation, used for stable list ordering. */
   createdAt: string;
+  /** Set by the server's library on a stored rule a rule may not be (one a
+   *  bundle import or version restore stored as given): why. Never saved. */
+  invalid?: string;
 }
 
 export interface LogicalNodeConfig {

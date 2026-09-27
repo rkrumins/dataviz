@@ -30,7 +30,7 @@ const QUERY = {
     options: {},
 } as unknown as SearchQuery
 
-function renderCard(onSwitchMatch?: (m: QuickMatch) => void) {
+function renderCard(onSwitchMatch?: (m: QuickMatch) => void, result: SearchResultPage = EMPTY) {
     const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
     render(
         <ProviderOverride value={{
@@ -39,7 +39,7 @@ function renderCard(onSwitchMatch?: (m: QuickMatch) => void) {
             providerReady: true, providerVersion: 1,
         } as never}>
             <ZeroResultsDiagnostic
-                result={EMPTY}
+                result={result}
                 query={QUERY}
                 viewId="view-1"
                 onSwitchMatch={onSwitchMatch}
@@ -77,5 +77,14 @@ describe('ZeroResultsDiagnostic', () => {
         fireEvent.click(screen.getByRole('button', { name: /Technical details/ }))
 
         expect(screen.getByText(/No node matched your conditions/)).toBeInTheDocument()
+    })
+})
+
+
+describe('ZeroResultsDiagnostic — a search that ran out of time', () => {
+    it('says it timed out instead of claiming nothing matched', () => {
+        renderCard(undefined, { ...EMPTY, deadlineExceeded: true } as SearchResultPage)
+        expect(screen.getByText(/timed out before it found anything/)).toBeInTheDocument()
+        expect(screen.queryByText(/Nothing in this view/)).not.toBeInTheDocument()
     })
 })

@@ -2524,6 +2524,9 @@ class _TimeoutMiddleware:
         re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/exports/stream$"),
         re.compile(r"^/api/v1/[^/]+/graph/export/stream$"),
         re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/exports/[^/]+/download$"),
+        # A search export's file, streamed from the object store: it holds nothing else while
+        # it streams (graph.search_export_download).
+        re.compile(r"^/api/v1/[^/]+/graph/search/exports/[^/]+/download$"),
     )
 
     def __init__(self, app):
