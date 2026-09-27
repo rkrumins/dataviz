@@ -3,7 +3,8 @@
 The job goes through the same hook the API wires into the import/export service (the target's
 live ontology, the route's refusals, then what a publish sets off), so this runs it end to end
 against Postgres: the draft's changes reach main and the job carries the commit; a draft that fell
-behind main is refused with the route's own answer, for the client to raise the same error.
+behind main is refused with the route's own answer, for the client to raise the same error; the
+merge of a draft's review goes the same way, waiting on its reviewer's approval.
 """
 import asyncio
 import os
@@ -52,6 +53,25 @@ async def _run() -> None:
     assert result2["error"]["status"] == 409, result2
     assert result2["error"]["detail"]["type"] == "not_up_to_date", result2
     assert (await ie.get_job(job2["job_id"]))["status"] == "failed"
+
+    # The merge of a draft's review, as a job: refused until the reviewer approves, then merged.
+    reviewed = await svc.open_draft(graph_id=gid, owner="alice")
+    await svc.apply_ops(graph_id=gid, branch_id=reviewed, actor="alice", ops=[upd("B", displayName="reviewed")])
+    mr = await svc.open_draft_mr(graph_id=gid, branch_id=reviewed, actor="alice", reviewers=["carol"])
+
+    async def merge_by_job():
+        job = await ie.create_publish_job(workspace_id="ws1", data_source_id=ds, graph_id=gid, branch_id=reviewed,
+                                          actor="alice", message="ship it", merge_request_id=mr)
+        return await ie.run_publish(job["job_id"])
+
+    unapproved = await merge_by_job()
+    assert unapproved["error"] == {"status": 409, "detail": {"type": "approval_required", "pending": ["carol"]}}
+    await svc.approve_pr(pr_id=mr, actor="carol")
+    merged = await merge_by_job()
+    pr = await svc.get_pr(mr)
+    assert pr["status"] == "merged" and pr["resulting_commit_id"] == merged["commitId"], (pr, merged)
+    nodes = (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]
+    assert nodes["B"]["displayName"] == "reviewed"
     await db.dispose_engine()
 
 
