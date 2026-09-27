@@ -3854,6 +3854,19 @@ class GraphVersioningService:
         async with self._session() as s:
             return await self._change_count(s, graph_id, branch_id)
 
+    async def draft_node_urns(self, *, graph_id: str, branch_id: str) -> List[str]:
+        """The URNs, as ``main`` has them now, of the nodes a draft changed and still has — not the
+        ones it created, which ``main`` doesn't have. A property operation's search judges each node
+        by its published value; these are the nodes whose value the draft may have changed."""
+        async with self._session() as s:
+            await self._get_branch(s, graph_id, branch_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            heads = await self._head_index(s, graph_id, branch_id)
+            ids = [eid for eid, h in heads.items() if h.kind == "node" and h.live]
+            now = await self._hashes_at(s, graph_id, main_id, ids, graph.main_head_commit_seq or 0)
+        return [w.urn for w in now.values() if w.urn]
+
     @staticmethod
     async def _change_count(s, graph_id: str, branch_id: str) -> int:
         return await s.scalar(select(func.count()).select_from(EntityHeadORM).where(

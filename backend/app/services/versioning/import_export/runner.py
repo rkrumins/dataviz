@@ -23,7 +23,7 @@ QUEUED = "queued"
 # The jobs this runner takes, and the service entry point that runs each (it records a failure
 # on the job rather than raising).
 _ENTRY_POINTS = {"ingest": "run_import_safe", "export": "run_export_safe",
-                 "publish": "run_publish_safe"}
+                 "publish": "run_publish_safe", "property_op": "run_property_op_safe"}
 JOB_TYPES = tuple(_ENTRY_POINTS)
 
 

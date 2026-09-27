@@ -219,6 +219,11 @@ DIFF_TREE_MAX_CHANGES: int = int(os.getenv("GRAPHVER_DIFF_TREE_MAX_CHANGES", "20
 # versioning worker, not inside the request: the squash holds every changed payload and hashes
 # them all, which a web pod's memory and event loop can't spare at that size.
 SYNC_PUBLISH_MAX_CHANGES: int = int(os.getenv("GRAPHVER_SYNC_PUBLISH_MAX_CHANGES", "20000"))
+# A property operation (property_ops) writes into its draft this many entities per commit.
+PROPERTY_OP_WINDOW: int = int(os.getenv("GRAPHVER_PROPERTY_OP_WINDOW", "10000"))
+# The most changes a draft may hold once a property operation is done: its own changes plus the
+# entities the operation would change. Past it the operation is refused before it writes anything.
+PROPERTY_OP_MAX_DRAFT_CHANGES: int = int(os.getenv("GRAPHVER_PROPERTY_OP_MAX_DRAFT_CHANGES", "100000"))
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")

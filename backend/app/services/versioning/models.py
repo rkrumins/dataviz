@@ -351,8 +351,10 @@ class JobORM(VersioningBase):
             # 'ingest': that is the file-import worker's type, and a worker claims by
             # job_type — sharing one would have the two run each other's jobs. Existing
             # DBs get it via migration 20260713_1400_jobs_bootstrap. 'publish' = a large draft's
-            # publish on the transfer runner (20260928_1000_jobs_publish).
-            "job_type IN ('ingest','projection','rebuild','export','bootstrap','publish')",
+            # publish on the transfer runner (20260928_1000_jobs_publish). 'property_op' = a
+            # property operation written into a draft (20260929_1000_jobs_propop).
+            "job_type IN ('ingest','projection','rebuild','export','bootstrap','publish',"
+            "'property_op')",
             name="ck_jobs_type",
         ),
     )
