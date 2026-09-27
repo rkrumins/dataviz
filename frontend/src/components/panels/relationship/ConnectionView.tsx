@@ -3,15 +3,17 @@
  * roll-up, a summary wire. Says what it summarises, and lists the relationships
  * behind it at the endpoints they really name; each opens on the drawer's trail.
  */
-import { useMemo } from 'react'
+import { useId, useMemo } from 'react'
 import { ChevronRight, Crosshair, Waypoints } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type EdgeMemberRef, type LineageNode } from '@/store/canvas'
 import { useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { targetFromMember } from '@/lib/drawerEdgeTarget'
-import { ActionButton } from '../EntityDrawer'
+import { Button } from '@/components/ui/Button'
 import { Section } from '../DrawerSection'
-import { Bridge, DrawerHeaderRow, Notice } from './RelationshipParts'
+import { DrawerBody, DrawerHeader, DrawerShell } from '../shell/DrawerShell'
+import { DrawerTopBar, KindBadge } from '../shell/DrawerTopBar'
+import { Bridge, Notice } from './RelationshipParts'
 import { useEndpoints, useOpenEndpoint, type Endpoint } from './useEndpoints'
 import { openInEdgeExplorer, relationshipCopy } from './relationshipModel'
 
@@ -20,9 +22,8 @@ const ROW_CAP = 100
 
 type ConnectionTarget = Extract<DrawerEdgeTarget, { kind: 'connection' }>
 
-export function ConnectionView({ target, guard, onClose, resolveNode, onFocusNode, onLocateMany }: {
+export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLocateMany }: {
   target: ConnectionTarget
-  guard: (step: () => void) => void
   onClose: () => void
   resolveNode?: (id: string) => LineageNode | null
   onFocusNode?: (nodeId: string) => void | Promise<unknown>
@@ -41,21 +42,29 @@ export function ConnectionView({ target, guard, onClose, resolveNode, onFocusNod
     ? relationshipCopy(target.types[0], relationshipTypes).label
     : `${target.types.length || 'Several'} relationship types`
   const hasRollups = target.members.some((m) => m.rollup)
+  const titleId = useId()
+  const source = endpoints.get(target.source)!
+  const dest = endpoints.get(target.target)!
 
-  const openMember = (m: EdgeMemberRef) =>
-    guard(() => useCanvasStore.getState().openEdgeDrawer(targetFromMember(m, target.id)))
+  const openMember = (m: EdgeMemberRef) => useCanvasStore.getState().openEdgeDrawer(targetFromMember(m, target.id))
 
   return (
-    <>
-      <div className="flex-shrink-0 p-5 border-b border-glass-border">
-        <DrawerHeaderRow badge="Connection" badgeColor={color} guard={guard} onClose={onClose} onFocusNode={onFocusNode} />
+    <DrawerShell titleId={titleId} focusKey={target.id} onClose={onClose}>
+      <DrawerHeader>
+        <DrawerTopBar
+          badge={<KindBadge label="Connection" bg={`${color}1a`} fg={color} />}
+          closeLabel="Close relationship details"
+          onClose={onClose}
+          onFocusNode={onFocusNode}
+        />
+        <h2 id={titleId} tabIndex={-1} className="sr-only">Connection: {source.name} and {dest.name}</h2>
         <Bridge
-          source={endpoints.get(target.source)!}
-          target={endpoints.get(target.target)!}
+          source={source}
+          target={dest}
           label={label}
           color={color}
           bidirectional={target.bidirectional}
-          onOpen={(id) => guard(() => { void opener.open(id) })}
+          onOpen={opener.open}
           pendingId={opener.pendingId}
           unreachableId={opener.unreachableId}
         />
@@ -69,21 +78,26 @@ export function ConnectionView({ target, guard, onClose, resolveNode, onFocusNod
         </p>
         <div className="flex items-center gap-2 flex-wrap mt-3">
           {onLocateMany && (
-            <ActionButton icon={Crosshair} label="Locate both ends" onClick={() => { void onLocateMany([target.source, target.target]) }} />
+            <Button size="sm" variant="subtle" leftIcon={Crosshair} onClick={() => { void onLocateMany([target.source, target.target]) }}>
+              Locate both ends
+            </Button>
           )}
-          <ActionButton
-            icon={Waypoints}
-            label="Edge Explorer"
-            onClick={() => guard(() => {
+          <Button
+            size="sm"
+            variant="subtle"
+            leftIcon={Waypoints}
+            onClick={() => {
               // The Explorer lists canvas edges, so select the members the canvas holds.
               const onCanvas = useCanvasStore.getState()._edgeIndex
               openInEdgeExplorer(target.members.filter((m) => onCanvas.has(m.id)).map((m) => m.id))
-            })}
-          />
+            }}
+          >
+            Edge Explorer
+          </Button>
         </div>
-      </div>
+      </DrawerHeader>
 
-      <div className="flex-1 overflow-y-auto custom-scrollbar">
+      <DrawerBody>
         {target.types.length > 0 && (
           <Section title="Relationship types">
             <div className="flex flex-wrap gap-1.5">
@@ -127,8 +141,8 @@ export function ConnectionView({ target, guard, onClose, resolveNode, onFocusNod
             )}
           </Section>
         )}
-      </div>
-    </>
+      </DrawerBody>
+    </DrawerShell>
   )
 }
 

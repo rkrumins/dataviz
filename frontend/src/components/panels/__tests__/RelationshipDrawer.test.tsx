@@ -67,6 +67,8 @@ function setup(target: DrawerEdgeTarget, opts: { canvasEdges?: LineageEdge[] } =
     drawerHistory: { entries: [], cursor: -1 },
     selectedNodeIds: [],
     selectedEdgeIds: [],
+    drawerDirty: false,
+    pendingDrawerMove: null,
   })
   useCanvasStore.getState().openEdgeDrawer(target)
 }
@@ -95,8 +97,8 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(within(bridge).getByText('Revenue')).toBeInTheDocument()
     expect(screen.getByText('owner')).toBeInTheDocument()
     const provenance = screen.getByText('Provenance').closest('.px-5') as HTMLElement
-    expect(within(provenance).getByText('Created').closest('div')).toHaveTextContent('by Ana')
-    expect(within(provenance).getByText('Last changed').closest('div')).toHaveTextContent('by Bo')
+    expect(within(provenance).getByText('Created').closest('div')).toHaveTextContent(/by.*Ana/)
+    expect(within(provenance).getByText('Last changed').closest('div')).toHaveTextContent(/by.*Bo/)
     expect(screen.getByTestId('entity-history')).toHaveTextContent('e1')
   })
 
@@ -116,12 +118,12 @@ describe('RelationshipDrawer — a relationship', () => {
     const user = userEvent.setup()
     setup(rel('e1'))
     render(<RelationshipDrawer canEdit />)
-    await user.click(screen.getByRole('button', { name: /Edit/ }))
+    await user.click(screen.getByRole('tab', { name: /Edit/ }))
     await user.click(screen.getByRole('button', { name: /Add property/i }))
     await user.type(screen.getByPlaceholderText('Property name'), 'tier')
     await user.type(screen.getByPlaceholderText('Enter a value…'), 'gold')
     await user.click(screen.getByRole('button', { name: 'Add' }))
-    await user.click(screen.getByRole('button', { name: /Stage Changes/ }))
+    await user.click(screen.getByRole('button', { name: /Stage changes/ }))
 
     const [change] = useStagedChangesStore.getState().changes
     expect(change).toMatchObject({
@@ -138,14 +140,14 @@ describe('RelationshipDrawer — a relationship', () => {
     const user = userEvent.setup()
     setup(rel('e1'))
     render(<RelationshipDrawer canEdit />)
-    await user.click(screen.getByRole('button', { name: /Edit/ }))
+    await user.click(screen.getByRole('tab', { name: /Edit/ }))
     await user.click(screen.getByRole('button', { name: /Add property/i }))
     await user.type(screen.getByPlaceholderText('Property name'), 'tier')
     await user.type(screen.getByPlaceholderText('Enter a value…'), 'gold')
     await user.click(screen.getByRole('button', { name: 'Add' }))
     await user.click(screen.getByRole('button', { name: 'Open Orders' }))
 
-    expect(screen.getByText('Unsaved changes')).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog', { name: 'Unsaved changes' })).toBeInTheDocument()
     expect(useCanvasStore.getState().drawerEdge?.id).toBe('e1')
     await user.click(screen.getByRole('button', { name: 'Discard' }))
     expect(useCanvasStore.getState().drawerNodeId).toBe('a')
@@ -155,7 +157,7 @@ describe('RelationshipDrawer — a relationship', () => {
     setup(rel('e1'))
     useCanvasStore.getState().openEdgeDrawer(rel('e1'), { edit: true })
     render(<RelationshipDrawer canEdit />)
-    expect(screen.getByRole('button', { name: /Stage Changes/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Stage changes/ })).toBeInTheDocument()
   })
 
   it.each([
@@ -165,7 +167,7 @@ describe('RelationshipDrawer — a relationship', () => {
     h.record = { ...h.record!, edgeType: type }
     setup(rel('e1', type))
     render(<RelationshipDrawer canEdit onDeleteEdge={vi.fn()} />)
-    expect(screen.queryByRole('button', { name: /^Edit/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /^Edit/ })).not.toBeInTheDocument()
     expect(screen.queryByTitle('Delete relationship')).not.toBeInTheDocument()
     expect(screen.getByText(reason)).toBeInTheDocument()
   })
@@ -175,7 +177,7 @@ describe('RelationshipDrawer — a relationship', () => {
     const onStartEditing = vi.fn()
     setup(rel('e1'))
     render(<RelationshipDrawer canEdit={false} onStartEditing={onStartEditing} />)
-    expect(screen.queryByRole('button', { name: /^Edit/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /^Edit/ })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Open a draft' }))
     expect(onStartEditing).toHaveBeenCalled()
   })
@@ -184,7 +186,7 @@ describe('RelationshipDrawer — a relationship', () => {
     h.summary = { ...h.summary, exists: false, version: null, created: null, updated: null, value: null }
     setup(rel('e1'))
     render(<RelationshipDrawer canEdit />)
-    expect(screen.queryByRole('button', { name: /^Edit/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /^Edit/ })).not.toBeInTheDocument()
     expect(screen.getByText(/Not under version control/)).toBeInTheDocument()
   })
 

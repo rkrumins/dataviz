@@ -16,12 +16,14 @@
  * Details come from the drawer's own read (`useRelationshipRecord`), never the
  * canvas copy: canvas edges carry no properties and, from a trace, not even the
  * relationship's real id.
+ *
+ * Built on the drawer frame and shell: while an edit is unstaged, every move of
+ * the drawer asks first.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { memo, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
-  AlertCircle, AlertTriangle, Check, CheckCircle, Code, Copy, Crosshair, Eye, FileText, History,
-  Info, Link, Loader2, Pencil, PencilLine, Save, Sparkles, Trash2, Waypoints,
+  AlertCircle, Check, Code, Copy, Crosshair, Eye, FileText, History, Info, Link, Pencil, PencilLine,
+  Sparkles, Trash2, Waypoints,
 } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
@@ -34,29 +36,46 @@ import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { actorName } from '@/features/versioning/model/branchVocab'
 import type { EntityEvent } from '@/services/versioningApiService'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
+import { edgeIndexOf } from '@/lib/storeIndex'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
-import { MOTION } from '@/lib/motion'
-import { cn } from '@/lib/utils'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { EmptyState } from '@/components/ui/EmptyState'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { SkeletonText } from '@/components/ui/Skeleton'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { Section } from './DrawerSection'
 import { PropertyEditor } from './PropertyEditor'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
-import { ActionButton, ModeTab, TimeStat } from './EntityDrawer'
 import { useDrawerHistoryScope } from './useDrawerHistoryScope'
+import { DrawerBody, DrawerFooter, DrawerFrame, DrawerHeader, DrawerShell } from './shell/DrawerShell'
+import { DrawerTopBar, KindBadge } from './shell/DrawerTopBar'
+import { FreshnessStat } from './shell/FreshnessStat'
+import { JsonView } from './shell/JsonView'
+import { StageBar } from './shell/StageBar'
 import { ConnectionView } from './relationship/ConnectionView'
-import { Bridge, ConfirmDiscard, DetailRow, DrawerHeaderRow, Notice } from './relationship/RelationshipParts'
+import { Bridge, DetailRow, Notice } from './relationship/RelationshipParts'
 import { useEndpoints, useOpenEndpoint } from './relationship/useEndpoints'
 import { KIND_COPY, openInEdgeExplorer, relationshipCopy } from './relationship/relationshipModel'
 
 /** Created / last changed, as the summary reports them for the line being read. */
 interface ProvenanceMark {
   at?: string
+  /** The actor's id, when it is a person. */
+  userId: string | null
   by: string
   /** The draft's own change — not published yet. */
   inDraft: boolean
 }
 
 const markOf = (e: EntityEvent | null | undefined, names?: Record<string, string>): ProvenanceMark | undefined =>
-  e ? { at: e.at, by: actorName(e.actor ?? undefined, names), inDraft: e.inDraft } : undefined
+  e ? {
+    at: e.at,
+    userId: e.actor && e.actor !== 'system' ? e.actor : null,
+    by: actorName(e.actor ?? undefined, names),
+    inDraft: e.inDraft,
+  } : undefined
 
 interface RelationshipDrawerProps {
   /** Graph writes are possible here: a draft is open and nothing locks the canvas. */
@@ -78,9 +97,16 @@ interface RelationshipDrawerProps {
 type RelationshipTarget = Extract<DrawerEdgeTarget, { kind: 'relationship' }>
 type ViewMode = 'view' | 'edit' | 'json'
 
+const closeDrawer = () => useCanvasStore.getState().requestDrawerMove(() => {
+  const s = useCanvasStore.getState()
+  s.closeNodeDrawer()
+  s.clearSelection()
+})
+
 /** Mount only while a relationship is open (`drawerEdge`): the drawer keeps
- *  showing its last target through the rail's exit animation. */
-export function RelationshipDrawer(props: RelationshipDrawerProps) {
+ *  showing its last target through the rail's exit animation. Memoised: a
+ *  canvas re-rendering never re-renders the drawer. */
+export const RelationshipDrawer = memo(function RelationshipDrawer(props: RelationshipDrawerProps) {
   const live = useCanvasStore((s) => s.drawerEdge)
   // Keep the last target while the rail animates the drawer out, so it exits
   // showing what it showed rather than blanking first.
@@ -88,65 +114,28 @@ export function RelationshipDrawer(props: RelationshipDrawerProps) {
   if (live && live !== last) setLast(live)
   const target = live ?? last
 
-  const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
-  const clearSelection = useCanvasStore((s) => s.clearSelection)
-
-  // Unsaved-changes gate for every move made FROM this drawer (trail, an
-  // endpoint, a member, close). A move to the other kind unmounts the drawer,
-  // so it must be asked before the move, not after.
-  const [dirty, setDirty] = useState(false)
-  const [pendingMove, setPendingMove] = useState<(() => void) | null>(null)
-  const guard = useCallback((move: () => void) => {
-    if (dirty) setPendingMove(() => move)
-    else move()
-  }, [dirty])
-  const discardAndMove = useCallback(() => {
-    const move = pendingMove
-    setPendingMove(null)
-    setDirty(false)
-    move?.()
-  }, [pendingMove])
-  const close = useCallback(() => guard(() => {
-    closeNodeDrawer()
-    clearSelection()
-  }), [guard, closeNodeDrawer, clearSelection])
-
   if (!target) return null
   return (
-    <motion.aside
-      data-panel="relationship-drawer"
-      aria-label="Relationship details"
-      initial={{ width: 0, opacity: 0 }}
-      animate={{ width: 'clamp(420px, 32vw, 560px)', opacity: 1 }}
-      exit={{ width: 0, opacity: 0 }}
-      transition={MOTION.drawerSlide}
-      className="relative h-full flex-shrink-0 overflow-hidden bg-canvas-elevated border-l border-glass-border shadow-lg shadow-black/20"
-    >
-      <div className="relative w-[clamp(420px,32vw,560px)] h-full flex flex-col overflow-hidden">
-        {pendingMove && <ConfirmDiscard onKeep={() => setPendingMove(null)} onDiscard={discardAndMove} />}
-        {target.kind === 'relationship' ? (
-          <RelationshipPanel key={`r:${target.id}`} {...props} target={target} guard={guard} onClose={close} onDirtyChange={setDirty} />
-        ) : (
-          <ConnectionView
-            key={`c:${target.id}`}
-            target={target}
-            guard={guard}
-            onClose={close}
-            resolveNode={props.resolveNode}
-            onFocusNode={props.onFocusNode}
-            onLocateMany={props.onLocateMany}
-          />
-        )}
-      </div>
-    </motion.aside>
+    <DrawerFrame panel="relationship-drawer" label="Relationship details">
+      {target.kind === 'relationship' ? (
+        <RelationshipPanel key={`r:${target.id}`} {...props} target={target} onClose={closeDrawer} />
+      ) : (
+        <ConnectionView
+          key={`c:${target.id}`}
+          target={target}
+          onClose={closeDrawer}
+          resolveNode={props.resolveNode}
+          onFocusNode={props.onFocusNode}
+          onLocateMany={props.onLocateMany}
+        />
+      )}
+    </DrawerFrame>
   )
-}
+})
 
 function RelationshipPanel({
   target,
-  guard,
   onClose,
-  onDirtyChange,
   canEdit = false,
   writesLocked = false,
   resolveNode,
@@ -156,20 +145,18 @@ function RelationshipPanel({
   onStartEditing,
 }: RelationshipDrawerProps & {
   target: RelationshipTarget
-  guard: (move: () => void) => void
   onClose: () => void
-  onDirtyChange: (dirty: boolean) => void
 }) {
   const relationshipTypes = useViewRelationshipTypes()
   const containmentTypes = useViewContainmentEdgeTypes()
   const versioningEnabled = useFeature('versioningEnabled')
   const editModeEnabled = useFeature('editModeEnabled')
   const scope = useDrawerHistoryScope()
+  const titleId = useId()
 
   // ── The relationship itself: the drawer's own read, else what the canvas knows ──
   const { record, entityId, unsaved, isLoading: recordLoading, isError: recordError, refetch } = useRelationshipRecord(target)
-  const edges = useCanvasStore((s) => s.edges)
-  const canvasEdge = useMemo(() => edges.find((e) => e.id === target.id), [edges, target.id])
+  const canvasEdge = useCanvasStore((s) => edgeIndexOf(s.edges).get(target.id))
   const type = record?.edgeType ?? target.edgeType
   const kind = edgeKind(type, relationshipTypes, containmentTypes)
   const copy = relationshipCopy(type, relationshipTypes)
@@ -216,21 +203,14 @@ function RelationshipPanel({
   // ── Can this relationship be changed here? ──
   const editable = kind === 'lineage' && !unsaved && !writesLocked && versioningEnabled && editModeEnabled
     && canEdit && !!record && tracked && !pendingDelete
+  const openReview = () => useStagedChangesStore.getState().openReviewPanel()
   const readOnlyNotice = ((): { tone: 'info' | 'warn'; text: string; action?: { label: string; onClick: () => void } } | null => {
     if (kind !== 'lineage') return { tone: 'info', text: KIND_COPY[kind].readOnly! }
     if (unsaved) {
-      return {
-        tone: 'warn',
-        text: 'Not saved yet — save your changes to add properties and see its history.',
-        action: { label: 'Review & Save', onClick: () => useStagedChangesStore.getState().openReviewPanel() },
-      }
+      return { tone: 'warn', text: 'Not saved yet — save your changes to add properties and see its history.', action: { label: 'Review & Save', onClick: openReview } }
     }
     if (pendingDelete) {
-      return {
-        tone: 'warn',
-        text: 'Deletion staged — it is removed when you save, or discard it in Review.',
-        action: { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() },
-      }
+      return { tone: 'warn', text: 'Deletion staged — it is removed when you save, or discard it in Review.', action: { label: 'Review', onClick: openReview } }
     }
     if (writesLocked) return { tone: 'info', text: 'Read-only while tracing.' }
     if (!versioningEnabled || !editModeEnabled) return null
@@ -253,8 +233,7 @@ function RelationshipPanel({
   const [hasChanges, setHasChanges] = useState(false)
   const [justStaged, setJustStaged] = useState(false)
   const [copied, setCopied] = useState(false)
-  useEffect(() => { onDirtyChange(hasChanges) }, [hasChanges, onDirtyChange])
-  useEffect(() => () => onDirtyChange(false), [onDirtyChange])
+  const shownMode: ViewMode = mode === 'edit' && !editable ? 'view' : mode
 
   // Entering Edit starts from what is shown — unless there are unsaved edits
   // from a moment ago, which a trip to View must not throw away.
@@ -277,13 +256,15 @@ function RelationshipPanel({
     }
   }, [editable, shownProps])
 
-  const cancelEdit = () => {
+  const discard = () => {
     setHasChanges(false)
     setMode('view')
   }
 
+  const stagedTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  useEffect(() => () => clearTimeout(stagedTimer.current), [])
   const stage = () => {
-    if (!record || !entityId) return
+    if (!record || !entityId || !hasChanges) return
     useStagedChangesStore.getState().stageOrReplace(
       (c) => c.type === 'edit_edge' && c.targetId === entityId,
       {
@@ -299,7 +280,8 @@ function RelationshipPanel({
     setHasChanges(false)
     setMode('view')
     setJustStaged(true)
-    setTimeout(() => setJustStaged(false), 2500)
+    clearTimeout(stagedTimer.current)
+    stagedTimer.current = setTimeout(() => setJustStaged(false), 2500)
   }
 
   const copyId = async () => {
@@ -310,263 +292,258 @@ function RelationshipPanel({
 
   const canDelete = !!onDeleteEdge && kind === 'lineage' && !writesLocked && !!canvasEdge
     && canvasEdge.id === entityId && !pendingDelete
-  const deleteRelationship = () => guard(() => {
+  const deleteRelationship = () => useCanvasStore.getState().requestDrawerMove(() => {
     onDeleteEdge!(canvasEdge!.id)
     useCanvasStore.getState().closeNodeDrawer()
   })
 
-  const json = useMemo(() => JSON.stringify({
+  const jsonData = useMemo(() => ({
     id: entityId ?? target.id,
     type,
     source: target.source,
     target: target.target,
     ...(confidence !== undefined ? { confidence } : {}),
     properties: shownProps,
-  }, null, 2), [entityId, target, type, confidence, shownProps])
+  }), [entityId, target, type, confidence, shownProps])
+
+  const hasProps = Object.keys(shownProps).length > 0
+  const editing = shownMode === 'edit' || hasChanges || justStaged
 
   return (
-    <>
-      {/* Header */}
-      <div
-        className="flex-shrink-0 p-5 border-b border-glass-border"
-        style={{ background: `linear-gradient(135deg, ${color}10 0%, transparent 60%)` }}
+    <DrawerShell
+      titleId={titleId}
+      focusKey={target.id}
+      dirty={hasChanges}
+      dirtyWhat="your changes to this relationship"
+      onClose={onClose}
+      onStage={stage}
+      canStage={hasChanges}
+      onDiscard={discard}
+    >
+      <Tabs
+        value={shownMode}
+        onValueChange={(v) => (v === 'edit' ? startEdit() : setMode(v as ViewMode))}
+        className="flex flex-col flex-1 min-h-0"
       >
-        <DrawerHeaderRow badge={copy.label} badgeColor={color} guard={guard} onClose={onClose} onFocusNode={onFocusNode} />
-        <Bridge
-          source={source}
-          target={dest}
-          label={copy.label}
-          color={color}
-          onOpen={(id) => guard(() => { void opener.open(id) })}
-          pendingId={opener.pendingId}
-          unreachableId={opener.unreachableId}
-        />
-
-        <div className="flex items-center gap-2 flex-wrap mt-4">
-          {onLocateMany && (
-            <ActionButton icon={Crosshair} label="Locate both ends" onClick={() => { void onLocateMany([target.source, target.target]) }} />
-          )}
-          <ActionButton icon={copied ? Check : Copy} label={copied ? 'Copied!' : 'Copy ID'} onClick={() => { void copyId() }} />
-          <ActionButton
-            icon={Waypoints}
-            label="Edge Explorer"
-            onClick={() => guard(() => openInEdgeExplorer(canvasEdge ? [canvasEdge.id] : []))}
+        <DrawerHeader style={{ background: `linear-gradient(135deg, ${color}10 0%, transparent 60%)` }}>
+          <DrawerTopBar
+            badge={<KindBadge label={copy.label} bg={`${color}1a`} fg={color} />}
+            closeLabel="Close relationship details"
+            onClose={onClose}
+            onFocusNode={onFocusNode}
           />
-          {canDelete && (
-            <button
-              type="button"
-              onClick={deleteRelationship}
-              title="Delete relationship"
-              className="h-9 px-3 rounded-xl flex items-center gap-2 text-sm font-medium text-rose-600 dark:text-rose-400 bg-rose-500/10 hover:bg-rose-500/20 transition-colors duration-150"
+          <h2 id={titleId} tabIndex={-1} className="sr-only">
+            {copy.label}: {source.name} to {dest.name}
+          </h2>
+          <Bridge
+            source={source}
+            target={dest}
+            label={copy.label}
+            color={color}
+            onOpen={opener.open}
+            pendingId={opener.pendingId}
+            unreachableId={opener.unreachableId}
+          />
+
+          <div className="flex items-center gap-2 flex-wrap mt-4">
+            {onLocateMany && (
+              <Button size="sm" variant="subtle" leftIcon={Crosshair} onClick={() => { void onLocateMany([target.source, target.target]) }}>
+                Locate both ends
+              </Button>
+            )}
+            <Button size="sm" variant="subtle" leftIcon={copied ? Check : Copy} onClick={() => { void copyId() }}>
+              {copied ? 'Copied' : 'Copy ID'}
+            </Button>
+            <Button
+              size="sm"
+              variant="subtle"
+              leftIcon={Waypoints}
+              onClick={() => useCanvasStore.getState().requestDrawerMove(() => openInEdgeExplorer(canvasEdge ? [canvasEdge.id] : []))}
             >
-              <Trash2 className="w-4 h-4" />
-              <span className="hidden lg:inline">Delete</span>
-            </button>
-          )}
-        </div>
+              Edge Explorer
+            </Button>
+            {canDelete && (
+              <Button
+                size="sm"
+                variant="subtle"
+                leftIcon={Trash2}
+                onClick={deleteRelationship}
+                title="Delete relationship"
+                className="text-rose-600 dark:text-rose-400 bg-rose-500/10 hover:bg-rose-500/20 dark:bg-rose-500/10 dark:hover:bg-rose-500/20"
+              >
+                Delete
+              </Button>
+            )}
+          </div>
 
-        <div className="flex items-center gap-1 mt-4 p-1 rounded-xl bg-black/5 dark:bg-white/5">
-          <ModeTab active={mode === 'view'} onClick={() => setMode('view')} icon={Eye} label="View" />
-          {editable && (
-            <ModeTab
-              active={mode === 'edit'}
-              onClick={startEdit}
-              icon={Pencil}
-              label="Edit"
-              badge={hasChanges ? '•' : undefined}
-            />
-          )}
-          <ModeTab active={mode === 'json'} onClick={() => setMode('json')} icon={Code} label="JSON" />
-        </div>
+          <TabsList aria-label="Relationship details" className="mt-4">
+            <TabsTrigger value="view" icon={Eye}>View</TabsTrigger>
+            {editable && (
+              <TabsTrigger value="edit" icon={Pencil}
+                badge={hasChanges ? <span className="w-1.5 h-1.5 rounded-full bg-amber-500" aria-label="unsaved changes" /> : undefined}>
+                Edit
+              </TabsTrigger>
+            )}
+            <TabsTrigger value="json" icon={Code}>JSON</TabsTrigger>
+          </TabsList>
+        </DrawerHeader>
 
-        <AnimatePresence>
-          {(hasChanges || justStaged || (pendingEdit && mode === 'view')) && (
-            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="mt-3">
-              {hasChanges ? (
-                <Notice tone="warn"><span className="inline-flex items-center gap-2"><AlertTriangle className="w-4 h-4" />You have unsaved changes</span></Notice>
-              ) : justStaged ? (
-                <Notice tone="ok"><span className="inline-flex items-center gap-2"><CheckCircle className="w-4 h-4" />Changes staged</span></Notice>
-              ) : (
-                <Notice tone="info" action={{ label: 'Review & Save', onClick: () => useStagedChangesStore.getState().openReviewPanel() }}>
+        <DrawerBody>
+          {(readOnlyNotice || (pendingEdit && shownMode === 'view')) && (
+            <div className="px-5 pt-4 space-y-2">
+              {readOnlyNotice && <Notice tone={readOnlyNotice.tone} action={readOnlyNotice.action}>{readOnlyNotice.text}</Notice>}
+              {pendingEdit && shownMode === 'view' && (
+                <Notice tone="info" action={{ label: 'Review & Save', onClick: openReview }}>
                   Showing your staged property changes — not saved yet.
                 </Notice>
               )}
-            </motion.div>
+            </div>
           )}
-        </AnimatePresence>
-      </div>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar">
-        {readOnlyNotice && (
-          <div className="px-5 pt-4">
-            <Notice tone={readOnlyNotice.tone} action={readOnlyNotice.action}>{readOnlyNotice.text}</Notice>
-          </div>
-        )}
+          <TabsContent value="view">
+            <div className="divide-y divide-glass-border">
+              <Section title="Identifier" icon={Link}>
+                <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-black/[0.04] dark:bg-white/[0.05]">
+                  <code className="flex-1 text-xs font-mono text-ink-muted truncate" title={entityId ?? target.id}>{entityId ?? target.id}</code>
+                </div>
+              </Section>
 
-        {mode === 'view' && (
-          <div className="divide-y divide-glass-border">
-            <Section title="Identifier" icon={Link}>
-              <div className="flex items-center gap-2 p-3 rounded-xl bg-black/5 dark:bg-white/5">
-                <code className="flex-1 text-xs font-mono text-ink-muted truncate" title={entityId ?? target.id}>{entityId ?? target.id}</code>
-              </div>
-            </Section>
-
-            <Section title="Details" icon={Info}>
-              <div className="space-y-1">
-                <DetailRow label="Type">{copy.label}{copy.label.toUpperCase() !== type.toUpperCase() && <span className="ml-1.5 font-mono text-ink-muted">{type}</span>}</DetailRow>
-                {copy.description && <DetailRow label="Meaning">{copy.description}</DetailRow>}
-                <DetailRow label="Kind">{KIND_COPY[kind].label}</DetailRow>
-                <DetailRow label="From" mono>{target.source}</DetailRow>
-                <DetailRow label="To" mono>{target.target}</DetailRow>
-                {confidence !== undefined && confidence !== null && (
-                  <div className="py-1.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-ink-muted">Confidence</span>
-                      <span className="text-xs text-ink">{Math.round(confidence * 100)}%</span>
-                    </div>
-                    <div className="mt-1 h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
-                      <div className="h-full rounded-full" style={{ width: `${Math.round(confidence * 100)}%`, backgroundColor: color }} />
-                    </div>
-                  </div>
-                )}
-              </div>
-            </Section>
-
-            {historyOn && !unsaved && (
-              <Section title="Provenance" icon={Sparkles}>
-                {summaryQ.isLoading ? (
-                  <p className="text-xs text-ink-muted inline-flex items-center gap-2"><Loader2 className="w-3.5 h-3.5 animate-spin" />Loading…</p>
-                ) : !summary?.created ? (
-                  <p className="text-xs text-ink-muted italic">No recorded history for this relationship.</p>
-                ) : (
-                  <div className="space-y-1">
-                    <ProvenanceRow label="Created" mark={provenance.created} />
-                    <ProvenanceRow label="Last changed" mark={provenance.updated} />
-                    <DetailRow label="Revisions">
-                      {summary.revisions.published.toLocaleString()} published
-                      {draftId && <> · {summary.revisions.draft.toLocaleString()} in this draft</>}
-                    </DetailRow>
-                    {summary.changedOnMainSinceBranch && (
-                      <div className="pt-1">
-                        <Notice tone="info">Changed on the published graph since this draft began — this draft still shows it as it was.</Notice>
+              <Section title="Details" icon={Info}>
+                <div className="space-y-1">
+                  <DetailRow label="Type">{copy.label}{copy.label.toUpperCase() !== type.toUpperCase() && <span className="ml-1.5 font-mono text-ink-muted">{type}</span>}</DetailRow>
+                  {copy.description && <DetailRow label="Meaning">{copy.description}</DetailRow>}
+                  <DetailRow label="Kind">{KIND_COPY[kind].label}</DetailRow>
+                  <DetailRow label="From" mono>{target.source}</DetailRow>
+                  <DetailRow label="To" mono>{target.target}</DetailRow>
+                  {confidence !== undefined && confidence !== null && (
+                    <div className="py-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-ink-muted">Confidence</span>
+                        <span className="text-xs text-ink tabular-nums">{Math.round(confidence * 100)}%</span>
                       </div>
-                    )}
-                    <p className="pt-1 text-[11px] text-ink-muted">Published changes name whoever published them.</p>
-                  </div>
+                      <div className="mt-1 h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden"
+                        role="meter" aria-label="Confidence" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(confidence * 100)}>
+                        <div className="h-full rounded-full" style={{ width: `${Math.round(confidence * 100)}%`, backgroundColor: color }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </Section>
+
+              {historyOn && !unsaved && (
+                <Section title="Provenance" icon={Sparkles}>
+                  {summaryQ.isLoading ? (
+                    <SkeletonText lines={3} />
+                  ) : !summary?.created ? (
+                    <p className="text-xs text-ink-muted italic">No recorded history for this relationship.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      <ProvenanceRow label="Created" mark={provenance.created} />
+                      <ProvenanceRow label="Last changed" mark={provenance.updated} />
+                      <DetailRow label="Revisions">
+                        {summary.revisions.published.toLocaleString()} published
+                        {draftId && <> · {summary.revisions.draft.toLocaleString()} in this draft</>}
+                      </DetailRow>
+                      {summary.changedOnMainSinceBranch && (
+                        <div className="pt-1">
+                          <Notice tone="info">Changed on the published graph since this draft began — this draft still shows it as it was.</Notice>
+                        </div>
+                      )}
+                      <p className="pt-1 text-[11px] text-ink-muted">Published changes name whoever published them.</p>
+                    </div>
+                  )}
+                </Section>
+              )}
+
+              <Section title="Properties" icon={FileText} flush={hasProps}>
+                {recordLoading && !pendingEdit ? (
+                  <SkeletonText lines={3} />
+                ) : recordError ? (
+                  <Notice tone="warn" action={{ label: 'Retry', onClick: () => { void refetch() } }}>
+                    <span className="inline-flex items-center gap-2"><AlertCircle className="w-4 h-4" aria-hidden />Couldn’t load this relationship’s properties.</span>
+                  </Notice>
+                ) : hasProps ? (
+                  <PanelErrorBoundary resetKeys={[entityId ?? target.id]}>
+                    <PropertyEditor value={shownProps} onChange={() => {}} readOnly searchable groupByPath bare />
+                  </PanelErrorBoundary>
+                ) : (
+                  <EmptyState compact icon={FileText} title="No properties yet"
+                    description={editable ? 'Record what this flow carries, how often, who owns it.' : undefined}
+                    action={editable ? { label: 'Add properties', onClick: startEdit } : undefined} />
                 )}
               </Section>
-            )}
 
-            <Section title="Properties" icon={FileText} flush={Object.keys(shownProps).length > 0}>
-              {recordLoading && !pendingEdit ? (
-                <p className="text-xs text-ink-muted inline-flex items-center gap-2"><Loader2 className="w-3.5 h-3.5 animate-spin" />Loading…</p>
-              ) : recordError ? (
-                <Notice tone="warn" action={{ label: 'Retry', onClick: () => { void refetch() } }}>
-                  <span className="inline-flex items-center gap-2"><AlertCircle className="w-4 h-4" />Couldn’t load this relationship’s properties.</span>
-                </Notice>
-              ) : Object.keys(shownProps).length > 0 ? (
+              {historyOn && !unsaved && entityId && (
+                <Section title="History" icon={History}>
+                  <EntityHistory
+                    wsId={scope.wsId!}
+                    graphId={scope.graphId!}
+                    entityId={entityId}
+                    mainBranchId={scope.mainBranchId}
+                    branchId={scope.branchId}
+                    kind="edge"
+                  />
+                </Section>
+              )}
+            </div>
+          </TabsContent>
+
+          {editable && (
+            <TabsContent value="edit">
+              <Section title="Properties" icon={FileText} flush>
                 <PanelErrorBoundary resetKeys={[entityId ?? target.id]}>
-                  <PropertyEditor value={shownProps} onChange={() => {}} readOnly searchable groupByPath bare />
+                  <PropertyEditor
+                    value={draft}
+                    onChange={(next) => {
+                      setDraft(next as Record<string, unknown>)
+                      setHasChanges(true)
+                      setJustStaged(false)
+                    }}
+                    searchable
+                    groupByPath
+                    bare
+                  />
                 </PanelErrorBoundary>
-              ) : (
-                <p className="text-xs text-ink-muted italic">
-                  No properties yet.{editable ? ' Switch to Edit to add metadata.' : ''}
-                </p>
-              )}
-            </Section>
-
-            {historyOn && !unsaved && entityId && (
-              <Section title="History" icon={History}>
-                <EntityHistory
-                  wsId={scope.wsId!}
-                  graphId={scope.graphId!}
-                  entityId={entityId}
-                  mainBranchId={scope.mainBranchId}
-                  branchId={scope.branchId}
-                  kind="edge"
-                />
               </Section>
-            )}
-          </div>
-        )}
+            </TabsContent>
+          )}
 
-        {mode === 'edit' && (
-          <Section title="Properties" icon={FileText} flush>
-            <PanelErrorBoundary resetKeys={[entityId ?? target.id]}>
-              <PropertyEditor
-                value={draft}
-                onChange={(next) => {
-                  setDraft(next as Record<string, unknown>)
-                  setHasChanges(true)
-                }}
-                searchable
-                groupByPath
-                bare
+          <TabsContent value="json">
+            <JsonView data={jsonData} label="Relationship data as JSON" />
+          </TabsContent>
+        </DrawerBody>
+
+        <DrawerFooter>
+          {editing ? (
+            <StageBar dirty={hasChanges} justStaged={justStaged} onCancel={discard} onStage={stage} />
+          ) : historyOn && !unsaved ? (
+            <div className="grid grid-cols-2 gap-2">
+              <FreshnessStat
+                icon={<Sparkles className="w-4 h-4" />}
+                label={provenance.created?.inDraft ? 'Created · draft' : 'Created'}
+                iso={provenance.created?.at}
+                tone="emerald"
+                loading={summaryQ.isLoading}
+                by={provenance.created ? { id: provenance.created.userId, name: provenance.created.by } : undefined}
               />
-            </PanelErrorBoundary>
-          </Section>
-        )}
-
-        {mode === 'json' && (
-          <div className="p-5">
-            <pre className="p-3 rounded-xl bg-black/5 dark:bg-white/5 text-xs font-mono text-ink whitespace-pre-wrap break-all">{json}</pre>
-          </div>
-        )}
-      </div>
-
-      {/* Footer */}
-      <div className="flex-shrink-0 p-4 border-t border-glass-border bg-canvas-elevated">
-        {mode === 'edit' ? (
-          <div className="flex items-center justify-end gap-3">
-            <button
-              type="button"
-              onClick={cancelEdit}
-              className="px-4 py-2 text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/5 rounded-xl transition-colors duration-150"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={stage}
-              disabled={!hasChanges}
-              className={cn(
-                'px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors duration-150',
-                hasChanges
-                  ? 'bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25'
-                  : 'bg-white/5 text-ink-muted cursor-not-allowed',
-              )}
-            >
-              <Save className="w-4 h-4" />
-              Stage Changes
-            </button>
-          </div>
-        ) : historyOn && !unsaved ? (
-          <div className="grid grid-cols-2 gap-2">
-            <TimeStat
-              icon={<Sparkles className="w-4 h-4" />}
-              label={provenance.created?.inDraft ? 'Created · draft' : 'Created'}
-              iso={provenance.created?.at}
-              tone="emerald"
-              loading={summaryQ.isLoading}
-              emptyText="—"
-            />
-            <TimeStat
-              icon={<PencilLine className="w-4 h-4" />}
-              label={provenance.updated?.inDraft ? 'Updated · draft' : 'Updated'}
-              iso={provenance.updated?.at}
-              tone="indigo"
-              loading={summaryQ.isLoading}
-              emptyText="No changes yet"
-            />
-          </div>
-        ) : (
-          <p className="text-[11px] text-ink-muted text-center">
-            {unsaved ? 'Save your changes to start this relationship’s history.' : 'History is available with version control.'}
-          </p>
-        )}
-      </div>
-    </>
+              <FreshnessStat
+                icon={<PencilLine className="w-4 h-4" />}
+                label={provenance.updated?.inDraft ? 'Updated · draft' : 'Updated'}
+                iso={provenance.updated?.at}
+                tone="indigo"
+                loading={summaryQ.isLoading}
+                emptyText="No changes yet"
+                by={provenance.updated ? { id: provenance.updated.userId, name: provenance.updated.by } : undefined}
+              />
+            </div>
+          ) : (
+            <p className="text-[11px] text-ink-muted text-center py-1">
+              {unsaved ? 'Save your changes to start this relationship’s history.' : 'History is available with version control.'}
+            </p>
+          )}
+        </DrawerFooter>
+      </Tabs>
+    </DrawerShell>
   )
 }
 
@@ -574,9 +551,12 @@ function ProvenanceRow({ label, mark }: { label: string; mark?: ProvenanceMark }
   return (
     <DetailRow label={label}>
       {mark ? (
-        <span title={mark.at ? formatUtc(mark.at) : undefined}>
-          {mark.at ? timeAgo(mark.at) : '—'} · by <span className="font-medium">{mark.by}</span>
-          {mark.inDraft && <span className="ml-1.5 px-1.5 py-px rounded text-[10px] font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400">in this draft</span>}
+        <span className="inline-flex items-center gap-1.5 flex-wrap justify-end">
+          {mark.at ? <HoverTip label={formatUtc(mark.at)} width="data" className="inline-flex">{timeAgo(mark.at)}</HoverTip> : '—'}
+          <span className="text-ink-muted">· by</span>
+          <UserAvatar userId={mark.userId} name={mark.by} className="w-4 h-4 text-[8px]" />
+          <span className="font-medium">{mark.by}</span>
+          {mark.inDraft && <Badge tone="warning">in this draft</Badge>}
         </span>
       ) : '—'}
     </DetailRow>

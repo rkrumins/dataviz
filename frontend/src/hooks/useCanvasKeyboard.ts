@@ -20,6 +20,7 @@
 
 import { useEffect, useCallback, useRef } from 'react'
 import { useCanvasStore } from '@/store/canvas'
+import { isInKeyboardScope } from '@/lib/keyboardScope'
 
 // ============================================
 // Types
@@ -101,31 +102,22 @@ export function useCanvasKeyboard({
     handlers,
     containerRef,
 }: UseCanvasKeyboardOptions) {
-    const {
-        selectedNodeIds,
-        selectedEdgeIds,
-        clearSelection,
-        removeNode,
-        removeEdge,
-    } = useCanvasStore()
-    
     // Store handlers in ref to avoid dependency issues
     const handlersRef = useRef(handlers)
     handlersRef.current = handlers
-    
-    // Default delete handler
+
+    // The defaults read the store when a key is pressed — never by subscription: this hook sits
+    // in every canvas, and a whole-store subscription re-rendered the canvas on every write.
     const defaultDelete = useCallback(() => {
-        // Delete selected nodes
-        selectedNodeIds.forEach(id => removeNode(id))
-        // Delete selected edges
-        selectedEdgeIds.forEach(id => removeEdge(id))
-        clearSelection()
-    }, [selectedNodeIds, selectedEdgeIds, removeNode, removeEdge, clearSelection])
-    
-    // Default cancel handler
+        const s = useCanvasStore.getState()
+        s.selectedNodeIds.forEach(id => s.removeNode(id))
+        s.selectedEdgeIds.forEach(id => s.removeEdge(id))
+        s.clearSelection()
+    }, [])
+
     const defaultCancel = useCallback(() => {
-        clearSelection()
-    }, [clearSelection])
+        useCanvasStore.getState().clearSelection()
+    }, [])
     
     // Keyboard event handler
     const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -140,6 +132,9 @@ export function useCanvasKeyboard({
         ) {
             return
         }
+        // A drawer or dialog owns the keys typed inside it (Backspace there is not "delete the
+        // selected node").
+        if (isInKeyboardScope(target)) return
         
         const isMod = e.metaKey || e.ctrlKey
         const isShift = e.shiftKey
@@ -291,12 +286,6 @@ export function useCanvasKeyboard({
             target.removeEventListener('keydown', handleKeyDown as EventListener)
         }
     }, [handleKeyDown, containerRef])
-    
-    return {
-        selectedNodeIds,
-        selectedEdgeIds,
-        hasSelection: selectedNodeIds.length > 0 || selectedEdgeIds.length > 0,
-    }
 }
 
 // ============================================

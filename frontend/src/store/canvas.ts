@@ -269,6 +269,22 @@ interface CanvasState {
   drawerHistory: { entries: DrawerEntry[]; cursor: number }
   drawerBack: () => void
   drawerForward: () => void
+  /**
+   * The drawer on screen has edits it has not staged (it says so via `setDrawerDirty`). While
+   * it does, any move of the drawer — to another entity or relationship, along its trail, or
+   * shut — is HELD rather than carried out (`pendingDrawerMove`), whole: a click on another
+   * node neither swaps the drawer nor selects the node until the reader chooses. The drawer
+   * shows the choice; `resolveDrawerMove` settles it.
+   */
+  drawerDirty: boolean
+  setDrawerDirty: (dirty: boolean) => void
+  pendingDrawerMove: DrawerMove | null
+  /** Run a multi-step move (open + reveal, a trace, the builder) now — or hold all of it. */
+  requestDrawerMove: (move: () => void) => void
+  /** `proceed`: the edits were discarded or staged, replay the held move. `keep`: drop it. */
+  resolveDrawerMove: (choice: 'proceed' | 'keep') => void
+  /** Close the drawer whatever it holds — for a canvas or view that is going away. */
+  forceCloseDrawer: () => void
 
   // Viewport
   viewport: Viewport
@@ -419,10 +435,38 @@ function mergeGraph(
   }
 }
 
+/** A drawer move held while the drawer has unsaved edits: every store call that moved it in one
+ *  tick (a click selects AND opens; a trail step moves AND selects), replayed in order. */
+export interface DrawerMove {
+  steps: Array<() => void>
+}
+
+/** Moves replayed from a settled prompt, and nested moves of a replay, pass the gate. */
+let drawerGateBypass = 0
+/** Calls held within one tick join one move; a later one replaces it (the latest wins). */
+let drawerMoveBatchOpen = false
+
+/** Trail entries kept — a long walk forgets its oldest steps, not the recent ones. */
+export const DRAWER_TRAIL_MAX = 50
+
 export const useCanvasStore = create<CanvasState>()(
   persist(
     withVersion(
-    (set, get) => ({
+    (set, get) => {
+    /** Hold `replay` instead of running the move it stands for — when it `moves` the drawer
+     *  and the drawer has unsaved edits. Returns whether it was held. */
+    const holdDrawerMove = (moves: boolean, replay: () => void): boolean => {
+      const s = get()
+      if (!moves || !s.drawerDirty || drawerGateBypass > 0) return false
+      const pending = s.pendingDrawerMove
+      set({ pendingDrawerMove: { steps: pending && drawerMoveBatchOpen ? [...pending.steps, replay] : [replay] } })
+      if (!drawerMoveBatchOpen) {
+        drawerMoveBatchOpen = true
+        queueMicrotask(() => { drawerMoveBatchOpen = false })
+      }
+      return true
+    }
+    return ({
       // Nodes and Edges
       nodes: [],
       edges: [],
@@ -558,7 +602,11 @@ export const useCanvasStore = create<CanvasState>()(
       // Selection
       selectedNodeIds: [],
       selectedEdgeIds: [],
-      selectNode: (id, multi = false) => set((state) => ({
+      selectNode: (id, multi = false) => {
+        const s = get()
+        const swapsDrawer = !multi && !id.startsWith('logical:') && (s.drawerNodeId !== id || !!s.drawerEdge)
+        if (holdDrawerMove(swapsDrawer, () => get().selectNode(id, multi))) return
+        set((state) => ({
         selectedNodeIds: multi
           // A logical grouping is a container, not an entity — it can be
           // clicked, but it never joins a selection a bulk action reads.
@@ -584,8 +632,11 @@ export const useCanvasStore = create<CanvasState>()(
         ...(!multi && !id.startsWith('logical:')
           ? { drawerNodeId: id, drawerEdge: null, drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }) }
           : {}),
-      })),
-      selectEdge: (id, multi = false) => set((state) => ({
+        }))
+      },
+      selectEdge: (id, multi = false) => {
+        if (holdDrawerMove(!!get().drawerNodeId, () => get().selectEdge(id, multi))) return
+        set((state) => ({
         selectedEdgeIds: multi
           ? state.selectedEdgeIds.includes(id)
             ? state.selectedEdgeIds.filter((eid) => eid !== id)
@@ -595,10 +646,14 @@ export const useCanvasStore = create<CanvasState>()(
         // Mutual exclusion: selecting an edge swaps the right rail to the
         // edge drawer.
         drawerNodeId: null,
-      })),
-      setSelection: (ids) => set(() => {
+        }))
+      },
+      setSelection: (ids) => {
         const next = [...new Set(ids.filter(isSelectableNode))]
-        return {
+        const s = get()
+        const swapsDrawer = next.length === 1 && (s.drawerNodeId !== next[0] || !!s.drawerEdge)
+        if (holdDrawerMove(swapsDrawer, () => get().setSelection(ids))) return
+        set(() => ({
           selectedNodeIds: next,
           // Node and edge selections are mutually exclusive, as in selectNode.
           selectedEdgeIds: [],
@@ -606,8 +661,8 @@ export const useCanvasStore = create<CanvasState>()(
           // drawer; a set of several must not, because the drawer shows ONE
           // entity and a selection of five is not one entity.
           ...(next.length === 1 ? { drawerNodeId: next[0], drawerEdge: null } : {}),
-        }
-      }),
+        }))
+      },
       multiSelectArmed: false,
       setMultiSelectArmed: (multiSelectArmed) => set({ multiSelectArmed }),
       clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [], multiSelectArmed: false }),
@@ -618,43 +673,92 @@ export const useCanvasStore = create<CanvasState>()(
       drawerEdge: null,
       drawerEdgeEditRequest: false,
       drawerHistory: { entries: [], cursor: -1 },
-      openNodeDrawer: (id) => set((state) => ({
-        drawerNodeId: id,
-        drawerEdge: null,
-        drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }),
-      })),
-      openEdgeDrawer: (target, opts) => set((state) => ({
-        drawerEdge: target,
-        drawerNodeId: null,
-        drawerEdgeEditRequest: opts?.edit === true,
-        drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'edge', target }),
-      })),
+      openNodeDrawer: (id) => {
+        const s = get()
+        if (holdDrawerMove(s.drawerNodeId !== id || !!s.drawerEdge, () => get().openNodeDrawer(id))) return
+        set((state) => ({
+          drawerNodeId: id,
+          drawerEdge: null,
+          drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }),
+        }))
+      },
+      openEdgeDrawer: (target, opts) => {
+        const s = get()
+        const same = !s.drawerNodeId && !!s.drawerEdge && sameDrawerEntry({ kind: 'edge', target: s.drawerEdge }, { kind: 'edge', target })
+        if (holdDrawerMove(!same, () => get().openEdgeDrawer(target, opts))) return
+        set((state) => ({
+          drawerEdge: target,
+          drawerNodeId: null,
+          drawerEdgeEditRequest: opts?.edit === true,
+          drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'edge', target }),
+        }))
+      },
       consumeDrawerEdgeEditRequest: () => {
         const requested = get().drawerEdgeEditRequest
         if (requested) set({ drawerEdgeEditRequest: false })
         return requested
       },
-      closeNodeDrawer: () => set({
+      closeNodeDrawer: () => {
+        const s = get()
+        if (holdDrawerMove(!!s.drawerNodeId || !!s.drawerEdge, () => get().closeNodeDrawer())) return
+        set({
+          drawerNodeId: null,
+          drawerEdge: null,
+          drawerEdgeEditRequest: false,
+          drawerHistory: { entries: [], cursor: -1 },
+        })
+      },
+      drawerBack: () => {
+        if (holdDrawerMove(get().drawerHistory.cursor > 0, () => get().drawerBack())) return
+        set((state) => {
+          const cursor = state.drawerHistory.cursor - 1
+          if (cursor < 0) return {}
+          return {
+            ...showDrawerEntry(state.drawerHistory.entries[cursor]!),
+            drawerHistory: { ...state.drawerHistory, cursor },
+          }
+        })
+      },
+      drawerForward: () => {
+        const h = get().drawerHistory
+        if (holdDrawerMove(h.cursor < h.entries.length - 1, () => get().drawerForward())) return
+        set((state) => {
+          const cursor = state.drawerHistory.cursor + 1
+          if (cursor >= state.drawerHistory.entries.length) return {}
+          return {
+            ...showDrawerEntry(state.drawerHistory.entries[cursor]!),
+            drawerHistory: { ...state.drawerHistory, cursor },
+          }
+        })
+      },
+      drawerDirty: false,
+      pendingDrawerMove: null,
+      setDrawerDirty: (dirty) => {
+        if (get().drawerDirty === dirty) return
+        // A drawer that has nothing to lose (staged, discarded, gone) leaves nothing to ask about.
+        set(dirty ? { drawerDirty: true } : { drawerDirty: false, pendingDrawerMove: null })
+      },
+      requestDrawerMove: (move) => {
+        if (!holdDrawerMove(true, move)) move()
+      },
+      resolveDrawerMove: (choice) => {
+        const pending = get().pendingDrawerMove
+        set(choice === 'proceed' ? { pendingDrawerMove: null, drawerDirty: false } : { pendingDrawerMove: null })
+        if (choice !== 'proceed' || !pending) return
+        drawerGateBypass++
+        try {
+          pending.steps.forEach((step) => step())
+        } finally {
+          drawerGateBypass--
+        }
+      },
+      forceCloseDrawer: () => set({
+        drawerDirty: false,
+        pendingDrawerMove: null,
         drawerNodeId: null,
         drawerEdge: null,
         drawerEdgeEditRequest: false,
         drawerHistory: { entries: [], cursor: -1 },
-      }),
-      drawerBack: () => set((state) => {
-        const cursor = state.drawerHistory.cursor - 1
-        if (cursor < 0) return {}
-        return {
-          ...showDrawerEntry(state.drawerHistory.entries[cursor]!),
-          drawerHistory: { ...state.drawerHistory, cursor },
-        }
-      }),
-      drawerForward: () => set((state) => {
-        const cursor = state.drawerHistory.cursor + 1
-        if (cursor >= state.drawerHistory.entries.length) return {}
-        return {
-          ...showDrawerEntry(state.drawerHistory.entries[cursor]!),
-          drawerHistory: { ...state.drawerHistory, cursor },
-        }
       }),
 
       // Viewport
@@ -819,7 +923,8 @@ export const useCanvasStore = create<CanvasState>()(
         if (remainingEdges.length === state.edges.length) return state
         return { edges: remainingEdges, _edgeIndex: nextEdgeIndex }
       }),
-    })),
+    })
+    }),
     {
       name: 'canvas-storage',
       storage: createJSONStorage(() => localStorage),
@@ -890,7 +995,7 @@ function pushDrawerHistory(
   entry: DrawerEntry,
 ): { entries: DrawerEntry[]; cursor: number } {
   if (sameDrawerEntry(history.entries[history.cursor], entry)) return history
-  const entries = [...history.entries.slice(0, history.cursor + 1), entry]
+  const entries = [...history.entries.slice(0, history.cursor + 1), entry].slice(-DRAWER_TRAIL_MAX)
   return { entries, cursor: entries.length - 1 }
 }
 

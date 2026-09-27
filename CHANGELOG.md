@@ -57,6 +57,18 @@ relationships on the published graph are read-only, and say why.
   pages newest first (`limit`, `before`/`nextBefore`, `scope=all|draft|published`, `branchId`), reads
   only main and the draft you name (403 for a draft you cannot read), and says what each revision
   changed, property by property. The drawers use these instead of downloading every revision.
+- **The entity and relationship drawers share one frame, and keep their keys to themselves.** Keys
+  typed in a drawer no longer reach the canvas: Backspace in a drawer does not delete the selected
+  entity, and the canvas's letter shortcuts do not fire. Esc leaves a field first, then closes the
+  drawer; ⌘S (Ctrl+S) stages an edit. When the drawer changes to another entity while you are working
+  in it, focus moves to the new title. When it closes, focus goes back to where it came from. An edit
+  in progress shows a stage bar, with Cancel and "Stage changes", on every tab. "Updated" names who
+  made the change.
+- **The drawers stay fast on large canvases.** They read their own entity rather than the whole
+  graph, so a pan, a pulse or a page of children arriving elsewhere no longer re-renders them. The
+  list of places to move an entity is built only when you open it, and is searchable. Reading the
+  relationships between a few known entities binds both ends in FalkorDB, so a relationship on a hub
+  no longer walks every edge the hub has.
 - **An update removes a property only when told to.** `POST /graph/changes`, the draft
   `…/changes` (stage) route and `PATCH /edges/{id}` take `unsetProperties: [name, …]` beside the
   payload. `properties` in an update merges key by key everywhere, including the stage route, which
@@ -65,6 +77,11 @@ relationships on the published graph are read-only, and say why.
 
 ### Fixed
 
+- **An unstaged edit in a drawer could be lost without a word.** Esc, starting a trace, opening the
+  Hierarchy Builder or following a lineage row closed or swapped the drawer and dropped the edit, and
+  a canvas click selected the other entity while the drawer still showed the first. Now anything
+  that would move the drawer waits, selection included, and asks: stage the edit and go on, discard
+  it, or keep editing. Leaving the page asks too.
 - **A stored export's download could be cut short.** It was held to the API's two-minute deadline,
   which ends a response cleanly, so a large file (a view package's, say) could arrive incomplete while
   looking whole, and nginx buffered it to disk. It now runs as long as it takes, as the streamed

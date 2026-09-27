@@ -75,7 +75,7 @@ import {
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
-import { EntityDrawer } from '../../panels/EntityDrawer'
+import { EntityDrawer } from '../../panels/entity/EntityDrawer'
 import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
 import { targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
@@ -772,7 +772,11 @@ export function ContextViewCanvas({
     },
     onCloseEntityDrawer: () => {
       if (isStagedPanelOpen) { closeStagedChangesPanel(); return true }
-      if (drawerNodeId || drawerEdge) { closeNodeDrawer(); clearSelection(); return true }
+      if (drawerNodeId || drawerEdge) {
+        // One move: with unsaved edits in the drawer, neither happens until the reader decides.
+        useCanvasStore.getState().requestDrawerMove(() => { closeNodeDrawer(); clearSelection() })
+        return true
+      }
       return false
     },
     // ESC exits an active trace before any other panel close — gives the
@@ -1870,7 +1874,7 @@ export function ContextViewCanvas({
   // snapshot of lines that are no longer drawn into another view.
   useEffect(() => () => {
     const s = useCanvasStore.getState()
-    if (s.drawerEdge || s.drawerHistory.entries.some(e => e.kind === 'edge')) s.closeNodeDrawer()
+    if (s.drawerEdge || s.drawerHistory.entries.some(e => e.kind === 'edge')) s.forceCloseDrawer()
   }, [activeView?.id])
 
   // ─── Node sort modes ────────────────────────────────────────────────────────
@@ -2271,35 +2275,39 @@ export function ContextViewCanvas({
     nodeId: string | readonly string[],
     direction: 'up' | 'down' | 'both' = 'both',
   ) => {
-    // A bulk trace walks every selected entity and the overlay draws their
-    // UNION. History, re-centre and the "already tracing this" check are all
-    // about a single focal, so they follow the FIRST seed — which for an
-    // ordinary one-entity trace is the only one, and nothing changes.
-    const nodeIds = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
-    if (nodeIds.length === 0) return
-    const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
-    const urn = urns[0]!
-    const view = {
-      showUpstream: direction !== 'down',
-      showDownstream: direction !== 'up',
-      depthUp: FULL_WALK_INITIAL_DEPTH,
-      depthDown: FULL_WALK_INITIAL_DEPTH,
-      // Re-pressing Trace on the focal already on screen does NOT re-seed the
-      // overlay, so recording an empty picture here would leave the entry
-      // describing a trace nobody is looking at. A genuinely new focal has no
-      // picture yet: empty means "as it opens", and the seed decides.
-      traceExpansion: canvasTraceRef.current.tracedUrn === urn
-        ? [...(overlayRef.current?.traceExpansion ?? [])]
-        : [],
-    }
-    setTraceShowUpstream(view.showUpstream)
-    setTraceShowDownstream(view.showDownstream)
-    setTraceDepthUp(view.depthUp)
-    setTraceDepthDown(view.depthDown)
-    // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
-    flushExpansionRecord()
-    setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeIds[0]!, view, timestamp: Date.now() }))
-    beginTrace(urns)
+    // A trace takes the canvas over and closes the drawer: a drawer move, held — whole — while
+    // the drawer has edits not staged yet.
+    useCanvasStore.getState().requestDrawerMove(() => {
+      // A bulk trace walks every selected entity and the overlay draws their
+      // UNION. History, re-centre and the "already tracing this" check are all
+      // about a single focal, so they follow the FIRST seed — which for an
+      // ordinary one-entity trace is the only one, and nothing changes.
+      const nodeIds = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
+      if (nodeIds.length === 0) return
+      const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
+      const urn = urns[0]!
+      const view = {
+        showUpstream: direction !== 'down',
+        showDownstream: direction !== 'up',
+        depthUp: FULL_WALK_INITIAL_DEPTH,
+        depthDown: FULL_WALK_INITIAL_DEPTH,
+        // Re-pressing Trace on the focal already on screen does NOT re-seed the
+        // overlay, so recording an empty picture here would leave the entry
+        // describing a trace nobody is looking at. A genuinely new focal has no
+        // picture yet: empty means "as it opens", and the seed decides.
+        traceExpansion: canvasTraceRef.current.tracedUrn === urn
+          ? [...(overlayRef.current?.traceExpansion ?? [])]
+          : [],
+      }
+      setTraceShowUpstream(view.showUpstream)
+      setTraceShowDownstream(view.showDownstream)
+      setTraceDepthUp(view.depthUp)
+      setTraceDepthDown(view.depthDown)
+      // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
+      flushExpansionRecord()
+      setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeIds[0]!, view, timestamp: Date.now() }))
+      beginTrace(urns)
+    })
   }, [displayMap, beginTrace, flushExpansionRecord])
 
   // History restore: the entry's own view params, no push (back/forward
@@ -5348,6 +5356,13 @@ export function ContextViewCanvas({
   // config — ontology-agnostic.
   const buildTypeLayerMapMemo = useMemo(() => buildTypeLayerMap(sortedLayers), [sortedLayers])
 
+  // The drawers are memoised: what this canvas hands them must keep its identity across renders.
+  const drawerTraceUp = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'up'), [startCanvasTrace])
+  const drawerTraceDown = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'down'), [startCanvasTrace])
+  const drawerFullTrace = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'both'), [startCanvasTrace])
+  const drawerLocateMany = useCallback((ids: string[]) => { void locateManyOnCanvas(ids) }, [locateManyOnCanvas])
+  const drawerStartEditing = canManage && versioningEnabled && canEnterEdit && editModeEnabled && !traceActive ? handleEnterEdit : undefined
+
   return (
     <div
       data-trace-active={traceActive ? 'true' : 'false'}
@@ -6495,16 +6510,16 @@ export function ContextViewCanvas({
             key="entity-drawer"
             // Edits are draft-only, and a trace is read-only for its whole life.
             canEdit={canvasWritable}
-            onStartEditing={canManage && versioningEnabled && canEnterEdit && editModeEnabled && !traceActive ? handleEnterEdit : undefined}
+            onStartEditing={drawerStartEditing}
             writesLocked={traceActive}
             resolveNode={resolveTraceNode}
             onFocusConnections={openLens}
-            onTraceUp={(nodeId) => startCanvasTrace(nodeId, 'up')}
-            onTraceDown={(nodeId) => startCanvasTrace(nodeId, 'down')}
-            onFullTrace={(nodeId) => startCanvasTrace(nodeId, 'both')}
+            onTraceUp={drawerTraceUp}
+            onTraceDown={drawerTraceDown}
+            onFullTrace={drawerFullTrace}
             onFocusNode={revealOnCanvas}
             onRevealPath={revealSearchHit}
-            onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
+            onLocateMany={drawerLocateMany}
           />
         )}
         {!builderOpen && !buildOpen && !drawerNodeId && drawerEdge && (
@@ -6515,9 +6530,9 @@ export function ContextViewCanvas({
             writesLocked={traceActive}
             resolveNode={resolveTraceNode}
             onFocusNode={revealOnCanvas}
-            onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
+            onLocateMany={drawerLocateMany}
             onDeleteEdge={canvasWritable ? interactions.deleteEdge : undefined}
-            onStartEditing={canManage && versioningEnabled && canEnterEdit && editModeEnabled && !traceActive ? handleEnterEdit : undefined}
+            onStartEditing={drawerStartEditing}
           />
         )}
         {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && isEdgePanelOpen && (

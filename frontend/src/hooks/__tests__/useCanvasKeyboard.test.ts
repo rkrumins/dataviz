@@ -79,3 +79,23 @@ describe('useCanvasKeyboard — command palette reallocation (C8)', () => {
     expect(handlers.onCommandPalette).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('keys typed inside a keyboard scope (a drawer)', () => {
+  it('never reach the canvas shortcuts', () => {
+    const onDelete = vi.fn()
+    const onTrace = vi.fn()
+    renderHook(() => useCanvasKeyboard({ enabled: true, handlers: { onDelete, onTrace } }))
+    const drawer = document.createElement('aside')
+    drawer.setAttribute('data-keyboard-scope', 'drawer')
+    const button = document.createElement('button')
+    drawer.appendChild(button)
+    document.body.appendChild(drawer)
+    button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }))
+    button.dispatchEvent(new KeyboardEvent('keydown', { key: 't', bubbles: true }))
+    expect(onDelete).not.toHaveBeenCalled()
+    expect(onTrace).not.toHaveBeenCalled()
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }))
+    expect(onDelete).toHaveBeenCalledTimes(1)
+    drawer.remove()
+  })
+})

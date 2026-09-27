@@ -201,13 +201,10 @@ export function useCanvasInteractions(
     
     const provider = useGraphProvider()
     const { notify } = useAppNotifications()
-    const {
-        nodes,
-        selectedNodeIds,
-        selectedEdgeIds,
-        selectNode,
-        clearSelection,
-    } = useCanvasStore()
+    // Actions only — the nodes and the selection are read when a handler runs, so the canvas
+    // hosting this hook is not re-rendered by every store write.
+    const selectNode = useCanvasStore((s) => s.selectNode)
+    const clearSelection = useCanvasStore((s) => s.clearSelection)
     
     // State
     const [contextMenu, setContextMenu] = useState<CanvasInteractionState['contextMenu']>({
@@ -386,19 +383,19 @@ export function useCanvasInteractions(
     }, [onNodeDeleted])
     
     const createChild = useCallback((parentId: string) => {
-        const parentNode = nodes.find(n => n.id === parentId)
+        const parentNode = useCanvasStore.getState().nodes.find(n => n.id === parentId)
         if (parentNode) {
             useHierarchyBuilderStore.getState().open({ parentUrn: (parentNode.data.urn as string) ?? parentNode.id })
         }
-    }, [nodes])
+    }, [])
     
     const copyUrn = useCallback(async (nodeId: string) => {
-        const node = nodes.find(n => n.id === nodeId)
+        const node = useCanvasStore.getState().nodes.find(n => n.id === nodeId)
         if (node?.data.urn) {
             await navigator.clipboard.writeText(node.data.urn)
             // Could show a notification here
         }
-    }, [nodes])
+    }, [])
     
     // ===================
     // Edge CRUD
@@ -549,22 +546,24 @@ export function useCanvasInteractions(
     // ===================
     
     const selectAll = useCallback(() => {
-        nodes.forEach(n => selectNode(n.id, true))
-    }, [nodes, selectNode])
+        useCanvasStore.getState().nodes.forEach(n => selectNode(n.id, true))
+    }, [selectNode])
     
     const deleteSelected = useCallback(() => {
         // Route through the staged-delete helpers so keyboard Delete shows up
         // in the staged-changes panel just like context-menu Delete does.
+        const { selectedNodeIds, selectedEdgeIds } = useCanvasStore.getState()
         selectedNodeIds.forEach(id => deleteNode(id))
         selectedEdgeIds.forEach(id => deleteEdge(id))
         clearSelection()
-    }, [selectedNodeIds, selectedEdgeIds, deleteNode, deleteEdge, clearSelection])
+    }, [deleteNode, deleteEdge, clearSelection])
     
     const duplicateSelected = useCallback(() => {
-        selectedNodeIds.forEach(id => duplicateNode(id))
-    }, [selectedNodeIds, duplicateNode])
+        useCanvasStore.getState().selectedNodeIds.forEach(id => duplicateNode(id))
+    }, [duplicateNode])
     
     const copySelectedUrns = useCallback(async () => {
+        const { selectedNodeIds, nodes } = useCanvasStore.getState()
         const urns = selectedNodeIds
             .map(id => nodes.find(n => n.id === id)?.data.urn)
             .filter(Boolean)
@@ -573,7 +572,7 @@ export function useCanvasInteractions(
         if (urns) {
             await navigator.clipboard.writeText(urns)
         }
-    }, [selectedNodeIds, nodes])
+    }, [])
     
     // ===================
     // Keyboard Handlers
@@ -585,6 +584,7 @@ export function useCanvasInteractions(
         onSelectAll: selectAll,
         onCopy: copySelectedUrns,
         onEdit: () => {
+            const { selectedNodeIds } = useCanvasStore.getState()
             if (selectedNodeIds.length === 1) {
                 editNode(selectedNodeIds[0])
             }
@@ -611,6 +611,7 @@ export function useCanvasInteractions(
             }
         },
         onTrace: () => {
+            const { selectedNodeIds } = useCanvasStore.getState()
             if (selectedNodeIds.length === 1 && onTraceNode) {
                 onTraceNode(selectedNodeIds[0])
             }
@@ -619,6 +620,7 @@ export function useCanvasInteractions(
             useHierarchyBuilderStore.getState().open()
         },
         onConnectMode: () => {
+            const { selectedNodeIds } = useCanvasStore.getState()
             if (selectedNodeIds.length === 1) onConnectMode?.(selectedNodeIds[0])
         },
         onCommandPalette: openCommandPalette,

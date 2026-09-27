@@ -1,43 +1,12 @@
 /**
- * Presentational pieces of the relationship drawer: its header row, the
- * source → target "bridge", notices and detail rows.
+ * Presentational pieces of the relationship drawer: the source → target
+ * "bridge", notices and detail rows.
  */
 import type React from 'react'
-import { ArrowDown, ArrowUpDown, Loader2, X } from 'lucide-react'
+import { ArrowDown, ArrowUpDown, Loader2 } from 'lucide-react'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
-import { DrawerTrailNav } from '../DrawerTrailNav'
 import type { Endpoint } from './useEndpoints'
-
-export function DrawerHeaderRow({ badge, badgeColor, guard, onClose, onFocusNode }: {
-  badge: string
-  badgeColor: string
-  guard: (step: () => void) => void
-  onClose: () => void
-  onFocusNode?: (nodeId: string) => void | Promise<unknown>
-}) {
-  return (
-    <div className="flex items-center justify-between mb-3">
-      <div className="flex items-center gap-2 min-w-0">
-        <DrawerTrailNav onFocusNode={onFocusNode} guard={guard} />
-        <span
-          className="px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide truncate"
-          style={{ backgroundColor: `${badgeColor}1a`, color: badgeColor }}
-        >
-          {badge}
-        </span>
-      </div>
-      <button
-        type="button"
-        onClick={onClose}
-        aria-label="Close relationship details"
-        className="w-8 h-8 rounded-lg flex items-center justify-center text-ink-muted hover:text-ink hover:bg-white/10 transition-colors duration-150"
-      >
-        <X className="w-4 h-4" />
-      </button>
-    </div>
-  )
-}
 
 /**
  * Source → relationship → target, read top to bottom. Each end opens that
@@ -137,27 +106,6 @@ export function DetailRow({ label, children, mono }: { label: string; children: 
     <div className="flex items-start justify-between gap-4 py-1.5">
       <span className="text-xs text-ink-muted min-w-[96px]">{label}</span>
       <span className={cn('text-xs text-ink text-right', mono ? 'font-mono break-all' : 'break-words')}>{children}</span>
-    </div>
-  )
-}
-
-export function ConfirmDiscard({ onKeep, onDiscard }: { onKeep: () => void; onDiscard: () => void }) {
-  return (
-    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/40 backdrop-blur-sm p-6">
-      <div className="w-full max-w-xs rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl p-5">
-        <h4 className="text-sm font-semibold text-ink">Unsaved changes</h4>
-        <p className="text-xs text-ink-muted mt-1.5">
-          You have unsaved property changes on this relationship. Leave and discard them?
-        </p>
-        <div className="flex items-center justify-end gap-2 mt-4">
-          <button type="button" onClick={onKeep} className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors">
-            Keep editing
-          </button>
-          <button type="button" onClick={onDiscard} className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:brightness-110 transition-all">
-            Discard
-          </button>
-        </div>
-      </div>
     </div>
   )
 }

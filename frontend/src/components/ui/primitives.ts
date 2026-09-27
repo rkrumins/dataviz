@@ -1,0 +1,10 @@
+/** The app's UI primitives — one import for the building blocks every surface shares. */
+export { Button, IconButton, type ButtonProps, type IconButtonProps } from './Button'
+export { Badge, type BadgeProps, type BadgeTone, type BadgeVariant } from './Badge'
+export { Tabs, TabsList, TabsTrigger, TabsContent } from './Tabs'
+export { Segmented, type SegmentedOption } from './Segmented'
+export { Skeleton, SkeletonText } from './Skeleton'
+export { EmptyState } from './EmptyState'
+export { Kbd } from './Kbd'
+export { HoverTip } from './HoverTip'
+export { UserAvatar } from './UserAvatar'
