@@ -3,13 +3,16 @@
  * catalog: every key with how many entities carry it, its kinds (mixed ones
  * flagged and explained), its range, its values with exact counts (or that
  * it has too many to list), the tags with their counts — and the searches
- * and rules it hands off, typed as the values are stored.
+ * and rules it hands off, typed as the values are stored. In a draft it
+ * lists the draft's property operations (progress, Stop, Undo) and badges
+ * the keys they changed.
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { PropertyCatalogState } from '@/hooks/usePropertyCatalog'
+import type { PropertyOpJob, PropertyOpList } from '@/services/versioningApiService'
 import {
     NO_DRAFT, NO_VERSION_CONTROL, type EntityEditing,
 } from '@/features/versioning/hooks/useEntityEditing'
@@ -19,8 +22,11 @@ import { PropertyBrowser } from '../PropertyBrowser'
 
 
 const notify = vi.fn()
+const undo = vi.fn()
 let state: PropertyCatalogState
 let editing: EntityEditing
+let draft: { wsId: string; graphId: string; branchId: string } | null = null
+let ops: PropertyOpList | undefined
 
 vi.mock('@/hooks/usePropertyCatalog', () => ({
     usePropertyCatalog: () => state,
@@ -34,6 +40,12 @@ vi.mock('../PropertyOperationDialog', () => ({
 vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/features/versioning/hooks/useEntityEditing')>()),
     useEntityEditing: () => editing,
+    useEditDraft: () => draft,
+}))
+vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+    usePropertyOps: () => ({ data: ops }),
+    useCancelPropertyOp: () => ({ mutate: vi.fn(), isPending: false }),
+    useUndoPropertyOp: () => ({ mutate: undo, isPending: false }),
 }))
 
 
@@ -258,5 +270,70 @@ describe('PropertyBrowser — a property is changed only in a draft', () => {
         expect(owner.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument()
         expect(owner.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
         expect(owner.getByRole('button', { name: 'Create rule' })).toBeEnabled()
+    })
+})
+
+
+describe('PropertyBrowser — a draft\'s property operations', () => {
+    const job = (over: Partial<PropertyOpJob> & { jobId: string }) => ({
+        kind: 'apply', undoOf: null, undoneBy: null, status: 'completed', phase: null,
+        cancelRequested: false, processed: 0, total: 0, percent: 100, error: null,
+        summary: { applied: 3, commits: ['c1'] }, ...over,
+    }) as PropertyOpJob
+
+    beforeEach(() => {
+        editing = { offered: true, blocked: null }
+        draft = { wsId: 'ws1', graphId: 'g1', branchId: 'br1' }
+        undo.mockReset()
+    })
+
+    it('shows the one being written with its progress, and badges what the draft changed', () => {
+        ops = {
+            draftChanges: 40, maxDraftChanges: 100_000, ops: [
+                job({ jobId: 'j2', status: 'running', phase: 'applying', processed: 30, total: 60, percent: 50,
+                      op: { kind: 'set', key: 'tier', value: 'gold' } }),
+                job({ jobId: 'j1', op: { kind: 'rename', key: 'owner', newKey: 'steward' } }),
+            ],
+        }
+        renderBrowser()
+        expect(screen.getByText('Set tier = gold')).toBeInTheDocument()
+        expect(screen.getByText('Applying · 30 of 60')).toBeInTheDocument()
+        expect(screen.getByRole('progressbar', { name: 'Set tier = gold' })).toHaveAttribute('aria-valuenow', '50')
+        // Written in part already: the key it adds is new in this draft, with its value.
+        expect(within(card('tier')).getByText('new')).toBeInTheDocument()
+        expect(within(card('tier')).getByText('gold')).toBeInTheDocument()
+        expect(within(card('owner')).getByText('rename')).toBeInTheDocument()
+        // Nothing is undone beside an operation being written.
+        expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument()
+    })
+
+    it('undoes a finished one, and says what an undo did', async () => {
+        ops = {
+            draftChanges: 3, maxDraftChanges: 100_000, ops: [
+                job({ jobId: 'j1', op: { kind: 'remove', key: 'legacyCode' } }),
+            ],
+        }
+        renderBrowser()
+        expect(within(card('legacyCode')).getByText('remove')).toBeInTheDocument()
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Undo' }))
+        expect(undo.mock.calls[0][0]).toBe('j1')
+
+        ops = {
+            draftChanges: 3, maxDraftChanges: 100_000, ops: [
+                job({ jobId: 'u1', kind: 'undo', undoOf: 'j1', op: { kind: 'remove', key: 'legacyCode' },
+                      summary: { restored: 2, changedSince: 1, commits: ['c2'] } }),
+                job({ jobId: 'j1', undoneBy: 'u1', op: { kind: 'remove', key: 'legacyCode' } }),
+            ],
+        }
+        renderBrowser()
+        expect(screen.getByText('2 entities put back · 1 edited since, left as it is')).toBeInTheDocument()
+        expect(screen.getAllByText('undone')).toHaveLength(1)
+    })
+
+    it('lists nothing outside a draft', () => {
+        draft = null
+        ops = undefined
+        renderBrowser()
+        expect(screen.queryByRole('list', { name: 'Property operations' })).not.toBeInTheDocument()
     })
 })

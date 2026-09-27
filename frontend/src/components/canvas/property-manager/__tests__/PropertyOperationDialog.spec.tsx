@@ -1,19 +1,22 @@
 /**
- * PropertyOperationDialog — verifies the in-session staging contract: an
- * update-mode dialog (key preset, target seeded with hasProperty) emits a
- * well-formed `PropertyOp` into propertyDraftStore on confirm.
+ * PropertyOperationDialog — applies one bulk property operation to the open draft: it asks the
+ * server to start the job with the criteria as counted, the operation as typed (a 64-bit integer
+ * exact) and the count it showed. Apply is held while the count is unknown, while another
+ * operation is being written into the draft, when the criteria match more than a draft may hold,
+ * and outside a draft; a refusal from the server is shown in the dialog, which stays open.
  *
- * Data deps mocked: discovery, the graph provider, and the match-count
- * service. framer-motion is stubbed (cached per tag) so the embedded
- * VisualQueryBuilder + portal render and inputs keep keystrokes.
+ * Data deps mocked: discovery, the graph provider, the match-count service, and the versioning
+ * hooks. framer-motion is stubbed (cached per tag) so the embedded VisualQueryBuilder + portal
+ * render and inputs keep keystrokes.
  */
 import React from 'react'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-import { PropertyOperationDialog } from '../PropertyOperationDialog'
-import { usePropertyDraftStore } from '@/store/propertyDraftStore'
+import type { PropertyOpList } from '@/services/versioningApiService'
+
+import { PropertyOperationDialog, type PropertyOpDraft } from '../PropertyOperationDialog'
 
 
 vi.mock('framer-motion', () => {
@@ -51,44 +54,131 @@ vi.mock('@/providers/GraphProviderContext', () => {
     return { useGraphProvider: () => provider }
 })
 
+const counts = { all: 5, narrowed: 2 }
 vi.mock('@/services/propertyInsights', () => ({
-    countMatches: vi.fn(async () => 5),
+    // The narrowed criteria (a fill's "key is empty") count fewer.
+    countMatches: vi.fn(async (_p: unknown, _v: string, predicate: { children?: Array<{ op?: string }> }) =>
+        (predicate.children?.some((c) => c.op === 'isEmpty') ? counts.narrowed : counts.all)),
     countPropertyUsageWithinTarget: vi.fn(async () => 0),
     getValueDistribution: vi.fn(async () => ({ values: [], truncated: false })),
     getAffectedSample: vi.fn(async () => ({ entities: [], truncated: false })),
 }))
 
-beforeEach(() => usePropertyDraftStore.setState({ pendingOps: [] }))
+vi.mock('@/features/versioning/hooks/useEntityEditing', () => ({
+    useEntityEditing: () => ({ offered: true, blocked: null }),
+}))
+
+const startMutate = vi.fn()
+vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+    useStartPropertyOp: () => ({ mutate: startMutate, isPending: false }),
+}))
+
+const DRAFT: PropertyOpDraft = { wsId: 'ws1', graphId: 'g1', branchId: 'br1' }
+const opsList = (extra: Partial<PropertyOpList> = {}): PropertyOpList =>
+    ({ ops: [], draftChanges: 0, maxDraftChanges: 100_000, ...extra })
+
+function renderDialog(props: Partial<React.ComponentProps<typeof PropertyOperationDialog>> = {}) {
+    const onClose = vi.fn()
+    render(
+        <PropertyOperationDialog
+            viewId="v1"
+            mode="update"
+            initialKey="owner"
+            knownEntityTypes={['dataset']}
+            knownLayers={[]}
+            draft={DRAFT}
+            ops={opsList()}
+            onClose={onClose}
+            {...props}
+        />,
+    )
+    return { onClose }
+}
+
+const applyButton = () => screen.getByRole('button', { name: /apply to draft/i })
+
+beforeEach(() => {
+    startMutate.mockReset()
+    counts.all = 5
+    counts.narrowed = 2
+})
 
 
 describe('PropertyOperationDialog', () => {
-    it('stages a "set" op (preset key + seeded target) on confirm', async () => {
+    it('applies a set to the draft: the criteria as counted, the value as typed, the count shown', async () => {
         const user = userEvent.setup()
-        const onClose = vi.fn()
-        render(
-            <PropertyOperationDialog
-                viewId="v1"
-                mode="update"
-                initialKey="owner"
-                knownEntityTypes={['dataset']}
-                knownLayers={[]}
-                onClose={onClose}
-            />,
-        )
+        startMutate.mockImplementation((body, opts) => opts.onSuccess({ jobId: 'j1', op: body.op }))
+        const { onClose } = renderDialog()
 
         // Key is preset and locked in update mode.
         expect(screen.getByDisplayValue('owner')).toBeInTheDocument()
-
-        // Type a value, then stage.
         await user.type(screen.getByPlaceholderText(/value/i), 'alice')
-        await user.click(screen.getByRole('button', { name: /stage change/i }))
+        await waitFor(() => expect(applyButton()).toBeEnabled())
+        await user.click(applyButton())
 
-        const ops = usePropertyDraftStore.getState().pendingOps
-        expect(ops).toHaveLength(1)
-        expect(ops[0]).toMatchObject({
-            kind: 'set', key: 'owner', value: 'alice', valueType: 'string',
+        expect(startMutate).toHaveBeenCalledTimes(1)
+        const [body] = startMutate.mock.calls[0]
+        expect(body).toEqual({
+            viewId: 'v1',
+            predicate: { kind: 'group', op: 'and', children: [{ kind: 'hasProperty', key: 'owner', negate: false }] },
+            op: { kind: 'set', key: 'owner', value: 'alice', valueType: 'string' },
+            expectedCount: 5,
         })
-        expect(ops[0].predicate).toMatchObject({ kind: 'hasProperty', key: 'owner' })
         expect(onClose).toHaveBeenCalled()
+    })
+
+    it('sends a 64-bit integer as its digits, so it arrives exact', async () => {
+        const user = userEvent.setup()
+        renderDialog()
+        await user.selectOptions(screen.getByRole('combobox'), 'number')
+        await user.type(screen.getByPlaceholderText('0'), '9223372036854775807')
+        await waitFor(() => expect(applyButton()).toBeEnabled())
+        await user.click(applyButton())
+        expect(startMutate.mock.calls[0][0].op).toEqual(
+            { kind: 'set', key: 'owner', value: '9223372036854775807', valueType: 'number' })
+    })
+
+    it('shows how many of the matches a fill can change', async () => {
+        const user = userEvent.setup()
+        renderDialog()
+        await user.click(screen.getByRole('button', { name: /fill if empty/i }))
+        expect(await screen.findByText(/can change/)).toBeInTheDocument()
+        expect(screen.getByText('2')).toBeInTheDocument()
+    })
+
+    it('is held while another operation is being written into the draft', async () => {
+        const user = userEvent.setup()
+        renderDialog({ ops: opsList({ ops: [{ jobId: 'j0', status: 'running' } as never] }) })
+        await user.type(screen.getByPlaceholderText(/value/i), 'alice')
+        expect(await screen.findByText(/being written into this draft/)).toBeInTheDocument()
+        expect(applyButton()).toBeDisabled()
+    })
+
+    it('is held when the criteria match more than a draft may hold', async () => {
+        const user = userEvent.setup()
+        counts.all = 150_000
+        renderDialog()
+        await user.type(screen.getByPlaceholderText(/value/i), 'alice')
+        expect(await screen.findByText(/more than a draft may hold/)).toBeInTheDocument()
+        expect(applyButton()).toBeDisabled()
+    })
+
+    it('is held outside a draft', async () => {
+        const user = userEvent.setup()
+        renderDialog({ draft: null })
+        await user.type(screen.getByPlaceholderText(/value/i), 'alice')
+        await screen.findByText(/entities match/)
+        expect(applyButton()).toBeDisabled()
+    })
+
+    it('shows the server\'s refusal and stays open', async () => {
+        const user = userEvent.setup()
+        startMutate.mockImplementation((_body, opts) => opts.onError(new Error('“urn” is kept by the platform')))
+        const { onClose } = renderDialog()
+        await user.type(screen.getByPlaceholderText(/value/i), 'alice')
+        await waitFor(() => expect(applyButton()).toBeEnabled())
+        await user.click(applyButton())
+        expect(await screen.findByRole('alert')).toHaveTextContent('kept by the platform')
+        expect(onClose).not.toHaveBeenCalled()
     })
 })

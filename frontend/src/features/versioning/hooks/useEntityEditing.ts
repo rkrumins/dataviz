@@ -26,6 +26,16 @@ export interface EntityEditing {
   blocked: string | null
 }
 
+/** The open draft the active view's edits go into — its ids — or null outside one. */
+export function useEditDraft(): { wsId: string; graphId: string; branchId: string } | null {
+  const view = useActiveView()
+  const wsId = view?.workspaceId ?? ''
+  const dataSourceId = view?.dataSourceId ?? null
+  const branchId = useEffectiveBranchId(wsId, dataSourceId, view?.id ?? null)
+  const graphId = useResolveGraph(wsId || undefined, dataSourceId, view?.id ?? null).data?.graphId
+  return wsId && graphId && branchId ? { wsId, graphId, branchId } : null
+}
+
 export function useEntityEditing(): EntityEditing {
   const versioningEnabled = useFeature('versioningEnabled')
   const editModeEnabled = useFeature('editModeEnabled')

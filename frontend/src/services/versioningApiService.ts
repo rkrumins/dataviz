@@ -16,6 +16,7 @@ import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
 import { readJsonLossless } from '@/lib/losslessJson'
+import type { Predicate } from '@/types/search'
 
 // ============================================
 // Wire types (match the backend `_ApiModel` aliases — camelCase)
@@ -1247,4 +1248,105 @@ export function updateMergeRequest(
     method: 'PATCH',
     body: JSON.stringify(data),
   })
+}
+
+// ============================================
+// Property operations — one property changed across a search's matches, written into a draft
+// ============================================
+
+export type PropertyOpKind = 'set' | 'fillEmpty' | 'rename' | 'remove'
+export type PropertyValueType = 'string' | 'number' | 'boolean'
+
+/** An operation as the Property Manager asks for it. `value` is the typed value on the wire
+ *  (`toWire`): a 64-bit integer travels as its digits and arrives exact. */
+export interface PropertyOpRequest {
+  kind: PropertyOpKind
+  key: string
+  newKey?: string
+  value?: unknown
+  valueType?: PropertyValueType
+}
+
+export type PropertyOpStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+/** What a job did. An operation's: `matched` by its search, `applied`, `unchanged` (already so),
+ *  `notInDraft`, and `skipped` (a rename whose new key had a value; what the ontology refused).
+ *  An undo's: `restored`, `unchanged`, `changedSince` (edited again, left as it is), `missing`. */
+export interface PropertyOpSummary {
+  matched?: number
+  applied?: number
+  unchanged?: number
+  notInDraft?: number
+  skipped?: { targetExists?: number; ontology?: number }
+  draftChangesBefore?: number | null
+  restored?: number
+  changedSince?: number
+  missing?: number
+  /** The draft commits it wrote, one per window. */
+  commits?: string[]
+}
+
+/** A property operation — or the undo of one — written into a draft by a job. */
+export interface PropertyOpJob {
+  jobId: string
+  kind: 'apply' | 'undo'
+  undoOf: string | null
+  undoneBy: string | null
+  status: PropertyOpStatus
+  /** While it runs: waiting for the published graph, finding its matches, or applying them. */
+  phase: 'queued' | 'waiting' | 'finding' | 'applying' | null
+  cancelRequested: boolean
+  graphId: string
+  branchId: string
+  viewId: string | null
+  actor: string | null
+  /** As the job writes it: the value typed (a number, a boolean). */
+  op: { kind: PropertyOpKind; key: string; newKey?: string; value?: unknown }
+  predicate: Predicate | null
+  expectedCount: number | null
+  processed: number
+  total: number
+  percent: number
+  summary: PropertyOpSummary | null
+  error: string | null
+  createdAt: string
+  startedAt: string | null
+  completedAt: string | null
+}
+
+/** A draft's operations, newest first, with how many changes it holds and may hold. */
+export interface PropertyOpList {
+  ops: PropertyOpJob[]
+  draftChanges: number
+  maxDraftChanges: number
+}
+
+const propertyOps = (wsId: string, graphId: string, branchId: string) =>
+  `${base(wsId)}/graphs/${graphId}/branches/${branchId}/property-ops`
+
+/** Start an operation on everything `predicate` matches in the view; the job writes it into the
+ *  draft. 409 while the draft has one under way, or is being published. */
+export function startPropertyOp(
+  wsId: string, graphId: string, branchId: string,
+  body: { viewId: string; predicate: Predicate; op: PropertyOpRequest; expectedCount?: number | null },
+): Promise<PropertyOpJob> {
+  return vfetch<PropertyOpJob>(propertyOps(wsId, graphId, branchId), jsonBody(body))
+}
+
+export function listPropertyOps(wsId: string, graphId: string, branchId: string): Promise<PropertyOpList> {
+  return vfetch<PropertyOpList>(propertyOps(wsId, graphId, branchId))
+}
+
+/** Stop an operation: a queued one at once, a running one once the window it is writing lands. */
+export function cancelPropertyOp(
+  wsId: string, graphId: string, branchId: string, jobId: string,
+): Promise<PropertyOpJob> {
+  return vfetch<PropertyOpJob>(`${propertyOps(wsId, graphId, branchId)}/${jobId}/cancel`, { method: 'POST' })
+}
+
+/** Put back what an operation changed, where nothing edited it since — as a job of its own. */
+export function undoPropertyOp(
+  wsId: string, graphId: string, branchId: string, jobId: string,
+): Promise<PropertyOpJob> {
+  return vfetch<PropertyOpJob>(`${propertyOps(wsId, graphId, branchId)}/${jobId}/undo`, { method: 'POST' })
 }

@@ -20,7 +20,8 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
-import { usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges } from '../hooks/useVersioning'
+import { usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges, usePropertyOps } from '../hooks/useVersioning'
+import { isLive, opLabel } from '../model/propertyOps'
 import { invalidateViewVersions } from '@/hooks/useViewVersions'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { queryClient } from '@/lib/queryClient'
@@ -67,6 +68,9 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const viewChanges = viewChangesQ.data
   const viewChangeCount = (viewChanges?.views.length ?? 0) + (viewChanges?.hidden ?? 0)
   const hasChanges = changeSet.changes.length > 0 || viewChangeCount > 0
+  // A property operation being written into the draft holds publishing until it finishes: the
+  // server refuses it meanwhile, since part of the operation would go out without the rest.
+  const writing = usePropertyOps(workspaceId, graphId, branchId).data?.ops.find(isLive)
 
   // The review that already covers this branch — from the list, or from a lost race.
   const existingPr = livePr ? { prId: livePr.prId, title: livePr.title } : raced
@@ -239,6 +243,16 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
             </>
           )}
 
+          {writing && (
+            <div className="rounded-lg border border-accent-lineage/30 bg-accent-lineage/5 px-3 py-2.5 flex items-start gap-2">
+              <Loader2 className="w-4 h-4 text-accent-lineage shrink-0 mt-0.5 animate-spin" />
+              <div className="text-[11px] text-ink-muted">
+                <span className="font-medium text-ink">{opLabel(writing.op)}</span> is being written into
+                this draft — publish once it finishes.
+              </div>
+            </div>
+          )}
+
           {confirmBypass && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
               <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
@@ -283,7 +297,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
             >
             <button
               onClick={handlePublish}
-              disabled={busy || !hasChanges}
+              disabled={busy || !hasChanges || !!writing}
               className={cn(
                 'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50',
                 confirmBypass

@@ -13,6 +13,7 @@ let viewChanges: BranchViewChanges | undefined
 
 vi.mock('../../hooks/useVersioning', () => ({
   usePublishBranch: () => ({ mutate: publishMutate, isPending: false }),
+  usePropertyOps: () => ({ data: undefined }),
   useOpenMergeRequest: () => ({ mutate: vi.fn(), isPending: false }),
   useLivePrForBranch: () => ({ livePr: undefined, pending: false }),
   useBranchViewChanges: () => ({ data: viewChanges, isLoading: false }),

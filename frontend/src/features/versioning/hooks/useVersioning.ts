@@ -10,6 +10,7 @@ import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
+import { isLive } from '../model/propertyOps'
 import { recordEvent } from '@/services/telemetryService'
 
 export const VERSIONING_KEYS = {
@@ -67,6 +68,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'restorePreview', ws, gid, cid] as const,
   bootstrap: (ws?: string, ds?: string | null) =>
     [...VERSIONING_KEYS.all, 'bootstrap', ws, ds] as const,
+  propertyOps: (ws?: string, gid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'propertyOps', ws, gid, bid] as const,
 }
 
 // ── Queries ────────────────────────────────────────────────────────────────
@@ -729,4 +732,49 @@ export function useMergeMergeRequest(wsId: string) {
       setTimeout(invalidateAggregatedEdges, 4000)
     },
   })
+}
+
+// ── Property operations ────────────────────────────────────────────────────
+
+/** How often to ask about a draft's property operations: every 2 s while one is under way, and
+ *  not at all otherwise — starting, stopping or undoing one refetches the list. */
+export function propertyOpsPollInterval(list?: api.PropertyOpList): number | false {
+  return list?.ops.some(isLive) ? 2000 : false
+}
+
+/** A draft's property operations, newest first, with its change count and cap. */
+export function usePropertyOps(wsId?: string | null, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.propertyOps(wsId ?? undefined, graphId, branchId),
+    queryFn: () => api.listPropertyOps(wsId!, graphId!, branchId!),
+    enabled: !!wsId && !!graphId && !!branchId,
+    refetchInterval: (q) => propertyOpsPollInterval(q.state.data),
+    refetchIntervalInBackground: false,
+  })
+}
+
+function usePropertyOpMutation<V>(
+  wsId: string, graphId: string, branchId: string,
+  call: (v: V) => Promise<api.PropertyOpJob>,
+) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: call,
+    onSettled: () => qc.invalidateQueries({ queryKey: VERSIONING_KEYS.propertyOps(wsId, graphId, branchId) }),
+  })
+}
+
+export function useStartPropertyOp(wsId: string, graphId: string, branchId: string) {
+  return usePropertyOpMutation(wsId, graphId, branchId,
+    (body: Parameters<typeof api.startPropertyOp>[3]) => api.startPropertyOp(wsId, graphId, branchId, body))
+}
+
+export function useCancelPropertyOp(wsId: string, graphId: string, branchId: string) {
+  return usePropertyOpMutation(wsId, graphId, branchId,
+    (jobId: string) => api.cancelPropertyOp(wsId, graphId, branchId, jobId))
+}
+
+export function useUndoPropertyOp(wsId: string, graphId: string, branchId: string) {
+  return usePropertyOpMutation(wsId, graphId, branchId,
+    (jobId: string) => api.undoPropertyOp(wsId, graphId, branchId, jobId))
 }

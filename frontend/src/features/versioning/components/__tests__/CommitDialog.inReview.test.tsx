@@ -16,6 +16,7 @@ let livePr: { prId: string; title: string | null } | undefined
 
 vi.mock('../../hooks/useVersioning', () => ({
   usePublishBranch: () => ({ mutate: publishMutate, isPending: false }),
+  usePropertyOps: () => ({ data: undefined }),
   useOpenMergeRequest: () => ({ mutate: openMrMutate, isPending: false }),
   useLivePrForBranch: () => ({ livePr, pending: false }),
   useBranchViewChanges: () => ({ data: undefined, isLoading: false }),
