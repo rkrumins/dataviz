@@ -4398,24 +4398,16 @@ class GraphVersioningService:
         tombstone → None.  Used as the 'ours' side of a rebase merge."""
         heads = await self._heads(s, graph_id, branch_id)
         out: Dict[str, Optional[dict]] = {}
-        node_ids, edge_ids, kindvid = [], [], {}
+        refs, kindvid = [], {}
         for eid, h in heads.items():
             if h.is_tombstone:
                 out[eid] = None
             else:
                 kindvid[eid] = h.head_version_id
-                (node_ids if h.entity_kind == "node" else edge_ids).append(h.head_version_id)
-        payload_by_vid: Dict[str, dict] = {}
-        if node_ids:
-            for r in (await s.execute(select(NodeVersionORM).where(
-                NodeVersionORM.graph_id == graph_id, NodeVersionORM.id.in_(node_ids)
-            ))).scalars():
-                payload_by_vid[r.id] = r.payload
-        if edge_ids:
-            for r in (await s.execute(select(EdgeVersionORM).where(
-                EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.id.in_(edge_ids)
-            ))).scalars():
-                payload_by_vid[r.id] = r.payload
+                refs.append((h.entity_kind, graph_id, h.head_version_id))
+        # Chunked: a draft can change more entities than one statement may name (asyncpg caps a
+        # statement at 32,767 parameters) — a large import or a bulk property change.
+        payload_by_vid = await self._payloads_by_version(s, refs)
         for eid, vid in kindvid.items():
             out[eid] = payload_by_vid.get(vid)
         return out
