@@ -20,7 +20,11 @@ from ..models import JobORM
 
 # The phase of a pending job that is ready to run: its file is stored, and a worker may take it.
 QUEUED = "queued"
-JOB_TYPES = ("ingest", "export")
+# The jobs this runner takes, and the service entry point that runs each (it records a failure
+# on the job rather than raising).
+_ENTRY_POINTS = {"ingest": "run_import_safe", "export": "run_export_safe",
+                 "publish": "run_publish_safe"}
+JOB_TYPES = tuple(_ENTRY_POINTS)
 
 
 def _now() -> str:
@@ -48,6 +52,11 @@ class TransferRunner:
             return row.id, row.job_type
 
     async def run_job(self, job_id: str, job_type: str) -> None:
-        """Run a claimed job to the end; a failure is recorded on the job, never raised."""
+        """Run a claimed job to the end; a failure is recorded on the job, never raised. A type this
+        runner doesn't know is failed, never run as some other kind of job."""
         ie = self._service_factory()
-        await (ie.run_import_safe if job_type == "ingest" else ie.run_export_safe)(job_id)
+        entry = _ENTRY_POINTS.get(job_type)
+        if entry is None:
+            await ie.mark_failed(job_id, f"this worker doesn't run {job_type!r} jobs")
+            return
+        await getattr(ie, entry)(job_id)

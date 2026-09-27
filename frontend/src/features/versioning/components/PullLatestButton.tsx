@@ -6,17 +6,17 @@
  * site is one line. Renders nothing unless `behind`. (PrDetailDrawer keeps its own flow — it
  * interleaves merge- and pull-resolve modes.)
  *
- * The diff (used to seed conflict resolutions) is fetched lazily — only after the first Pull click —
- * so a switcher listing many behind drafts doesn't fan out a diff request per row.
+ * Conflicts are resolved from the draft's own values the pull hands back for just those entities
+ * (`seeds`) — never the draft's whole diff, which a large draft would ship by the hundred megabytes.
  */
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { ArrowDownToLine, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import type { IncomingChanges, ResolutionMap } from '@/services/versioningApiService'
 import { ConflictResolver } from '@/features/reviews/components/ConflictResolver'
-import { useDiffVsMain, usePullLatestDraft } from '../hooks/useVersioning'
+import { usePullLatestDraft } from '../hooks/useVersioning'
 import { IncomingChangesSheet } from './IncomingChangesSheet'
 
 const VARIANTS = {
@@ -40,34 +40,25 @@ export function PullLatestButton({
 }) {
   const { notify } = useAppNotifications()
   const pull = usePullLatestDraft(wsId, graphId)
-  const [started, setStarted] = useState(false)
   const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
+  /** entityId → the draft's value of each conflicting entity, to seed its resolution. */
+  const [seeds, setSeeds] = useState<Record<string, Record<string, unknown> | undefined>>({})
   const [error, setError] = useState<string | null>(null)
   /** What the pull brought in — shown for review instead of a content-free notification. */
   const [incoming, setIncoming] = useState<IncomingChanges | null>(null)
 
-  // Lazy: the diff only loads once a Pull is in flight. Seeds are read at resolve-submit time, by
-  // when the diff has arrived. entityId → merged payload (the diff `after`), as in PrDetailDrawer.
-  const diffQ = useDiffVsMain(wsId, graphId, started ? branchId : null)
-  const seeds = useMemo(() => {
-    const out: Record<string, Record<string, unknown> | undefined> = {}
-    const d = diffQ.data
-    if (d) for (const e of [...d.added, ...d.modified]) out[e.entityId] = (e.after as Record<string, unknown>) ?? undefined
-    return out
-  }, [diffQ.data])
-
   const run = (resolutions?: ResolutionMap) => {
-    setStarted(true)
     pull.mutate(
       { branchId, resolutions },
       {
         onSuccess: (res) => {
           if (!res.clean) {
             setConflicts(res.conflicts)
+            setSeeds(Object.fromEntries(Object.entries(res.seeds ?? {}).map(([k, v]) => [k, v ?? undefined])))
             setError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
             return
           }
-          setConflicts(null); setError(null); setStarted(false)
+          setConflicts(null); setError(null)
           // Show WHAT came in, rather than asserting that something did. A pull takes other people's
           // work into your branch; ending that in a notification told the user nothing about it.
           if (res.incoming && res.incoming.commitCount > 0) {
@@ -106,7 +97,7 @@ export function PullLatestButton({
           seeds={seeds}
           busy={pull.isPending}
           error={error}
-          onCancel={() => { setConflicts(null); setError(null); setStarted(false) }}
+          onCancel={() => { setConflicts(null); setError(null) }}
           onResolve={(resolutions) => run(resolutions)}
         />
       )}

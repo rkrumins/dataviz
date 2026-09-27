@@ -90,7 +90,9 @@ export function CanvasVersioningBar({
   const [panelTab, setPanelTab] = useState<ViewPanelTab | null>(null)
   const uncommitted = useStagedChangeCount()
 
-  const diffQ = useDiffVsMain(workspaceId, graphId, isDraft ? branchId : null)
+  // Slim: modified entities by id alone — the bar counts changes and rings nodes, and never reads
+  // a modified entity's payloads, which a large draft would ship by the hundred megabytes.
+  const diffQ = useDiffVsMain(workspaceId, graphId, isDraft ? branchId : null, { slim: true })
   // Views the draft creates or changes (imports staged in it, layer edits) go live with it too.
   const viewChangesQ = useBranchViewChanges(workspaceId, graphId, isDraft ? branchId : null)
   const viewChangeCount = (viewChangesQ.data?.views.length ?? 0) + (viewChangesQ.data?.hidden ?? 0)
