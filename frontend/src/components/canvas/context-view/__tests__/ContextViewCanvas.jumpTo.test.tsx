@@ -13,7 +13,7 @@ import { useCanvasStore } from '@/store/canvas'
 
 // The drawer itself is not under test: only what the canvas hands it.
 const drawer = vi.hoisted(() => ({ jumpTo: undefined as ((id: string) => unknown) | undefined }))
-vi.mock('@/components/panels/EntityDrawer', () => {
+vi.mock('@/components/panels/entity/EntityDrawer', () => {
   const EntityDrawer = (props: { onFocusNode?: (id: string) => unknown }) => {
     drawer.jumpTo = props.onFocusNode
     return null
