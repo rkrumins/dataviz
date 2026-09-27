@@ -21,6 +21,10 @@ const IMMUTABLE_EDGE_KEYS = new Set([
 const asObj = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
 
+/** Removes a key from the entity's properties (backend `rowmodel.PROP_DELETE`): the backend merges
+ *  a properties patch onto what it holds, so a key merely left out is kept. */
+const PROP_DELETE = '__nx_prop_delete__'
+
 /** The OCC token (`version` content-hash) the entity was read at, for optimistic concurrency.
  * Looks on the staged `before` (node/edge as read) or its nested `edge`. Absent ⇒ the backend
  * falls back to a plain patch (no OCC) — so this is safe even before hydration carries `version`. */
@@ -30,8 +34,11 @@ function versionOf(before: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
 
-/** Map the canvas node display shape → backend GraphNode fields (partial update). */
-function nodeUpdatePayload(after: Record<string, unknown>): Record<string, unknown> {
+/** Map the canvas node display shape → backend GraphNode fields (partial update). ``before`` is the
+ *  node as read: a property it had that ``after`` dropped (removed, or renamed away) is sent as
+ *  `PROP_DELETE` — left out, the merge would keep it, and "Saved to draft." would bring it back. */
+function nodeUpdatePayload(after: Record<string, unknown>,
+                           before: Record<string, unknown> = {}): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   if ('displayName' in after) out.displayName = after.displayName
   else if ('label' in after) out.displayName = after.label
@@ -48,7 +55,13 @@ function nodeUpdatePayload(after: Record<string, unknown>): Record<string, unkno
   if ('description' in after) out.description = after.description
   if ('qualifiedName' in after) out.qualifiedName = after.qualifiedName
   if ('sourceSystem' in after) out.sourceSystem = after.sourceSystem
-  if (after.properties && typeof after.properties === 'object') out.properties = after.properties
+  if (after.properties && typeof after.properties === 'object') {
+    const properties = { ...asObj(after.properties) }
+    for (const key of Object.keys(asObj(before.properties))) {
+      if (!(key in properties)) properties[key] = PROP_DELETE
+    }
+    out.properties = properties
+  }
   return out
 }
 
@@ -93,7 +106,7 @@ export function stagedChangesToOps(
     switch (c.type) {
       case 'rename_entity':
       case 'update_entity': {
-        const payload = nodeUpdatePayload(asObj(c.after))
+        const payload = nodeUpdatePayload(asObj(c.after), asObj(c.before))
         // An empty payload is a no-op patch, so it is not sent — but it is never silently dropped:
         // `unsavedNodeFields` names exactly what this skipped, and the save reports it.
         if (Object.keys(payload).length > 0) {

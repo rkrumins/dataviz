@@ -27,6 +27,9 @@ import { cn } from '@/lib/utils'
 import { formatUrnLabel } from '@/lib/urnLabels'
 import type { GroupPredicate, Predicate } from '@/types/search'
 
+import { arityOf, isNegative, operatorLabel, predicateType } from '../typed/operators'
+import { describeDuration } from '../typed/valueCodec'
+
 
 // ---------------------------------------------------------------------------
 // Public entrypoint
@@ -270,30 +273,27 @@ function leafSentence(p: Predicate): ReactNode {
         }
         case 'layer':
             return <>layer is <Value>{p.layerAssignment}</Value></>
-        case 'hasProperty':
-            return p.negate
-                ? <>does not have a <Value>{p.key}</Value> property</>
-                : <>has a <Value>{p.key}</Value> property</>
+        case 'hasProperty': {
+            const has = p.negate ? 'does not have' : 'has'
+            if (p.keyMatch === 'prefix' || p.keyMatch === 'contains') {
+                return <>{has} a property whose name {p.keyMatch === 'prefix' ? 'starts with' : 'contains'} <Value>{p.key}</Value></>
+            }
+            return <>{has} a <Value>{p.key}</Value> property</>
+        }
         case 'property': {
             const op = p.op ?? 'eq'
-            const verb =
-                op === 'eq' ? 'equals'
-                    : op === 'neq' ? 'does not equal'
-                        : op === 'gt' ? 'is greater than'
-                            : op === 'gte' ? 'is at least'
-                                : op === 'lt' ? 'is less than'
-                                    : op === 'lte' ? 'is at most'
-                                        : op === 'in' ? 'is one of'
-                                            : op === 'notIn' ? 'is not one of'
-                                                : op === 'contains' ? 'contains'
-                                                    : op === 'startsWith' ? 'starts with'
-                                                        : op === 'endsWith' ? 'ends with'
-                                                            : op === 'between' ? 'is between'
-                                                                : op
+            const arity = arityOf(op)
+            const type = predicateType(p)
             return (
                 <>
-                    <Value>{p.key}</Value> {verb}{' '}
-                    <Value>{formatValue(p.value)}</Value>
+                    <Value>{p.key}</Value> {operatorLabel(op, type)}
+                    {arity === 'duration' && <> <Value quoted={false}>{describeDuration(p.value) ?? '…'}</Value></>}
+                    {arity !== 'none' && arity !== 'duration' && (
+                        <>{' '}<PropertyValue value={p.value} between={op === 'between'}
+                                              bare={BARE_TYPES.has(type) && !TEXT_OPS.has(op)} /></>
+                    )}
+                    {p.caseSensitive && arity !== 'none' && <span className="text-ink-muted"> (match case)</span>}
+                    {p.includeMissing && isNegative(op) && <span className="text-ink-muted"> (or not set)</span>}
                 </>
             )
         }
@@ -317,6 +317,8 @@ function leafSentence(p: Predicate): ReactNode {
             return <>lies on a path from <Value>{p.sourceUrns[0] ?? '…'}</Value> to <Value>{p.targetUrns[0] ?? '…'}</Value> (≤ {p.maxHops} hops)</>
         case 'degree':
             return <>has {p.direction ?? 'any'} edges {p.op} {p.value}</>
+        case 'all':
+            return <>every entity is included</>
         case 'group':
             return <>(nested group)</>
         default:
@@ -325,12 +327,34 @@ function leafSentence(p: Predicate): ReactNode {
 }
 
 
-function formatValue(v: unknown): string {
-    if (v === null || v === undefined) return '∅'
-    if (Array.isArray(v)) return v.map(formatValue).join(', ')
-    if (typeof v === 'string') return v
-    if (typeof v === 'number' || typeof v === 'boolean') return String(v)
-    return JSON.stringify(v)
+/** Compared as these, a value reads bare — unless the operator reads its
+ *  text ("contains 74" means the digits). */
+const BARE_TYPES = new Set(['number', 'boolean'])
+const TEXT_OPS = new Set(['contains', 'notContains', 'startsWith', 'endsWith'])
+
+
+/** A property value as the query will compare it: text quoted, numbers and
+ *  booleans bare, a list as its items, a range as both ends, and an empty
+ *  value as a gap waiting to be filled — never as `""`, which read as "equals
+ *  the empty string". */
+function PropertyValue({ value, between, bare }: {
+    value: unknown
+    between?: boolean
+    /** A number or true/false: bare even when it travels as text (a 64-bit
+     *  integer does, to keep its digits). */
+    bare?: boolean
+}) {
+    const one = (v: unknown, key?: number) => {
+        if (v === null || v === undefined || v === '') {
+            return <span key={key} className="text-ink-muted">…</span>
+        }
+        if (typeof v === 'string') return <Value key={key} quoted={!bare}>{v}</Value>
+        return <Value key={key} quoted={false}>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</Value>
+    }
+    if (!Array.isArray(value)) return one(value)
+    if (between) return <>{one(value[0], 0)} and {one(value[1], 1)}</>
+    if (value.length === 0) return one(undefined)
+    return <>{value.map((v, i) => <span key={i}>{i > 0 && ', '}{one(v)}</span>)}</>
 }
 
 
@@ -343,7 +367,7 @@ function Inline({ children }: { children: ReactNode }) {
 }
 
 
-function Value({ children }: { children: ReactNode }) {
+function Value({ children, quoted }: { children: ReactNode; quoted?: boolean }) {
     return (
         <span className={cn(
             'inline-flex items-center px-1.5 py-0',
@@ -351,7 +375,7 @@ function Value({ children }: { children: ReactNode }) {
             'bg-canvas-elevated/70 border border-glass-border/60',
             'text-ink',
         )}>
-            {typeof children === 'string' ? `"${children}"` : children}
+            {(quoted ?? typeof children === 'string') ? `"${children}"` : children}
         </span>
     )
 }

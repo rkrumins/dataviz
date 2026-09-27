@@ -19,6 +19,7 @@
 import Ajv, { type ValidateFunction } from 'ajv'
 import addFormats from 'ajv-formats'
 
+import { parseJsonLossless } from '@/lib/losslessJson'
 import type { Predicate, SearchQuery } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -76,7 +77,7 @@ export function decodePredicate(
 ): Predicate {
     let parsed: unknown
     try {
-        parsed = JSON.parse(raw)
+        parsed = parseJsonLossless(raw)
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         throw new PredicateValidationError(
@@ -96,7 +97,7 @@ export function decodeSearchQuery(
 ): SearchQuery {
     let parsed: unknown
     try {
-        parsed = JSON.parse(raw)
+        parsed = parseJsonLossless(raw)
     } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         throw new PredicateValidationError(

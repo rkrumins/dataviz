@@ -81,11 +81,23 @@ class StubMain:
 
 
 class FakeSvc:
-    def __init__(self, delta, adjust=None):
+    def __init__(self, delta, adjust=None, payloads=None):
         self._delta, self._adjust = delta, adjust or {}
+        self._payloads = payloads or {}            # entity id -> the draft's value, reader-shaped
+        self.version = (object(),)                 # a fresh draft per stub: nothing cached is shared
+        self.builds = 0
+        self.loads = []
+
+    async def overlay_version(self, *, graph_id, branch_id):
+        return self.version
 
     async def branch_overlay_delta(self, *, graph_id, branch_id):
+        self.builds += 1
         return self._delta
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids):
+        self.loads.append(list(entity_ids))
+        return [self._payloads[e] for e in entity_ids if e in self._payloads]
 
     async def aggregated_overlay_adjust(self, **kw):
         return self._adjust
@@ -200,6 +212,63 @@ def test_set_node_identity_reaches_the_base_provider():
 
     p.set_node_identity(None, None)
     assert base.identity == (None, None)
+
+
+# ── A large draft: modified nodes come by name, and a read loads just the ones it serves ─────
+_MODIFIED = {**_EMPTY, "nodesModified": [
+    {"urn": "A", "entityId": "e0"}, {"urn": "A.c", "entityId": "e1"}, {"urn": "B.c", "entityId": "e2"}]}
+_DRAFT_VALUES = {"e0": {"urn": "A", "entityType": "Table", "displayName": "A v2"},
+                 "e1": {"urn": "A.c", "entityType": "Column", "displayName": "A.c v2"},
+                 "e2": {"urn": "B.c", "entityType": "Column", "displayName": "B.c v2"}}
+
+
+def _prov(svc):
+    p = DraftOverlayProvider(StubMain(), svc=svc, graph_id="g", branch_id="d")
+    p.set_containment_edge_types(["CONTAINS"])
+    return p
+
+
+def test_a_read_loads_only_the_modified_nodes_it_serves():
+    """A draft that modified 100k nodes must not load 100k payloads to serve one page."""
+    async def run():
+        svc = FakeSvc(_MODIFIED, payloads=_DRAFT_VALUES)
+        p = _prov(svc)
+        kids = (await p.get_children_with_edges("A")).children
+        assert [(c.urn, c.display_name) for c in kids] == [("A.c", "A.c v2")]
+        assert svc.loads == [["e1"]]
+        assert (await p.get_node("B.c")).display_name == "B.c v2"
+        assert (await p.get_node("B.c")).display_name == "B.c v2"
+        assert svc.loads == [["e1"], ["e2"]], "a request loads a node once"
+        assert (await p.get_node("B")).display_name == "B"
+        assert svc.loads == [["e1"], ["e2"]], "an unmodified node loads nothing"
+    asyncio.run(run())
+
+
+def test_every_read_serves_the_drafts_value_of_a_modified_node():
+    async def run():
+        p = _prov(FakeSvc(_MODIFIED, payloads=_DRAFT_VALUES))
+        names = {n.urn: n.display_name for n in await p.get_nodes(NodeQuery())}
+        assert names == {"A": "A v2", "B": "B", "A.c": "A.c v2", "B.c": "B.c v2"}
+        assert [n.display_name for n in await p.search_nodes("B.c")] == ["B.c v2"]
+        top = {n.urn: n for n in (await p.get_top_level_or_orphan_nodes()).nodes}
+        assert (top["A"].display_name, top["A"].child_count) == ("A v2", 1), "keeps main's childCount"
+        assert (await p.get_node("A")).child_count == 1
+        assert (await p.resolve_identities(["A.c", "B"]))["A.c"]["name"] == "A.c v2"
+    asyncio.run(run())
+
+
+def test_reads_share_one_delta_until_the_draft_moves():
+    """Rebuilding the delta per read cost every read of a large draft seconds and a gigabyte."""
+    async def run():
+        svc = FakeSvc(_MODIFIED, payloads=_DRAFT_VALUES)
+        await asyncio.gather(*(_prov(svc).get_node("A") for _ in range(5)))
+        assert svc.builds == 1, "five reads at once build it once"
+        await _prov(svc).get_node("A")
+        assert svc.builds == 1, "a later read reuses it"
+        svc.version = (object(),)                        # the draft took a commit
+        await _prov(svc).get_node("A")
+        assert svc.builds == 2
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

@@ -350,8 +350,9 @@ class JobORM(VersioningBase):
             # 'bootstrap' = "enable version control" (bootstrap_worker). Deliberately NOT
             # 'ingest': that is the file-import worker's type, and a worker claims by
             # job_type — sharing one would have the two run each other's jobs. Existing
-            # DBs get it via migration 20260713_1400_jobs_bootstrap.
-            "job_type IN ('ingest','projection','rebuild','export','bootstrap')",
+            # DBs get it via migration 20260713_1400_jobs_bootstrap. 'publish' = a large draft's
+            # publish on the transfer runner (20260928_1000_jobs_publish).
+            "job_type IN ('ingest','projection','rebuild','export','bootstrap','publish')",
             name="ck_jobs_type",
         ),
     )

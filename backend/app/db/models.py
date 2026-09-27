@@ -1182,6 +1182,42 @@ class ObjectStoreChunkORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# view_saved_queries (a view's library)                                #
+# ------------------------------------------------------------------ #
+class ViewSavedQueryORM(Base):
+    """A search kept under a name in a view's library, for everyone who can
+    open the view. Saved queries belong to the view, not to a branch.
+
+    ``predicate`` is the search predicate as the client wrote it (JSON),
+    validated as a search's is. ``position`` orders the library's list."""
+    __tablename__ = "view_saved_queries"
+
+    id = Column(Text, primary_key=True)
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position = Column(Integer, nullable=False, default=0)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    predicate = Column(Text, nullable=False)                  # JSON
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    # Stamped by the service when the query itself changes — not by a
+    # reorder, which moves every row's position.
+    updated_by = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_vsq_view", "view_id", "position"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewSavedQuery id={self.id!r} view_id={self.view_id!r}>"
+
+
+# ------------------------------------------------------------------ #
 # data_source_stats (Graph Statistics Cache)                           #
 # ------------------------------------------------------------------ #
 

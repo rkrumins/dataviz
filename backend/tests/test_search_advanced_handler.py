@@ -6,7 +6,9 @@ Two route-layer concerns no service test can reach:
    concurrency slot, so a keystroke storm from search-as-you-type sheds
    load (429 + Retry-After) instead of pegging FalkorDB's single Cypher
    thread — the same treatment every other heavy graph route already
-   gets from ``_bounded_compute``.
+   gets from ``_bounded_compute``. The uncapped engine runs many
+   statements per search, so it is handed the same slot to take per
+   STATEMENT (``SearchRunContext.admit``) instead.
 
 2. **Capability guard.** The view scope IS the RBAC boundary for a
    share-link identity. ``scopeMode='data_source'`` drops the view's
@@ -99,12 +101,34 @@ def patched_search(monkeypatch):
     )
     calls: list = []
 
-    async def _fake_search(self, query):
+    async def _fake_search(self, query, **kwargs):
         calls.append(query)
         return _page(), _eff_scope()
 
     monkeypatch.setattr(AdvancedSearchService, "search", _fake_search)
     return calls
+
+
+def _use_engine(monkeypatch, engine: str) -> None:
+    from backend.app.services.deep_search import get_deep_search_settings
+    monkeypatch.setenv("DEEP_SEARCH_ENGINE", engine)
+    get_deep_search_settings.cache_clear()
+
+
+@pytest.fixture
+def legacy_engine(monkeypatch):
+    _use_engine(monkeypatch, "legacy")
+    yield
+    from backend.app.services.deep_search import get_deep_search_settings
+    get_deep_search_settings.cache_clear()
+
+
+@pytest.fixture
+def uncapped_engine(monkeypatch):
+    _use_engine(monkeypatch, "v2")
+    yield
+    from backend.app.services.deep_search import get_deep_search_settings
+    get_deep_search_settings.cache_clear()
 
 
 @pytest.fixture
@@ -133,7 +157,7 @@ def slot(monkeypatch):
 # Bulkhead
 # ---------------------------------------------------------------------------
 
-async def test_search_runs_inside_the_provider_slot(slot, patched_search):
+async def test_search_runs_inside_the_provider_slot(slot, patched_search, legacy_engine):
     """The search compute is wrapped in the per-(provider, graph) slot:
     acquired once with the provider's cache key, released on the way
     out."""
@@ -150,7 +174,7 @@ async def test_search_runs_inside_the_provider_slot(slot, patched_search):
     assert not slot["sem"].locked(), "slot must be released after the search"
 
 
-async def test_slot_is_held_while_the_search_runs(slot, monkeypatch):
+async def test_slot_is_held_while_the_search_runs(slot, monkeypatch, legacy_engine):
     """Guards against a wrapper that acquires and releases around nothing
     — the semaphore must still be held at the moment the compute runs."""
     from backend.app.services.advanced_search_service import (
@@ -158,7 +182,7 @@ async def test_slot_is_held_while_the_search_runs(slot, monkeypatch):
     )
     observed: list = []
 
-    async def _fake_search(self, query):
+    async def _fake_search(self, query, **kwargs):
         observed.append(slot["sem"].locked())
         return _page(), _eff_scope()
 
@@ -176,14 +200,14 @@ async def test_slot_is_held_while_the_search_runs(slot, monkeypatch):
     assert observed == [True]
 
 
-async def test_slot_released_when_the_search_raises(slot, monkeypatch):
+async def test_slot_released_when_the_search_raises(slot, monkeypatch, legacy_engine):
     """A failing search must not leak the slot — eight failures would
     otherwise wedge the provider permanently."""
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
     )
 
-    async def _boom(self, query):
+    async def _boom(self, query, **kwargs):
         raise ValidationError("view_not_found: view-1")
 
     monkeypatch.setattr(AdvancedSearchService, "search", _boom)
@@ -202,7 +226,7 @@ async def test_slot_released_when_the_search_raises(slot, monkeypatch):
     assert not slot["sem"].locked()
 
 
-async def test_provider_without_cache_key_is_unbounded(slot, patched_search):
+async def test_provider_without_cache_key_is_unbounded(slot, patched_search, legacy_engine):
     """Draft/versioned wrappers expose no ``manager_cache_key`` — those
     paths are Postgres-overlay-heavy, not FalkorDB fan-out, so they
     degrade to unbounded rather than borrowing another graph's slot."""
@@ -218,6 +242,75 @@ async def test_provider_without_cache_key_is_unbounded(slot, patched_search):
     assert slot["acquisitions"] == []
     assert page is not None
     assert len(patched_search) == 1
+
+
+async def test_uncapped_engine_is_admitted_per_statement(slot, monkeypatch, uncapped_engine):
+    """The uncapped engine runs many statements per search, so the route
+    does not hold a slot around the whole search — it hands the service
+    the same slot to take per statement, keyed like ``_bounded_compute``."""
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    seen: dict = {}
+
+    async def _fake_search(self, query, *, run_context=None, **kwargs):
+        seen["held_during_search"] = slot["sem"].locked()
+        seen["context"] = run_context
+        async with run_context.admit():
+            seen["held_in_statement"] = slot["sem"].locked()
+        return _page(), _eff_scope()
+
+    monkeypatch.setattr(AdvancedSearchService, "search", _fake_search)
+    await graph_mod.search_advanced(
+        query=_query(), request=_request(), response=Response(),
+        ws_id="ws-1", engine=_FakeEngine(), session=None,
+    )
+
+    assert seen["held_during_search"] is False
+    assert seen["held_in_statement"] is True
+    assert slot["acquisitions"] == [("prov-1", "graph-1")]
+    assert not slot["sem"].locked(), "the statement's slot is released after it"
+
+
+async def test_uncapped_engine_without_cache_key_is_unbounded(slot, monkeypatch, uncapped_engine):
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    contexts: list = []
+
+    async def _fake_search(self, query, *, run_context=None, **kwargs):
+        contexts.append(run_context)
+        return _page(), _eff_scope()
+
+    monkeypatch.setattr(AdvancedSearchService, "search", _fake_search)
+    await graph_mod.search_advanced(
+        query=_query(), request=_request(), response=Response(),
+        ws_id="ws-1", engine=_FakeEngine(cache_key=None), session=None,
+    )
+
+    assert contexts[0].admit is None
+    assert slot["acquisitions"] == []
+
+
+async def test_the_data_version_is_the_published_graphs(monkeypatch):
+    """A draft searches the graph it is a draft of, so its sessions are
+    versioned by the published graph's content generation — never the
+    draft's own, which moves with every edit to the draft."""
+    from backend.app.services.graph_cache import CacheScope
+    asked: list = []
+
+    class _Cache:
+        async def content_generation(self, scope):
+            asked.append(scope)
+            return "41"
+
+    monkeypatch.setattr(graph_mod, "get_graph_cache", lambda: _Cache())
+    monkeypatch.setattr(graph_mod, "_cache_scope", lambda engine: CacheScope(
+        workspace_id="ws-1", data_source_id="ds-1", branch_id="draft-7", graph_ns="g9"))
+
+    assert await graph_mod._search_data_version(_FakeEngine()) == "41.g9"
+    assert asked[0].branch_id == ""
+
+
+async def test_no_workspace_means_no_data_version(monkeypatch):
+    monkeypatch.setattr(graph_mod, "_cache_scope", lambda engine: None)
+    assert await graph_mod._search_data_version(_FakeEngine()) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +475,7 @@ async def test_provider_refusal_becomes_the_501_body(slot, monkeypatch):
         AdvancedSearchService,
     )
 
-    async def _refuse(self, query):
+    async def _refuse(self, query, **kwargs):
         raise NotImplementedError(REFUSAL)
 
     monkeypatch.setattr(AdvancedSearchService, "search", _refuse)
@@ -409,7 +502,7 @@ async def test_bare_refusal_keeps_the_provider_fallback(slot, monkeypatch):
         AdvancedSearchService,
     )
 
-    async def _refuse(self, query):
+    async def _refuse(self, query, **kwargs):
         raise NotImplementedError
 
     monkeypatch.setattr(AdvancedSearchService, "search", _refuse)
@@ -436,7 +529,7 @@ async def test_explain_maps_a_refusal_to_501(monkeypatch):
         AdvancedSearchService,
     )
 
-    async def _refuse(self, query):
+    async def _refuse(self, query, **kwargs):
         raise NotImplementedError(REFUSAL)
 
     monkeypatch.setattr(AdvancedSearchService, "explain", _refuse)

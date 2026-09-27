@@ -36,6 +36,7 @@ function stubDiscovery(over: Partial<UseDiscoveryResult> = {}): UseDiscoveryResu
         edgeTypes: [],
         keysByEdgeType: {},
         getEdgeValueSamples: () => [],
+        suggestValues: async () => null,
         ...over,
     }
 }

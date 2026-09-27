@@ -236,7 +236,26 @@ async def test_a_claimed_job_runs_through_the_services_safe_entry_point():
         async def run_export_safe(self, job_id):
             ran.append(("export", job_id))
 
+        async def run_publish_safe(self, job_id):
+            ran.append(("publish", job_id))
+
     runner = TransferRunner(_Service)
     await runner.run_job("vjob_1", "ingest")
     await runner.run_job("vjob_2", "export")
-    assert ran == [("import", "vjob_1"), ("export", "vjob_2")]
+    await runner.run_job("vjob_3", "publish")
+    assert ran == [("import", "vjob_1"), ("export", "vjob_2"), ("publish", "vjob_3")]
+
+
+async def test_a_job_of_a_type_the_runner_does_not_know_fails_rather_than_run_as_something_else():
+    """Anything not an import used to run as an export."""
+    ran = []
+
+    class _Service:
+        async def run_export_safe(self, job_id):
+            ran.append(("export", job_id))
+
+        async def mark_failed(self, job_id, message):
+            ran.append(("failed", job_id, message))
+
+    await TransferRunner(_Service).run_job("vjob_9", "bogus")
+    assert ran == [("failed", "vjob_9", "this worker doesn't run 'bogus' jobs")]

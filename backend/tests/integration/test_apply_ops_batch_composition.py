@@ -75,6 +75,14 @@ async def _run() -> None:
     n = (await _state(svc, gid))["N"]
     assert (n["displayName"], n["description"], n["entityType"]) == ("Renamed", "Described", "domain"), n
 
+    # …and a property the first edit removes stays removed (the drawer's rename, then another edit).
+    await svc.apply_ops(graph_id=gid, actor="alice", ops=[
+        _update("N", properties={"owner": "__nx_prop_delete__", "team": "a"}),
+        _update("N", displayName="Renamed Again"),
+    ])
+    n = (await _state(svc, gid))["N"]
+    assert (n["displayName"], n["properties"]) == ("Renamed Again", {"team": "a"}), n
+
     # An "update" of a node that does not exist creates it — so it is judged as a create:
     # with no type it is refused, and nothing is written.
     with pytest.raises(OntologyViolation) as exc:

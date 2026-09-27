@@ -74,4 +74,28 @@ describe('ChangeTreePanel', () => {
     )
     expect(screen.getByText('Nothing here.')).toBeInTheDocument()
   })
+
+  it('counts a draft too large to list as a tree, and says where each change is', () => {
+    render(
+      <ChangeTreePanel
+        summary={{
+          groups: [], groupTotal: 0,
+          counts: { added: 0, modified: 100000, removed: 0 },
+          entityCounts: { added: 0, modified: 100000, removed: 0 },
+          edgeCounts: { added: 0, modified: 0, removed: 0 },
+          impact: { SchemaField: 100000 },
+          tooLarge: { changed: 100000, limit: 20000 },
+        }}
+        fetchChildren={vi.fn()}
+        origin={origin}
+        emptyHint="Nothing here."
+        summaryFirst
+      />,
+    )
+    expect(screen.getByText('100000 changes')).toBeInTheDocument()
+    expect(screen.getByText(/too many to list here/)).toBeInTheDocument()
+    expect(screen.getByText(/Commits/)).toBeInTheDocument()
+    expect(screen.queryByText('Nothing here.')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Show details/)).not.toBeInTheDocument()
+  })
 })

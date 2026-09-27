@@ -15,7 +15,11 @@ ordinary branch path (reused from :class:`VersionedBranchProvider`).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TypeVar
+import asyncio
+import copy
+import logging
+from collections import ChainMap, OrderedDict
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, TypeVar
 
 from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
@@ -28,6 +32,8 @@ from .versioned_branch_provider import VersionedBranchProvider
 #: shape back — a closure in, a closure out. Declaring the base type lost
 #: ``frontierUp``/``frontierDown``/``seedTruncated`` to every static reader.
 _TraceT = TypeVar("_TraceT", bound=TraceResult)
+
+logger = logging.getLogger(__name__)
 
 
 class _OverlayDelta:
@@ -50,6 +56,9 @@ class _OverlayDelta:
         for d in raw.get("nodesUpsert", []):
             n = GraphNode(**d)
             self.node_upsert[n.urn] = n
+        # Nodes the draft modified, by urn → entity id: a read loads the ones it serves (load()).
+        self.node_modified: Dict[str, str] = {m["urn"]: m["entityId"] for m in raw.get("nodesModified", [])}
+        self._loader: Optional[Callable[[List[str]], Awaitable[List[dict]]]] = None
         for d in raw.get("nodesRemove", []):
             self.node_remove.add(d["urn"])
         for d in raw.get("edgesUpsert", []):
@@ -71,7 +80,26 @@ class _OverlayDelta:
 
     @property
     def empty(self) -> bool:
-        return not (self.node_upsert or self.node_remove or self.edge_upsert or self.edge_remove)
+        return not (self.node_upsert or self.node_modified or self.node_remove
+                    or self.edge_upsert or self.edge_remove)
+
+    def for_request(self, loader: Callable[[List[str]], Awaitable[List[dict]]]) -> "_OverlayDelta":
+        """This delta for one request: every index shared, plus the modified nodes this request
+        loads — kept apart, so a delta reused across requests never accumulates their payloads."""
+        view = copy.copy(self)
+        view.node_upsert = ChainMap({}, self.node_upsert)
+        view._loader = loader
+        return view
+
+    async def load(self, urns: Iterable[str]) -> None:
+        """Bring the draft's value of each MODIFIED node among ``urns`` into this request's view.
+        Every read that overlays base nodes calls it first, with the nodes it is about to serve."""
+        want = [u for u in dict.fromkeys(urns) if u in self.node_modified and u not in self.node_upsert]
+        if not want or self._loader is None:
+            return
+        for d in await self._loader([self.node_modified[u] for u in want]):
+            n = GraphNode(**d)
+            self.node_upsert[n.urn] = n
 
     @property
     def lineage_changed(self) -> bool:
@@ -125,10 +153,49 @@ class _OverlayDelta:
             return None
         up = self.node_upsert.get(base_node.urn)
         if up is None:
+            if base_node.urn in self.node_modified:          # a read that forgot to load() it
+                logger.warning("draft overlay: served main's value of modified node %s", base_node.urn)
             return self.with_child_count(base_node)
         if base_node.child_count is not None:               # a MODIFIED existing node keeps main's count
             up = up.model_copy(update={"child_count": base_node.child_count})
         return self.with_child_count(up)
+
+
+class _DeltaCache:
+    """This process's recent draft deltas, keyed by what a delta depends on
+    (``GraphVersioningService.overlay_version``): a draft's reads share one delta until the draft or
+    main moves, instead of each read rebuilding it — at 100k changed entities a rebuild costs a read
+    seconds. Built once per key, however many reads ask at the same time."""
+
+    def __init__(self, size: int = 2):
+        self._size = size
+        self._items: "OrderedDict[tuple, _OverlayDelta]" = OrderedDict()
+        self._building: Dict[tuple, asyncio.Task] = {}
+
+    async def get(self, key: tuple, build: Callable[[], Awaitable[_OverlayDelta]]) -> _OverlayDelta:
+        hit = self._items.get(key)
+        if hit is not None:
+            self._items.move_to_end(key)
+            return hit
+        task = self._building.get(key)
+        if task is None or task.get_loop() is not asyncio.get_running_loop():
+            task = asyncio.ensure_future(build())
+            self._building[key] = task
+            task.add_done_callback(lambda t, k=key: self._settle(k, t))
+        return await asyncio.shield(task)          # one reader giving up doesn't cancel the build
+
+    def _settle(self, key: tuple, task: asyncio.Task) -> None:
+        if self._building.get(key) is task:
+            del self._building[key]
+        if task.cancelled() or task.exception() is not None:
+            return
+        self._items[key] = task.result()
+        self._items.move_to_end(key)
+        while len(self._items) > self._size:
+            self._items.popitem(last=False)
+
+
+_DELTAS = _DeltaCache()
 
 
 class DraftOverlayProvider:
@@ -186,9 +253,20 @@ class DraftOverlayProvider:
 
     async def _delta_(self) -> _OverlayDelta:
         if self._delta is None:
-            raw = await self._svc.branch_overlay_delta(graph_id=self._gid, branch_id=self._branch)
-            self._delta = _OverlayDelta(raw, self._containment_types)
+            version = await self._svc.overlay_version(graph_id=self._gid, branch_id=self._branch)
+            cset = list(self._containment_types)
+
+            async def build() -> _OverlayDelta:
+                raw = await self._svc.branch_overlay_delta(graph_id=self._gid, branch_id=self._branch)
+                return _OverlayDelta(raw, cset)
+
+            shared = await _DELTAS.get((self._gid, self._branch, version, tuple(cset)), build)
+            self._delta = shared.for_request(self._load_modified)
         return self._delta
+
+    async def _load_modified(self, entity_ids: List[str]) -> List[dict]:
+        return await self._svc.overlay_payloads(
+            graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids)
 
     @staticmethod
     def _matches(node: GraphNode, query: NodeQuery) -> bool:
@@ -206,6 +284,7 @@ class DraftOverlayProvider:
         if urn in d.node_remove:
             return None
         base = await self._base.get_node(urn)
+        await d.load([urn])
         if base is not None:                                 # exists in main → merge changes, keep childCount
             return d.overlay_existing(base)
         up = d.node_upsert.get(urn)                          # draft-NEW node (no base)
@@ -221,6 +300,7 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return found
+        await d.load(urns)
         out = dict(found)
         for urn in urns:
             if urn in d.node_remove:
@@ -236,6 +316,7 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return base
+        await d.load(n.urn for n in base)
         seen: set = set()
         out: List[GraphNode] = []
         for n in base:
@@ -260,6 +341,7 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return base
+        await d.load(n.urn for n in base.nodes)
         seen: set = set()
         out: List[GraphNode] = []
         for n in base.nodes:
@@ -282,6 +364,7 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return base
+        await d.load(n.urn for n in base)
         q = (query or "").lower()
         out: List[GraphNode] = []
         for n in base:
@@ -337,6 +420,8 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return base
+        await d.load([c.urn for c in base.children]
+                     + [e.target_urn for e in d.cont_added if e.source_urn == parent_urn])
         # children: main's page overlaid (a renamed child keeps its base childCount so it
         # isn't orphaned), the draft's new children of THIS parent — see compose_page.
         added = [d.with_child_count(d.node_upsert[e.target_urn]) for e in d.cont_added
@@ -408,6 +493,7 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return base
+        await d.load(n.urn for n in base.nodes)
         # Overlay main's top-level set: drop removed, merge modified (keeping base childCount). A
         # draft-CREATED node becomes a new root only when no draft containment targets it. Crucially a
         # MODIFIED existing node (e.g. a rename) is NOT hoisted to top-level — its parent edge lives on
@@ -546,6 +632,14 @@ class DraftOverlayProvider:
     #: service layer.
     is_overlay = True
 
+    # The ontology's edge classification, as the base reads it (the scope
+    # diagnostics report it).
+    def _get_containment_edge_types(self):
+        return self._base._get_containment_edge_types()
+
+    def _get_lineage_edge_types(self):
+        return self._base._get_lineage_edge_types()
+
     async def deep_search(self, query, *, deadline_ms=None):
         """Search the base graph — the draft's own edits are NOT included.
 
@@ -563,6 +657,45 @@ class DraftOverlayProvider:
         """
         return await self._base.deep_search(query, deadline_ms=deadline_ms)
 
+    @property
+    def supports_search_sessions(self) -> bool:
+        return bool(getattr(self._base, "supports_search_sessions", False))
+
+    async def deep_search_session(self, query, *, context):
+        """The uncapped engine, on the base — the draft's edits are not
+        searched, for the reason :meth:`deep_search` gives."""
+        return await self._base.deep_search_session(query, context=context)
+
+    async def deep_search_count(self, query, *, context, advance=True):
+        """A rule's total — the base's, like :meth:`deep_search`."""
+        return await self._base.deep_search_count(query, context=context, advance=advance)
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        """Rule membership — the base's, like :meth:`deep_search`."""
+        return await self._base.deep_search_membership(scope, items, urns, context=context)
+
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False):
+        """The property catalog — the base's, like :meth:`deep_search_session`."""
+        return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
+                                                    session_id=session_id, refresh=refresh)
+
+    async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
+                                 session_id=None):
+        """An export of every match — the base's, like :meth:`deep_search_session`."""
+        return await self._base.deep_search_export(query, context=context, fmt=fmt,
+                                                   columns=columns, wait_ms=wait_ms,
+                                                   session_id=session_id)
+
+    async def deep_search_export_open(self, session_id, *, context):
+        """A complete export, to stream — the base's."""
+        return await self._base.deep_search_export_open(session_id, context=context)
+
+    async def deep_search_ancestor_counts(self, session_id, urns, *, context):
+        """Container counts from a search session — the base's, like
+        :meth:`deep_search_session`."""
+        return await self._base.deep_search_ancestor_counts(session_id, urns, context=context)
+
     async def deep_search_explain(self, query):
         """Compile-only path. Delegated for the same reason as
         :meth:`deep_search` — the Cypher explained is the one that would
@@ -574,6 +707,12 @@ class DraftOverlayProvider:
         queryable is a property of the base graph's storage."""
         return await self._base.deep_search_discover(
             sample_per_label=sample_per_label,
+        )
+
+    async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
+        """Value suggestions — the base's values, like :meth:`deep_search`."""
+        return await self._base.deep_search_values(
+            key=key, entity_types=entity_types, q=q, limit=limit,
         )
 
     # ---- writes: commit to the draft (reused from the branch provider) -- #

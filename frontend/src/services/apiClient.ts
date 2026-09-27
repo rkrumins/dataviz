@@ -12,6 +12,7 @@
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
+import { readJsonLossless } from '@/lib/losslessJson'
 
 /** The request + failure handling every helper here shares: a failure
  *  throws a readable Error, success hands back the Response. */
@@ -51,7 +52,7 @@ export async function authFetch<T>(
 ): Promise<T> {
     const res = await checkedFetch(url, init)
     if (res.status === 204) return undefined as T
-    return res.json()
+    return readJsonLossless<T>(res)
 }
 
 /**
@@ -63,7 +64,7 @@ export async function authFetch<T>(
  */
 export async function authFetchPage<T>(url: string): Promise<{ items: T[]; total: number }> {
     const res = await checkedFetch(url)
-    const items: T[] = await res.json()
+    const items: T[] = await readJsonLossless<T[]>(res)
     const header = res.headers.get('X-Total-Count')
     return { items, total: header ? Number(header) : items.length }
 }

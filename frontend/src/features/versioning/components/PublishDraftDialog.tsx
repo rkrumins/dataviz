@@ -24,7 +24,7 @@ export function PublishDraftDialog({
   onLeave?: CommitDialogProps['onLeave']
   onPublished?: CommitDialogProps['onPublished']
 }) {
-  const diffQ = useDiffVsMain(wsId, graphId, branchId)
+  const diffQ = useDiffVsMain(wsId, graphId, branchId, { slim: true })
   const changeSet = useMemo(
     () => (diffQ.data ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET),
     [diffQ.data, branchId],

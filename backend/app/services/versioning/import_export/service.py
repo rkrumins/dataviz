@@ -28,7 +28,7 @@ from ..models import BranchORM, ImportRowORM, JobORM
 from ..service import GraphVersioningService
 from .export_worker import ExportWorker, example_template_records, records_from_state
 from .formats import get_adapter
-from .import_worker import ImportWorker
+from .import_worker import ImportWorker, heartbeat
 from .rowmodel import column_order
 from .runner import JOB_TYPES, QUEUED
 
@@ -61,6 +61,7 @@ class ImportExportService:
         scope_resolver=None,
         ontology_resolver=None,
         layout_writer=None,
+        publish_hook=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
@@ -75,6 +76,11 @@ class ImportExportService:
         # batch_edge_facts) -> {added: N}`` — writes canonical layer assignments for a view-scoped
         # import's newly-created top-level entities. Injected at the API layer (management-DB access).
         self._layout_writer = layout_writer
+        # Optional async ``(job) -> {"commitId": id} | {"error": {"status", "detail"}}`` — publishes
+        # a draft or merges its review, with what a publish sets off after it lands. Injected at the
+        # API layer, which resolves the ontology and owns those side effects; a refusal comes back
+        # as the HTTP answer the route gives when it publishes inside the request.
+        self._publish_hook = publish_hook
 
     @property
     def store(self):
@@ -158,15 +164,15 @@ class ImportExportService:
             # A shutdown or a cancelled task: record it, or the job reads "running" forever.
             logger.warning("job %s was cancelled", job_id)
             try:
-                await self._mark_failed(job_id, _INTERRUPTED)
+                await self.mark_failed(job_id, _INTERRUPTED)
             except Exception:  # noqa: BLE001 — the cancellation must still propagate
                 logger.exception("recording the cancellation of job %s failed", job_id)
             raise
         except Exception as exc:  # pragma: no cover - defensive; recorded on the job row
             logger.exception("job %s failed", job_id)
-            await self._mark_failed(job_id, str(exc))
+            await self.mark_failed(job_id, str(exc))
 
-    async def _mark_failed(self, job_id: str, message: str) -> None:
+    async def mark_failed(self, job_id: str, message: str) -> None:
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             if row is not None and row.status in ("pending", "running"):
@@ -344,6 +350,61 @@ class ImportExportService:
 
     async def run_export_safe(self, job_id: str) -> None:
         await self._run_safe(job_id, self.run_export)
+
+    async def create_publish_job(
+        self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, branch_id: str,
+        actor: str, message: str, resolutions: Optional[Dict[str, Any]] = None,
+        merge_request_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """A publish of a draft too large to publish inside a request — or the merge of its review
+        (``merge_request_id``), queued like an export. The request rides in ``field_scope``."""
+        fields: Dict[str, Any] = {"actor": actor, "message": message}
+        if resolutions:
+            fields["resolutions"] = resolutions
+        if merge_request_id:
+            fields["mergeRequestId"] = merge_request_id
+        async with db.graphver_session() as s:
+            job = JobORM(job_type="publish", graph_id=graph_id, workspace_id=workspace_id,
+                         data_source_id=data_source_id, branch_id=branch_id,
+                         field_scope=fields, status="pending")
+            s.add(job)
+            await s.flush()
+            return {"job_id": job.id}
+
+    async def start_publish(self, job_id: str) -> str:
+        """Start the publish job (see :meth:`_start`). Returns the status to report."""
+        return await self._start(job_id, self.run_publish_safe, "publish")
+
+    async def run_publish(self, job_id: str) -> Dict[str, Any]:
+        """Publish the job's draft (or merge its review) through the injected hook, beating the
+        whole way: a large squash says nothing until it lands. Its answer is the job's summary."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            row.status = "running"
+            row.started_at = row.started_at or _now()
+            row.updated_at = _now()
+            job = {**(row.field_scope or {}), "graphId": row.graph_id, "branchId": row.branch_id,
+                   "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id}
+        beat = asyncio.create_task(heartbeat(job_id))
+        try:
+            result = await self._publish_hook(job)
+        finally:
+            beat.cancel()
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            row.summary = result
+            if "error" in result:
+                detail = result["error"].get("detail")
+                row.status = "failed"
+                row.error_message = str(detail.get("message") or detail.get("type")
+                                        if isinstance(detail, dict) else detail)[:2000]
+            else:
+                row.status = "completed"
+            row.completed_at = row.updated_at = _now()
+        return result
+
+    async def run_publish_safe(self, job_id: str) -> None:
+        await self._run_safe(job_id, self.run_publish)
 
     async def build_template(self, *, graph_id: str, export_format: str = "csv", limit: int = 5) -> bytes:
         """A small, prepopulated starter template so users learn the format instantly: the column

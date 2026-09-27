@@ -73,9 +73,9 @@ interface ReferenceModelState {
     scopeFilter: ScopeFilterConfig | null
 
     // ===== Display Rules (Property Manager tag overlay) =====
-    /** Saved display rules — predicate + tag label/color decorating
-     *  matched canvas nodes. Part of the blueprint; persisted via the
-     *  Save Blueprint flow. */
+    /** The open view's display rules — predicate + tag label/color
+     *  decorating matched canvas nodes. Loaded from, and every change
+     *  saved to, the view's library by ``viewLibraryStore``. */
     displayRules: DisplayRuleConfig[]
 
     // ===== Assignments (SINGLE SOURCE OF TRUTH) =====
@@ -159,14 +159,6 @@ interface ReferenceModelState {
 
     // ===== Display Rule Actions =====
     setDisplayRules: (rules: DisplayRuleConfig[]) => void
-    addDisplayRule: (rule: DisplayRuleConfig) => void
-    updateDisplayRule: (id: string, updates: Partial<DisplayRuleConfig>) => void
-    removeDisplayRule: (id: string) => void
-    toggleDisplayRule: (id: string) => void
-    /** Reorder rules to match the given id sequence. Rules not in the
-     *  sequence are appended in their existing relative order. Drives
-     *  chip stacking order on the canvas. */
-    reorderDisplayRules: (orderedIds: string[]) => void
 
     // ===== Observer Pattern =====
     onLayerChange: (callback: LayerChangeCallback) => UnsubscribeFn
@@ -396,48 +388,6 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
             // ===== Display Rule Actions =====
             setDisplayRules: (rules) => {
                 set({ displayRules: rules })
-            },
-
-            addDisplayRule: (rule) => {
-                set((s) => ({ displayRules: [...s.displayRules, rule] }))
-            },
-
-            updateDisplayRule: (id, updates) => {
-                set((s) => ({
-                    displayRules: s.displayRules.map((r) =>
-                        r.id === id ? { ...r, ...updates } : r,
-                    ),
-                }))
-            },
-
-            removeDisplayRule: (id) => {
-                set((s) => ({
-                    displayRules: s.displayRules.filter((r) => r.id !== id),
-                }))
-            },
-
-            toggleDisplayRule: (id) => {
-                set((s) => ({
-                    displayRules: s.displayRules.map((r) =>
-                        r.id === id ? { ...r, enabled: !r.enabled } : r,
-                    ),
-                }))
-            },
-
-            reorderDisplayRules: (orderedIds) => {
-                set((s) => {
-                    const byId = new Map(s.displayRules.map((r) => [r.id, r]))
-                    const next: DisplayRuleConfig[] = []
-                    for (const id of orderedIds) {
-                        const rule = byId.get(id)
-                        if (rule) { next.push(rule); byId.delete(id) }
-                    }
-                    // Append any rules not present in orderedIds (defensive).
-                    for (const rule of s.displayRules) {
-                        if (byId.has(rule.id)) next.push(rule)
-                    }
-                    return { displayRules: next }
-                })
             },
 
             // ===== Assignment Actions (Backend-Ready) =====

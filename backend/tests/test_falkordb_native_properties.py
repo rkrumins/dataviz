@@ -314,7 +314,7 @@ class TestComputeSearchableText:
         text = _compute_searchable_text("X", None, None, None, tags=123)
         assert text == "x"
 
-    def test_truncates_at_word_boundary_below_cap(self, monkeypatch):
+    def test_truncates_at_word_boundary_below_cap(self, monkeypatch, request):
         """When the result exceeds the cap, the helper trims to the
         last word boundary so the tail never ends mid-token (a
         partial token would defeat ``CONTAINS '<word>'`` substring
@@ -322,6 +322,8 @@ class TestComputeSearchableText:
         from backend.app.services.deep_search import get_deep_search_settings
         monkeypatch.setenv("DEEP_SEARCH_SEARCHABLE_TEXT_CAP", "20")
         get_deep_search_settings.cache_clear()
+        # monkeypatch restores the variable, not the settings read from it.
+        request.addfinalizer(get_deep_search_settings.cache_clear)
 
         text = _compute_searchable_text(
             "First word boundary", None, None,
@@ -660,6 +662,26 @@ class TestWritersUnderBudget:
         (item,) = [it for _, params in calls["batches"] for it in params["batch"]]
         assert item["nativeProps"] == {"owner": "x"}
         assert json.loads(item["propertiesRaw"]) == {"brand_new": 1}
+
+    def test_a_value_stored_past_the_budget_is_still_searchable_text(self, monkeypatch):
+        """Search "anywhere" reads ``searchableText``: a string kept raw,
+        past the budget, is in it as a native one is — the projector writes
+        it the same way. A nested value stays out, as a list does."""
+        from backend.app.services.versioning.projection import _node_item
+
+        monkeypatch.setenv("FALKORDB_NATIVE_PROPERTY_BUDGET", "100")
+        p, calls = _stubbed_provider(_graph_of(100) | {"owner"})
+        props = {"owner": "Alice", "brand_new": "Quarterly Revenue", "nested": {"x": "hidden"}}
+        asyncio.run(p.save_custom_graph([_node("urn:1", props)], []))
+        (item,) = [it for _, params in calls["batches"] for it in params["batch"]]
+        assert json.loads(item["propertiesRaw"]) == {"brand_new": "Quarterly Revenue",
+                                                     "nested": {"x": "hidden"}}
+        assert "quarterly revenue" in item["searchableText"]
+        assert "alice" in item["searchableText"] and "hidden" not in item["searchableText"]
+
+        projected = _node_item("e1", "urn:1", {"displayName": "urn:1", "properties": props},
+                               native_keys={"owner"})
+        assert projected["searchableText"] == item["searchableText"]
 
     def test_edges_alone_read_no_names(self):
         p, calls = _stubbed_provider(set())

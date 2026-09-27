@@ -209,3 +209,35 @@ describe('unsavedNodeFields — what a staged entity edit CANNOT carry to the ba
     expect(unsavedNodeFields(sc({ type: 'create_entity', targetUrn: 'urn:new', after: { owner: 'ana' } }))).toEqual([])
   })
 })
+
+describe('stagedChangesToOps — a property the edit removed', () => {
+  // The backend MERGES a properties patch onto what it holds: a key left out
+  // is kept. Removing or renaming a key in the drawer said "Saved to draft."
+  // and the old key came back; only the delete marker removes one.
+  it('sends the delete marker for a key the entity had and the edit dropped', () => {
+    const [op] = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:p',
+           before: { properties: { owner: 'fin', tier: 'gold' } },
+           after: { properties: { owner: 'fin' } } }),
+    ])
+    expect(op.payload).toEqual({ properties: { owner: 'fin', tier: '__nx_prop_delete__' } })
+  })
+
+  it('sends a rename as the old key deleted and the new one set', () => {
+    const [op] = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:p',
+           before: { properties: { team: 'ops', id: 7 } },
+           after: { properties: { squad: 'ops', id: 7 } } }),
+    ])
+    expect(op.payload).toEqual({ properties: { squad: 'ops', id: 7, team: '__nx_prop_delete__' } })
+  })
+
+  it('sends only what the edit holds when nothing was removed', () => {
+    const [op] = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:p',
+           before: { properties: { owner: 'fin' } },
+           after: { properties: { owner: 'ops', tier: 'gold' } } }),
+    ])
+    expect(op.payload).toEqual({ properties: { owner: 'ops', tier: 'gold' } })
+  })
+})
