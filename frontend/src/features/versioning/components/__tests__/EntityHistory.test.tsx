@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 const versions = [
   { commit_id: 'm1', commit_seq: 1, branch_id: 'main', op: 'create', actor: 'usr_alice123', created_at: '2024-01-01T00:00:00Z', payload: { urn: 'n', entityType: 'dataset', displayName: 'orig' } },
   { commit_id: 'd1', commit_seq: 1, branch_id: 'draft1', op: 'update', actor: 'bob@x', created_at: '2024-02-01T00:00:00Z', payload: { urn: 'n', entityType: 'dataset', displayName: 'my edit' } },
+  { commit_id: 'm2', commit_seq: 2, branch_id: 'main', op: 'delete', actor: 'system', created_at: '2024-03-01T00:00:00Z', payload: null },
 ]
 
 vi.mock('../../hooks/useVersioning', () => ({
@@ -37,5 +38,11 @@ describe('EntityHistory', () => {
     render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
     expect(screen.getByText(/by Alice Anderson/)).toBeInTheDocument()
     expect(screen.queryByText(/usr_alice123/)).not.toBeInTheDocument()
+  })
+
+  it('names a platform write "system", not an unresolved person', () => {
+    render(<EntityHistory wsId="w" graphId="g" entityId="n" mainBranchId="main" branchId={null} />)
+    expect(screen.getByText('by system')).toBeInTheDocument()
+    expect(screen.queryByText(/Unknown/)).not.toBeInTheDocument()
   })
 })

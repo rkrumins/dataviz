@@ -773,6 +773,9 @@ export interface GraphChangeOp {
   id?: string
   ref?: string
   payload?: Record<string, unknown> | null
+  /** `update` only: property names to REMOVE. An update merges `payload.properties` key by key,
+   *  so a property left out is kept — naming it here is the only way to delete one. */
+  unsetProperties?: string[]
   /** Optimistic-concurrency token: the `version` (content hash) the entity was read at. On an
    *  update the server 3-way merges against it so a concurrent same-field edit conflicts instead
    *  of silently overwriting. Omit ⇒ plain patch (no OCC). */

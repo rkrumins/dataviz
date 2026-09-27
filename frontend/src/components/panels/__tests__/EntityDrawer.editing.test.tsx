@@ -1,8 +1,7 @@
 /**
  * EntityDrawer — an entity is edited only where the edit can be kept, in a
- * draft. Anywhere else the Edit tab is disabled and says why, and the raw
- * JSON is read-only; staging an edit says it still needs Review & Save,
- * never that it was saved.
+ * draft. Anywhere else the Edit tab is disabled and says why; staging an
+ * edit says it still needs Review & Save, never that it was saved.
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -38,9 +37,9 @@ const NODE = {
     data: { label: 'Orders', type: 'dataset', urn: 'urn:li:dataset:orders' },
 } as unknown as LineageNode
 
-function openDrawer() {
+function openDrawer(canEdit = false) {
     useCanvasStore.setState({ nodes: [NODE], drawerNodeId: NODE.id })
-    render(<EntityDrawer />)
+    render(<EntityDrawer canEdit={canEdit} />)
 }
 
 beforeEach(() => {
@@ -52,7 +51,7 @@ beforeEach(() => {
 describe('EntityDrawer — editing is kept only in a draft', () => {
     it('stages an edit made in a draft, and says it still needs Review & Save', async () => {
         const user = userEvent.setup()
-        openDrawer()
+        openDrawer(true)
         await user.click(screen.getByRole('button', { name: 'Edit' }))
         const name = screen.getByPlaceholderText('Entity name...')
         await user.clear(name)
@@ -60,7 +59,7 @@ describe('EntityDrawer — editing is kept only in a draft', () => {
         await user.click(screen.getByRole('button', { name: /Stage Changes/ }))
 
         expect(useStagedChangesStore.getState().changes).toHaveLength(1)
-        expect(screen.getByText(/Review & Save to keep it/)).toBeInTheDocument()
+        expect(screen.getByText(/Review & Save keeps it in your draft/)).toBeInTheDocument()
         expect(screen.queryByText(/saved successfully/)).not.toBeInTheDocument()
     })
 
@@ -72,9 +71,6 @@ describe('EntityDrawer — editing is kept only in a draft', () => {
         expect(edit).toBeDisabled()
         await user.hover(edit.parentElement!)
         expect(await screen.findByRole('tooltip')).toHaveTextContent(NO_VERSION_CONTROL)
-
-        await user.click(screen.getByRole('button', { name: 'JSON' }))
-        expect(screen.getByRole('textbox')).toHaveAttribute('readonly')
     })
 
     it('offers no Edit tab where editing is off', () => {

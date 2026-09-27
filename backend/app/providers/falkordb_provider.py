@@ -54,6 +54,7 @@ from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
+from backend.common.property_patch import apply_properties_patch
 
 logger = logging.getLogger(__name__)
 
@@ -15054,14 +15055,29 @@ class FalkorDBProvider(GraphDataProvider):
             return False
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
-        """Update edge properties by edge ID."""
+        """PATCH an edge's properties by edge ID (see the provider interface).
+
+        ``r.properties`` is one JSON string, so the stored bag is read, patched and written
+        back — SETting the patch alone replaced the bag and dropped every property it didn't
+        name. (Two queries: a concurrent PATCH of the same edge can interleave; the versioned
+        write path above this provider is what serialises edits.)
+        """
         await self._ensure_connected()
         try:
+            read = await self._query(
+                "MATCH ()-[r]->() WHERE r.id = $eid RETURN r.properties LIMIT 1",
+                params={"eid": edge_id},
+            )
+            if not read.result_set:
+                return None
+            raw = read.result_set[0][0]
+            existing = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
             result = await self._query(
                 "MATCH (a)-[r]->(b) WHERE r.id = $eid "
                 "SET r.properties = $props "
                 "RETURN a.urn, b.urn, type(r), properties(r)",
-                params={"eid": edge_id, "props": json.dumps(properties)},
+                params={"eid": edge_id,
+                        "props": json.dumps(apply_properties_patch(existing, properties))},
             )
             if not result.result_set:
                 return None

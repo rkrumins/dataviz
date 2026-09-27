@@ -52,6 +52,7 @@ from backend.common.derived_artifacts import is_derived_label
 # Reuse the existing reader's schema helpers verbatim so the projection is
 # byte-for-byte reader-compatible (a reader schema change flows through here too).
 from backend.app.providers.falkordb_provider import (  # noqa: E402
+    _RESERVED_NODE_KEYS,
     _admit_native_keys,
     _compute_searchable_text,
     _text_properties,
@@ -171,17 +172,13 @@ def _projected_level(payload: dict, level_map: Optional[Dict[str, int]]) -> Opti
 
 
 def _projector_owned_property_names() -> Set[str]:
-    """Every node property the platform writes itself — never a user's to remove. Empty
-    (→ removal skipped) when the platform set cannot be resolved."""
-    from backend.app.providers.falkordb_provider import platform_property_names
-    platform = set(platform_property_names())
-    if not platform:
-        return set()
-    return platform | {
-        "urn", "entityId", "displayName", "qualifiedName", "description", "tags",
-        "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt", "propertiesRaw",
-        "level", "searchableText", "gvHash", "properties",
-    }
+    """Every property the platform writes on an ENTITY node — never a user's to remove: the
+    node's reserved keys (what the projector SETs, the conformance stamp's provenance, the
+    legacy blob). The rollup and ``_AggMeta`` names are written on edges and meta nodes, not
+    here — so a user property that happens to be called ``weight``, ``id`` or ``confidence``
+    is the user's, and removing it removes it. (Taking the whole platform set left exactly
+    those behind on the node, still in Properties and still matching search filters.)"""
+    return set(_RESERVED_NODE_KEYS)
 
 
 def _node_fingerprint(label: str, chash: str, ontology_level: Optional[int]) -> int:
@@ -2065,16 +2062,20 @@ class FalkorProjector:
         the committed payload no longer has — ``n += nativeProps`` only ever adds, so a
         property removed from an entity used to stay on its node (in Properties, matching
         search filters) until a drop-and-replay wiped the graph, which no longer happens. A
-        null in the map removes the property. Skipped when the platform's own property names
-        are unknown, so nothing that might be the platform's is ever taken."""
+        null in the map removes the property.
+
+        ``keep`` is never removed, and neither is a node's own identity property — the source
+        property its ``urnSource`` / ``nameSource`` stamp says its urn / name was filled from
+        (a source whose identity column is ``id`` keeps its ``id``)."""
         for item in chunk:
             item["gone"] = {}
-        if not keep:
-            return
-        res = await _q(client, f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}}) RETURN u, keys(n)",
+        res = await _q(client, f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}}) "
+                               f"RETURN u, keys(n), n.urnSource, n.nameSource",
                        params={"urns": [i["urn"] for i in chunk]},
                        timeout_ms=_READ_TIMEOUT_MS, read_only=True)
-        held = {str(u): set(ks or []) for u, ks in (getattr(res, "result_set", None) or [])}
+        held: Dict[str, Set[str]] = {}
+        for u, ks, *identity in (getattr(res, "result_set", None) or []):
+            held[str(u)] = set(ks or []) - {k for k in identity if isinstance(k, str) and k}
         for item in chunk:
             stale = held.get(item["urn"], set()) - keep - set(item["nativeProps"] or {})
             item["gone"] = {k: None for k in stale}

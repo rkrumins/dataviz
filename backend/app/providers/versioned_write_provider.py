@@ -175,11 +175,12 @@ class VersionedWriteProvider:
         return await self._inner.create_edge(edge)
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
-        cur = await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id)
-        if cur is not None:                              # need the full edge payload to version it
-            payload = {**cur, "properties": {**(cur.get("properties") or {}), **(properties or {})}}
-            await self._record([{"op": "update", "entity_kind": "edge",
-                                 "entity_id": edge_id, "payload": payload}], f"update edge {edge_id}")
+        # `properties` is a PATCH (a removal is PROP_DELETE); versioning applies it onto the
+        # stored edge and the provider onto its own copy — the same patch, the same result.
+        if await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id) is not None:
+            await self._record([{"op": "update", "entity_kind": "edge", "entity_id": edge_id,
+                                 "payload": {"properties": dict(properties or {})}}],
+                               f"update edge {edge_id}")
         return await self._inner.update_edge(edge_id, properties)
 
     async def delete_edge(self, edge_id: str) -> bool:

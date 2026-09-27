@@ -124,7 +124,13 @@ interface StagedChangesState {
   patchAfter: (changeId: string, patch: Record<string, unknown>, summary?: string) => void
   discard: (changeId: string) => void
   discardAll: () => void
-  applyAll: (provider: GraphDataProvider, wsId: string) => Promise<{ ok: number; failed: number }>
+  /** `graphWrites: false` — the published graph: every graph-data change fails with
+   *  {@link PUBLISHED_READ_ONLY} (kept, for the user to move to a draft) instead of being dropped. */
+  applyAll: (
+    provider: GraphDataProvider,
+    wsId: string,
+    opts?: { graphWrites?: boolean },
+  ) => Promise<{ ok: number; failed: number }>
   openReviewPanel: () => void
   closeReviewPanel: () => void
 
@@ -156,6 +162,15 @@ const APPLY_ORDER_GROUP: Record<StagedChangeType, number> = {
   create_edge: 5,
   move_entity: 5,          // after creates: the new parent may be created in the same save
 }
+
+/** Change types that edit graph DATA. They are saved only to a draft, as one `/graph/changes`
+ *  commit; the rest edit the view's layout and persist with the view. */
+export const GRAPH_DATA_CHANGE_TYPES: ReadonlySet<StagedChangeType> = new Set<StagedChangeType>([
+  'create_entity', 'rename_entity', 'update_entity', 'delete_entity', 'move_entity',
+  'create_edge', 'edit_edge', 'delete_edge', 'reverse_edge',
+])
+
+export const PUBLISHED_READ_ONLY = 'The published graph is read-only — open a draft to save this change.'
 
 const _SCOPE_NULL = '__none__'   // sentinel for the null/unscoped slice in _byScope
 
@@ -365,7 +380,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
   canUndo: () => get().changes.length > 0,
   canRedo: () => get().redoStack.length > 0,
 
-  applyAll: async (provider, wsId) => {
+  applyAll: async (provider, wsId, opts) => {
     const { changes } = get()
     if (changes.length === 0) return { ok: 0, failed: 0 }
 
@@ -391,6 +406,12 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const remaining: StagedChange[] = []
 
     for (const change of sorted) {
+      if (opts?.graphWrites === false && GRAPH_DATA_CHANGE_TYPES.has(change.type)) {
+        // Never "applied" by dropping it: a graph edit without a draft has nowhere to go.
+        failed++
+        remaining.push({ ...change, error: PUBLISHED_READ_ONLY })
+        continue
+      }
       if (!change.apply) {
         // No backend apply hook — treat as a local-only change that's already
         // committed to its owning store. Drop it from the staging list.

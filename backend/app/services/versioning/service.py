@@ -35,13 +35,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from . import config, db
-from .changeset import Delta, materialize, net_delta, diff_states
+from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
+from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
-from .typed_merge import preserve_stored_type
 from .ontology import (
     Ontology, OntologyRules, canonicalize_payload_types,
     validate_entities, validate_entities_rich,
@@ -612,6 +612,8 @@ class GraphVersioningService:
                 ref = op.get("ref", entity_id)
                 assigned[ref] = entity_id
                 payload = op.get("payload")
+                if op["op"] == "create":
+                    payload = strip_deletes(payload)     # a new entity has nothing to remove
                 if op["entity_kind"] == "node":
                     payload = _sanitize_node_properties(payload)
                 if op["op"] != "delete":
@@ -5399,36 +5401,18 @@ class GraphVersioningService:
 
             ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
 
-            # Resolve ops → new payloads for the AFFECTED entities only.
-            new_vals: Dict[str, Optional[dict]] = {}
-            kind_by_entity: Dict[str, str] = {}
-            update_ids: set = set()
-            base_versions: Dict[str, str] = {}        # entity_id → client's OCC token (content_hash)
-            for op in ops:
-                eid = op["entity_id"]
-                payload = op.get("payload") or {}
-                kind_by_entity[eid] = (op.get("entity_kind")
-                                       or ("edge" if _is_edge_payload(payload) else "node"))
-                earlier = new_vals.get(eid)
-                if op["op"] == "update" and earlier is not None:
-                    # Several ops on ONE entity in one batch COMPOSE, in order: an update after a
-                    # create (a node renamed before its first save) patches the create's payload,
-                    # and two updates become one patch — composed as patches, so a property the
-                    # first removes stays removed. Replacing instead stored a renamed new node as
-                    # {displayName} alone — no type, no urn — which then failed every read of the
-                    # draft.
-                    new_vals[eid] = (self._compose_patches(earlier, payload) if eid in update_ids
-                                     else self._patch_payload(earlier, payload))
-                else:
-                    new_vals[eid] = None if op["op"] == "delete" else dict(payload)
-                    if op["op"] == "update":
-                        update_ids.add(eid)
-                        if op.get("base_version"):
-                            base_versions[eid] = op["base_version"]
-                    else:
-                        update_ids.discard(eid)          # a create / delete restarts the entity
-                if new_vals[eid] is not None and kind_by_entity[eid] == "node":
-                    new_vals[eid] = _sanitize_node_properties(new_vals[eid])
+            # Resolve ops → new payloads for the AFFECTED entities only. Several ops on ONE
+            # entity in one batch COMPOSE, in order: an update after a create (a node renamed
+            # before its first save) patches the create's payload, and two updates become one
+            # patch that keeps BOTH updates' property removals (applying the first onto the
+            # second dropped the first's removal). Replacing instead stored a renamed new node
+            # as {displayName} alone — no type, no urn — which then failed every read of the draft.
+            fold = fold_batch_ops(
+                ops, is_edge_payload=_is_edge_payload, sanitize_node=_sanitize_node_properties)
+            new_vals: Dict[str, Optional[dict]] = fold.new_vals
+            kind_by_entity: Dict[str, str] = fold.kind_by_entity
+            update_ids: set = fold.update_ids
+            base_versions: Dict[str, str] = fold.base_versions   # entity_id → client's OCC token
 
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
             cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
@@ -5627,42 +5611,17 @@ class GraphVersioningService:
 
     @staticmethod
     def _patch_payload(base: Optional[dict], patch: dict) -> dict:
-        """Apply a partial update `patch` onto `base`: top-level fields override, and the
-        nested ``properties`` dict is DEEP-merged (a partial properties patch must not drop
-        the keys it didn't mention). Mirrors the merge the canvas endpoint used to do.
-
-        A key the base already has keeps its stored value when the patch sends the same
-        value back in a lossier form — the browser's rounded copy of a 19-digit integer,
-        or digits as text (``typed_merge.preserve_stored_type``) — so a drawer edit of
-        one field can no longer rewrite every other property it round-trips."""
-        base = base or {}
-        out = {**base, **patch}
-        if patch.get("properties") is not None or base.get("properties") is not None:
-            base_props = base.get("properties") or {}
-            merged = {**base_props}
-            for k, v in (patch.get("properties") or {}).items():
-                merged[k] = preserve_stored_type(base_props[k], v) if k in base_props else v
-            # A bulk import can explicitly REMOVE a property by patching it with this sentinel
-            # (rowmodel.PROP_DELETE — a `\N` cell / properties_json null); drop those keys. The
-            # literal never occurs in real data, so this is inert for every other write path.
-            out["properties"] = {k: v for k, v in merged.items() if v != "__nx_prop_delete__"}
-        return out
+        """Apply a partial update `patch` onto `base` (see ``backend.common.property_patch``):
+        top-level fields override, ``properties`` is merged key by key, and a property marked
+        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed."""
+        return apply_patch(base, patch)
 
     @staticmethod
     def _compose_patches(first: dict, second: dict) -> dict:
-        """Two partial updates of ONE entity in one batch, as the one patch they make in order:
-        ``second`` wins field by field and, inside ``properties``, key by key. A removal
-        (``__nx_prop_delete__``) is kept for the stored value to lose — :meth:`_patch_payload`
-        treats its base as a stored payload and would drop the marker, bringing the key back. A
-        value the second re-sends in a lossier form keeps the first's, as two saves in turn would."""
-        out = {**first, **second}
-        if first.get("properties") is not None or second.get("properties") is not None:
-            before = first.get("properties") or {}
-            merged = {**before}
-            for k, v in (second.get("properties") or {}).items():
-                merged[k] = preserve_stored_type(before[k], v) if k in before else v
-            out["properties"] = merged
-        return out
+        """Two partial updates of ONE entity in one batch, as the one patch they make in order
+        (see ``backend.common.property_patch.compose_patches``): a removal stays a removal until
+        it meets the stored value."""
+        return compose_patches(first, second)
 
     async def _payloads_by_content_hash(
         self, s, graph_id: str, eid_to_token: Mapping[str, str], kind_by_entity: Mapping[str, str]

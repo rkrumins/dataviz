@@ -27,7 +27,11 @@ export interface StageEntityInput {
   /** Parent node urn for nested creation (may be another staged node's temp urn). */
   parentUrn?: string | null
   tags?: string[]
-  /** Free-form properties (description, custom schema fields, etc.). */
+  /** Node fields, never properties — filed under `properties` they were stripped on save. */
+  description?: string
+  qualifiedName?: string
+  sourceSystem?: string
+  /** User properties (custom schema fields, etc.). */
   properties?: Record<string, unknown>
   /**
    * The ontology containment relationship to use for the parent→child edge
@@ -35,6 +39,18 @@ export interface StageEntityInput {
    * resolved containment type. Ignored when there is no parent.
    */
   containmentEdgeType?: string
+}
+
+const NODE_FIELDS = ['description', 'qualifiedName', 'sourceSystem'] as const
+
+/** The node fields an input sets (blank ones left out). */
+function nodeFieldsOf(input: Pick<StageEntityInput, (typeof NODE_FIELDS)[number]>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const field of NODE_FIELDS) {
+    const v = input[field]?.trim()
+    if (v) out[field] = v
+  }
+  return out
 }
 
 export function useStageEntityCreation() {
@@ -50,6 +66,7 @@ export function useStageEntityCreation() {
     (input: StageEntityInput): string => {
       const tags = input.tags ?? []
       const properties = input.properties ?? {}
+      const fields = nodeFieldsOf(input)
       // Only treat the parent as a CONTAINMENT parent when it's a real node on
       // the canvas (a just-staged node counts — it's in the store). A layer id
       // or a not-yet-loaded container would otherwise produce a dangling
@@ -81,6 +98,7 @@ export function useStageEntityCreation() {
           type: input.entityType,
           urn: tempUrn,
           classifications: tags,
+          ...fields,
           isPending: 'create',
           properties,
         },
@@ -103,6 +121,7 @@ export function useStageEntityCreation() {
       // `apply` (which reads from this same object) observes edits made after staging.
       const afterState = {
         entityType: input.entityType, displayName: input.displayName, parentUrn, tags, properties,
+        ...fields,
         // Recorded so the staged-changes review can show how the child is related to its parent —
         // only when the ontology actually declares a containment relationship.
         ...(parentUrn && containmentEdgeType ? { containmentEdgeType, parentLabel } : {}),
@@ -185,7 +204,9 @@ export function useStageEntityCreation() {
    * eventual `apply`/save — and mirrors the visible fields onto the optimistic canvas node.
    */
   const updateStagedEntity = useCallback(
-    (tempUrn: string, patch: { displayName?: string; tags?: string[]; properties?: Record<string, unknown> }) => {
+    (tempUrn: string, patch: {
+      displayName?: string; tags?: string[]; properties?: Record<string, unknown>
+    } & Pick<StageEntityInput, 'description' | 'qualifiedName' | 'sourceSystem'>) => {
       const change = useStagedChangesStore
         .getState()
         .changes.find((c) => c.type === 'create_entity' && c.targetUrn === tempUrn)
@@ -208,6 +229,12 @@ export function useStageEntityCreation() {
       if (patch.tags !== undefined) {
         afterPatch.tags = patch.tags
         nodePatch.classifications = patch.tags
+      }
+      for (const field of NODE_FIELDS) {
+        if (patch[field] !== undefined) {
+          afterPatch[field] = patch[field]
+          nodePatch[field] = patch[field]
+        }
       }
       if (patch.properties !== undefined) {
         const mergedProperties = { ...after.properties, ...patch.properties }

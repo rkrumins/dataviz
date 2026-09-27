@@ -15,10 +15,13 @@
  * JSON blob — see falkordb_provider._split_user_properties), so these values
  * round-trip as-is.
  *
- * An edit is kept only as a change in the view's draft (useEntityEditing):
- * Stage Changes stages it, and Review & Save commits it to the draft as
- * /graph/changes ops (stagedChangesToOps). A data source without version
- * control is read-only here — there is no direct write to an external graph.
+ * Editing happens in a draft only (`canEdit`). An edit stages ONE change per
+ * node (`stageNodeEdit`) and is saved with the draft as a patch against the node
+ * as first read (`stagedChangesToOps`): changed fields, set properties, and each
+ * removed property named in `unsetProperties`. Where a field lives — top-level or
+ * in `properties` — is decided by `lib/nodeFields`.
+ * Where editing is offered but can't be kept (no draft, or no version control)
+ * the Edit tab is disabled with the reason (useEntityEditing).
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
@@ -43,22 +46,25 @@ import { useReparentNode } from '@/components/canvas/context-view/useReparentNod
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { stageNodeEdit } from '@/features/versioning/model/stageNodeEdit'
+import { readSchemaField, userProperties, withReserved, writeBusinessLabel, writeSchemaField } from '@/lib/nodeFields'
 import { useFeature } from '@/store/features'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
-import { useResolveGraph, useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
-import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { useEntityEditing, NO_VERSION_CONTROL } from '@/features/versioning/hooks/useEntityEditing'
 import { HoverTip } from '@/components/ui/HoverTip'
-import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
-import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
+import { useBranchStore } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Section } from './DrawerSection'
+import { DrawerTrailNav } from './DrawerTrailNav'
+import { useDrawerHistoryScope } from './useDrawerHistoryScope'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 
 // ============================================
@@ -66,6 +72,11 @@ import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 // ============================================
 
 interface EntityDrawerProps {
+  /** The canvas owning this drawer accepts graph edits — a draft, in edit mode.
+   *  Without it the drawer is read-only; the published graph is never edited in place. */
+  canEdit?: boolean
+  /** Offered on a read-only drawer over the published graph: start editing in a draft. */
+  onStartEditing?: () => void
   /** Writes are refused by the surface that owns this drawer — currently a
    *  canvas trace, which is read-only for its whole life. Hides the Edit tab
    *  and takes away the property editor's edit rights, so the drawer cannot
@@ -110,6 +121,8 @@ type ViewMode = 'view' | 'edit' | 'json'
 // ============================================
 
 export function EntityDrawer({
+  canEdit = false,
+  onStartEditing,
   writesLocked = false,
   onFocusConnections,
   onTraceUp,
@@ -125,46 +138,19 @@ export function EntityDrawer({
   // its own node / actions change — NOT on every unrelated canvas store mutation
   // (selection, hover, node drags, layout ticks), which otherwise re-renders the
   // whole drawer continuously and makes everything in it feel laggy.
-  const updateNode = useCanvasStore((s) => s.updateNode)
   const clearSelection = useCanvasStore((s) => s.clearSelection)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
-  const drawerBackStep = useCanvasStore((s) => s.drawerBack)
-  const drawerForwardStep = useCanvasStore((s) => s.drawerForward)
-  const canDrawerBack = useCanvasStore((s) => s.drawerHistory.cursor > 0)
-  const canDrawerForward = useCanvasStore(
-    (s) => s.drawerHistory.cursor < s.drawerHistory.entries.length - 1)
-  // Retracing is a move on the CANVAS too: the drawer showing an entity the
-  // board is not looking at is how people lose their place. Select it (so the
-  // canvas highlight follows) and reveal it, exactly as clicking a neighbour
-  // row does — the reveal is best-effort and never blocks the panel swap.
-  const stepDrawer = useCallback((step: () => void) => {
-    step()
-    const target = useCanvasStore.getState().drawerNodeId
-    if (!target) return
-    useCanvasStore.getState().selectNode(target)
-    void onFocusNode?.(target)
-  }, [onFocusNode])
-  const drawerBack = useCallback(() => stepDrawer(drawerBackStep), [stepDrawer, drawerBackStep])
-  const drawerForward = useCallback(() => stepDrawer(drawerForwardStep), [stepDrawer, drawerForwardStep])
   const schema = useSchemaStore((s) => s.schema)
   const mode = usePersonaStore((s) => s.mode)
 
-  // Versioning context for the per-entity History section — resolve the active view's data source
-  // to its graph (cached; the same resolve the canvas versioning bar uses). Null when version
-  // control isn't enabled, in which case the History section hides.
-  const activeView = useActiveView()
-  const resolve = useResolveGraph(activeView?.workspaceId, activeView?.dataSourceId ?? null, activeView?.id ?? null)
-  // Version history is a membership-gated surface and has no meaning for
-  // a read-only shared viewer (no drafts, no commits they can act on) —
-  // withholding the ids keeps every versioning query from firing.
-  const readOnlyView = useViewExecutionContext()?.readOnly ?? false
-  const historyWsId = readOnlyView ? undefined : activeView?.workspaceId
-  const historyGraphId = readOnlyView ? null : (resolve.data?.graphId ?? null)
-  const historyMainBranch = resolve.data?.mainBranchId ?? null
-  // The active draft (if any), so the History section also shows this branch's unmerged commits.
-  // Scoped by the active view's id (branch-per-view) so this never shows another view's draft
-  // commits on the same data source.
-  const historyBranchId = useEffectiveBranchId(activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
+  // Versioning context for the per-entity History section. Null ids when version control isn't
+  // enabled or the viewer is read-only, in which case the History section hides.
+  const {
+    wsId: historyWsId,
+    graphId: historyGraphId,
+    mainBranchId: historyMainBranch,
+    branchId: historyBranchId,
+  } = useDrawerHistoryScope()
 
   // The drawer is sticky: it shows whichever entity it was last opened on
   // (drawerNodeId), independent of canvas highlight selection. It stays open
@@ -205,7 +191,6 @@ export function EntityDrawer({
   // at all (switched off, a read-only view, a ghost, a locked surface) it goes.
   const editing = useEntityEditing()
   const editOffered = !isGhost && !writesLocked && editing.offered
-  const canEdit = editOffered && !editing.blocked
   const entityHistory = useEntityHistory(
     versioningEnabled ? historyWsId : undefined,
     versioningEnabled ? historyGraphId : undefined,
@@ -226,8 +211,6 @@ export function EntityDrawer({
   // Local state
   const [viewMode, setViewMode] = useState<ViewMode>('view')
   const [formData, setFormData] = useState<Record<string, any>>({})
-  const [rawJson, setRawJson] = useState('')
-  const [jsonError, setJsonError] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
   const [showSaved, setShowSaved] = useState(false)
   const [copiedUrn, setCopiedUrn] = useState(false)
@@ -235,6 +218,10 @@ export function EntityDrawer({
   // Unsaved-changes guard: confirm before closing or switching nodes.
   const [confirmClose, setConfirmClose] = useState(false)
   const [pendingSwitchId, setPendingSwitchId] = useState<string | null>(null)
+  // A trail step held while there are unsaved edits. A step can land on a
+  // relationship, which swaps this drawer out entirely — the revert-on-switch
+  // effect below never gets to run, so the step is gated before it happens.
+  const [pendingStep, setPendingStep] = useState<(() => void) | null>(null)
   const prevIdRef = useRef<string | null>(null)
   const bypassGuardRef = useRef(false)
 
@@ -251,11 +238,8 @@ export function EntityDrawer({
     bypassGuardRef.current = false
     prevIdRef.current = id
     if (selectedNode) {
-      const data = selectedNode.data as Record<string, any>
-      setFormData({ ...data })
-      setRawJson(JSON.stringify(data, null, 2))
+      setFormData({ ...(selectedNode.data as Record<string, any>) })
       setHasChanges(false)
-      setJsonError(null)
       setViewMode('view')
     }
   }, [selectedNode?.id, hasChanges])
@@ -281,132 +265,29 @@ export function EntityDrawer({
     [selectedNode, mode],
   )
 
-  // Handle form field changes
-  const handleChange = useCallback((key: string, value: any) => {
-    const newData = { ...formData, [key]: value }
-    setFormData(newData)
+  // Every edit is an update of the form's copy of the node; the Edit tab's inputs say which field
+  // (`lib/nodeFields` decides where it lives).
+  const handleEdit = useCallback((update: (data: Record<string, any>) => Record<string, any>) => {
+    setFormData((d) => update(d))
     setHasChanges(true)
-    setJsonError(null)
-  }, [formData])
-
-  // Replace the entire `properties` bag — PropertyEditor emits a fresh object
-  // on every mutation (add/remove/rename/type-change/reorder). Other top-level
-  // canvas-store fields are untouched.
-  const handlePropertiesChange = useCallback(
-    (nextProperties: Record<string, any>) => {
-      const next = { ...formData, properties: nextProperties }
-      setFormData(next)
-      setHasChanges(true)
-      setJsonError(null)
-    },
-    [formData],
-  )
-
-  // `rawJson` is only rendered in the JSON view, so serialize lazily when the
-  // user opens it (not on every keystroke — that pretty-prints the whole entity).
-  const openJsonView = useCallback(() => {
-    setRawJson(JSON.stringify(formData, null, 2))
-    setViewMode('json')
-  }, [formData])
-
-  // Handle raw JSON changes
-  const handleRawJsonChange = useCallback((value: string) => {
-    setRawJson(value)
-    setHasChanges(true)
-    try {
-      const parsed = JSON.parse(value)
-      setFormData(parsed)
-      setJsonError(null)
-    } catch (e) {
-      setJsonError((e as Error).message)
-    }
   }, [])
 
-  // Stage changes — recorded for review, not committed to backend until the
-  // user clicks Save Blueprint.
-  //
-  // Diff strategy: if only `label` differs, stage as `rename_entity` (existing
-  // semantics). For any other change (including nested objects like `metadata`),
-  // stage as `update_entity` carrying the full before/after diff. The canvas is
-  // mutated immediately for visual feedback; staging captures provenance so the
-  // review panel can render and discard the change.
+  // Stage the edit — recorded for review, saved with the draft. The canvas shows it at once; the
+  // staged change keeps the node as first read, so the save sends only what changed and a discard
+  // puts it back.
   const handleSave = useCallback(() => {
     if (!selectedNode) return
-    if (jsonError) return
-
-    const previousData = { ...(selectedNode.data as Record<string, any>) }
-    const previousLabel = (previousData.label as string) ?? ''
-    const newLabel = (formData.label as string) ?? previousLabel
-
-    updateNode(selectedNode.id, formData)
+    stageNodeEdit(selectedNode.id, selectedNode.data, formData as LineageNode['data'])
     setHasChanges(false)
     setShowSaved(true)
     setTimeout(() => setShowSaved(false), 2000)
-    setRawJson(JSON.stringify(formData, null, 2))
-
-    // Compute changed keys via shallow JSON-equality (handles nested objects).
-    const allKeys = new Set([
-      ...Object.keys(previousData),
-      ...Object.keys(formData),
-    ])
-    const changedKeys: string[] = []
-    for (const k of allKeys) {
-      // Layer placement is VIEW config now (referenceLayout.assignments, managed on the canvas), not an
-      // editable node property — never stage it as an update_entity field.
-      if (k === 'layerAssignment') continue
-      if (JSON.stringify(previousData[k]) !== JSON.stringify(formData[k])) {
-        changedKeys.push(k)
-      }
-    }
-
-    if (changedKeys.length === 0) return
-
-    const stagedChanges = useStagedChangesStore.getState()
-    const onlyLabel = changedKeys.length === 1 && changedKeys[0] === 'label'
-
-    if (onlyLabel) {
-      stagedChanges.stageOrReplace(
-        (c) => c.type === 'rename_entity' && c.targetId === selectedNode.id,
-        {
-          type: 'rename_entity',
-          targetId: selectedNode.id,
-          targetUrn: previousData.urn,
-          before: previousData,
-          after: { ...formData },
-          summary: `Rename '${previousLabel}' → '${newLabel}'`,
-          discard: () => {
-            useCanvasStore.getState().updateNode(selectedNode.id, previousData)
-          },
-        },
-      )
-      return
-    }
-
-    // Multi-field edit — stage as update_entity (saved to the draft by stagedChangesToOps).
-    stagedChanges.stageOrReplace(
-      (c) => c.type === 'update_entity' && c.targetId === selectedNode.id,
-      {
-        type: 'update_entity',
-        targetId: selectedNode.id,
-        targetUrn: previousData.urn,
-        before: previousData,
-        after: { ...formData },
-        summary: `Edit ${changedKeys.length} field${changedKeys.length === 1 ? '' : 's'} on '${previousLabel || selectedNode.id}'`,
-        discard: () => {
-          useCanvasStore.getState().updateNode(selectedNode.id, previousData)
-        },
-      },
-    )
-  }, [selectedNode, formData, jsonError, updateNode])
+  }, [selectedNode, formData])
 
   // Cancel changes
   const handleCancel = useCallback(() => {
     if (selectedNode) {
-      const data = selectedNode.data as Record<string, any>
-      setFormData({ ...data })
-      setRawJson(JSON.stringify(data, null, 2))
+      setFormData({ ...(selectedNode.data as Record<string, any>) })
       setHasChanges(false)
-      setJsonError(null)
     }
     setViewMode('view')
   }, [selectedNode])
@@ -438,7 +319,11 @@ export function EntityDrawer({
   const discardAndProceed = useCallback(() => {
     bypassGuardRef.current = true
     setHasChanges(false)
-    if (pendingSwitchId) {
+    if (pendingStep) {
+      const step = pendingStep
+      setPendingStep(null)
+      step()
+    } else if (pendingSwitchId) {
       const target = pendingSwitchId
       setPendingSwitchId(null)
       useCanvasStore.getState().openNodeDrawer(target)
@@ -447,12 +332,18 @@ export function EntityDrawer({
       closeNodeDrawer()
       clearSelection()
     }
-  }, [pendingSwitchId, confirmClose, closeNodeDrawer, clearSelection])
+  }, [pendingStep, pendingSwitchId, confirmClose, closeNodeDrawer, clearSelection])
 
   const keepEditing = useCallback(() => {
     setPendingSwitchId(null)
+    setPendingStep(null)
     setConfirmClose(false)
   }, [])
+
+  const guardStep = useCallback((step: () => void) => {
+    if (hasChanges) setPendingStep(() => step)
+    else step()
+  }, [hasChanges])
 
   // Get external URL
   const externalUrl = useMemo(() => {
@@ -466,11 +357,10 @@ export function EntityDrawer({
   const urn = formData.urn || selectedNode.id
   const childCount = formData.childCount || formData._collapsedChildCount || 0
 
-  // After the converter cleanup in useGraphHydration, the editable property
-  // bag lives in a single explicit field (`properties`). PropertyEditor
-  // targets it directly; everything else on `data` is structured.
-  const propertiesBag: Record<string, any> =
-    (formData.properties as Record<string, any> | undefined) ?? {}
+  // The user's own properties. The bag can also hold reserved names the reader mirrors into it
+  // (`childCount`) — they are node fields, never shown, edited or removed as properties.
+  const propertiesBag: Record<string, any> = userProperties(formData.properties)
+  const editable = canEdit && editOffered
 
   // NOTE: no local <AnimatePresence> here. The drawer is conditionally
   // rendered inside ContextViewCanvas's right-rail AnimatePresence, which
@@ -496,12 +386,12 @@ export function EntityDrawer({
       >
         <div className="w-[clamp(420px,32vw,560px)] h-full flex flex-col overflow-hidden">
         {/* Unsaved-changes guard */}
-        {(confirmClose || pendingSwitchId) && (
+        {(confirmClose || pendingSwitchId || pendingStep) && (
           <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/40 backdrop-blur-sm p-6">
             <div className="w-full max-w-xs rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl p-5">
               <h4 className="text-sm font-semibold text-ink">Unsaved changes</h4>
               <p className="text-xs text-ink-muted mt-1.5">
-                You have unsaved property changes. {pendingSwitchId ? 'Switch entity' : 'Close'} and discard them?
+                You have unsaved property changes. {pendingSwitchId || pendingStep ? 'Switch entity' : 'Close'} and discard them?
               </p>
               <div className="flex items-center justify-end gap-2 mt-4">
                 <button onClick={keepEditing} className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors">
@@ -524,47 +414,9 @@ export function EntityDrawer({
           {/* Type Badge & Close */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
-              {/* The trail. Following lineage from here is a WALK — a
-                  consumer, then its consumer — and a walk you cannot retrace
-                  is one people stop taking. Rendered only once there is
-                  somewhere to go, so a drawer opened on one entity carries no
-                  dead controls. */}
-              {(canDrawerBack || canDrawerForward) && (
-                <div className="flex items-center gap-0.5 mr-0.5">
-                  <button
-                    type="button"
-                    onClick={drawerBack}
-                    disabled={!canDrawerBack}
-                    aria-label="Back to the previous entity"
-                    title="Back"
-                    className={cn(
-                      'p-1.5 rounded-lg transition-colors duration-150',
-                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                      canDrawerBack
-                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
-                        : 'text-ink-muted opacity-40 cursor-not-allowed',
-                    )}
-                  >
-                    <LucideIcons.ChevronLeft className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={drawerForward}
-                    disabled={!canDrawerForward}
-                    aria-label="Forward to the next entity"
-                    title="Forward"
-                    className={cn(
-                      'p-1.5 rounded-lg transition-colors duration-150',
-                      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                      canDrawerForward
-                        ? 'text-ink-muted hover:text-ink hover:bg-white/10'
-                        : 'text-ink-muted opacity-40 cursor-not-allowed',
-                    )}
-                  >
-                    <LucideIcons.ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
+              {/* The trail — shared with the relationship drawer, so one walk
+                  can cross a relationship and come back. */}
+              <DrawerTrailNav onFocusNode={onFocusNode} guard={guardStep} />
               <span
                 className="px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide"
                 style={{ backgroundColor: colors.bg, color: colors.text }}
@@ -711,11 +563,7 @@ export function EntityDrawer({
               icon={LucideIcons.Eye}
               label="View"
             />
-            {editOffered && (editing.blocked ? (
-              <HoverTip label={editing.blocked} className="flex-1 flex">
-                <ModeTab active={false} disabled icon={LucideIcons.Pencil} label="Edit" />
-              </HoverTip>
-            ) : (
+            {editable ? (
               <ModeTab
                 active={viewMode === 'edit'}
                 onClick={() => setViewMode('edit')}
@@ -723,10 +571,22 @@ export function EntityDrawer({
                 label="Edit"
                 badge={hasChanges ? '•' : undefined}
               />
-            ))}
+            ) : onStartEditing && editOffered && editing.blocked !== NO_VERSION_CONTROL ? (
+              // The published graph is never edited in place — say where editing happens.
+              <ModeTab
+                active={false}
+                onClick={onStartEditing}
+                icon={LucideIcons.GitBranchPlus}
+                label="Edit in a draft"
+              />
+            ) : editOffered && editing.blocked ? (
+              <HoverTip label={editing.blocked} className="flex-1 flex">
+                <ModeTab active={false} disabled icon={LucideIcons.Pencil} label="Edit" />
+              </HoverTip>
+            ) : null}
             <ModeTab
               active={viewMode === 'json'}
-              onClick={openJsonView}
+              onClick={() => setViewMode('json')}
               icon={LucideIcons.Code}
               label="JSON"
             />
@@ -734,22 +594,17 @@ export function EntityDrawer({
 
           {/* Status Indicators */}
           <AnimatePresence>
-            {(hasChanges || showSaved || jsonError) && (
+            {(hasChanges || showSaved) && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
                 exit={{ opacity: 0, height: 0 }}
                 className="mt-3"
               >
-                {jsonError ? (
-                  <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-500 text-xs flex items-center gap-2">
-                    <LucideIcons.AlertCircle className="w-4 h-4" />
-                    Invalid JSON: {jsonError}
-                  </div>
-                ) : showSaved ? (
-                  <div className="px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/20 text-green-500 text-xs flex items-center gap-2">
+                {showSaved ? (
+                  <div className="px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/20 text-green-600 dark:text-green-400 text-xs flex items-center gap-2" role="status">
                     <LucideIcons.CheckCircle className="w-4 h-4" />
-                    Staged — Review &amp; Save to keep it
+                    Staged — Review &amp; Save keeps it in your draft
                   </div>
                 ) : hasChanges ? (
                   <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-500 text-xs flex items-center gap-2">
@@ -785,32 +640,24 @@ export function EntityDrawer({
             />
           )}
 
-          {viewMode === 'edit' && (
+          {viewMode === 'edit' && editable && (
             <EditModeContent
               nodeId={selectedNode.id}
               formData={formData}
               entityType={entityType}
               urn={urn}
               propertiesBag={propertiesBag}
-              onChange={handleChange}
-              onPropertiesChange={handlePropertiesChange}
+              onEdit={handleEdit}
               onCopyUrn={handleCopyUrn}
             />
           )}
 
-          {viewMode === 'json' && (
-            <JsonModeContent
-              rawJson={rawJson}
-              jsonError={jsonError}
-              onChange={handleRawJsonChange}
-              canEdit={canEdit}
-            />
-          )}
+          {viewMode === 'json' && <JsonModeContent data={formData} />}
         </div>
 
         {/* Footer */}
         <div className="flex-shrink-0 p-4 border-t border-glass-border/50 bg-canvas-elevated/50">
-          {viewMode === 'view' ? (
+          {viewMode !== 'edit' ? (
             <div className="space-y-2">
               <div className="grid grid-cols-2 gap-2">
                 <TimeStat
@@ -849,10 +696,10 @@ export function EntityDrawer({
               </button>
               <button
                 onClick={handleSave}
-                disabled={!hasChanges || !!jsonError || !canEdit}
+                disabled={!hasChanges}
                 className={cn(
                   "px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors duration-150",
-                  hasChanges && !jsonError && canEdit
+                  hasChanges
                     ? "bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25"
                     : "bg-white/5 text-ink-muted cursor-not-allowed"
                 )}
@@ -880,7 +727,7 @@ interface ActionButtonProps {
   onClick?: () => void
 }
 
-function ActionButton({ icon: Icon, label, primary, active, onClick }: ActionButtonProps) {
+export function ActionButton({ icon: Icon, label, primary, active, onClick }: ActionButtonProps) {
   return (
     <button
       onClick={onClick}
@@ -909,7 +756,7 @@ interface ModeTabProps {
   badge?: string
 }
 
-function ModeTab({ active, onClick, disabled, icon: Icon, label, badge }: ModeTabProps) {
+export function ModeTab({ active, onClick, disabled, icon: Icon, label, badge }: ModeTabProps) {
   return (
     <button
       onClick={onClick}
@@ -953,7 +800,7 @@ const TIMESTAT_TONES = {
   },
 } as const
 
-function TimeStat({ icon, label, iso, tone, loading, live, overrideValue, emptyText }: {
+export function TimeStat({ icon, label, iso, tone, loading, live, overrideValue, emptyText }: {
   icon: React.ReactNode
   label: string
   iso?: string
@@ -1429,10 +1276,12 @@ interface EditModeContentProps {
   entityType: any
   urn: string
   propertiesBag: Record<string, any>
-  onChange: (key: string, value: any) => void
-  onPropertiesChange: (next: Record<string, any>) => void
+  onEdit: (update: (data: Record<string, any>) => Record<string, any>) => void
   onCopyUrn: () => void
 }
+
+/** Schema fields the form already shows as its own inputs. */
+const FORM_FIELD_IDS = ['name', 'label', 'description', 'urn', 'businessLabel']
 
 function EditModeContent({
   nodeId,
@@ -1440,10 +1289,12 @@ function EditModeContent({
   entityType,
   urn,
   propertiesBag,
-  onChange,
-  onPropertiesChange,
+  onEdit,
   onCopyUrn,
 }: EditModeContentProps) {
+  // Top-level node fields (name, description, qualified name, source system).
+  const onChange = (key: string, value: any) => onEdit((d) => ({ ...d, [key]: value }))
+  const schemaFields = ((entityType?.fields ?? []) as any[]).filter((f) => !FORM_FIELD_IDS.includes(f.id))
   // Layer placement is VIEW config now (referenceLayout.assignments), managed on the canvas — not an
   // editable node property. Show the RESOLVED layer name read-only (explicit assignment; inherited
   // placement resolves live on the canvas). A Context View node's id IS its urn, so the map is keyed here.
@@ -1482,7 +1333,7 @@ function EditModeContent({
           <input
             type="text"
             value={formData.businessLabel || ''}
-            onChange={(e) => onChange('businessLabel', e.target.value)}
+            onChange={(e) => { const v = e.target.value; onEdit((d) => writeBusinessLabel(d, v)) }}
             className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 focus:bg-white/8 transition-colors duration-150 outline-none text-sm"
             placeholder="Business-friendly name..."
           />
@@ -1595,27 +1446,27 @@ function EditModeContent({
       </div>
 
       {/* Dynamic Schema Fields */}
-      {entityType?.fields && entityType.fields.filter((f: any) => !['name', 'label', 'description', 'urn', 'businessLabel'].includes(f.id)).length > 0 && (
+      {schemaFields.length > 0 && (
         <div className="pt-5 border-t border-glass-border/30">
           <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-4">
             Schema Properties
           </h4>
           <div className="space-y-4">
-            {entityType.fields.filter((f: any) => !['name', 'label', 'description', 'urn', 'businessLabel'].includes(f.id)).map((field: any) => (
+            {schemaFields.map((field: any) => (
               <div key={field.id} className="space-y-2">
                 <label className="text-xs font-medium text-ink-muted">{field.name}</label>
                 {field.type === 'textarea' || field.type === 'markdown' ? (
                   <textarea
-                    value={formData[field.id] || ''}
-                    onChange={(e) => onChange(field.id, e.target.value)}
+                    value={String(readSchemaField(formData, field.id) ?? '')}
+                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }}
                     rows={2}
                     className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm resize-none"
                   />
                 ) : (
                   <input
                     type="text"
-                    value={formData[field.id] || ''}
-                    onChange={(e) => onChange(field.id, e.target.value)}
+                    value={String(readSchemaField(formData, field.id) ?? '')}
+                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }}
                     className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm"
                   />
                 )}
@@ -1637,7 +1488,15 @@ function EditModeContent({
           <PanelErrorBoundary resetKeys={[urn]}>
             <PropertyEditor
               value={propertiesBag}
-              onChange={(next) => onPropertiesChange(next as Record<string, any>)}
+              onChange={(next) => onEdit((d) => {
+                const bag = next as Record<string, any>
+                // The business label is a property the header also shows — keep the two as one.
+                return {
+                  ...d,
+                  properties: withReserved(d.properties, bag),
+                  businessLabel: typeof bag.businessLabel === 'string' ? bag.businessLabel : undefined,
+                }
+              })}
               searchable
               groupByPath
               bare
@@ -1653,42 +1512,22 @@ function EditModeContent({
 // JSON Mode Content
 // ============================================
 
-interface JsonModeContentProps {
-  rawJson: string
-  jsonError: string | null
-  onChange: (value: string) => void
-  canEdit: boolean
-}
-
-function JsonModeContent({ rawJson, jsonError, onChange, canEdit }: JsonModeContentProps) {
+/** The node as JSON, read-only — for inspection. Serialised only while this tab is open. */
+function JsonModeContent({ data }: { data: Record<string, any> }) {
+  const json = useMemo(() => JSON.stringify(data, null, 2), [data])
   return (
     <div className="p-5">
-      <div className="flex items-center justify-between mb-3">
-        <label className="text-xs font-semibold text-ink-muted flex items-center gap-2">
-          <LucideIcons.Code className="w-3.5 h-3.5" />
-          Raw JSON Data
-        </label>
-        <span className={cn(
-          "text-xs px-2 py-1 rounded-lg",
-          jsonError
-            ? "bg-red-500/10 text-red-500"
-            : "bg-green-500/10 text-green-500"
-        )}>
-          {jsonError ? '⚠️ Invalid' : '✓ Valid'}
-        </span>
-      </div>
-      <textarea
-        value={rawJson}
-        onChange={(e) => onChange(e.target.value)}
-        readOnly={!canEdit}
-        className={cn(
-          "w-full h-[500px] px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border transition-colors duration-150 outline-none text-xs font-mono resize-none custom-scrollbar",
-          jsonError
-            ? "border-red-500/30 focus:border-red-500/50"
-            : "border-white/10 focus:border-accent-lineage/50"
-        )}
-        spellCheck={false}
-      />
+      <label className="text-xs font-semibold text-ink-muted flex items-center gap-2 mb-3">
+        <LucideIcons.Code className="w-3.5 h-3.5" />
+        Raw JSON Data
+      </label>
+      <pre
+        className="w-full max-h-[500px] overflow-auto px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border border-glass-border text-xs font-mono text-ink whitespace-pre-wrap break-words custom-scrollbar"
+        aria-label="Entity data as JSON"
+        tabIndex={0}
+      >
+        {json}
+      </pre>
     </div>
   )
 }

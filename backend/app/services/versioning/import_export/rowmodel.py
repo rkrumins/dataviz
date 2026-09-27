@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from backend.common.property_patch import PROP_DELETE
+
 _NODE_CORE = (
     "urn", "entityType", "displayName", "qualifiedName",
     "description", "sourceSystem", "layerAssignment",
@@ -55,13 +57,10 @@ def _is_scalar_or_flat_list(v: Any) -> bool:
     return False
 
 
-# Sentinel that flows to the update patch and tells it to REMOVE the property (see
-# service._patch_payload). Chosen so it can never collide with real data. An EMPTY cell still means
+# Sentinel that flows to the update patch and tells it to REMOVE the property — the one internal
+# removal form every write path shares (backend.common.property_patch). An EMPTY cell still means
 # "leave unchanged" (PATCH); deletion is always explicit — a ``\N`` token in a prop.<name> cell, or
 # a ``null`` value in properties_json.
-# Uses a Unicode Private-Use-Area char (never in real data, and — unlike a NUL byte — valid in
-# Postgres text/JSONB so the staged row persists).
-PROP_DELETE = "__nx_prop_delete__"
 _DELETE_TOKENS = {"\\n", "\\N", "\\NULL"}
 
 

@@ -397,6 +397,29 @@ describe('useHierarchyOutline', () => {
     expect(result.current.descendantCount(containerUrn!)).toBe(0)
   })
 
+  it('16. a description is a node field: staged top-level on the create and on a later details edit, never among the properties', () => {
+    seedNode('urn:real:domain1', 'domain', 'Sales Domain')
+    const { result } = renderHook(() =>
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', initialTypeId: null }),
+    )
+    act(() => result.current.setName('Analytics'))
+    act(() => result.current.setDetails({ description: 'Where analytics lives', tags: '', fieldValues: { owner: 'ana' } }))
+    let tempUrn: string | null = null
+    act(() => { tempUrn = result.current.commitSibling() })
+
+    const after = findByTempUrn(tempUrn!)!.after as Record<string, unknown>
+    expect(after.description).toBe('Where analytics lives')
+    expect(after.properties).toEqual({ owner: 'ana' })
+    expect(canvasNode(tempUrn!)?.data.description).toBe('Where analytics lives')
+
+    act(() => result.current.updateRowDetails(tempUrn!, { description: 'Changed', properties: { owner: 'bo', qualifiedName: 'q.a' } }))
+    const edited = findByTempUrn(tempUrn!)!.after as Record<string, unknown>
+    expect(edited.description).toBe('Changed')
+    expect(edited.qualifiedName).toBe('q.a')
+    expect(edited.properties).toEqual({ owner: 'bo' })
+    expect(canvasNode(tempUrn!)?.data.description).toBe('Changed')
+  })
+
   it('13. renameRow updates the staged change after.displayName and the optimistic canvas label', () => {
     const { result } = renderHook(() =>
       useHierarchyOutline({ scopeParentUrn: null, initialTypeId: null }),
