@@ -13,7 +13,7 @@ import { useActiveView } from '@/store/schema'
 import { useEffectiveBranchId } from '@/store/branchStore'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 
-import { useResolveGraph } from './useVersioning'
+import { useProjectionWatermark, useResolveGraph } from './useVersioning'
 
 export const NO_VERSION_CONTROL = "Version control isn't set up for this data source yet"
 export const NO_DRAFT = 'Switch to a draft to make changes'
@@ -34,6 +34,19 @@ export function useEditDraft(): { wsId: string; graphId: string; branchId: strin
   const branchId = useEffectiveBranchId(wsId, dataSourceId, view?.id ?? null)
   const graphId = useResolveGraph(wsId || undefined, dataSourceId, view?.id ?? null).data?.graphId
   return wsId && graphId && branchId ? { wsId, graphId, branchId } : null
+}
+
+/** Whether the active view's published graph is catching up with main — its search can't run
+ *  meanwhile — asked again until it has; `recheck` asks now (a search was just refused). Not
+ *  catching up where the view has no versioned graph. */
+export function usePublishedGraphCatchingUp(): { catchingUp: boolean; recheck: () => void } {
+  const view = useActiveView()
+  const graphId = useResolveGraph(view?.workspaceId, view?.dataSourceId ?? null, view?.id ?? null).data?.graphId
+  const watermark = useProjectionWatermark(view?.workspaceId, graphId, { untilFresh: true })
+  return {
+    catchingUp: watermark.data?.fresh === false,
+    recheck: () => { if (graphId) void watermark.refetch() },
+  }
 }
 
 export function useEntityEditing(): EntityEditing {

@@ -10,11 +10,13 @@
  * render and inputs keep keystrokes.
  */
 import React from 'react'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+import { countMatches } from '@/services/propertyInsights'
 import type { PropertyOpList } from '@/services/versioningApiService'
+import type { Predicate } from '@/types/search'
 
 import { PropertyOperationDialog, type PropertyOpDraft } from '../PropertyOperationDialog'
 
@@ -55,17 +57,22 @@ vi.mock('@/providers/GraphProviderContext', () => {
 })
 
 const counts = { all: 5, narrowed: 2 }
+// The narrowed criteria (a fill's "key is empty") count fewer.
+const countAsSearchWould = async (_p: unknown, _v: string, predicate: Predicate) =>
+    ((predicate as { children?: Array<{ op?: string }> }).children?.some((c) => c.op === 'isEmpty')
+        ? counts.narrowed : counts.all)
 vi.mock('@/services/propertyInsights', () => ({
-    // The narrowed criteria (a fill's "key is empty") count fewer.
-    countMatches: vi.fn(async (_p: unknown, _v: string, predicate: { children?: Array<{ op?: string }> }) =>
-        (predicate.children?.some((c) => c.op === 'isEmpty') ? counts.narrowed : counts.all)),
+    countMatches: vi.fn(),
     countPropertyUsageWithinTarget: vi.fn(async () => 0),
     getValueDistribution: vi.fn(async () => ({ values: [], truncated: false })),
     getAffectedSample: vi.fn(async () => ({ entities: [], truncated: false })),
 }))
 
+const watermark = { fresh: true }
+const recheck = vi.fn()
 vi.mock('@/features/versioning/hooks/useEntityEditing', () => ({
     useEntityEditing: () => ({ offered: true, blocked: null }),
+    usePublishedGraphCatchingUp: () => ({ catchingUp: !watermark.fresh, recheck }),
 }))
 
 const startMutate = vi.fn()
@@ -79,7 +86,7 @@ const opsList = (extra: Partial<PropertyOpList> = {}): PropertyOpList =>
 
 function renderDialog(props: Partial<React.ComponentProps<typeof PropertyOperationDialog>> = {}) {
     const onClose = vi.fn()
-    render(
+    const dialog = () => (
         <PropertyOperationDialog
             viewId="v1"
             mode="update"
@@ -90,9 +97,10 @@ function renderDialog(props: Partial<React.ComponentProps<typeof PropertyOperati
             ops={opsList()}
             onClose={onClose}
             {...props}
-        />,
+        />
     )
-    return { onClose }
+    const { rerender } = render(dialog())
+    return { onClose, rerender: () => rerender(dialog()) }
 }
 
 const applyButton = () => screen.getByRole('button', { name: /apply to draft/i })
@@ -101,6 +109,9 @@ beforeEach(() => {
     startMutate.mockReset()
     counts.all = 5
     counts.narrowed = 2
+    watermark.fresh = true
+    recheck.mockReset()
+    vi.mocked(countMatches).mockReset().mockImplementation(countAsSearchWould)
 })
 
 
@@ -168,6 +179,46 @@ describe('PropertyOperationDialog', () => {
         renderDialog({ draft: null })
         await user.type(screen.getByPlaceholderText(/value/i), 'alice')
         await screen.findByText(/entities match/)
+        expect(applyButton()).toBeDisabled()
+    })
+
+    it('says the published graph is catching up, and counts once it has', async () => {
+        const user = userEvent.setup()
+        watermark.fresh = false
+        vi.mocked(countMatches).mockRejectedValue(new Error(
+            'API Error 501: {"detail":"Search isn\'t available while the published graph is catching up — try again in a moment."}'))
+        const { rerender } = renderDialog()
+        await user.type(screen.getByPlaceholderText(/value/i), 'alice')
+        expect(await screen.findByText(/published graph is catching up/)).toBeInTheDocument()
+        await waitFor(() => expect(countMatches).toHaveBeenCalledTimes(1))
+        await act(async () => {})                     // the count's refusal lands
+        expect(applyButton()).toBeDisabled()
+
+        watermark.fresh = true
+        vi.mocked(countMatches).mockImplementation(countAsSearchWould)
+        rerender()
+        await waitFor(() => expect(applyButton()).toBeEnabled())
+        expect(countMatches).toHaveBeenCalledTimes(2)
+        expect(screen.getByText(/^\s*entities match$/)).toHaveTextContent('5 entities match')
+        expect(screen.queryByText(/published graph is catching up/)).not.toBeInTheDocument()
+    })
+
+    it('asks again how far the published graph has got when a count is refused', async () => {
+        const user = userEvent.setup()
+        vi.mocked(countMatches).mockRejectedValue(new Error(
+            'API Error 501: {"detail":"Search isn\'t available while the published graph is catching up — try again in a moment."}'))
+        renderDialog()
+        await user.type(screen.getByPlaceholderText(/value/i), 'alice')
+        await waitFor(() => expect(recheck).toHaveBeenCalled())
+    })
+
+    it('says why the matches couldn\'t be counted', async () => {
+        const user = userEvent.setup()
+        vi.mocked(countMatches).mockRejectedValue(new Error(
+            'API Error 422: {"detail":"A search can hold at most 64 conditions."}'))
+        renderDialog()
+        await user.type(screen.getByPlaceholderText(/value/i), 'alice')
+        expect(await screen.findByText(/at most 64 conditions/)).toBeInTheDocument()
         expect(applyButton()).toBeDisabled()
     })
 

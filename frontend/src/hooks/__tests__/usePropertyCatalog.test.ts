@@ -80,6 +80,34 @@ describe('usePropertyCatalog', () => {
         expect(result.current.error).toBeNull()
     })
 
+    it('reads the view again once the published graph has caught up', async () => {
+        searchCatalog.mockRejectedValueOnce(Object.assign(new Error('API Error 501'), { status: 501 }))
+        const { result, rerender } = renderHook(({ behind }) => usePropertyCatalog('view-1', behind),
+                                                { initialProps: { behind: true } })
+        await waitFor(() => expect(result.current.unavailable).toBe(true))
+
+        searchCatalog.mockResolvedValueOnce(answer({ entities: 100 }))
+        rerender({ behind: false })
+        await waitFor(() => expect(result.current.catalog?.entities).toBe(100))
+        expect(result.current.unavailable).toBe(false)
+    })
+
+    it('keeps the catalog it has while the published graph catches up, then reads the view again', async () => {
+        searchCatalog.mockResolvedValueOnce(answer({ entities: 100 }))
+        const { result, rerender } = renderHook(({ behind }) => usePropertyCatalog('view-1', behind),
+                                                { initialProps: { behind: false } })
+        await waitFor(() => expect(result.current.catalog?.entities).toBe(100))
+
+        rerender({ behind: true })
+        expect(searchCatalog).toHaveBeenCalledTimes(1)
+        expect(result.current.catalog?.entities).toBe(100)
+        expect(result.current.unavailable).toBe(false)
+
+        searchCatalog.mockResolvedValueOnce(answer({ entities: 120 }))
+        rerender({ behind: false })
+        await waitFor(() => expect(result.current.catalog?.entities).toBe(120))
+    })
+
     it("never shows one view's catalog under another", async () => {
         searchCatalog.mockResolvedValueOnce(answer({ entities: 100 }))
         const { result, rerender } = renderHook(({ view }) => usePropertyCatalog(view),

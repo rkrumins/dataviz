@@ -23,7 +23,7 @@ import { createPortal } from 'react-dom'
 
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
-import { useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import { useEntityEditing, usePublishedGraphCatchingUp } from '@/features/versioning/hooks/useEntityEditing'
 import { useStartPropertyOp } from '@/features/versioning/hooks/useVersioning'
 import { isLive, opLabel, withPrecondition } from '@/features/versioning/model/propertyOps'
 import { useAffectedSample, useValueDistribution } from '@/hooks/usePropertyInsights'
@@ -101,8 +101,9 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
     )
 
     // Each count with the criteria it was counted for: a count of earlier criteria is stale, and
-    // one not yet in for the criteria now is being counted. `count: null` — it couldn't be.
-    const [counted, setCounted] = useState<{ key: string; count: number | null } | null>(null)
+    // one not yet in for the criteria now is being counted. `count: null` — it couldn't be, and
+    // `problem` says why.
+    const [counted, setCounted] = useState<{ key: string; count: number | null; problem?: string } | null>(null)
     // Of those, how many the operation can change (a fill, rename or remove narrows to them).
     const [narrowedCounted, setNarrowedCounted] = useState<{ key: string; count: number | null } | null>(null)
     // For a Set op: how many of the targeted entities already carry the key
@@ -121,31 +122,41 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
         [knownLayers],
     )
 
+    // The search reads the published graph, which can't be searched while it catches up with main:
+    // the counts wait for it, and are taken again once it has. A refused count asks how far it has
+    // got — it may have fallen behind since.
+    const { catchingUp, recheck } = usePublishedGraphCatchingUp()
+
     const conditions = useMemo(() => topLevelConditions(predicate), [predicate])
     const predicateReady = conditions.length > 0 && !conditions.some((c) => isRowIncomplete(c))
     const trimmedKey = key.trim()
     const trimmedNewKey = newKey.trim()
 
     // ── Live match-count preview (debounced) ─────────────────────────
-    const predicateKey = JSON.stringify(predicate)
+    const predicateKey = JSON.stringify([predicate, catchingUp])
     useEffect(() => {
         if (!predicateReady) return
         const controller = new AbortController()
         const t = setTimeout(() => {
             countMatches(provider, viewId, predicate as Predicate, controller.signal)
                 .then((n) => { if (!controller.signal.aborted) setCounted({ key: predicateKey, count: n }) })
-                .catch(() => { if (!controller.signal.aborted) setCounted({ key: predicateKey, count: null }) })
+                .catch((e) => {
+                    if (controller.signal.aborted) return
+                    setCounted({ key: predicateKey, count: null, problem: serverDetail(e) })
+                    recheck()
+                })
         }, PREVIEW_DEBOUNCE_MS)
         return () => { controller.abort(); clearTimeout(t) }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [provider, viewId, predicateKey, predicateReady])
     const counting = predicateReady && counted?.key !== predicateKey
     const count = !counting && counted ? counted.count : null
+    const countProblem = !counting && counted?.count === null ? counted.problem ?? null : null
 
     // How many the operation can change: the criteria narrowed as the server narrows them.
     const narrowed = predicateReady && predicate && trimmedKey
         ? withPrecondition({ kind, key: trimmedKey }, predicate) : null
-    const narrowedKey = narrowed ? JSON.stringify(narrowed) : null
+    const narrowedKey = narrowed ? JSON.stringify([narrowed, catchingUp]) : null
     useEffect(() => {
         if (!narrowed) return
         const controller = new AbortController()
@@ -449,6 +460,8 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                         writing={writing}
                         tooBroad={tooBroad}
                         mayPassCap={mayPassCap}
+                        catchingUp={catchingUp && count === null}
+                        countProblem={catchingUp ? null : countProblem}
                         ops={ops}
                         refusal={refusal}
                     />
@@ -505,12 +518,29 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
 }
 
 
+/** What the server said went wrong: an API error's ``detail``, or else the error's own message. */
+function serverDetail(e: unknown): string {
+    const message = (e as Error)?.message ?? String(e)
+    try {
+        const parsed = JSON.parse(message.replace(/^API Error \d+: /, '')) as { detail?: unknown }
+        if (typeof parsed.detail === 'string') return parsed.detail
+    } catch {
+        // Not JSON: the message is all there is.
+    }
+    return message
+}
+
+
 /** Why Apply is held back, or what to know before pressing it. */
-function OperationNotes({ blocked, writing, tooBroad, mayPassCap, ops, refusal }: {
+function OperationNotes({ blocked, writing, tooBroad, mayPassCap, catchingUp, countProblem, ops, refusal }: {
     blocked: string | null
     writing: boolean
     tooBroad: boolean
     mayPassCap: boolean
+    /** The published graph is catching up with main, so the matches can't be counted yet. */
+    catchingUp: boolean
+    /** Why the matches couldn't be counted. */
+    countProblem: string | null
     ops?: PropertyOpList
     refusal: string | null
 }) {
@@ -518,7 +548,9 @@ function OperationNotes({ blocked, writing, tooBroad, mayPassCap, ops, refusal }
     const held = blocked
         ?? (writing ? 'An operation is being written into this draft — apply this one when it finishes.' : null)
         ?? (tooBroad ? `These criteria match more than ${max} entities, more than a draft may hold. Narrow them.` : null)
+        ?? (countProblem ? `The matches couldn't be counted: ${countProblem}` : null)
     const notes = [
+        catchingUp && 'The published graph is catching up with the latest changes. The matches are counted once it has.',
         mayPassCap && `This draft holds ${ops!.draftChanges.toLocaleString()} changes already. If this adds more than a draft may hold (${max}), it is refused before it writes anything — publish the draft and continue in a new one.`,
         (ops?.draftChanges ?? 0) > 0 && 'The criteria match the published graph, as Advanced Search does in a draft; each entity is then changed as it is in this draft.',
     ].filter(Boolean) as string[]

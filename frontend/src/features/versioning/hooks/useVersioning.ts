@@ -130,12 +130,15 @@ function expectCatchUp(wsId?: string, graphId?: string | null) {
 
 /** How often to re-read the watermark (false = stop): while forced; while catching up or
  *  rebuilding; and, for a short window after main advanced, while merely behind — until the
- *  projection has had its chance to start. A recorded failure ends that window early. */
+ *  projection has had its chance to start. A recorded failure ends that window early. A caller
+ *  waiting `untilFresh` keeps it polling for as long as the graph is behind. */
 export function watermarkPollInterval(
   d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
+  untilFresh = false,
 ): number | false {
   if (force) return 3_000
   if (!d || d.fresh !== false) return false
+  if (untilFresh) return 3_000
   const active = d.status === 'projecting' || d.status === 'rebuilding'
   const justAdvanced = advancedAt !== undefined && now - advancedAt < CATCH_UP_WINDOW_MS
   return active || (justAdvanced && !d.lastError) ? 3_000 : false
@@ -147,16 +150,19 @@ export function watermarkPollInterval(
  *  forever. A merge/publish invalidates this query, so a freshly-started projection is picked up.
  *  `opts.force` keeps the poll alive REGARDLESS of status — the Data health rebuild flow needs to
  *  observe the terminal transition (idle + lastError = failed), which the status-gated poll would
- *  stop one tick short of. */
+ *  stop one tick short of. `opts.untilFresh` keeps it polling while the graph is behind, for a
+ *  caller that waits on the published graph (a property operation's count). */
 export function useProjectionWatermark(
-  wsId?: string, graphId?: string | null, opts?: { force?: boolean },
+  wsId?: string, graphId?: string | null, opts?: { force?: boolean; untilFresh?: boolean },
 ) {
   const force = opts?.force ?? false
+  const untilFresh = opts?.untilFresh ?? false
   return useQuery({
     queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId),
     queryFn: () => api.getWatermark(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
-    refetchInterval: (q) => watermarkPollInterval(q.state.data, force, mainAdvancedAt.get(`${wsId}:${graphId}`), Date.now()),
+    refetchInterval: (q) => watermarkPollInterval(
+      q.state.data, force, mainAdvancedAt.get(`${wsId}:${graphId}`), Date.now(), untilFresh),
     staleTime: 2_000,
     refetchOnWindowFocus: false,
   })

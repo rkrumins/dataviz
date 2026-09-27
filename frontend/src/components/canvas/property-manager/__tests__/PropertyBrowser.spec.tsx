@@ -27,10 +27,13 @@ let state: PropertyCatalogState
 let editing: EntityEditing
 let draft: { wsId: string; graphId: string; branchId: string } | null = null
 let ops: PropertyOpList | undefined
+let catchingUp = false
+const usePropertyCatalog = vi.fn(() => state)
 
 vi.mock('@/hooks/usePropertyCatalog', () => ({
-    usePropertyCatalog: () => state,
+    usePropertyCatalog: (...args: unknown[]) => usePropertyCatalog(...(args as [])),
 }))
+beforeEach(() => { catchingUp = false })
 vi.mock('@/components/ui/notifications', () => ({
     useAppNotifications: () => ({ notify }),
 }))
@@ -41,6 +44,7 @@ vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) =
     ...(await importOriginal<typeof import('@/features/versioning/hooks/useEntityEditing')>()),
     useEntityEditing: () => editing,
     useEditDraft: () => draft,
+    usePublishedGraphCatchingUp: () => ({ catchingUp, recheck: vi.fn() }),
 }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
     usePropertyOps: () => ({ data: ops }),
@@ -222,6 +226,14 @@ describe('PropertyBrowser', () => {
 
 describe('PropertyBrowser — a property is changed only in a draft', () => {
     beforeEach(() => { editing = { offered: true, blocked: null } })
+
+    it('says the published graph is catching up, and reads the view again once it has', () => {
+        catchingUp = true
+        renderBrowser({ catalog: null, unavailable: true })
+        expect(screen.getByText(/published graph is catching up/)).toBeInTheDocument()
+        expect(screen.queryByText(/aren't available/)).not.toBeInTheDocument()
+        expect(usePropertyCatalog).toHaveBeenLastCalledWith(expect.any(String), true)
+    })
 
     it('offers New, Update and Remove while a draft is open', async () => {
         renderBrowser()

@@ -31,7 +31,9 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { usePropertyCatalog } from '@/hooks/usePropertyCatalog'
 import { PropertyOpList } from '@/features/versioning/components/PropertyOpList'
-import { useEditDraft, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
+import {
+    useEditDraft, useEntityEditing, usePublishedGraphCatchingUp,
+} from '@/features/versioning/hooks/useEntityEditing'
 import { usePropertyOps } from '@/features/versioning/hooks/useVersioning'
 import { opsOverlay, type OpsOverlayEntry } from '@/features/versioning/model/propertyOps'
 import type { Predicate, SearchCatalogProperty, SearchCatalogValue } from '@/types/search'
@@ -83,7 +85,8 @@ export function PropertyBrowser({
             .catch(() => notify('error', `Couldn't copy “${key}”`))
     }
 
-    const { catalog, reading, error, unavailable, refresh } = usePropertyCatalog(viewId)
+    const { catchingUp } = usePublishedGraphCatchingUp()
+    const { catalog, reading, error, unavailable, refresh } = usePropertyCatalog(viewId, catchingUp)
     const [query, setQuery] = useState('')
     const [sort, setSort] = useState<SortMode>('usage')
     const [dialog, setDialog] = useState<DialogState>(null)
@@ -143,7 +146,9 @@ export function PropertyBrowser({
     if (unavailable) {
         return (
             <div className="px-3 py-5 rounded-xl border border-glass-border text-center text-[11px] text-ink-muted">
-                Property insights aren't available for this view here.
+                {catchingUp
+                    ? "The published graph is catching up with the latest changes. This view's properties show once it has."
+                    : "Property insights aren't available for this view here."}
             </div>
         )
     }
