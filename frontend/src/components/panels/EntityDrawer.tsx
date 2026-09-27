@@ -13,18 +13,13 @@
  * persisted. FalkorDB already stores arbitrary JSON property bags (scalars +
  * flat scalar-lists as native node props, complex values in a `propertiesRaw`
  * JSON blob — see falkordb_provider._split_user_properties), so these values
- * round-trip as-is once the write path below lands.
+ * round-trip as-is.
  *
- * TODO(backend): Drawer edits currently stage as `update_entity` with a no-op
- * apply hook. To persist edits, mirror the existing edge PATCH pattern:
- *   1. `PATCH /api/v1/{wsId}/graph/nodes/{urn}` route in
- *      backend/app/api/v1/endpoints/graph.py (mirror PATCH /edges/{id})
- *   2. `GraphDataProvider.update_node(urn, payload)` (mirror `update_edge`),
- *      implemented for FalkorDB (Neo4j/Spanner can follow).
- *   3. `RemoteGraphProvider.updateNode` + replace the `apply` console.warn
- *      below with the call.
- * Payload persists the editable surface: `properties` + descriptive fields
- * (displayName, description, qualifiedName, sourceSystem, layerAssignment, tags).
+ * Editing happens in a draft only (`canEdit`). An edit stages ONE change per
+ * node (`stageNodeEdit`) and is saved with the draft as a patch against the node
+ * as first read (`stagedChangesToOps`): changed fields, set properties, and each
+ * removed property named in `unsetProperties`. Where a field lives — top-level or
+ * in `properties` — is decided by `lib/nodeFields`.
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
@@ -49,6 +44,8 @@ import { useReparentNode } from '@/components/canvas/context-view/useReparentNod
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { stageNodeEdit } from '@/features/versioning/model/stageNodeEdit'
+import { readSchemaField, userProperties, withReserved, writeBusinessLabel, writeSchemaField } from '@/lib/nodeFields'
 import { useFeature } from '@/store/features'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
@@ -71,6 +68,11 @@ import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 // ============================================
 
 interface EntityDrawerProps {
+  /** The canvas owning this drawer accepts graph edits — a draft, in edit mode.
+   *  Without it the drawer is read-only; the published graph is never edited in place. */
+  canEdit?: boolean
+  /** Offered on a read-only drawer over the published graph: start editing in a draft. */
+  onStartEditing?: () => void
   /** Writes are refused by the surface that owns this drawer — currently a
    *  canvas trace, which is read-only for its whole life. Hides the Edit tab
    *  and takes away the property editor's edit rights, so the drawer cannot
@@ -115,6 +117,8 @@ type ViewMode = 'view' | 'edit' | 'json'
 // ============================================
 
 export function EntityDrawer({
+  canEdit = false,
+  onStartEditing,
   writesLocked = false,
   onFocusConnections,
   onTraceUp,
@@ -130,7 +134,6 @@ export function EntityDrawer({
   // its own node / actions change — NOT on every unrelated canvas store mutation
   // (selection, hover, node drags, layout ticks), which otherwise re-renders the
   // whole drawer continuously and makes everything in it feel laggy.
-  const updateNode = useCanvasStore((s) => s.updateNode)
   const clearSelection = useCanvasStore((s) => s.clearSelection)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const schema = useSchemaStore((s) => s.schema)
@@ -202,8 +205,6 @@ export function EntityDrawer({
   // Local state
   const [viewMode, setViewMode] = useState<ViewMode>('view')
   const [formData, setFormData] = useState<Record<string, any>>({})
-  const [rawJson, setRawJson] = useState('')
-  const [jsonError, setJsonError] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
   const [showSaved, setShowSaved] = useState(false)
   const [copiedUrn, setCopiedUrn] = useState(false)
@@ -231,11 +232,8 @@ export function EntityDrawer({
     bypassGuardRef.current = false
     prevIdRef.current = id
     if (selectedNode) {
-      const data = selectedNode.data as Record<string, any>
-      setFormData({ ...data })
-      setRawJson(JSON.stringify(data, null, 2))
+      setFormData({ ...(selectedNode.data as Record<string, any>) })
       setHasChanges(false)
-      setJsonError(null)
       setViewMode('view')
     }
   }, [selectedNode?.id, hasChanges])
@@ -261,145 +259,29 @@ export function EntityDrawer({
     [selectedNode, mode],
   )
 
-  // Handle form field changes
-  const handleChange = useCallback((key: string, value: any) => {
-    const newData = { ...formData, [key]: value }
-    setFormData(newData)
+  // Every edit is an update of the form's copy of the node; the Edit tab's inputs say which field
+  // (`lib/nodeFields` decides where it lives).
+  const handleEdit = useCallback((update: (data: Record<string, any>) => Record<string, any>) => {
+    setFormData((d) => update(d))
     setHasChanges(true)
-    setJsonError(null)
-  }, [formData])
-
-  // Replace the entire `properties` bag — PropertyEditor emits a fresh object
-  // on every mutation (add/remove/rename/type-change/reorder). Other top-level
-  // canvas-store fields are untouched.
-  const handlePropertiesChange = useCallback(
-    (nextProperties: Record<string, any>) => {
-      const next = { ...formData, properties: nextProperties }
-      setFormData(next)
-      setHasChanges(true)
-      setJsonError(null)
-    },
-    [formData],
-  )
-
-  // `rawJson` is only rendered in the JSON view, so serialize lazily when the
-  // user opens it (not on every keystroke — that pretty-prints the whole entity).
-  const openJsonView = useCallback(() => {
-    setRawJson(JSON.stringify(formData, null, 2))
-    setViewMode('json')
-  }, [formData])
-
-  // Handle raw JSON changes
-  const handleRawJsonChange = useCallback((value: string) => {
-    setRawJson(value)
-    setHasChanges(true)
-    try {
-      const parsed = JSON.parse(value)
-      setFormData(parsed)
-      setJsonError(null)
-    } catch (e) {
-      setJsonError((e as Error).message)
-    }
   }, [])
 
-  // Stage changes — recorded for review, not committed to backend until the
-  // user clicks Save Blueprint.
-  //
-  // Diff strategy: if only `label` differs, stage as `rename_entity` (existing
-  // semantics). For any other change (including nested objects like `metadata`),
-  // stage as `update_entity` carrying the full before/after diff. The canvas is
-  // mutated immediately for visual feedback; staging captures provenance so the
-  // review panel can render and discard the change.
+  // Stage the edit — recorded for review, saved with the draft. The canvas shows it at once; the
+  // staged change keeps the node as first read, so the save sends only what changed and a discard
+  // puts it back.
   const handleSave = useCallback(() => {
     if (!selectedNode) return
-    if (jsonError) return
-
-    const previousData = { ...(selectedNode.data as Record<string, any>) }
-    const previousLabel = (previousData.label as string) ?? ''
-    const newLabel = (formData.label as string) ?? previousLabel
-
-    updateNode(selectedNode.id, formData)
+    stageNodeEdit(selectedNode.id, selectedNode.data, formData as LineageNode['data'])
     setHasChanges(false)
     setShowSaved(true)
     setTimeout(() => setShowSaved(false), 2000)
-    setRawJson(JSON.stringify(formData, null, 2))
-
-    // Compute changed keys via shallow JSON-equality (handles nested objects).
-    const allKeys = new Set([
-      ...Object.keys(previousData),
-      ...Object.keys(formData),
-    ])
-    const changedKeys: string[] = []
-    for (const k of allKeys) {
-      // Layer placement is VIEW config now (referenceLayout.assignments, managed on the canvas), not an
-      // editable node property — never stage it as an update_entity field.
-      if (k === 'layerAssignment') continue
-      if (JSON.stringify(previousData[k]) !== JSON.stringify(formData[k])) {
-        changedKeys.push(k)
-      }
-    }
-
-    if (changedKeys.length === 0) return
-
-    const stagedChanges = useStagedChangesStore.getState()
-    const onlyLabel = changedKeys.length === 1 && changedKeys[0] === 'label'
-
-    if (onlyLabel) {
-      stagedChanges.stageOrReplace(
-        (c) => c.type === 'rename_entity' && c.targetId === selectedNode.id,
-        {
-          type: 'rename_entity',
-          targetId: selectedNode.id,
-          targetUrn: previousData.urn,
-          before: previousData,
-          after: { ...formData },
-          summary: `Rename '${previousLabel}' → '${newLabel}'`,
-          discard: () => {
-            useCanvasStore.getState().updateNode(selectedNode.id, previousData)
-          },
-        },
-      )
-      return
-    }
-
-    // Multi-field edit — stage as update_entity. Apply hook is a stub until
-    // the backend ships PATCH /api/v1/{wsId}/graph/nodes/{urn}; see the file
-    // header for the full backlog.
-    stagedChanges.stageOrReplace(
-      (c) => c.type === 'update_entity' && c.targetId === selectedNode.id,
-      {
-        type: 'update_entity',
-        targetId: selectedNode.id,
-        targetUrn: previousData.urn,
-        before: previousData,
-        after: { ...formData },
-        summary: `Edit ${changedKeys.length} field${changedKeys.length === 1 ? '' : 's'} on '${previousLabel || selectedNode.id}'`,
-        discard: () => {
-          useCanvasStore.getState().updateNode(selectedNode.id, previousData)
-        },
-        apply: async () => {
-          // TODO(backend): replace with
-          //   await authFetch(`/api/v1/${wsId}/graph/nodes/${urn}`, {
-          //     method: 'PATCH', body: JSON.stringify({ properties: after })
-          //   })
-          // once the endpoint and provider methods land.
-          console.warn(
-            '[update_entity] TODO: PATCH /api/v1/{wsId}/graph/nodes/{urn} not yet implemented',
-            { targetId: selectedNode.id, urn: previousData.urn, changedKeys },
-          )
-        },
-      },
-    )
-  }, [selectedNode, formData, jsonError, updateNode])
+  }, [selectedNode, formData])
 
   // Cancel changes
   const handleCancel = useCallback(() => {
     if (selectedNode) {
-      const data = selectedNode.data as Record<string, any>
-      setFormData({ ...data })
-      setRawJson(JSON.stringify(data, null, 2))
+      setFormData({ ...(selectedNode.data as Record<string, any>) })
       setHasChanges(false)
-      setJsonError(null)
     }
     setViewMode('view')
   }, [selectedNode])
@@ -469,11 +351,10 @@ export function EntityDrawer({
   const urn = formData.urn || selectedNode.id
   const childCount = formData.childCount || formData._collapsedChildCount || 0
 
-  // After the converter cleanup in useGraphHydration, the editable property
-  // bag lives in a single explicit field (`properties`). PropertyEditor
-  // targets it directly; everything else on `data` is structured.
-  const propertiesBag: Record<string, any> =
-    (formData.properties as Record<string, any> | undefined) ?? {}
+  // The user's own properties. The bag can also hold reserved names the reader mirrors into it
+  // (`childCount`) — they are node fields, never shown, edited or removed as properties.
+  const propertiesBag: Record<string, any> = userProperties(formData.properties)
+  const editable = canEdit && !isGhost && versioningEnabled && editModeEnabled && !writesLocked
 
   // NOTE: no local <AnimatePresence> here. The drawer is conditionally
   // rendered inside ContextViewCanvas's right-rail AnimatePresence, which
@@ -676,7 +557,7 @@ export function EntityDrawer({
               icon={LucideIcons.Eye}
               label="View"
             />
-            {!isGhost && versioningEnabled && editModeEnabled && !writesLocked && (
+            {editable ? (
               <ModeTab
                 active={viewMode === 'edit'}
                 onClick={() => setViewMode('edit')}
@@ -684,10 +565,18 @@ export function EntityDrawer({
                 label="Edit"
                 badge={hasChanges ? '•' : undefined}
               />
-            )}
+            ) : onStartEditing && !isGhost && !writesLocked && versioningEnabled && editModeEnabled ? (
+              // The published graph is never edited in place — say where editing happens.
+              <ModeTab
+                active={false}
+                onClick={onStartEditing}
+                icon={LucideIcons.GitBranchPlus}
+                label="Edit in a draft"
+              />
+            ) : null}
             <ModeTab
               active={viewMode === 'json'}
-              onClick={openJsonView}
+              onClick={() => setViewMode('json')}
               icon={LucideIcons.Code}
               label="JSON"
             />
@@ -695,22 +584,17 @@ export function EntityDrawer({
 
           {/* Status Indicators */}
           <AnimatePresence>
-            {(hasChanges || showSaved || jsonError) && (
+            {(hasChanges || showSaved) && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
                 exit={{ opacity: 0, height: 0 }}
                 className="mt-3"
               >
-                {jsonError ? (
-                  <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-500 text-xs flex items-center gap-2">
-                    <LucideIcons.AlertCircle className="w-4 h-4" />
-                    Invalid JSON: {jsonError}
-                  </div>
-                ) : showSaved ? (
-                  <div className="px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/20 text-green-500 text-xs flex items-center gap-2">
+                {showSaved ? (
+                  <div className="px-3 py-2 rounded-lg bg-green-500/10 border border-green-500/20 text-green-600 dark:text-green-400 text-xs flex items-center gap-2" role="status">
                     <LucideIcons.CheckCircle className="w-4 h-4" />
-                    Changes saved successfully
+                    Staged — Review &amp; Save keeps it in your draft
                   </div>
                 ) : hasChanges ? (
                   <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-500 text-xs flex items-center gap-2">
@@ -746,32 +630,24 @@ export function EntityDrawer({
             />
           )}
 
-          {viewMode === 'edit' && (
+          {viewMode === 'edit' && editable && (
             <EditModeContent
               nodeId={selectedNode.id}
               formData={formData}
               entityType={entityType}
               urn={urn}
               propertiesBag={propertiesBag}
-              onChange={handleChange}
-              onPropertiesChange={handlePropertiesChange}
+              onEdit={handleEdit}
               onCopyUrn={handleCopyUrn}
             />
           )}
 
-          {viewMode === 'json' && (
-            <JsonModeContent
-              rawJson={rawJson}
-              jsonError={jsonError}
-              onChange={handleRawJsonChange}
-              canEdit={!isGhost && versioningEnabled && editModeEnabled && !writesLocked}
-            />
-          )}
+          {viewMode === 'json' && <JsonModeContent data={formData} />}
         </div>
 
         {/* Footer */}
         <div className="flex-shrink-0 p-4 border-t border-glass-border/50 bg-canvas-elevated/50">
-          {viewMode === 'view' ? (
+          {viewMode !== 'edit' ? (
             <div className="space-y-2">
               <div className="grid grid-cols-2 gap-2">
                 <TimeStat
@@ -810,10 +686,10 @@ export function EntityDrawer({
               </button>
               <button
                 onClick={handleSave}
-                disabled={!hasChanges || !!jsonError}
+                disabled={!hasChanges}
                 className={cn(
                   "px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 transition-colors duration-150",
-                  hasChanges && !jsonError
+                  hasChanges
                     ? "bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25"
                     : "bg-white/5 text-ink-muted cursor-not-allowed"
                 )}
@@ -1386,10 +1262,12 @@ interface EditModeContentProps {
   entityType: any
   urn: string
   propertiesBag: Record<string, any>
-  onChange: (key: string, value: any) => void
-  onPropertiesChange: (next: Record<string, any>) => void
+  onEdit: (update: (data: Record<string, any>) => Record<string, any>) => void
   onCopyUrn: () => void
 }
+
+/** Schema fields the form already shows as its own inputs. */
+const FORM_FIELD_IDS = ['name', 'label', 'description', 'urn', 'businessLabel']
 
 function EditModeContent({
   nodeId,
@@ -1397,10 +1275,12 @@ function EditModeContent({
   entityType,
   urn,
   propertiesBag,
-  onChange,
-  onPropertiesChange,
+  onEdit,
   onCopyUrn,
 }: EditModeContentProps) {
+  // Top-level node fields (name, description, qualified name, source system).
+  const onChange = (key: string, value: any) => onEdit((d) => ({ ...d, [key]: value }))
+  const schemaFields = ((entityType?.fields ?? []) as any[]).filter((f) => !FORM_FIELD_IDS.includes(f.id))
   // Layer placement is VIEW config now (referenceLayout.assignments), managed on the canvas — not an
   // editable node property. Show the RESOLVED layer name read-only (explicit assignment; inherited
   // placement resolves live on the canvas). A Context View node's id IS its urn, so the map is keyed here.
@@ -1439,7 +1319,7 @@ function EditModeContent({
           <input
             type="text"
             value={formData.businessLabel || ''}
-            onChange={(e) => onChange('businessLabel', e.target.value)}
+            onChange={(e) => { const v = e.target.value; onEdit((d) => writeBusinessLabel(d, v)) }}
             className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 focus:bg-white/8 transition-colors duration-150 outline-none text-sm"
             placeholder="Business-friendly name..."
           />
@@ -1552,27 +1432,27 @@ function EditModeContent({
       </div>
 
       {/* Dynamic Schema Fields */}
-      {entityType?.fields && entityType.fields.filter((f: any) => !['name', 'label', 'description', 'urn', 'businessLabel'].includes(f.id)).length > 0 && (
+      {schemaFields.length > 0 && (
         <div className="pt-5 border-t border-glass-border/30">
           <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-4">
             Schema Properties
           </h4>
           <div className="space-y-4">
-            {entityType.fields.filter((f: any) => !['name', 'label', 'description', 'urn', 'businessLabel'].includes(f.id)).map((field: any) => (
+            {schemaFields.map((field: any) => (
               <div key={field.id} className="space-y-2">
                 <label className="text-xs font-medium text-ink-muted">{field.name}</label>
                 {field.type === 'textarea' || field.type === 'markdown' ? (
                   <textarea
-                    value={formData[field.id] || ''}
-                    onChange={(e) => onChange(field.id, e.target.value)}
+                    value={String(readSchemaField(formData, field.id) ?? '')}
+                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }}
                     rows={2}
                     className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm resize-none"
                   />
                 ) : (
                   <input
                     type="text"
-                    value={formData[field.id] || ''}
-                    onChange={(e) => onChange(field.id, e.target.value)}
+                    value={String(readSchemaField(formData, field.id) ?? '')}
+                    onChange={(e) => { const v = e.target.value; onEdit((d) => writeSchemaField(d, field.id, v)) }}
                     className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm"
                   />
                 )}
@@ -1594,7 +1474,15 @@ function EditModeContent({
           <PanelErrorBoundary resetKeys={[urn]}>
             <PropertyEditor
               value={propertiesBag}
-              onChange={(next) => onPropertiesChange(next as Record<string, any>)}
+              onChange={(next) => onEdit((d) => {
+                const bag = next as Record<string, any>
+                // The business label is a property the header also shows — keep the two as one.
+                return {
+                  ...d,
+                  properties: withReserved(d.properties, bag),
+                  businessLabel: typeof bag.businessLabel === 'string' ? bag.businessLabel : undefined,
+                }
+              })}
               searchable
               groupByPath
               bare
@@ -1610,42 +1498,22 @@ function EditModeContent({
 // JSON Mode Content
 // ============================================
 
-interface JsonModeContentProps {
-  rawJson: string
-  jsonError: string | null
-  onChange: (value: string) => void
-  canEdit: boolean
-}
-
-function JsonModeContent({ rawJson, jsonError, onChange, canEdit }: JsonModeContentProps) {
+/** The node as JSON, read-only — for inspection. Serialised only while this tab is open. */
+function JsonModeContent({ data }: { data: Record<string, any> }) {
+  const json = useMemo(() => JSON.stringify(data, null, 2), [data])
   return (
     <div className="p-5">
-      <div className="flex items-center justify-between mb-3">
-        <label className="text-xs font-semibold text-ink-muted flex items-center gap-2">
-          <LucideIcons.Code className="w-3.5 h-3.5" />
-          Raw JSON Data
-        </label>
-        <span className={cn(
-          "text-xs px-2 py-1 rounded-lg",
-          jsonError
-            ? "bg-red-500/10 text-red-500"
-            : "bg-green-500/10 text-green-500"
-        )}>
-          {jsonError ? '⚠️ Invalid' : '✓ Valid'}
-        </span>
-      </div>
-      <textarea
-        value={rawJson}
-        onChange={(e) => onChange(e.target.value)}
-        readOnly={!canEdit}
-        className={cn(
-          "w-full h-[500px] px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border transition-colors duration-150 outline-none text-xs font-mono resize-none custom-scrollbar",
-          jsonError
-            ? "border-red-500/30 focus:border-red-500/50"
-            : "border-white/10 focus:border-accent-lineage/50"
-        )}
-        spellCheck={false}
-      />
+      <label className="text-xs font-semibold text-ink-muted flex items-center gap-2 mb-3">
+        <LucideIcons.Code className="w-3.5 h-3.5" />
+        Raw JSON Data
+      </label>
+      <pre
+        className="w-full max-h-[500px] overflow-auto px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border border-glass-border text-xs font-mono text-ink whitespace-pre-wrap break-words custom-scrollbar"
+        aria-label="Entity data as JSON"
+        tabIndex={0}
+      >
+        {json}
+      </pre>
     </div>
   )
 }

@@ -60,6 +60,7 @@ from backend.common.models.graph import (
     TopLevelNodesResult,
     TraceResult,
 )
+from backend.common.property_patch import apply_properties_patch
 # Note: this provider implements aggregation natively against the sidecar
 # table for performance reasons. The shared ``AggregatedEdgeMaterializer``
 # in ``backend/common/providers/aggregation.py`` is kept for FalkorDB and
@@ -1722,7 +1723,7 @@ class SpannerProvider(GraphDataProvider):
                 return None
             row = {fields[i]: row_tuple[i] for i in range(len(fields))}
             existing = _decode_json(row.get("properties")) or {}
-            merged = {**existing, **patch}
+            merged = apply_properties_patch(existing, patch)   # a PROP_DELETE value removes
             transaction.execute_update(
                 "UPDATE GraphEdge SET properties = JSON @props WHERE edge_id = @id",
                 params={"props": merged, "id": edge_id},

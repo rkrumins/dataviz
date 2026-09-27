@@ -40,7 +40,7 @@ describe('stagedChangesToOps', () => {
     expect(ops).toEqual([{ op: 'update', kind: 'edge', id: 'e2', payload: { confidence: 0.9 } }])
   })
 
-  it('sends an edited property bag as a diff: changed and added keys, removed keys as the delete marker', () => {
+  it('sends an edited property bag as a diff: changed and added keys set, removed keys named in unsetProperties', () => {
     const ops = stagedChangesToOps([
       sc({
         type: 'edit_edge', targetId: 'e2',
@@ -50,8 +50,16 @@ describe('stagedChangesToOps', () => {
     ])
     expect(ops).toEqual([{
       op: 'update', kind: 'edge', id: 'e2',
-      payload: { properties: { owner: 'bo', tier: 'gold', note: '__nx_prop_delete__' } },
+      payload: { properties: { owner: 'bo', tier: 'gold' } },
+      unsetProperties: ['note'],
     }])
+  })
+
+  it('sends a removal-only edge edit (nothing set) — the removal is the whole edit', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'edit_edge', targetId: 'e2', before: { properties: { a: 1, b: 2 } }, after: { properties: { a: 1 } } }),
+    ])
+    expect(ops).toEqual([{ op: 'update', kind: 'edge', id: 'e2', payload: {}, unsetProperties: ['b'] }])
   })
 
   it('sends nothing for a property edit that changed nothing', () => {
@@ -193,18 +201,24 @@ describe('unsavedNodeFields — what a staged entity edit CANNOT carry to the ba
     }))).toEqual(['owner'])
   })
 
-  it('names businessLabel — the payload carries it, but no backend field stores it', () => {
-    // The drawer edits "Business Label" as a top-level node field and the payload still carries it
-    // (so a mixed batch commits the rest), but nothing on the backend reads it: `businessLabel`
-    // appears nowhere in the Python, `_node_item` never projects it, and the drawer reads it back
-    // out of `n.properties`. Claiming it saved is exactly the lie this mechanism exists to end.
+  it('carries businessLabel as the user property it is — a partial snapshot of only the mirror too', () => {
+    // The canvas shows `data.businessLabel`, but it is read from — and stored as —
+    // `properties.businessLabel`; no backend field stores a top-level one.
     const c = sc({
       type: 'update_entity', targetUrn: 'urn:bl',
       before: { businessLabel: 'Orders' },
       after: { businessLabel: 'Customer Orders' },
     })
-    expect(stagedChangesToOps([c])[0].payload).toEqual({ businessLabel: 'Customer Orders' })
-    expect(unsavedNodeFields(c)).toEqual(['businessLabel'])
+    expect(stagedChangesToOps([c])[0].payload).toEqual({ properties: { businessLabel: 'Customer Orders' } })
+    expect(unsavedNodeFields(c)).toEqual([])
+  })
+
+  it('names businessLabel when the mirror changed but the bag it mirrors did not', () => {
+    expect(unsavedNodeFields(sc({
+      type: 'update_entity', targetUrn: 'urn:bl2',
+      before: { businessLabel: 'Orders', properties: { businessLabel: 'Orders' } },
+      after: { businessLabel: 'Customer Orders', properties: { businessLabel: 'Orders' } },
+    }))).toEqual(['businessLabel'])
   })
 
   it('says nothing about the descriptive fields now that they are carried', () => {
@@ -235,5 +249,80 @@ describe('unsavedNodeFields — what a staged entity edit CANNOT carry to the ba
     expect(unsavedNodeFields(sc({ type: 'assign_layer', targetId: 'n', after: { layerId: 'L1' } }))).toEqual([])
     expect(unsavedNodeFields(sc({ type: 'delete_entity', targetId: 'n' }))).toEqual([])
     expect(unsavedNodeFields(sc({ type: 'create_entity', targetUrn: 'urn:new', after: { owner: 'ana' } }))).toEqual([])
+  })
+})
+
+/**
+ * Removing a node property never persisted: the drawer sent the whole bag, the server merges
+ * `properties` key by key, and a key left out is kept. A node update is now a patch against the
+ * node as first read — changed fields only, set properties only, removed ones named.
+ */
+describe('stagedChangesToOps — a node update is a patch against the node as read', () => {
+  const read = {
+    urn: 'urn:n', label: 'Orders', type: 'Table', description: 'd', classifications: ['pii'], version: 'v7',
+    childCount: 3,
+    properties: { owner: 'ana', sla: '1h', childCount: 3 },
+  }
+
+  it('names a deleted property in unsetProperties and sends nothing that did not change', () => {
+    const [op] = stagedChangesToOps([sc({
+      type: 'update_entity', targetUrn: 'urn:n', before: read,
+      after: { ...read, properties: { owner: 'bo', childCount: 3 } },
+    })])
+    expect(op).toEqual({
+      op: 'update', kind: 'node', id: 'urn:n', baseVersion: 'v7',
+      payload: { properties: { owner: 'bo' } },
+      unsetProperties: ['sla'],
+    })
+  })
+
+  it('a removal-only edit is still sent', () => {
+    const [op] = stagedChangesToOps([sc({
+      type: 'update_entity', targetUrn: 'urn:n', before: read,
+      after: { ...read, properties: { owner: 'ana', childCount: 3 } },
+    })])
+    expect(op.payload).toEqual({})
+    expect(op.unsetProperties).toEqual(['sla'])
+  })
+
+  it('never sends, compares or removes a reserved name the reader mirrored into the bag', () => {
+    const [op] = stagedChangesToOps([sc({
+      type: 'update_entity', targetUrn: 'urn:n', before: read,
+      after: { ...read, childCount: 4, properties: { owner: 'ana', sla: '1h' } },
+    })])
+    expect(op).toBeUndefined()
+  })
+
+  it('stores a schema field among the properties', () => {
+    const [op] = stagedChangesToOps([sc({
+      type: 'update_entity', targetUrn: 'urn:n', before: read,
+      after: { ...read, properties: { ...read.properties, retentionDays: '90' } },
+    })])
+    expect(op.payload).toEqual({ properties: { retentionDays: '90' } })
+  })
+
+  it('treats a blank field left blank as no change', () => {
+    const ops = stagedChangesToOps([sc({
+      type: 'update_entity', targetUrn: 'urn:n',
+      before: { ...read, qualifiedName: undefined }, after: { ...read, qualifiedName: '' },
+    })])
+    expect(ops).toEqual([])
+  })
+
+  it('a rename sends the new name alone', () => {
+    const [op] = stagedChangesToOps([sc({
+      type: 'rename_entity', targetUrn: 'urn:n', before: read, after: { ...read, label: 'Orders v2' },
+    })])
+    expect(op.payload).toEqual({ displayName: 'Orders v2' })
+    expect(op.unsetProperties).toBeUndefined()
+  })
+
+  it('no op ever carries the internal removal marker', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:n', before: read, after: { ...read, properties: {} } }),
+      sc({ type: 'edit_edge', targetId: 'e1', before: { properties: { a: 1 } }, after: { properties: {} } }),
+    ])
+    expect(JSON.stringify(ops)).not.toContain('__nx_prop_delete__')
+    expect(ops.map((o) => o.unsetProperties)).toEqual([['owner', 'sla'], ['a']])
   })
 })

@@ -5785,13 +5785,19 @@ export function ContextViewCanvas({
             }
             return
           }
-          // Main mode: legacy per-change apply.
+          // Main mode: the view's layout changes persist with the view; graph edits never write to
+          // the published graph — they stay staged, marked, for the user to take to a draft.
           const result = stagedChangeList.length > 0
-            ? await applyStagedChanges(provider, scopeWsId)
+            ? await applyStagedChanges(provider, scopeWsId, { graphWrites: false })
             : { ok: 0, failed: 0 }
           if (result.failed === 0) {
             await flushLayoutSave()
             closeStagedChangesPanel()
+          } else {
+            if (result.ok > 0) await flushLayoutSave()
+            notify('warning', `${result.failed} ${result.failed === 1 ? 'change edits' : 'changes edit'} the published graph — open a draft to save ${result.failed === 1 ? 'it' : 'them'}.`,
+              canManage && versioningEnabled && canEnterEdit && editModeEnabled
+                ? { label: 'Open a draft', onClick: handleEnterEdit } : undefined)
           }
         }} />
 
@@ -6477,7 +6483,9 @@ export function ContextViewCanvas({
         {!builderOpen && !buildOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
-            // Read-only for the whole trace window, like the canvas behind it.
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable}
+            onStartEditing={canManage && versioningEnabled && canEnterEdit && editModeEnabled && !traceActive ? handleEnterEdit : undefined}
             writesLocked={traceActive}
             resolveNode={resolveTraceNode}
             onFocusConnections={openLens}
@@ -6506,6 +6514,7 @@ export function ContextViewCanvas({
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}
+            canEdit={canvasWritable}
             onClose={closeEdgePanel}
             edgeFilters={dynamicEdgeFilters}
             onToggleFilter={toggleEdgeFilter}

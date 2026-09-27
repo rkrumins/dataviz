@@ -2205,6 +2205,7 @@ class ContextEngine:
         import uuid as _uuid
         from backend.app.ontology.mutation_validator import MutationOp, validate_edge_mutation
         from backend.common.models.graph import EdgeMutationResult
+        from backend.common.property_patch import strip_deletes
 
         resolved = await self._get_resolved_ontology()
 
@@ -2235,7 +2236,7 @@ class ContextEngine:
             targetUrn=request.target_urn,
             edgeType=request.edge_type,
             confidence=1.0,
-            properties=request.properties,
+            properties=strip_deletes(request.properties) or {},
         )
 
         try:
@@ -2252,11 +2253,15 @@ class ContextEngine:
         return EdgeMutationResult(edge=edge, success=True, warnings=val.warnings or [])
 
     async def update_edge(self, edge_id: str, request) -> Any:
-        """Update mutable edge properties."""
+        """Update mutable edge properties — a PATCH: ``properties`` sets, ``unsetProperties``
+        removes, everything else is kept. Raises ``InvalidPatch`` for a contradictory request."""
         from backend.common.models.graph import EdgeMutationResult
+        from backend.common.property_patch import normalize_update
 
+        patch = normalize_update(
+            {"properties": request.properties}, getattr(request, "unset_properties", None))["properties"]
         try:
-            edge = await self.provider.update_edge(edge_id, request.properties)
+            edge = await self.provider.update_edge(edge_id, patch)
             if edge is None:
                 return EdgeMutationResult(success=False, error=f"Edge '{edge_id}' not found")
             return EdgeMutationResult(edge=edge, success=True)

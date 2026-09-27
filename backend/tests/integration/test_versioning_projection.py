@@ -129,8 +129,9 @@ class FakeGraph:
                             and e["type"] != "AGGREGATED"
                             and params["lo"] <= self._id_of(e["src"]) < params["hi"]])
         # The node merge's removed-property read: the keys each node still holds.
-        if cypher.startswith("UNWIND $urns AS u MATCH (n:") and cypher.endswith("RETURN u, keys(n)"):
-            return _Result([[u, [k for k in self.nodes[u] if not k.startswith("_")]]
+        if cypher.startswith("UNWIND $urns AS u MATCH (n:") and "RETURN u, keys(n)" in cypher:
+            return _Result([[u, [k for k in self.nodes[u] if not k.startswith("_")],
+                             self.nodes[u].get("urnSource"), self.nodes[u].get("nameSource")]
                             for u in params["urns"] if u in self.nodes])
         # A retype, in place: the node keeps its edges.
         if cypher.startswith("UNWIND $urns AS u MATCH (n:") and " SET n:" in cypher and " REMOVE n:" in cypher:

@@ -762,8 +762,13 @@ class CreateEdgeRequest(BaseModel):
 
 
 class UpdateEdgeRequest(BaseModel):
-    """Update mutable properties of an existing edge. edge_type is immutable."""
+    """Update mutable properties of an existing edge. edge_type is immutable.
+
+    A PATCH: ``properties`` sets the named keys and keeps the rest;
+    ``unsetProperties`` names the keys to remove.
+    """
     properties: Dict[str, Any] = Field(default_factory=dict)
+    unset_properties: List[str] = Field(default_factory=list, alias="unsetProperties")
 
     class Config:
         populate_by_name = True

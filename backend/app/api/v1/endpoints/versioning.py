@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.raw_path_route import RawPathSegmentRoute
+from backend.common.property_patch import InvalidPatch, normalize_update
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
@@ -596,6 +597,27 @@ class StageOp(_ApiModel):
     payload: Optional[dict] = None
     ref: Optional[str] = None
     change_reason: Optional[str] = Field(default=None, alias="changeReason")
+    unset_properties: Optional[List[str]] = Field(
+        default=None, alias="unsetProperties",
+        description="update only: property names to remove (an update merges properties key by key).")
+
+
+def _stage_ops(ops: List[StageOp]) -> List[dict]:
+    """Staged ops as the service takes them: an update's ``unsetProperties`` becomes the one
+    internal removal form (``property_patch``). A contradictory patch is a 422."""
+    out = []
+    for op in ops:
+        staged = op.model_dump(exclude_none=True)
+        unset = staged.pop("unset_properties", None)
+        try:
+            if unset and staged.get("op") != "update":
+                raise InvalidPatch(f"unsetProperties applies to an update, not a {staged.get('op')}")
+            if unset:
+                staged["payload"] = normalize_update(staged.get("payload"), unset)
+        except InvalidPatch as exc:
+            raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
+        out.append(staged)
+    return out
 
 
 class StageRequest(_ApiModel):
@@ -1592,10 +1614,11 @@ async def stage_changes(
     session: AsyncSession = Depends(get_db_session),
 ):
     rules = await _rules_for_meta(session, ws_id, _meta)
+    ops = _stage_ops(body.ops)
     with _domain_errors():
         assigned = await svc.stage_changes(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
-            ops=[op.model_dump(exclude_none=True) for op in body.ops],
+            ops=ops,
             ontology_rules=rules,
         )
     return {"assigned": assigned, "count": len(body.ops)}

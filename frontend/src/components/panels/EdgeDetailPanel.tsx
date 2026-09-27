@@ -49,7 +49,6 @@ import { useSchemaStore, useContainmentEdgeTypes, useEdgeTypeMetadataMap, useRel
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { deleteEdge as apiDeleteEdge } from '@/services/edgeApi'
 import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { edgeKind } from '@/services/ontologyPreflightService'
 import { targetFromEdge } from '@/lib/drawerEdgeTarget'
@@ -99,6 +98,8 @@ export function generateEdgeTypeFilters(
 
 interface EdgeDetailPanelProps {
     isOpen: boolean
+    /** The canvas accepts graph edits (a draft, in edit mode). Without it the cards only read. */
+    canEdit?: boolean
     onClose: () => void
     onToggleFilter?: (type: string) => void
     edgeFilters?: EdgeTypeFilter[]
@@ -107,6 +108,7 @@ interface EdgeDetailPanelProps {
 
 export function EdgeDetailPanel({
     isOpen,
+    canEdit = false,
     onClose,
     onToggleFilter,
     edgeFilters: providedFilters,
@@ -534,6 +536,7 @@ export function EdgeDetailPanel({
                             <EdgeCard
                                 key={edge.id}
                                 edge={edge}
+                                canEdit={canEdit}
                                 nodeMap={nodeMap}
                                 isExpanded={expandedEdgeId === edge.id}
                                 isHighlighted={highlightedEdgeIds.has(edge.id)}
@@ -559,6 +562,7 @@ export function EdgeDetailPanel({
                             <EdgeCard
                                 key={edge.id}
                                 edge={edge}
+                                canEdit={canEdit}
                                 nodeMap={nodeMap}
                                 isExpanded={expandedEdgeId === edge.id}
                                 isHighlighted={true}
@@ -578,6 +582,7 @@ export function EdgeDetailPanel({
                             <EdgeCard
                                 key={edge.id}
                                 edge={edge}
+                                canEdit={canEdit}
                                 nodeMap={nodeMap}
                                 isExpanded={expandedEdgeId === edge.id}
                                 isHighlighted={highlightedEdgeIds.has(edge.id)}
@@ -653,6 +658,7 @@ function EmptyState({ message }: { message: string }) {
 
 interface EdgeCardProps {
     edge: LineageEdge
+    canEdit: boolean
     nodeMap: Map<string, LineageNode>
     isExpanded: boolean
     isHighlighted: boolean
@@ -665,6 +671,7 @@ interface EdgeCardProps {
 
 function EdgeCard({
     edge,
+    canEdit,
     nodeMap,
     isExpanded,
     isHighlighted,
@@ -687,13 +694,13 @@ function EdgeCard({
     const color = edgeVisual.strokeColor
     const EdgeIcon = GitBranch  // Generic fallback; icon resolution TBD in Phase 4d
 
-    // PATCH/DELETE /edges/{id} both 403 server-side when either flag is off — don't
-    // offer edit/delete controls that would fail (same dual-flag gate as EntityDrawer).
+    // Edits are staged for a draft's save, so they are offered only where the canvas accepts
+    // them — and never when either flag is off (the save would 403).
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const versioningEnabled = useFeature('versioningEnabled')
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const editModeEnabled = useFeature('editModeEnabled')
-    const canEditEdge = versioningEnabled && editModeEnabled
+    const canEditEdge = canEdit && versioningEnabled && editModeEnabled
     // Only a raw lineage relationship is edited by hand — roll-ups and
     // hierarchy links are maintained elsewhere (the drawer says where).
     const relationshipTypes = useViewRelationshipTypes()
@@ -719,9 +726,6 @@ function EdgeCard({
             summary: `Delete edge '${sourceLabel}' → '${targetLabel}'`,
             discard: () => {
                 useCanvasStore.getState().addEdges([snapshot])
-            },
-            apply: async (ctx) => {
-                await apiDeleteEdge(ctx.wsId, edge.id)
             },
         })
     }

@@ -44,6 +44,14 @@ relationships on the published graph are read-only, and say why.
 - **A click on a line opens the relationship drawer instead of the Edge Explorer.** The Explorer is
   one click away from the drawer. Its cards gain an "Open details" button, and their pencil opens the
   drawer in Edit.
+- **Entities and relationships are edited in a draft only.** On the published graph the entity
+  drawer and the Edge Explorer offer no edit controls; the drawer offers "Edit in a draft" instead.
+  The drawer's JSON tab is read-only.
+- **An update removes a property only when told to.** `POST /graph/changes`, the draft
+  `…/changes` (stage) route and `PATCH /edges/{id}` take `unsetProperties: [name, …]` beside the
+  payload. `properties` in an update merges key by key everywhere, including the stage route, which
+  used to replace the whole bag. Naming a property both in `properties` and in `unsetProperties`, or
+  `unsetProperties` on anything but an update, is a 422 (`invalid_patch`).
 
 ### Fixed
 
@@ -63,10 +71,32 @@ relationships on the published graph are read-only, and say why.
 - **History for an entity or relationship whose id holds a `/` returned 404.** The versioning routes
   now keep an encoded `/` inside the id, as the graph routes already did — which covers a
   relationship id made from two URNs with paths.
+- **Deleting an entity's property never persisted.** The save said "Saved" and the property came
+  back on reload: the drawer sent the whole property bag, and an update keeps every property it
+  doesn't mention. An edit now saves only what changed, and names each removed property. Around it,
+  every other write path removes a property the same way: two edits of one entity in one save no
+  longer lose the first one's removal; the stage-and-commit path no longer wipes the properties an
+  edit doesn't mention; a new entity never stores the removal marker; and `PATCH /edges/{id}` no longer
+  replaces a relationship's whole property bag with the few it names.
+- **Edits made on the published graph were dropped while Save reported success.** Save there now
+  keeps them, says they need a draft, and offers to open one.
+- **An entity's schema fields and business label were never saved.** Both are now stored as the
+  entity's properties, where the drawer reads them from.
+- **A rename and an edit of the same entity were two changes**, and discarding one put the other's
+  stale copy back on the canvas. They are one change now.
+- **The Hierarchy Builder lost a new entity's description** — it was filed among the properties,
+  where the save strips the name as reserved. It is saved as the entity's description.
+- **A removed property named like one of the platform's own (`id`, `weight`, `confidence`, …) stayed
+  on the live graph** — still shown, still matching search filters. The projection now removes any
+  property except the node's own reserved fields and its identity property.
 
 ### Upgrading
 
-No migration. The pod nginx's streamed-export location now also covers `…/exports/{job}/download`
+No migration. To clear properties the projection left behind on the live graph before this release,
+run `python backend/scripts/heal_native_leftovers.py` (a dry run, which lists what it would remove)
+and then with `--apply`; it removes only a property the entity's published version no longer has.
+A client that removed a property through the stage route by leaving it out of `properties` must now
+name it in `unsetProperties`. The pod nginx's streamed-export location now also covers `…/exports/{job}/download`
 (no buffering, an hour between reads): an nginx config of your own in front of the API needs the
 same. Exports are kept in the object store for a day: keep it on a mount
 (`OBJECT_STORE_BACKEND=local`) rather than in the database for exports of many gigabytes.

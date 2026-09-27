@@ -10,6 +10,7 @@ import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
+import { stageNodeEdit } from '@/features/versioning/model/stageNodeEdit'
 import { useBranchStore } from '@/store/branchStore'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { getDeleteImpact } from '@/services/versioningApiService'
@@ -206,7 +207,6 @@ export function useCanvasInteractions(
         selectedEdgeIds,
         selectNode,
         clearSelection,
-        updateNode,
     } = useCanvasStore()
     
     // State
@@ -260,32 +260,13 @@ export function useCanvasInteractions(
     const saveInlineEdit = useCallback((nodeId: string, newValue: string) => {
         const node = useCanvasStore.getState().nodes.find(n => n.id === nodeId)
         const previousLabel = (node?.data?.label as string) ?? ''
-        if (previousLabel === newValue) {
-            setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
-            return
-        }
-        updateNode(nodeId, { label: newValue })
-        onInlineEditSave?.(nodeId, newValue)
         setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
-
-        const stagedChanges = useStagedChangesStore.getState()
-        // Replace any existing rename for this node so the user's net rename
-        // shows up as a single entry, but preserve the original `before` value.
-        stagedChanges.stageOrReplace(
-            (c) => c.type === 'rename_entity' && c.targetId === nodeId,
-            {
-                type: 'rename_entity',
-                targetId: nodeId,
-                targetUrn: (node?.data?.urn as string) ?? nodeId,
-                before: { label: previousLabel },
-                after: { label: newValue },
-                summary: `Rename '${previousLabel}' → '${newValue}'`,
-                discard: () => {
-                    useCanvasStore.getState().updateNode(nodeId, { label: previousLabel })
-                },
-            },
-        )
-    }, [updateNode, onInlineEditSave])
+        if (!node || previousLabel === newValue) return
+        // One staged edit per node: a rename after a drawer edit (or before one) joins it,
+        // keeping the node as first read as the diff base and the discard target.
+        stageNodeEdit(nodeId, node.data, { ...node.data, label: newValue })
+        onInlineEditSave?.(nodeId, newValue)
+    }, [onInlineEditSave])
     
     const cancelInlineEdit = useCallback(() => {
         setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
