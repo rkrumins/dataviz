@@ -30,7 +30,12 @@ _REQUIRED_BEFORE: Sequence[str] = ("ingest", "projection", "rebuild", "export", 
 
 def _widen_job_type_check(bind, required: Sequence[str]) -> None:
     """Rebuild ck_jobs_type over `required` ∪ whatever is already in the table."""
-    jobs = f'"{gv_config.graphver_schema()}"."jobs"'
+    schema = gv_config.graphver_schema()
+    # A database installed at head has no graphver schema until the versioning worker's bootstrap
+    # (create_schema_and_partitions) creates it, and that builds the constraint from the models.
+    if not sa.inspect(bind).has_table("jobs", schema=schema):
+        return
+    jobs = f'"{schema}"."jobs"'
     present = {
         row[0] for row in bind.execute(sa.text(f"SELECT DISTINCT job_type FROM {jobs}"))
         if row[0]
