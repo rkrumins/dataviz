@@ -54,7 +54,9 @@ interface ViewState {
 }
 
 
-export function usePropertyCatalog(viewId: string): PropertyCatalogState {
+/** ``catchingUp`` — whether the published graph is behind main: its catalog can't be read
+ *  meanwhile (the last complete one stays), and is read again once it has caught up. */
+export function usePropertyCatalog(viewId: string, catchingUp = false): PropertyCatalogState {
     const provider = useGraphProvider()
     const [held, setHeld] = useState<ViewState | null>(null)
     // A refresh belongs to the view it was asked for.
@@ -62,6 +64,9 @@ export function usePropertyCatalog(viewId: string): PropertyCatalogState {
 
     useEffect(() => {
         if (!viewId || !(provider instanceof RemoteGraphProvider)) return
+        // While the published graph catches up it can't be read: the catalog already held stays,
+        // and the view is read again once it has caught up.
+        if (catchingUp && remembered(provider, viewId)) return
         const controller = new AbortController()
         // Every update names its view: an answer for a view switched away
         // from never shows under the new one.
@@ -85,7 +90,7 @@ export function usePropertyCatalog(viewId: string): PropertyCatalogState {
                              error: refused ? null : (e as Error).message }))
         })
         return () => controller.abort()
-    }, [provider, viewId, refreshOf])
+    }, [provider, viewId, refreshOf, catchingUp])
 
     const refresh = useCallback(
         () => setRefreshOf((r) => ({ viewId, n: r.viewId === viewId ? r.n + 1 : 1 })),

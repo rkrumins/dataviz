@@ -1,9 +1,9 @@
 /**
  * ViewVersioningPanel — the canvas review hub for a view, as a slide-over with three tabs:
  *   • Changes — one place for everything in this branch: PENDING (unsaved canvas edits) at the top
- *     with a Review & Save action, then ALL committed branch changes cumulatively (summary-first
- *     tree). So after you save, your work doesn't "disappear" — it moves from Pending to Committed
- *     in the same view.
+ *     with a Review & Save action, the property operations written into it (progress, Stop, Undo),
+ *     then ALL committed branch changes cumulatively (summary-first tree). So after you save, your
+ *     work doesn't "disappear" — it moves from Pending to Committed in the same view.
  *   • Commits — the branch's history commit-by-commit (this draft / this view / whole graph), each
  *     expandable to its own diff (GitHub-style).
  *   • Pull Requests — raised from this view, or the whole data source.
@@ -16,8 +16,9 @@ import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import * as api from '@/services/versioningApiService'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { useBranchDiffSummary, useBranchViewChanges } from '../hooks/useVersioning'
+import { useBranchDiffSummary, useBranchViewChanges, usePropertyOps } from '../hooks/useVersioning'
 import { DraftViewChanges } from './DraftViewChanges'
+import { PropertyOpList } from './PropertyOpList'
 import { ChangeTreePanel } from './ChangeTreePanel'
 import { ViewPrList } from '../../reviews/components/ViewPrList'
 import { ViewHistoryTimeline } from './ViewHistoryTimeline'
@@ -94,6 +95,8 @@ export function ViewVersioningPanel({
   // the truncation advisory only appears past it (far beyond any real schema's top-level containers).
   const summaryQ = useBranchDiffSummary(wsId, graphId, branchId ?? null, 1000)
   const viewChangesQ = useBranchViewChanges(wsId, graphId, branchId ?? null)
+  // Property operations written into the draft: their progress, Stop and Undo.
+  const opsQ = usePropertyOps(wsId, graphId, branchId ?? null)
   const fetchChildren = useCallback(
     (key: string, offset: number) =>
       api.getBranchDiffChildren(wsId, graphId, branchId!, key, { offset, limit: 50 }),
@@ -145,6 +148,14 @@ export function ViewVersioningPanel({
             (branchId ? (
               <div className="space-y-4">
                 <PendingChanges />
+                {(opsQ.data?.ops.length ?? 0) > 0 && (
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider mb-2 px-0.5">
+                      Property operations
+                    </p>
+                    <PropertyOpList wsId={wsId} graphId={graphId} branchId={branchId} list={opsQ.data} />
+                  </div>
+                )}
                 {viewChangesQ.data && (viewChangesQ.data.views.length + viewChangesQ.data.hidden) > 0 && (
                   <div>
                     <p className="text-[10px] font-semibold uppercase tracking-wider mb-2 px-0.5">

@@ -6414,6 +6414,13 @@ class FalkorDBProvider(GraphDataProvider):
         from .falkordb_search.export import open_export
         return await open_export(self, session_id, scope_hash=context.scope_hash)
 
+    async def deep_search_scan(self, query, *, context, cap):
+        """The URNs of ``query``'s matches, for a job, stopping once there are
+        more than ``cap``. See ``falkordb_search/scan.py``."""
+        from .falkordb_search.scan import scan_urns
+        await self._ensure_connected()
+        return await scan_urns(self, query, context=context, cap=cap)
+
     async def deep_search_ancestor_counts(self, session_id, urns, *, context):
         """How many of a search's matches each container holds, from the
         session's tally. See ``falkordb_search/engine.py``."""

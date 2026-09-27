@@ -311,13 +311,13 @@ def _returns_hits(query: SearchQuery) -> bool:
     and it isn't a path search (a different statement and response)."""
     if query.options.results not in ("hits", "both"):
         return False
+    return not _has_path(query.predicate)
 
-    def has_path(p) -> bool:
-        if isinstance(p, PathPredicate):
-            return True
-        return isinstance(p, GroupPredicate) and any(has_path(c) for c in p.children)
 
-    return not has_path(query.predicate)
+def _has_path(p) -> bool:
+    if isinstance(p, PathPredicate):
+        return True
+    return isinstance(p, GroupPredicate) and any(_has_path(c) for c in p.children)
 
 
 def _empty_page(query: SearchQuery) -> SearchResultPage:
@@ -697,6 +697,23 @@ class AdvancedSearchService:
             result.download_token = mint_download_token(
                 result.session_id, eff.scope_hash, principal, auth_config.JWT_SECRET_KEY)
         return result
+
+    async def scope_for_operation(self, predicate, scope: SearchScope):
+        """A property operation's search: checked as an export's is — and refused as a path
+        search, which finds routes, not entities to change — on its view's scope resolved here as
+        a search's is. ``(query, scope_hash)``; the query is None when every root the client named
+        lies outside the view. It needs no engine: the operation's job runs the search later."""
+        leaves = _validate_predicate(predicate, path="$.predicate")
+        max_leaves = get_deep_search_settings().max_leaf_count
+        if leaves > max_leaves:
+            raise ValidationError(f"$.predicate has {leaves} leaves (max {max_leaves})")
+        if _has_path(predicate):
+            raise ValidationError("A path search finds routes, not entities to change.")
+        stamped, eff = await self._rule_scope(scope)
+        if stamped is None:
+            return None, eff.scope_hash
+        return (SearchQuery(predicate=predicate, scope=stamped, options=SearchOptions(results="hits")),
+                eff.scope_hash)
 
     async def open_export(self, session_id: str, scope_hash: str):
         """A complete export of this view's ``scope_hash`` — its answer and

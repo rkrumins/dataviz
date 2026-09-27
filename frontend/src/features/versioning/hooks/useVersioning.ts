@@ -10,6 +10,7 @@ import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
+import { isLive } from '../model/propertyOps'
 import { recordEvent } from '@/services/telemetryService'
 
 export const VERSIONING_KEYS = {
@@ -67,6 +68,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'restorePreview', ws, gid, cid] as const,
   bootstrap: (ws?: string, ds?: string | null) =>
     [...VERSIONING_KEYS.all, 'bootstrap', ws, ds] as const,
+  propertyOps: (ws?: string, gid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'propertyOps', ws, gid, bid] as const,
 }
 
 // ── Queries ────────────────────────────────────────────────────────────────
@@ -127,12 +130,15 @@ function expectCatchUp(wsId?: string, graphId?: string | null) {
 
 /** How often to re-read the watermark (false = stop): while forced; while catching up or
  *  rebuilding; and, for a short window after main advanced, while merely behind — until the
- *  projection has had its chance to start. A recorded failure ends that window early. */
+ *  projection has had its chance to start. A recorded failure ends that window early. A caller
+ *  waiting `untilFresh` keeps it polling for as long as the graph is behind. */
 export function watermarkPollInterval(
   d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
+  untilFresh = false,
 ): number | false {
   if (force) return 3_000
   if (!d || d.fresh !== false) return false
+  if (untilFresh) return 3_000
   const active = d.status === 'projecting' || d.status === 'rebuilding'
   const justAdvanced = advancedAt !== undefined && now - advancedAt < CATCH_UP_WINDOW_MS
   return active || (justAdvanced && !d.lastError) ? 3_000 : false
@@ -144,16 +150,19 @@ export function watermarkPollInterval(
  *  forever. A merge/publish invalidates this query, so a freshly-started projection is picked up.
  *  `opts.force` keeps the poll alive REGARDLESS of status — the Data health rebuild flow needs to
  *  observe the terminal transition (idle + lastError = failed), which the status-gated poll would
- *  stop one tick short of. */
+ *  stop one tick short of. `opts.untilFresh` keeps it polling while the graph is behind, for a
+ *  caller that waits on the published graph (a property operation's count). */
 export function useProjectionWatermark(
-  wsId?: string, graphId?: string | null, opts?: { force?: boolean },
+  wsId?: string, graphId?: string | null, opts?: { force?: boolean; untilFresh?: boolean },
 ) {
   const force = opts?.force ?? false
+  const untilFresh = opts?.untilFresh ?? false
   return useQuery({
     queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId),
     queryFn: () => api.getWatermark(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
-    refetchInterval: (q) => watermarkPollInterval(q.state.data, force, mainAdvancedAt.get(`${wsId}:${graphId}`), Date.now()),
+    refetchInterval: (q) => watermarkPollInterval(
+      q.state.data, force, mainAdvancedAt.get(`${wsId}:${graphId}`), Date.now(), untilFresh),
     staleTime: 2_000,
     refetchOnWindowFocus: false,
   })
@@ -729,4 +738,49 @@ export function useMergeMergeRequest(wsId: string) {
       setTimeout(invalidateAggregatedEdges, 4000)
     },
   })
+}
+
+// ── Property operations ────────────────────────────────────────────────────
+
+/** How often to ask about a draft's property operations: every 2 s while one is under way, and
+ *  not at all otherwise — starting, stopping or undoing one refetches the list. */
+export function propertyOpsPollInterval(list?: api.PropertyOpList): number | false {
+  return list?.ops.some(isLive) ? 2000 : false
+}
+
+/** A draft's property operations, newest first, with its change count and cap. */
+export function usePropertyOps(wsId?: string | null, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.propertyOps(wsId ?? undefined, graphId, branchId),
+    queryFn: () => api.listPropertyOps(wsId!, graphId!, branchId!),
+    enabled: !!wsId && !!graphId && !!branchId,
+    refetchInterval: (q) => propertyOpsPollInterval(q.state.data),
+    refetchIntervalInBackground: false,
+  })
+}
+
+function usePropertyOpMutation<V>(
+  wsId: string, graphId: string, branchId: string,
+  call: (v: V) => Promise<api.PropertyOpJob>,
+) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: call,
+    onSettled: () => qc.invalidateQueries({ queryKey: VERSIONING_KEYS.propertyOps(wsId, graphId, branchId) }),
+  })
+}
+
+export function useStartPropertyOp(wsId: string, graphId: string, branchId: string) {
+  return usePropertyOpMutation(wsId, graphId, branchId,
+    (body: Parameters<typeof api.startPropertyOp>[3]) => api.startPropertyOp(wsId, graphId, branchId, body))
+}
+
+export function useCancelPropertyOp(wsId: string, graphId: string, branchId: string) {
+  return usePropertyOpMutation(wsId, graphId, branchId,
+    (jobId: string) => api.cancelPropertyOp(wsId, graphId, branchId, jobId))
+}
+
+export function useUndoPropertyOp(wsId: string, graphId: string, branchId: string) {
+  return usePropertyOpMutation(wsId, graphId, branchId,
+    (jobId: string) => api.undoPropertyOp(wsId, graphId, branchId, jobId))
 }

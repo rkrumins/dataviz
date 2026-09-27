@@ -34,7 +34,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
-from . import config, db
+from . import config, db, property_directive
 from .changeset import Delta, materialize, net_delta, diff_states
 from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
@@ -584,6 +584,8 @@ class GraphVersioningService:
         as earlier *uncommitted* working changes can't be typed here, so those
         edges are skipped — **checkpoint is the authoritative rich gate**.
         """
+        if any(op.get("directive") is not None for op in ops):
+            raise ValueError("a property operation is decided when it is applied — it can't be staged")
         assigned: Dict[str, str] = {}
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
@@ -894,7 +896,9 @@ class GraphVersioningService:
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)       # serialize same-graph merges (see _lock_graph)
                 graph = await s.get(GraphORM, graph_id)
-                draft = await s.get(BranchORM, branch_id)
+                # The draft's row, before reading the draft: a property operation's window being
+                # written into it lands first, and the next is refused (see _apply_ops_once).
+                draft = await s.get(BranchORM, branch_id, with_for_update=True)
                 if graph is None or draft is None or draft.graph_id != graph_id:
                     raise ValueError("unknown graph/branch")
                 self._require_open(draft)
@@ -1082,7 +1086,9 @@ class GraphVersioningService:
         collision, so it must re-read all state from a fresh session (it does)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
-            draft = await s.get(BranchORM, branch_id)
+            # The draft's row first, as publish takes it: a property operation's window being
+            # written from the draft's old base lands before the base moves.
+            draft = await s.get(BranchORM, branch_id, with_for_update=True)
             if graph is None or draft is None or draft.graph_id != graph_id:
                 raise ValueError("unknown graph/branch")
             self._require_open(draft)
@@ -2087,7 +2093,8 @@ class GraphVersioningService:
                 if pr.status in ("merged", "closed"):
                     raise ValueError(f"merge request {mr_id} is {pr.status}")
                 graph = await s.get(GraphORM, pr.target_graph_id)
-                draft = await s.get(BranchORM, pr.source_branch_id)
+                # The draft's row first, as publish takes it (a property operation's window).
+                draft = await s.get(BranchORM, pr.source_branch_id, with_for_update=True)
                 if graph is None or draft is None:
                     raise ValueError("merge request endpoints missing")
                 self._require_open(draft)
@@ -3852,6 +3859,42 @@ class GraphVersioningService:
         async with self._session() as s:
             return await self._change_count(s, graph_id, branch_id)
 
+    async def draft_entity_ids(self, *, graph_id: str, branch_id: str) -> set:
+        """The ids of the entities a draft changes: its own heads."""
+        async with self._session() as s:
+            return set((await s.execute(select(EntityHeadORM.entity_id).where(
+                EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id))).scalars())
+
+    async def commit_node_changes(self, *, graph_id: str, commit_id: str, after: Optional[str] = None,
+                                  limit: int = 10_000) -> List[Tuple[str, Optional[dict], Optional[dict]]]:
+        """A commit's node changes a page at a time, keyset on entity id through ``ix_nv_commit``:
+        ``(entity_id, before, after)`` — each node as it was just before the commit and as the
+        commit left it (``None``: absent). What undoing a property operation reverts."""
+        async with self._session() as s:
+            query = select(NodeVersionORM.entity_id, NodeVersionORM.op, NodeVersionORM.payload,
+                           NodeVersionORM.prev_content_hash).where(
+                NodeVersionORM.graph_id == graph_id, NodeVersionORM.commit_id == commit_id)
+            if after is not None:
+                query = query.where(NodeVersionORM.entity_id > after)
+            rows = (await s.execute(query.order_by(NodeVersionORM.entity_id).limit(limit))).all()
+            before = await self._payloads_by_content_hash(
+                s, graph_id, {eid: prev for eid, _op, _p, prev in rows if prev}, {})
+        return [(eid, before.get(eid), None if op == "delete" else payload)
+                for eid, op, payload, _prev in rows]
+
+    async def draft_node_urns(self, *, graph_id: str, branch_id: str) -> List[str]:
+        """The URNs, as ``main`` has them now, of the nodes a draft changed and still has — not the
+        ones it created, which ``main`` doesn't have. A property operation's search judges each node
+        by its published value; these are the nodes whose value the draft may have changed."""
+        async with self._session() as s:
+            await self._get_branch(s, graph_id, branch_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            heads = await self._head_index(s, graph_id, branch_id)
+            ids = [eid for eid, h in heads.items() if h.kind == "node" and h.live]
+            now = await self._hashes_at(s, graph_id, main_id, ids, graph.main_head_commit_seq or 0)
+        return [w.urn for w in now.values() if w.urn]
+
     @staticmethod
     async def _change_count(s, graph_id: str, branch_id: str) -> int:
         return await s.scalar(select(func.count()).select_from(EntityHeadORM).where(
@@ -4432,6 +4475,16 @@ class GraphVersioningService:
         ``AccessDenied`` when ``viewer`` may not read it (someone else's private draft)."""
         async with self._session() as s:
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+
+    async def assert_branch_editable(self, *, graph_id: str, branch_id: str, actor: str) -> None:
+        """Raise ``ValueError`` unless ``branch_id`` is an open draft of the graph, and
+        ``AccessDenied`` when ``actor`` may not edit it (a shared draft they aren't an editor of)."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise ValueError("main changes by publishing a draft, not directly")
+            self._require_open(branch)
+            await self._require_edit(s, branch, actor, ())
 
     async def _readable_branch_ids(self, s, branch_ids, viewer: "Viewer") -> set:
         """Subset of *branch_ids* the viewer may read — for filtering cross-branch results
@@ -5348,12 +5401,20 @@ class GraphVersioningService:
         message: str = "edit", branch_id: Optional[str] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        outcome: Optional[dict] = None,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
         graph write becomes a durable, attributed commit without a draft round-trip.
         Each op is ``{op, entity_kind, entity_id, payload}``. Returns the commit id, or
         ``None`` if the ops are a no-op against current state.
+
+        A node ``update`` may carry a property operation's ``directive`` instead of a payload
+        (:mod:`.property_directive`), one op per entity: it is decided on the entity's value in
+        this branch inside the commit, and ``outcome`` (when given) is filled with the entity ids
+        it ``changed``, left ``unchanged``, found ``notInDraft`` (not live in the branch), or
+        skipped because a rename's ``targetExists`` or a revert's key was edited since
+        (``changedSince``).
 
         Cost is **O(ops)**, not O(graph): it resolves only the affected entities' current
         values (``_current_values``), cascades node deletes to their live incident edges
@@ -5370,7 +5431,7 @@ class GraphVersioningService:
             lambda: self._apply_ops_once(
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules),
+                ontology_rules=ontology_rules, outcome=outcome),
         )
 
     async def _apply_ops_once(
@@ -5378,6 +5439,7 @@ class GraphVersioningService:
         message: str, branch_id: Optional[str],
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        outcome: Optional[dict] = None,
     ) -> Optional[str]:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -5385,7 +5447,13 @@ class GraphVersioningService:
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             bid = branch_id or await self._main_branch_id(s, graph_id)
-            branch = await s.get(BranchORM, bid)
+            # A property operation writes into a draft over many commits, for minutes: each one
+            # holds the draft's row, which a publish, merge or pull of the draft takes before it
+            # reads the draft — so a window lands wholly before one, or is refused after it.
+            directed = any(op.get("directive") is not None for op in ops)
+            branch = await s.get(BranchORM, bid, with_for_update=directed or None)
+            if directed:
+                self._require_open(branch)
 
             # Serialize main-advancing writes on this graph BEFORE reading the head, so a
             # write-through composes against — and advances — the current main atomically
@@ -5404,8 +5472,20 @@ class GraphVersioningService:
             kind_by_entity: Dict[str, str] = {}
             update_ids: set = set()
             base_versions: Dict[str, str] = {}        # entity_id → client's OCC token (content_hash)
+            directives: Dict[str, Mapping] = {}       # entity_id → property operation, decided below
             for op in ops:
                 eid = op["entity_id"]
+                if op.get("directive") is not None:
+                    if op["op"] != "update" or (op.get("entity_kind") or "node") != "node":
+                        raise ValueError("a property operation applies to a node update only")
+                    if eid in directives or eid in new_vals:
+                        raise ValueError(f"a property operation must be the only op on {eid}")
+                    property_directive.check(op["directive"])
+                    directives[eid] = op["directive"]
+                    kind_by_entity[eid] = "node"
+                    continue
+                if eid in directives:
+                    raise ValueError(f"a property operation must be the only op on {eid}")
                 payload = op.get("payload") or {}
                 kind_by_entity[eid] = (op.get("entity_kind")
                                        or ("edge" if _is_edge_payload(payload) else "node"))
@@ -5431,7 +5511,24 @@ class GraphVersioningService:
                     new_vals[eid] = _sanitize_node_properties(new_vals[eid])
 
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
-            cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
+            cur_vals = await self._current_values(s, graph_id, bid, [*new_vals, *directives])
+
+            # Property operations are decided HERE, on each entity's value in this branch now (and
+            # again on a retry, which re-enters with a fresh read) — never on what the caller saw.
+            decided: Dict[str, List[str]] = {"changed": [], "unchanged": [], "notInDraft": [],
+                                             "targetExists": [], "changedSince": []}
+            for eid, directive in directives.items():
+                cur = cur_vals.get(eid)
+                if cur is None:
+                    decided["notInDraft"].append(eid)
+                    continue
+                res = property_directive.resolve(cur, directive)
+                decided[res.outcome].append(eid)
+                if res.payload is not None:
+                    new_vals[eid] = _sanitize_node_properties(res.payload)
+            if outcome is not None:
+                outcome.clear()
+                outcome.update(decided)
 
             # An `update` is a field-level PATCH onto the entity's current value (a version row stores
             # the FULL payload, composed last-writer-wins per ENTITY), preserving fields the op didn't
@@ -5677,8 +5774,9 @@ class GraphVersioningService:
         for model, ids in ((NodeVersionORM, node_ids), (EdgeVersionORM, edge_ids)):
             if not ids:
                 continue
-            tokens = list({eid_to_token[e] for e in ids})
-            for chunk in _chunks(ids, _IN_LIST_MAX):
+            # Each chunk sends its ids and just their tokens: at most _IN_LIST_MAX parameters.
+            for chunk in _chunks(ids, _IN_LIST_MAX // 2):
+                tokens = list({eid_to_token[e] for e in chunk})
                 rows = (await s.execute(
                     select(model.entity_id, model.content_hash, model.payload).where(
                         model.graph_id == graph_id, model.entity_id.in_(chunk),

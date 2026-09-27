@@ -20,6 +20,12 @@ describe('watermarkPollInterval', () => {
     expect(watermarkPollInterval({ fresh: true, status: 'idle' }, false, 1_000, 5_000)).toBe(false)
   })
 
+  it('keeps polling a graph that is behind for a caller waiting until it is fresh', () => {
+    expect(watermarkPollInterval(behindIdle, false, undefined, 5_000, true)).toBe(3_000)
+    expect(watermarkPollInterval({ ...behindIdle, lastError: 'boom' }, false, undefined, 5_000, true)).toBe(3_000)
+    expect(watermarkPollInterval({ fresh: true, status: 'idle' }, false, undefined, 5_000, true)).toBe(false)
+  })
+
   it('polls while catching up or rebuilding, and always when forced', () => {
     expect(watermarkPollInterval({ fresh: false, status: 'projecting' }, false, undefined, 0)).toBe(3_000)
     expect(watermarkPollInterval({ fresh: false, status: 'rebuilding' }, false, undefined, 0)).toBe(3_000)

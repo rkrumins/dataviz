@@ -42,6 +42,7 @@ tests/test_concurrency_tuning_doc.py
 tests/test_configmap_matches_manifests.py
 tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
+tests/test_deep_search_overlay_providers.py
 tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_drift_probe_cost.py
@@ -85,7 +86,10 @@ tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
 tests/test_projection_stalled_reconcile.py
+tests/test_property_directive.py
 tests/test_property_index.py
+tests/test_property_ops.py
+tests/test_property_ops_api.py
 tests/test_provider_failover_pause.py
 tests/test_provider_fleet_admission.py
 tests/test_provider_refresh_batch.py
@@ -101,6 +105,7 @@ tests/test_search_catalog.py
 tests/test_search_engine.py
 tests/test_search_export.py
 tests/test_search_rules.py
+tests/test_search_scan.py
 tests/test_search_schema_endpoint.py
 tests/test_search_semantics.py
 tests/test_search_values.py

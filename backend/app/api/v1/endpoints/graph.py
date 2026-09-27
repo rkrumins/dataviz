@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
@@ -1822,20 +1821,7 @@ def _statement_admission(engine: ContextEngine):
     """``_bounded_compute``'s two slots — this process's and the fleet's —
     as a context manager held for ONE statement, or None when the engine's
     provider has no slot key (``_bounded_compute`` degrades the same way)."""
-    key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
-    if key is None:
-        return None
-
-    @asynccontextmanager
-    async def admit():
-        sem = await provider_manager.acquire_provider_slot(*key)
-        try:
-            async with provider_manager.fleet_slot(*key):
-                yield
-        finally:
-            sem.release()
-
-    return admit
+    return provider_manager.statement_admission(getattr(engine, "provider", None))
 
 
 async def _search_data_version(engine: ContextEngine) -> str:

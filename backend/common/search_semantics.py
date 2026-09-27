@@ -426,7 +426,7 @@ def evaluate(stored: Any, cmp: Comparison) -> bool:
     if op == "isNotSet":
         return stored is None
     if op in ("isEmpty", "isNotEmpty"):
-        return _is_blank(stored) == (op == "isEmpty")
+        return is_blank(stored) == (op == "isEmpty")
     positive = POSITIVE_OF.get(op)
     if positive is not None:
         if stored is None:
@@ -466,7 +466,9 @@ def _elements(stored: Any) -> list:
     return stored if isinstance(stored, list) else [stored]
 
 
-def _is_blank(v: Any) -> bool:
+def is_blank(v: Any) -> bool:
+    """Whether ``isEmpty`` holds for a stored value (``None`` for a missing key) — also what a
+    property operation's "fill empty" fills."""
     # FalkorDB's trim() strips spaces only — a tab is content.
     return v is None or v == [] or (isinstance(v, str) and v.strip(" ") == "")
 

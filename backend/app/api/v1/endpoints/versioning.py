@@ -48,6 +48,13 @@ from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.messaging import nudge_projection
+from backend.app.services.versioning.property_ops import (
+    CannotUndo,
+    OpContext,
+    PropertyOpRunning,
+    PublishRunning,
+    running_refusal,
+)
 from backend.app.services.versioning.service import (
     AccessDenied,
     ApprovalRequired,
@@ -60,6 +67,7 @@ from backend.app.services.versioning.service import (
     PullRequestExists,
     Viewer,
 )
+from backend.common.models.search import Predicate
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +132,7 @@ def get_import_export_service():
             versioning=_service, scope_resolver=_resolve_export_view_scope,
             ontology_resolver=_resolve_ontology_types,
             layout_writer=_write_view_import_assignments,
-            publish_hook=_publish_from_job)
+            publish_hook=_publish_from_job, property_op_context=_property_op_context)
     return _ie_service
 
 
@@ -1708,6 +1716,7 @@ async def publish(
 ):
     """Publish a draft. One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities is
     published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``)."""
+    await _refuse_while_written(ie, graph_id, branch_id)
     if await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         return await _queue_publish(ie, workspace_id=ws_id, meta=_meta, graph_id=graph_id,
                                     branch_id=branch_id, actor=user.id, body=body)
@@ -1801,6 +1810,267 @@ async def get_publish_job(
             "commit_id": summary.get("commitId"), "error": error}
 
 
+# --------------------------------------------------------------------------- #
+# Property operations: one property changed across a search's matches, in a draft #
+# --------------------------------------------------------------------------- #
+_GATE_EDIT = require_feature("editModeEnabled")
+_PROPERTY_KEY_MAX = 128
+
+
+class PropertyOpSpec(_ApiModel):
+    kind: Literal["set", "fillEmpty", "rename", "remove"]
+    key: str
+    new_key: Optional[str] = Field(default=None, alias="newKey")
+    value: Any = None
+    value_type: Optional[Literal["string", "number", "boolean"]] = Field(default=None, alias="valueType")
+
+
+class PropertyOpRequest(_ApiModel):
+    view_id: str = Field(alias="viewId", min_length=1)
+    predicate: Predicate
+    op: PropertyOpSpec
+    expected_count: Optional[int] = Field(default=None, alias="expectedCount", ge=0)
+
+
+def _property_operation(spec: PropertyOpSpec) -> Dict[str, Any]:
+    """The operation as its job writes it — the value typed as ``valueType`` says, a 64-bit integer
+    kept exact — or 422 saying what can't be written."""
+    from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
+    from backend.common.search_semantics import SemanticsError, is_blank, resolve_comparison
+
+    def refuse(message: str):
+        raise HTTPException(status_code=422, detail={"type": "invalid_property_operation",
+                                                     "message": message})
+
+    def check_key(key: Optional[str], what: str) -> None:
+        if key is None or not key.strip():
+            refuse(f"Name the {what}.")
+        if len(key) > _PROPERTY_KEY_MAX:
+            refuse(f"A property name is at most {_PROPERTY_KEY_MAX} characters.")
+        if key in _RESERVED_NODE_KEYS:
+            refuse(f"“{key}” is kept by the platform: it isn't a property you can change.")
+
+    check_key(spec.key, "property")
+    op: Dict[str, Any] = {"kind": spec.kind, "key": spec.key}
+    if spec.kind == "rename":
+        check_key(spec.new_key, "property's new name")
+        if spec.new_key == spec.key:
+            refuse("The new name is the same as the old one.")
+        op["newKey"] = spec.new_key
+    elif spec.kind in ("set", "fillEmpty"):
+        if spec.value_type is None:
+            refuse("Say what type the value is: string, number or boolean.")
+        if is_blank(spec.value):
+            refuse("Give the value to write.")
+        try:
+            op["value"] = resolve_comparison("eq", spec.value, value_type=spec.value_type).values[0]
+        except SemanticsError as exc:
+            refuse(str(exc))
+    return op
+
+
+async def _operation_search(session: AsyncSession, ws_id: str, meta: dict, branch_id: str,
+                            body: PropertyOpRequest):
+    """The operation's search on its view's scope, resolved as a search's is in this draft — 404
+    for an unknown view, 422 for a search the operation can't use."""
+    from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
+    from backend.common.models.search import SearchScope
+
+    search = AdvancedSearchService(None, session=session, workspace_id=ws_id,
+                                   data_source_id=meta.get("data_source_id"), branch_id=branch_id)
+    try:
+        query, scope_hash = await search.scope_for_operation(
+            body.predicate, SearchScope(view_id=body.view_id, scope_mode="view"))
+    except ValidationError as exc:
+        if str(exc).startswith("view_not_found"):
+            raise HTTPException(status_code=404, detail="view not found") from exc
+        raise HTTPException(status_code=422, detail={"type": "invalid_search", "message": str(exc)}) from exc
+    if query is None:
+        raise HTTPException(status_code=422, detail={"type": "invalid_search",
+                                                     "message": "The view has nothing to search."})
+    return query, scope_hash
+
+
+def _publishing(job_id: str) -> dict:
+    return {"type": "publish_running", "jobId": job_id,
+            "message": "This draft is being published. Wait for it to finish."}
+
+
+async def _refuse_while_written(ie, graph_id: str, branch_id: str) -> None:
+    """409 while a property operation is being written into the draft: publishing, merging or
+    pulling it now would take part of the operation, or move the draft under it."""
+    job_id = await ie.property_ops.running(graph_id=graph_id, branch_id=branch_id)
+    if job_id is not None:
+        raise HTTPException(status_code=409, detail=running_refusal(job_id))
+
+
+async def _property_op_context(job: dict) -> Optional[OpContext]:
+    """What a property operation's job searches and writes with — or None while the published
+    graph catches up with main (the job waits): its search runs there, as Advanced Search's does in
+    a draft, with each statement admitted like a search's. An undo searches nothing, so it doesn't
+    wait. This may be the versioning worker."""
+    from backend.app.api.v1.endpoints.graph import _search_data_version
+    from backend.app.db.engine import get_async_session
+    from backend.app.providers.manager import provider_manager
+    from backend.app.services.context_engine import ContextEngine
+    from backend.app.services.deep_search import SearchRunContext
+
+    svc = get_versioning_service()
+    graph_id, ws, ds = job["graphId"], job["workspaceId"], job["dataSourceId"]
+    searching = job.get("kind", "apply") == "apply"
+    if searching and not (await svc.projection_watermark(graph_id))["fresh"]:
+        return None
+    meta = await svc.get_graph(graph_id)
+    engine = None
+    async with get_async_session() as session:
+        if searching:
+            engine = await ContextEngine.for_workspace(ws, provider_manager, session, data_source_id=ds,
+                                                       actor=job.get("actor"))
+        cset = await _live_containment_types(session, ws, ds)
+        rules = await _rules_for_meta(session, ws, meta)
+    provider = context = None
+    if searching:
+        if getattr(engine, "_branch_id", None):
+            return None                              # main went stale since: served from Postgres
+        provider = engine.provider
+        if not hasattr(provider, "deep_search_scan"):
+            raise RuntimeError("This data source's graph can't be searched for a property operation.")
+        context = SearchRunContext(data_version=await _search_data_version(engine),
+                                   scope_hash=job.get("scopeHash") or "",
+                                   admit=provider_manager.statement_admission(provider))
+
+    async def on_written() -> None:
+        # The draft's canvas reads are cached per draft: each window changes them.
+        try:
+            await get_graph_cache().bump_generation(CacheScope(ws, ds or "", job["branchId"]))
+        except Exception as exc:                     # never fail the write over its cache
+            logger.warning("read-cache invalidation for draft %s skipped: %s", job["branchId"], exc)
+
+    return OpContext(provider=provider, run_context=context, containment_edge_types=cset,
+                     ontology_rules=rules, on_written=on_written)
+
+
+def _op_on(job: Optional[dict], graph_id: str, branch_id: str) -> dict:
+    if job is None or job["graphId"] != graph_id or job["branchId"] != branch_id:
+        raise HTTPException(status_code=404, detail="property operation not found")
+    return job
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-ops", status_code=202,
+             dependencies=[Depends(_GATE_EDIT)])
+async def create_property_op(
+    ws_id: str, graph_id: str, branch_id: str, body: PropertyOpRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+    ie=Depends(get_import_export_service),
+):
+    """Set, fill, rename or remove one property on everything a search matches in a view, written
+    into this draft by a job: 202 with the job (``GET …/property-ops/{jobId}`` follows it). The
+    search matches the published graph, as Advanced Search does in a draft; each entity is decided
+    on its value in the draft. 409 while the draft has an operation or a publish under way."""
+    if _meta.get("fork_parent_graph_id"):
+        raise HTTPException(status_code=409, detail={
+            "type": "fork_not_supported", "message": "Property operations aren't available on a fork."})
+    op = _property_operation(body.op)
+    with _domain_errors():
+        await svc.assert_branch_editable(graph_id=graph_id, branch_id=branch_id, actor=user.id)
+    query, scope_hash = await _operation_search(session, ws_id, _meta, branch_id, body)
+    try:
+        with _domain_errors():
+            job_id = await ie.property_ops.create(
+                workspace_id=ws_id, data_source_id=_meta.get("data_source_id"), graph_id=graph_id,
+                branch_id=branch_id, view_id=body.view_id, actor=user.id, op=op, query=query,
+                scope_hash=scope_hash, expected_count=body.expected_count)
+    except PropertyOpRunning as exc:
+        raise HTTPException(status_code=409, detail=running_refusal(exc.job_id)) from exc
+    except PublishRunning as exc:
+        raise HTTPException(status_code=409, detail=_publishing(exc.job_id)) from exc
+    await ie.start_property_op(job_id)
+    return JSONResponse(status_code=202, content=await ie.property_ops.get(job_id))
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/property-ops")
+async def list_property_ops(
+    ws_id: str, graph_id: str, branch_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """The draft's property operations, newest first, with how many changes it holds and may hold
+    (an operation that would take it past ``maxDraftChanges`` is refused)."""
+    with _domain_errors():
+        await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+    return {"ops": await ie.property_ops.list(graph_id=graph_id, branch_id=branch_id, limit=limit),
+            "draftChanges": await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id),
+            "maxDraftChanges": vconfig.PROPERTY_OP_MAX_DRAFT_CHANGES}
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/property-ops/{job_id}")
+async def get_property_op(
+    ws_id: str, graph_id: str, branch_id: str, job_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Where a property operation is: waiting, finding, applying (with its progress), or done —
+    with what it did, or why it stopped."""
+    with _domain_errors():
+        await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+    return _op_on(await ie.property_ops.get(job_id), graph_id, branch_id)
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-ops/{job_id}/cancel",
+             dependencies=[Depends(_GATE_EDIT)])
+async def cancel_property_op(
+    ws_id: str, graph_id: str, branch_id: str, job_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Stop a property operation: a pending one at once, a running one once the window it is
+    writing lands. What it wrote stays in the draft."""
+    _op_on(await ie.property_ops.get(job_id), graph_id, branch_id)
+    with _domain_errors():
+        await svc.assert_branch_editable(graph_id=graph_id, branch_id=branch_id, actor=user.id)
+    return await ie.property_ops.cancel(job_id)
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-ops/{job_id}/undo", status_code=202,
+             dependencies=[Depends(_GATE_EDIT)])
+async def undo_property_op(
+    ws_id: str, graph_id: str, branch_id: str, job_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Put back what a property operation changed, entity by entity, where nothing edited it since
+    — as a job, like the operation: 202 with it. 409 while the draft has an operation or its
+    publish under way, and for an operation that changed nothing, is an undo, or is undone."""
+    _op_on(await ie.property_ops.get(job_id), graph_id, branch_id)
+    with _domain_errors():
+        await svc.assert_branch_editable(graph_id=graph_id, branch_id=branch_id, actor=user.id)
+    try:
+        with _domain_errors():
+            undo_id = await ie.property_ops.create_undo(job_id=job_id, actor=user.id)
+    except PropertyOpRunning as exc:
+        raise HTTPException(status_code=409, detail=running_refusal(exc.job_id)) from exc
+    except PublishRunning as exc:
+        raise HTTPException(status_code=409, detail=_publishing(exc.job_id)) from exc
+    except CannotUndo as exc:
+        raise HTTPException(status_code=409, detail={"type": exc.reason, "message": str(exc)}) from exc
+    await ie.start_property_op(undo_id)
+    return JSONResponse(status_code=202, content=await ie.property_ops.get(undo_id))
+
+
 @router.post("/graphs/{graph_id}/branches/{branch_id}/abandon", response_model=BranchResponse)
 async def abandon_draft(
     ws_id: str, graph_id: str, branch_id: str,
@@ -1835,6 +2105,7 @@ async def rebase_draft(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
 ):
     """Pull the latest ``main`` into a draft ("update branch"). Returns ``{clean, conflicts, changes,
     incoming, baseCommitSeq, alreadyUpToDate}``; on ``clean: false`` the client resolves the conflicts
@@ -1845,6 +2116,7 @@ async def rebase_draft(
     always `undefined` on the client, which is why "Pull latest" claimed it had pulled changes even
     when the draft was already up to date. The model puts the wire back on the camelCase contract
     every other route here follows."""
+    await _refuse_while_written(ie, graph_id, branch_id)
     with _domain_errors():
         return await svc.rebase_draft(
             graph_id=graph_id, branch_id=branch_id, actor=user.id, resolutions=body.resolutions,
@@ -3474,6 +3746,8 @@ async def merge_merge_request(
     """Merge a merge request. A draft that changes more than ``SYNC_PUBLISH_MAX_CHANGES``
     entities is merged by a job instead: 202 with the job to poll, as for publish."""
     target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
+    if source:
+        await _refuse_while_written(ie, target, str(source))
     if source and await svc.branch_change_count(
             graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),

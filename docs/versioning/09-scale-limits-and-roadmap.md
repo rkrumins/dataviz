@@ -38,6 +38,7 @@ These were real hotspots that were fixed and measured (see [03](03-branching-com
 | **`main` Merkle root** | Persisted copy-on-write, only changed-path rows written; unchanged subtrees inherited via the as-of index | `O(changed · depth)` for non-fork `main` |
 | **Bulk inserts / large reads** | Chunked to stay under asyncpg's 32767 / Postgres' 65535 bind-param cap (`_IN_LIST_MAX=20000`) | no param-overflow crashes at scale |
 | **Reconciling projection** | Stalest-first, bounded concurrency (`PROJECTION_CONCURRENCY=8`), unpinned graphs excluded from the batch | catches up across hundreds of graphs |
+| **Property operations** ([08 §12](08-import-export.md#12-property-operations-a-searchs-matches-edited-in-a-draft)) | A job: the search's matches read by a capped scan, written 10,000 entities a commit, each decided on its draft value | 99,822 entities on a 1M-node graph in 80 s, the worker at 328 MB; undone in 80–107 s; a 500k search refused in 3 s |
 
 ## 3. Complexity reference
 
@@ -63,7 +64,10 @@ after `_state_as_of`/`_kind_map_multi` were fixed — it makes a one-entity chec
 `O(graph)`. See [03](03-branching-commits-merge.md).
 
 > **Limitation.** A checkpoint on a draft of a multi-million-entity graph pays a full-graph hash walk.
-> Fine at current scale; a keyset/CoW upgrade is the fix (§7).
+> Measured on the 1M-node bench graph: saving one hand-edited entity (Review & Save, then Publish)
+> held 4.6 GB in the web process and ran past the 2-minute request limit, twice. Writes through
+> `apply_ops` — imports, property operations — don't checkpoint, and aren't affected. A keyset/CoW
+> upgrade is the fix (§7).
 
 ### 4.2 The FalkorDB full seed is in-memory (write cost fixed 2026-07)
 A full seed composes the **entire live state in memory** via `_state_as_of`. Its per-edge endpoint
@@ -170,6 +174,10 @@ Every knob lives in `backend/app/services/versioning/config.py` and is env-overr
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `commit_seq`-collision retry budget |
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
 | `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `50000` / `5000` | import windowing / inline-vs-async threshold |
+| `GRAPHVER_DIFF_TREE_MAX_CHANGES` | `20000` | above it the Changes panel counts a draft's changes instead of listing them |
+| `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` | `20000` | above it a draft publishes (or has its review merged) as a job on the worker |
+| `GRAPHVER_PROPERTY_OP_WINDOW` | `10000` | entities per commit of a property operation ([08 §12](08-import-export.md#12-property-operations-a-searchs-matches-edited-in-a-draft)) |
+| `GRAPHVER_PROPERTY_OP_MAX_DRAFT_CHANGES` | `100000` | the most changes a draft may hold once a property operation is done; past it the operation is refused before it writes |
 
 ## 10. Roadmap (prioritized)
 

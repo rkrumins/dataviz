@@ -30,12 +30,17 @@ import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
-import { useAbandonDraft, useBranchFreshness, useBranches, useDiffVsMain, useResolveGraph, useBranchViewChanges } from '../hooks/useVersioning'
+import {
+  useAbandonDraft, useBranchFreshness, useBranches, useDiffVsMain, usePropertyOps, useResolveGraph,
+  useBranchViewChanges,
+} from '../hooks/useVersioning'
+import { usePropertyOpCompletion } from '../hooks/usePropertyOpCompletion'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import { BRANCH_VOCAB } from '../model/branchVocab'
+import { isLive, opLabel } from '../model/propertyOps'
 import { AggregationSyncChip } from './AggregationSyncChip'
 import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
@@ -118,6 +123,12 @@ export function CanvasVersioningBar({
   }, [requestedTab, graphId, clearPanelRequest])
 
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
+
+  // A property operation being written into the draft: a chip while it runs, and word once it's done.
+  const opsQ = usePropertyOps(workspaceId, graphId, isDraft ? branchId : null)
+  const liveOp = opsQ.data?.ops.find(isLive)
+  const reviewChanges = useCallback(() => setPanelTab('changes'), [])
+  usePropertyOpCompletion(opsQ.data, reviewChanges)
 
   // Is the active draft behind main? Drives the toolbar "Pull latest" — derived locally (like the switcher).
   // View-scoped, matching BranchSwitcher's key EXACTLY. It used to fetch the graph-wide list (no
@@ -324,6 +335,22 @@ export function CanvasVersioningBar({
                     <span className="text-xs font-medium text-amber-500 inline-flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> {uncommitted} unsaved
                     </span>
+                  </HoverTip>
+                )}
+                {liveOp && (
+                  <HoverTip
+                    className="inline-flex"
+                    label={opLabel(liveOp.op)}
+                    detail="Being written into this draft — its progress, Stop and Undo are in Changes"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setPanelTab('changes')}
+                      className="text-xs font-medium text-accent-lineage inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md hover:bg-accent-lineage/10 transition-colors"
+                    >
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      {liveOp.phase === 'applying' ? `Applying a property change · ${liveOp.percent}%` : 'Applying a property change'}
+                    </button>
                   </HoverTip>
                 )}
               </>

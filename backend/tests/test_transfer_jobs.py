@@ -239,11 +239,16 @@ async def test_a_claimed_job_runs_through_the_services_safe_entry_point():
         async def run_publish_safe(self, job_id):
             ran.append(("publish", job_id))
 
+        async def run_property_op_safe(self, job_id):
+            ran.append(("property_op", job_id))
+
     runner = TransferRunner(_Service)
     await runner.run_job("vjob_1", "ingest")
     await runner.run_job("vjob_2", "export")
     await runner.run_job("vjob_3", "publish")
-    assert ran == [("import", "vjob_1"), ("export", "vjob_2"), ("publish", "vjob_3")]
+    await runner.run_job("vjob_4", "property_op")
+    assert ran == [("import", "vjob_1"), ("export", "vjob_2"), ("publish", "vjob_3"),
+                   ("property_op", "vjob_4")]
 
 
 async def test_a_job_of_a_type_the_runner_does_not_know_fails_rather_than_run_as_something_else():

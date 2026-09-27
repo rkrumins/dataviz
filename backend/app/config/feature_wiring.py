@@ -246,7 +246,10 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
     "editModeEnabled": FeatureWiring(
         key="editModeEnabled",
         posture="capability",
-        server_gates=("Graph mutation routes — node/edge create, update and delete",),
+        server_gates=(
+            "Graph mutation routes — node/edge create, update and delete",
+            "POST …/branches/{id}/property-ops — a property changed across a search's matches",
+        ),
         ui_surfaces=(
             "Edit controls in the entity drawer",
             "Node/edge editing on the canvas",

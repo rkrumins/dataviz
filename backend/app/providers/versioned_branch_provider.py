@@ -537,6 +537,42 @@ class VersionedBranchProvider:
         """Value suggestions — same gap as :meth:`deep_search`."""
         raise NotImplementedError(_NO_DEEP_SEARCH)
 
+    # A draft over this stale main hands each of these to it (``DraftOverlayProvider``): the same
+    # gap, refused the same way — the Properties tab, display rules and exports included.
+    async def deep_search_session(self, query, *, context):
+        """A search's pages — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_count(self, query, *, context, advance=True):
+        """A rule's total — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_membership(self, scope, items, urns, *, context):
+        """Rule membership — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
+                                  refresh=False):
+        """The property catalog — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
+                                 session_id=None):
+        """An export of every match — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_export_open(self, session_id, *, context):
+        """A running export — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_scan(self, query, *, context, cap):
+        """Every match for a job — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_ancestor_counts(self, session_id, urns, *, context):
+        """Matches under each container — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
     # ---- stats: counts + schema summaries over the composed branch state - #
     async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:
         """Node/edge counts + per-type breakdowns from the composed branch state.

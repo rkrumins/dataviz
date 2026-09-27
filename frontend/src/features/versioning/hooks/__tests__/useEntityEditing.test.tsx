@@ -9,7 +9,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useBranchStore } from '@/store/branchStore'
 
-import { NO_DRAFT, NO_VERSION_CONTROL, useEntityEditing } from '../useEntityEditing'
+import {
+    NO_DRAFT, NO_VERSION_CONTROL, useEntityEditing, usePublishedGraphCatchingUp,
+} from '../useEntityEditing'
 
 
 let flags: Record<string, boolean>
@@ -25,7 +27,13 @@ vi.mock('@/store/schema', () => ({
 vi.mock('@/providers/ViewExecutionContext', () => ({
     useViewExecutionContext: () => ({ readOnly }),
 }))
-vi.mock('../useVersioning', () => ({ useResolveGraph: () => resolve }))
+let watermark: { fresh: boolean } | undefined
+const refetch = vi.fn()
+const useProjectionWatermark = vi.fn(() => ({ data: watermark, refetch }))
+vi.mock('../useVersioning', () => ({
+    useResolveGraph: () => resolve,
+    useProjectionWatermark: (...args: unknown[]) => useProjectionWatermark(...(args as [])),
+}))
 
 const VERSIONED = { data: { graphId: 'g1' }, isError: false }
 
@@ -88,5 +96,31 @@ describe('useEntityEditing', () => {
         arrange()
         const { result } = renderHook(() => useEntityEditing())
         expect(result.current.offered).toBe(false)
+    })
+})
+
+
+describe('usePublishedGraphCatchingUp', () => {
+    it("says whether the view's published graph is behind main, asking until it has caught up", () => {
+        watermark = { fresh: false }
+        const { result, rerender } = renderHook(() => usePublishedGraphCatchingUp())
+        expect(result.current.catchingUp).toBe(true)
+        expect(useProjectionWatermark).toHaveBeenLastCalledWith('ws', 'g1', { untilFresh: true })
+
+        watermark = { fresh: true }
+        rerender()
+        expect(result.current.catchingUp).toBe(false)
+        result.current.recheck()
+        expect(refetch).toHaveBeenCalled()
+    })
+
+    it('is not catching up where the view has no versioned graph', () => {
+        resolve = { isError: true }
+        watermark = undefined
+        refetch.mockReset()
+        const { result } = renderHook(() => usePublishedGraphCatchingUp())
+        expect(result.current.catchingUp).toBe(false)
+        result.current.recheck()
+        expect(refetch).not.toHaveBeenCalled()
     })
 })

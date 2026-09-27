@@ -26,14 +26,15 @@ import os
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Dict, Iterable, List, Optional, Sequence, Set, Union
 
-from sqlalchemy import Text, cast, func, select
+from sqlalchemy import Text, bindparam, cast, func, select
+from sqlalchemy.dialects.postgresql import ARRAY
 
 from .. import db
 from ..models import BranchORM, EdgeVersionORM, EntityHeadORM, GraphORM, NodeVersionORM
 
 #: Rows per page. Big enough that per-page overhead is noise, small enough to hold comfortably.
 PAGE_SIZE = int(os.getenv("GRAPH_EXPORT_PAGE_SIZE", "2000"))
-#: Ids per point lookup (an IN list).
+#: Ids per point lookup.
 _LOOKUP_CHUNK = 5000
 
 
@@ -85,6 +86,14 @@ def _chunks(items: Sequence[str], n: int) -> Iterable[Sequence[str]]:
         yield items[i:i + n]
 
 
+def _one_of(column, ids: Sequence[str]):
+    """``column = ANY(:ids)``, the ids bound as one array. As an ``IN`` list each id is a parameter
+    of its own, and once a prepared statement has run five times Postgres may plan it generically:
+    for these lookups that plan was three times slower (0.15 s → 0.5 s per 5,000 ids on a 1M-node
+    graph)."""
+    return column == func.any(bindparam(None, list(ids), type_=ARRAY(Text)))
+
+
 @dataclass(frozen=True)
 class VersionLayer:
     """A branch's version rows at ``commit_seq <= seq`` — the winner per entity is its newest."""
@@ -115,7 +124,7 @@ class VersionLayer:
         out: Dict[str, Winner] = {}
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
             async with db.graphver_session() as s:
-                rows = (await s.execute(self._winners(kind, payload).where(model.entity_id.in_(chunk)))).all()
+                rows = (await s.execute(self._winners(kind, payload).where(_one_of(model.entity_id, chunk)))).all()
             for r in rows:
                 out[r[0]] = _winner(kind, self.graph_id, r)
         return out
@@ -155,7 +164,7 @@ class HeadsLayer:
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
             async with db.graphver_session() as s:
                 rows = (await s.execute(
-                    self._heads(kind, payload).where(EntityHeadORM.entity_id.in_(chunk)))).all()
+                    self._heads(kind, payload).where(_one_of(EntityHeadORM.entity_id, chunk)))).all()
             for r in rows:
                 out[r[0]] = self._winner(kind, r)
         return out
@@ -234,7 +243,7 @@ class Snapshot:
                 async with db.graphver_session() as s:
                     rows = (await s.execute(
                         select(NodeVersionORM.entity_id).where(
-                            NodeVersionORM.graph_id == graph_id, column.in_(chunk)).distinct())).all()
+                            NodeVersionORM.graph_id == graph_id, _one_of(column, chunk)).distinct())).all()
                 candidates.update(r[0] for r in rows)
         live = await self.lookup_live("node", candidates)
         wanted_set = set(wanted)

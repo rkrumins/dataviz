@@ -1,18 +1,21 @@
 /**
  * PropertyOperationDialog — author one bulk property operation (create /
- * update / remove a property across a matched set of entities) and stage
- * it in-session. NO backend write happens — the op is recorded in
- * ``propertyDraftStore`` and surfaced optimistically over the catalogue.
+ * update / remove a property across a matched set of entities) and apply it
+ * to the open draft: a background job on the server writes it in, a window
+ * at a time, each entity decided on its value in the draft. Its progress,
+ * Stop and Undo are in the Properties tab and the draft's Changes.
  *
  * The target set is defined with the SAME flat-filter builder as Advanced
- * Search (``VisualQueryBuilder``) bound to local predicate state; a live
- * match count previews how many entities the op will touch.
+ * Search (``VisualQueryBuilder``) bound to local predicate state. A live
+ * match count previews how many entities the criteria match on the
+ * published graph (what the job's search matches), and — for a fill, rename
+ * or remove — how many of them the operation can change.
  *
  * Portal-mounted (mirrors CreateRuleModal / SaveQueryDialog) so the
  * ``fixed inset-0`` overlay escapes the drawer's framer-motion transform.
  */
 import { motion } from 'framer-motion'
-import { AlertTriangle, Database, Loader2, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Database, Info, Loader2, Trash2, X } from 'lucide-react'
 import {
     type FC, useEffect, useMemo, useState,
 } from 'react'
@@ -20,18 +23,20 @@ import { createPortal } from 'react-dom'
 
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { useEntityEditing, usePublishedGraphCatchingUp } from '@/features/versioning/hooks/useEntityEditing'
+import { useStartPropertyOp } from '@/features/versioning/hooks/useVersioning'
+import { isLive, opLabel, withPrecondition } from '@/features/versioning/model/propertyOps'
 import { useAffectedSample, useValueDistribution } from '@/hooks/usePropertyInsights'
-import { cn, generateId } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { countMatches, countPropertyUsageWithinTarget } from '@/services/propertyInsights'
-import {
-    usePropertyDraftStore,
-    type PropertyOpKind,
-    type PropertyValueType,
-} from '@/store/propertyDraftStore'
+import type {
+    PropertyOpKind, PropertyOpList, PropertyValueType,
+} from '@/services/versioningApiService'
 import type { Predicate } from '@/types/search'
 
 import { fieldClass } from '../search/builder/editors/shared'
+import { toWire, valueProblem } from '../search/typed/valueCodec'
 import { isRowIncomplete } from '../search/panel/ConditionRow'
 import { topLevelConditions } from '../search/panel/predicateComposition'
 import { useDiscovery } from '../search/builder/useDiscovery'
@@ -40,6 +45,13 @@ import { VisualQueryBuilder } from '../search/panel/VisualQueryBuilder'
 
 export type PropertyDialogMode = 'create' | 'update' | 'remove'
 
+/** The open draft an operation is written into. */
+export interface PropertyOpDraft {
+    wsId: string
+    graphId: string
+    branchId: string
+}
+
 export interface PropertyOperationDialogProps {
     viewId: string
     mode: PropertyDialogMode
@@ -47,6 +59,10 @@ export interface PropertyOperationDialogProps {
     initialKey?: string
     knownEntityTypes: string[]
     knownLayers: string[]
+    /** Where it is written — none outside a draft, where nothing can be applied. */
+    draft: PropertyOpDraft | null
+    /** The draft's operations: whether one is under way, and its change count and cap. */
+    ops?: PropertyOpList
     onClose: () => void
 }
 
@@ -63,11 +79,12 @@ const PREVIEW_DEBOUNCE_MS = 400
 
 
 export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
-    viewId, mode, initialKey = '', knownEntityTypes, knownLayers, onClose,
+    viewId, mode, initialKey = '', knownEntityTypes, knownLayers, draft, ops, onClose,
 }) => {
     const provider = useGraphProvider()
     const { notify } = useAppNotifications()
-    const addOp = usePropertyDraftStore((s) => s.addOp)
+    const editing = useEntityEditing()
+    const start = useStartPropertyOp(draft?.wsId ?? '', draft?.graphId ?? '', draft?.branchId ?? '')
     const { allKeys, keysByEntityType, tagValues, getValueSamples } = useDiscovery(viewId)
 
     const [key, setKey] = useState(initialKey)
@@ -83,11 +100,16 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
             : ({ kind: 'hasProperty', key: initialKey, negate: false } as Predicate),
     )
 
-    const [count, setCount] = useState<number | null>(null)
-    const [counting, setCounting] = useState(false)
+    // Each count with the criteria it was counted for: a count of earlier criteria is stale, and
+    // one not yet in for the criteria now is being counted. `count: null` — it couldn't be, and
+    // `problem` says why.
+    const [counted, setCounted] = useState<{ key: string; count: number | null; problem?: string } | null>(null)
+    // Of those, how many the operation can change (a fill, rename or remove narrows to them).
+    const [narrowedCounted, setNarrowedCounted] = useState<{ key: string; count: number | null } | null>(null)
     // For a Set op: how many of the targeted entities already carry the key
     // (those values get overwritten). Drives the overwrite guidance.
     const [alreadySet, setAlreadySet] = useState<number | null>(null)
+    const [refusal, setRefusal] = useState<string | null>(null)
 
     const allowedKinds: PropertyOpKind[] = mode === 'remove'
         ? ['remove']
@@ -100,43 +122,68 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
         [knownLayers],
     )
 
+    // The search reads the published graph, which can't be searched while it catches up with main:
+    // the counts wait for it, and are taken again once it has. A refused count asks how far it has
+    // got — it may have fallen behind since.
+    const { catchingUp, recheck } = usePublishedGraphCatchingUp()
+
     const conditions = useMemo(() => topLevelConditions(predicate), [predicate])
     const predicateReady = conditions.length > 0 && !conditions.some((c) => isRowIncomplete(c))
+    const trimmedKey = key.trim()
+    const trimmedNewKey = newKey.trim()
 
     // ── Live match-count preview (debounced) ─────────────────────────
-    const predicateKey = JSON.stringify(predicate)
+    const predicateKey = JSON.stringify([predicate, catchingUp])
     useEffect(() => {
-        if (!predicateReady) { setCount(null); return }
+        if (!predicateReady) return
         const controller = new AbortController()
-        setCounting(true)
         const t = setTimeout(() => {
             countMatches(provider, viewId, predicate as Predicate, controller.signal)
-                .then((n) => { if (!controller.signal.aborted) setCount(n) })
-                .catch(() => { if (!controller.signal.aborted) setCount(null) })
-                .finally(() => { if (!controller.signal.aborted) setCounting(false) })
+                .then((n) => { if (!controller.signal.aborted) setCounted({ key: predicateKey, count: n }) })
+                .catch((e) => {
+                    if (controller.signal.aborted) return
+                    setCounted({ key: predicateKey, count: null, problem: serverDetail(e) })
+                    recheck()
+                })
         }, PREVIEW_DEBOUNCE_MS)
         return () => { controller.abort(); clearTimeout(t) }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [provider, viewId, predicateKey, predicateReady])
+    const counting = predicateReady && counted?.key !== predicateKey
+    const count = !counting && counted ? counted.count : null
+    const countProblem = !counting && counted?.count === null ? counted.problem ?? null : null
 
-    const trimmedKey = key.trim()
-    const trimmedNewKey = newKey.trim()
+    // How many the operation can change: the criteria narrowed as the server narrows them.
+    const narrowed = predicateReady && predicate && trimmedKey
+        ? withPrecondition({ kind, key: trimmedKey }, predicate) : null
+    const narrowedKey = narrowed ? JSON.stringify([narrowed, catchingUp]) : null
+    useEffect(() => {
+        if (!narrowed) return
+        const controller = new AbortController()
+        const t = setTimeout(() => {
+            countMatches(provider, viewId, narrowed, controller.signal)
+                .then((n) => { if (!controller.signal.aborted) setNarrowedCounted({ key: narrowedKey!, count: n }) })
+                .catch(() => { if (!controller.signal.aborted) setNarrowedCounted({ key: narrowedKey!, count: null }) })
+        }, PREVIEW_DEBOUNCE_MS)
+        return () => { controller.abort(); clearTimeout(t) }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [provider, viewId, narrowedKey])
+    const changeable = narrowedCounted && narrowedCounted.key === narrowedKey ? narrowedCounted.count : null
+
     const needsValue = kind === 'set' || kind === 'fillEmpty'
-    const valueReady = !needsValue
-        || valueType === 'boolean'
-        || valueText.trim().length > 0
+    // The value as it goes on the wire: a 64-bit integer as its digits, so it arrives exact.
+    const wireValue = needsValue
+        ? toWire(valueType === 'boolean' ? String(boolValue) : valueText, valueType) : undefined
+    const valueIssue = needsValue ? valueProblem('eq', valueType, wireValue) : null
     const renameReady = kind !== 'rename' || (trimmedNewKey.length > 0 && trimmedNewKey !== trimmedKey)
-    const canApply = trimmedKey.length > 0 && predicateReady && valueReady && renameReady
-
-    const coercedValue = (): string | number | boolean | undefined => {
-        if (!needsValue) return undefined
-        if (valueType === 'boolean') return boolValue
-        if (valueType === 'number') {
-            const n = Number(valueText)
-            return Number.isFinite(n) ? n : valueText
-        }
-        return valueText
-    }
+    const writing = ops?.ops.some(isLive) ?? false
+    const max = ops?.maxDraftChanges
+    const tooBroad = count !== null && max !== undefined && count > max
+    const mayPassCap = !tooBroad && count !== null && max !== undefined && ops !== undefined
+        && ops.draftChanges + count > max
+    const canApply = !!draft && !editing.blocked && trimmedKey.length > 0 && predicateReady
+        && !valueIssue && renameReady && !counting && count !== null && count > 0 && !tooBroad
+        && !writing && !start.isPending
 
     // Existing values to suggest as quick-picks (known keys only).
     const dist = useValueDistribution(viewId, trimmedKey, needsValue && trimmedKey.length > 0)
@@ -159,27 +206,29 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
     }, [provider, viewId, predicateKey, predicateReady, kind, trimmedKey])
 
     // Plain function (not memoised) so it always reads the latest field
-    // state — a stale-closure here silently staged the wrong value.
+    // state — a stale-closure here silently applied the wrong value.
     const handleApply = () => {
         if (!canApply || !predicate) return
-        const targetCount = count ?? 0
-        addOp({
-            id: generateId('propop'),
-            kind,
-            key: trimmedKey,
-            newKey: kind === 'rename' ? trimmedNewKey : undefined,
-            value: coercedValue(),
-            valueType: needsValue ? valueType : undefined,
-            predicate,
-            targetCount,
-            createdAt: new Date().toISOString(),
+        setRefusal(null)
+        start.mutate({
+            viewId,
+            // Wrapped as the count wrapped it, so the job's search is the one counted.
+            predicate: predicate.kind === 'group'
+                ? predicate : ({ kind: 'group', op: 'and', children: [predicate] } as Predicate),
+            op: {
+                kind,
+                key: trimmedKey,
+                ...(kind === 'rename' ? { newKey: trimmedNewKey } : {}),
+                ...(needsValue ? { value: wireValue, valueType } : {}),
+            },
+            expectedCount: count,
+        }, {
+            onSuccess: (job) => {
+                notify('success', `${opLabel(job.op)} — being written into this draft. Its progress is in the Properties tab.`)
+                onClose()
+            },
+            onError: (e) => setRefusal((e as Error).message),
         })
-        const verb = kind === 'remove' ? 'Remove' : kind === 'rename' ? 'Rename' : 'Set'
-        notify(
-            'success',
-            `Staged: ${verb} “${trimmedKey}”${kind === 'rename' ? ` → “${trimmedNewKey}”` : ''} on ${targetCount} ${targetCount === 1 ? 'entity' : 'entities'} — not yet saved`,
-        )
-        onClose()
     }
 
     const onKeyDown = (e: React.KeyboardEvent) => {
@@ -224,7 +273,7 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                     <div className="flex-1 min-w-0">
                         <h3 className="text-[15px] font-display font-bold text-ink leading-tight">{title}</h3>
                         <p className="text-[11.5px] text-ink-muted mt-0.5">
-                            Apply to every entity matched by the criteria below. Staged in-session — not saved to the graph.
+                            Apply to every entity matched by the criteria below — written into this draft, where you can review, undo or publish it.
                         </p>
                     </div>
                     <button
@@ -310,7 +359,10 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                                     </button>
                                 ) : (
                                     <input
-                                        type={valueType === 'number' ? 'number' : 'text'}
+                                        // Text, never type="number": that reads its value as a double
+                                        // and rounds a 64-bit integer to a neighbour no entity holds.
+                                        type="text"
+                                        inputMode={valueType === 'number' ? 'decimal' : undefined}
                                         value={valueText}
                                         onChange={(e) => setValueText(e.target.value)}
                                         placeholder={valueType === 'number' ? '0' : 'value…'}
@@ -402,6 +454,17 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                             ) : null}
                         </div>
                     )}
+
+                    <OperationNotes
+                        blocked={editing.blocked}
+                        writing={writing}
+                        tooBroad={tooBroad}
+                        mayPassCap={mayPassCap}
+                        catchingUp={catchingUp && count === null}
+                        countProblem={catchingUp ? null : countProblem}
+                        ops={ops}
+                        refusal={refusal}
+                    />
                 </div>
 
                 {/* Footer */}
@@ -412,7 +475,12 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                         ) : counting ? (
                             'Counting matches…'
                         ) : count !== null ? (
-                            <><span className="text-ink font-semibold">{count}</span> {count === 1 ? 'entity' : 'entities'} affected</>
+                            <>
+                                <span className="text-ink font-semibold">{count.toLocaleString()}</span> {count === 1 ? 'entity matches' : 'entities match'}
+                                {changeable !== null && (
+                                    <> · <span className="text-ink font-semibold">{changeable.toLocaleString()}</span> can change</>
+                                )}
+                            </>
                         ) : null}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
@@ -427,7 +495,7 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                             type="button"
                             onClick={handleApply}
                             disabled={!canApply}
-                            title={canApply ? 'Stage operation (⌘/Ctrl + Enter)' : undefined}
+                            title={canApply ? 'Apply to this draft (⌘/Ctrl + Enter)' : undefined}
                             className={cn(
                                 'inline-flex items-center gap-1.5 px-3.5 h-8 rounded-lg text-[12px] font-semibold transition-colors',
                                 canApply
@@ -437,7 +505,8 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                                     : 'bg-slate-100 dark:bg-white/5 text-slate-400 dark:text-ink-muted/60 cursor-not-allowed',
                             )}
                         >
-                            Stage change
+                            {start.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                            Apply to draft
                         </button>
                     </div>
                 </div>
@@ -445,5 +514,61 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
         </div>
         </>,
         document.body,
+    )
+}
+
+
+/** What the server said went wrong: an API error's ``detail``, or else the error's own message. */
+function serverDetail(e: unknown): string {
+    const message = (e as Error)?.message ?? String(e)
+    try {
+        const parsed = JSON.parse(message.replace(/^API Error \d+: /, '')) as { detail?: unknown }
+        if (typeof parsed.detail === 'string') return parsed.detail
+    } catch {
+        // Not JSON: the message is all there is.
+    }
+    return message
+}
+
+
+/** Why Apply is held back, or what to know before pressing it. */
+function OperationNotes({ blocked, writing, tooBroad, mayPassCap, catchingUp, countProblem, ops, refusal }: {
+    blocked: string | null
+    writing: boolean
+    tooBroad: boolean
+    mayPassCap: boolean
+    /** The published graph is catching up with main, so the matches can't be counted yet. */
+    catchingUp: boolean
+    /** Why the matches couldn't be counted. */
+    countProblem: string | null
+    ops?: PropertyOpList
+    refusal: string | null
+}) {
+    const max = ops?.maxDraftChanges.toLocaleString()
+    const held = blocked
+        ?? (writing ? 'An operation is being written into this draft — apply this one when it finishes.' : null)
+        ?? (tooBroad ? `These criteria match more than ${max} entities, more than a draft may hold. Narrow them.` : null)
+        ?? (countProblem ? `The matches couldn't be counted: ${countProblem}` : null)
+    const notes = [
+        catchingUp && 'The published graph is catching up with the latest changes. The matches are counted once it has.',
+        mayPassCap && `This draft holds ${ops!.draftChanges.toLocaleString()} changes already. If this adds more than a draft may hold (${max}), it is refused before it writes anything — publish the draft and continue in a new one.`,
+        (ops?.draftChanges ?? 0) > 0 && 'The criteria match the published graph, as Advanced Search does in a draft; each entity is then changed as it is in this draft.',
+    ].filter(Boolean) as string[]
+    if (!held && !refusal && notes.length === 0) return null
+    return (
+        <div className="flex flex-col gap-1.5">
+            {(refusal || held) && (
+                <div role="alert" className="flex items-start gap-1.5 px-2.5 py-2 rounded-lg text-[11px] bg-rose-500/10 border border-rose-500/30 text-rose-300">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                    <span>{refusal ?? held}</span>
+                </div>
+            )}
+            {notes.map((note) => (
+                <div key={note} className="flex items-start gap-1.5 text-[11px] text-ink-muted">
+                    <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
+                    <span>{note}</span>
+                </div>
+            ))}
+        </div>
     )
 }

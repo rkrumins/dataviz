@@ -19,6 +19,7 @@ Design invariants:
 """
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -1238,6 +1239,26 @@ class ProviderManager:
     # ------------------------------------------------------------------ #
     # Fleet-wide compute admission                                         #
     # ------------------------------------------------------------------ #
+
+    def statement_admission(self, provider):
+        """This process's slot and the fleet's on ``provider``'s graph, as a
+        context manager held for ONE statement — for work that runs many (the
+        uncapped search, a job's scan), admitted statement by statement rather
+        than once around the whole. None when the provider has no slot key."""
+        key = getattr(provider, "manager_cache_key", None)
+        if key is None:
+            return None
+
+        @contextlib.asynccontextmanager
+        async def admit():
+            sem = await self.acquire_provider_slot(*key)
+            try:
+                async with self.fleet_slot(*key):
+                    yield
+            finally:
+                sem.release()
+
+        return admit
 
     def fleet_slot(self, provider_id: str, graph_name: str = "") -> "_FleetSlot":
         """Async context manager holding ONE of the fleet's slots on

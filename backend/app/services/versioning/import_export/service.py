@@ -25,6 +25,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 
 from .. import config, db
 from ..models import BranchORM, ImportRowORM, JobORM
+from ..property_ops import PropertyOps, running_refusal
 from ..service import GraphVersioningService
 from .export_worker import ExportWorker, example_template_records, records_from_state
 from .formats import get_adapter
@@ -62,6 +63,7 @@ class ImportExportService:
         ontology_resolver=None,
         layout_writer=None,
         publish_hook=None,
+        property_op_context=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
@@ -81,6 +83,10 @@ class ImportExportService:
         # API layer, which resolves the ontology and owns those side effects; a refusal comes back
         # as the HTTP answer the route gives when it publishes inside the request.
         self._publish_hook = publish_hook
+        # Optional async ``(job) -> OpContext | None`` — the published graph's search and the
+        # target's ontology for a property operation, ``None`` while the published graph catches up.
+        # Injected at the API layer, which owns the providers.
+        self.property_ops = PropertyOps(self._svc, property_op_context)
 
     @property
     def store(self):
@@ -385,11 +391,17 @@ class ImportExportService:
             row.updated_at = _now()
             job = {**(row.field_scope or {}), "graphId": row.graph_id, "branchId": row.branch_id,
                    "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id}
-        beat = asyncio.create_task(heartbeat(job_id))
-        try:
-            result = await self._publish_hook(job)
-        finally:
-            beat.cancel()
+        # A property operation started on the draft since the request checked: publishing now
+        # would take part of it.
+        writing = await self.property_ops.running(graph_id=job["graphId"], branch_id=job["branchId"])
+        if writing is not None:
+            result = {"error": {"status": 409, "detail": running_refusal(writing)}}
+        else:
+            beat = asyncio.create_task(heartbeat(job_id))
+            try:
+                result = await self._publish_hook(job)
+            finally:
+                beat.cancel()
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             row.summary = result
@@ -405,6 +417,13 @@ class ImportExportService:
 
     async def run_publish_safe(self, job_id: str) -> None:
         await self._run_safe(job_id, self.run_publish)
+
+    async def start_property_op(self, job_id: str) -> str:
+        """Start a property operation (see :meth:`_start`). Returns the status to report."""
+        return await self._start(job_id, self.run_property_op_safe, "property operation")
+
+    async def run_property_op_safe(self, job_id: str) -> None:
+        await self._run_safe(job_id, self.property_ops.run)
 
     async def build_template(self, *, graph_id: str, export_format: str = "csv", limit: int = 5) -> bytes:
         """A small, prepopulated starter template so users learn the format instantly: the column
