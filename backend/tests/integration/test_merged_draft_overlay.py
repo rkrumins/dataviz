@@ -28,8 +28,8 @@ async def _run() -> None:
     assert [n["urn"] for n in before["nodesUpsert"]] == ["P"], "an open draft overlays its edits"
     await svc.publish(graph_id=gid, branch_id=d, actor="alice", message="publish")
     after = await svc.branch_overlay_delta(graph_id=gid, branch_id=d)
-    assert after == {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [],
-                     "nodesNew": []}, f"a merged draft must read as main: {after}"
+    assert after == {"nodesUpsert": [], "nodesModified": [], "nodesRemove": [], "edgesUpsert": [],
+                     "edgesRemove": [], "nodesNew": []}, f"a merged draft must read as main: {after}"
     await db.dispose_engine()
 
 
