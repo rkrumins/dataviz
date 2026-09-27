@@ -42,6 +42,7 @@ tests/test_concurrency_tuning_doc.py
 tests/test_configmap_matches_manifests.py
 tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
+tests/test_deep_search_overlay_providers.py
 tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_drift_probe_cost.py

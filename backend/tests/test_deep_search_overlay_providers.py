@@ -234,3 +234,31 @@ async def test_draft_over_a_stale_main_propagates_the_refusal():
 
     with pytest.raises(NotImplementedError):
         await overlay.deep_search(_query("view-1"))
+
+
+_SCOPE = SearchScope(view_id="view-1")
+
+#: Every search a draft's overlay hands to its base, with arguments of the right shape.
+_DELEGATED = {
+    "deep_search_session": lambda p: p.deep_search_session(_query("view-1"), context=None),
+    "deep_search_count": lambda p: p.deep_search_count(_query("view-1"), context=None),
+    "deep_search_membership": lambda p: p.deep_search_membership(_SCOPE, [], ["urn:a"], context=None),
+    "deep_search_catalog": lambda p: p.deep_search_catalog(_SCOPE, context=None, wait_ms=0),
+    "deep_search_export": lambda p: p.deep_search_export(
+        _query("view-1"), context=None, fmt="csv", columns=[], wait_ms=0),
+    "deep_search_export_open": lambda p: p.deep_search_export_open("s1", context=None),
+    "deep_search_scan": lambda p: p.deep_search_scan(_query("view-1"), context=None, cap=10),
+    "deep_search_ancestor_counts": lambda p: p.deep_search_ancestor_counts("s1", ["urn:a"], context=None),
+}
+
+
+@pytest.mark.parametrize("call", list(_DELEGATED.values()), ids=list(_DELEGATED))
+async def test_every_search_on_a_draft_over_a_stale_main_is_refused_as_catching_up(call):
+    """The Properties tab's catalog, display rules' counts and membership, an export, a property
+    operation's scan: each is the base's on a draft, and on a stale main the base is a
+    ``VersionedBranchProvider``. Each answers the catching-up refusal (501), not an
+    ``AttributeError`` (500)."""
+    with pytest.raises(NotImplementedError) as exc:
+        await call(_overlay(_branch()))
+
+    assert "catching up" in str(exc.value)
