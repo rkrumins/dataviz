@@ -5258,10 +5258,12 @@ class GraphVersioningService:
                 if op["op"] == "update" and earlier is not None:
                     # Several ops on ONE entity in one batch COMPOSE, in order: an update after a
                     # create (a node renamed before its first save) patches the create's payload,
-                    # and two updates become one patch. Replacing instead stored a renamed new
-                    # node as {displayName} alone — no type, no urn — which then failed every
-                    # read of the draft.
-                    new_vals[eid] = self._patch_payload(earlier, payload)
+                    # and two updates become one patch — composed as patches, so a property the
+                    # first removes stays removed. Replacing instead stored a renamed new node as
+                    # {displayName} alone — no type, no urn — which then failed every read of the
+                    # draft.
+                    new_vals[eid] = (self._compose_patches(earlier, payload) if eid in update_ids
+                                     else self._patch_payload(earlier, payload))
                 else:
                     new_vals[eid] = None if op["op"] == "delete" else dict(payload)
                     if op["op"] == "update":
@@ -5489,6 +5491,22 @@ class GraphVersioningService:
             # (rowmodel.PROP_DELETE — a `\N` cell / properties_json null); drop those keys. The
             # literal never occurs in real data, so this is inert for every other write path.
             out["properties"] = {k: v for k, v in merged.items() if v != "__nx_prop_delete__"}
+        return out
+
+    @staticmethod
+    def _compose_patches(first: dict, second: dict) -> dict:
+        """Two partial updates of ONE entity in one batch, as the one patch they make in order:
+        ``second`` wins field by field and, inside ``properties``, key by key. A removal
+        (``__nx_prop_delete__``) is kept for the stored value to lose — :meth:`_patch_payload`
+        treats its base as a stored payload and would drop the marker, bringing the key back. A
+        value the second re-sends in a lossier form keeps the first's, as two saves in turn would."""
+        out = {**first, **second}
+        if first.get("properties") is not None or second.get("properties") is not None:
+            before = first.get("properties") or {}
+            merged = {**before}
+            for k, v in (second.get("properties") or {}).items():
+                merged[k] = preserve_stored_type(before[k], v) if k in before else v
+            out["properties"] = merged
         return out
 
     async def _payloads_by_content_hash(
