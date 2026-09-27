@@ -104,17 +104,19 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(within(bridge).getByText('Orders')).toBeInTheDocument()
     expect(within(bridge).getByText('Revenue')).toBeInTheDocument()
     expect(screen.getByText('owner')).toBeInTheDocument()
-    // Created · Updated · Synced, each with who or what.
-    expect(screen.getByText('Created').closest('div')).toHaveTextContent(/Ana/)
+    // Updated (who, when) and Synced, as in the entity drawer.
     expect(screen.getByText('Updated').closest('div')).toHaveTextContent(/Bo/)
-    expect(screen.getByText('Synced').closest('div')).toHaveTextContent(/Live graph/)
+    expect(screen.getByText('Synced')).toBeInTheDocument()
     expect(screen.getByTestId('entity-history')).toHaveTextContent('e1')
   })
 
-  it('details name each end and its type first, with the ids as the detail', () => {
+  it('details say what the relationship means, and name each end and its type first, with the ids as the detail', () => {
     setup(rel('e1'))
     render(<RelationshipDrawer canEdit />)
     const details = screen.getByText('Details').closest('.px-5') as HTMLElement
+    // No description in the ontology: its kind explains it.
+    expect(within(details).getByText('Meaning').closest('div')).toHaveTextContent('Data moves from the first entity to the second.')
+    expect(within(details).queryByText('Confidence')).not.toBeInTheDocument()
     const from = within(details).getByText('From').closest('div') as HTMLElement
     expect(within(from).getByRole('button', { name: 'Orders' })).toBeInTheDocument()
     expect(within(from).getByText('dataset')).toBeInTheDocument()
@@ -222,7 +224,7 @@ describe('RelationshipDrawer — a relationship', () => {
     h.scope = { wsId: undefined, graphId: null, mainBranchId: null, branchId: null }
     setup(rel('e1'))
     render(<RelationshipDrawer />)
-    expect(screen.queryByText('Created')).not.toBeInTheDocument()
+    expect(screen.queryByText('Updated')).not.toBeInTheDocument()
     expect(screen.getByText('History is available with version control.')).toBeInTheDocument()
     expect(screen.queryByTestId('entity-history')).not.toBeInTheDocument()
   })

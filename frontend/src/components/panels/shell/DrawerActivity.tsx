@@ -1,19 +1,19 @@
 /**
- * DrawerActivity — the drawer footer's three facts, the same in both drawers: when the entity was
- * created and last changed, and by whom, on the line being read (a draft sees main at its branch
- * point plus its own edits); and when the live graph last caught up with saved changes.
+ * DrawerActivity — the drawer footer's two facts, the same in both drawers: when the entity last
+ * changed, and by whom, on the line being read (a draft sees main at its branch point plus its own
+ * edits); and when the live graph last caught up with saved changes.
  *
- * Everything the summary knows besides lives in the cards' tooltips — revision counts, and who a
- * published change is credited to. A change made on the published graph after the draft began is
- * said above the cards: the draft still shows the entity as it was.
+ * The rest of what the summary knows is in the Updated card's tooltip: when it was created and by
+ * whom, its revision counts, and who a published change is credited to. A change made on the
+ * published graph after the draft began is said above the cards: the draft still shows the entity
+ * as it was.
  */
-import { AlertTriangle, Loader2, PencilLine, RefreshCcw, Sparkles } from 'lucide-react'
+import { AlertTriangle, Loader2, PencilLine, RefreshCcw } from 'lucide-react'
 import type { EntityEvent, EntitySummary } from '@/services/versioningApiService'
 import { useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { actorName } from '@/features/versioning/model/branchVocab'
+import { timeAgo } from '@/lib/timeAgo'
 import { FreshnessStat } from './FreshnessStat'
-
-const PUBLISHED_CREDIT = 'A published change is credited to whoever published it.'
 
 export function DrawerActivity({ summary, loading, wsId, graphId, inDraft }: {
   summary?: EntitySummary
@@ -27,14 +27,9 @@ export function DrawerActivity({ summary, loading, wsId, graphId, inDraft }: {
   // "Synced" = when the live read layer last caught up — always at or after the last update, so it
   // never contradicts "Updated". While it is catching up, say so.
   const syncing = watermark?.fresh === false && (watermark.status === 'projecting' || watermark.status === 'rebuilding')
-  const by = (e?: EntityEvent | null) => e
-    ? { id: e.actor && e.actor !== 'system' ? e.actor : null, name: actorName(e.actor ?? undefined, summary?.userNames) }
-    : undefined
-  const revisions = summary && (
-    `${summary.revisions.published.toLocaleString()} published`
-    + (inDraft ? ` · ${summary.revisions.draft.toLocaleString()} in this draft` : '')
-  )
-  const credit = (e?: EntityEvent | null) => (e?.inDraft ? 'In this draft — not published yet.' : PUBLISHED_CREDIT)
+  const name = (e: EntityEvent) => actorName(e.actor ?? undefined, summary?.userNames)
+  const updated = summary?.updated
+  const created = summary?.created
 
   return (
     <div className="space-y-2">
@@ -44,39 +39,33 @@ export function DrawerActivity({ summary, loading, wsId, graphId, inDraft }: {
           Changed on the published graph since this draft began — the draft still shows it as it was.
         </p>
       )}
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-[3fr_2fr] gap-2">
         <FreshnessStat
-          icon={<Sparkles />}
-          label="Created"
-          iso={summary?.created?.at}
-          tone="sky"
-          loading={loading}
-          emptyText="—"
-          note="Not recorded"
-          by={by(summary?.created)}
-          tag={summary?.created?.inDraft ? 'draft' : undefined}
-          tip={credit(summary?.created)}
-        />
-        <FreshnessStat
-          icon={<PencilLine />}
-          label="Updated"
-          iso={summary?.updated?.at}
+          icon={<PencilLine className="w-4 h-4" />}
+          label={updated?.inDraft ? 'Updated · draft' : 'Updated'}
+          iso={updated?.at}
           tone="indigo"
           loading={loading}
-          emptyText="—"
-          note="No changes yet"
-          by={by(summary?.updated)}
-          tag={summary?.updated?.inDraft ? 'draft' : undefined}
-          tip={<>{revisions && <span className="block">{revisions}</span>}{credit(summary?.updated)}</>}
+          emptyText="No changes yet"
+          by={updated ? { id: updated.actor && updated.actor !== 'system' ? updated.actor : null, name: name(updated) } : undefined}
+          tip={summary && (
+            <>
+              {created && <span className="block">Created {timeAgo(created.at)} by {name(created)}{created.inDraft ? ', in this draft' : ''}</span>}
+              <span className="block">
+                {summary.revisions.published.toLocaleString()} published
+                {inDraft && <> · {summary.revisions.draft.toLocaleString()} in this draft</>}
+              </span>
+              {updated?.inDraft ? 'Not published yet.' : 'A published change is credited to whoever published it.'}
+            </>
+          )}
         />
         <FreshnessStat
-          icon={syncing ? <Loader2 className="animate-spin motion-reduce:animate-none" /> : <RefreshCcw />}
+          icon={syncing ? <Loader2 className="w-4 h-4 animate-spin motion-reduce:animate-none" /> : <RefreshCcw className="w-4 h-4" />}
           label={syncing ? 'Syncing' : 'Synced'}
           iso={syncing ? undefined : watermark?.lastProjectedAt}
           tone={syncing ? 'amber' : 'emerald'}
           live={!syncing && watermark?.fresh === true}
-          overrideValue={syncing ? 'Catching up…' : undefined}
-          note={syncing ? 'Live graph' : watermark?.fresh === false ? 'Live graph behind' : 'Live graph'}
+          overrideValue={syncing ? 'In progress…' : undefined}
           tip="When the live graph last caught up with saved changes."
         />
       </div>

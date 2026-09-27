@@ -1,7 +1,7 @@
 /**
- * The drawers' footer facts: Created · Updated · Synced, each saying who or what — the draft's own
- * changes tagged, a change on the published graph since the draft began called out, and the live
- * graph's catch-up shown while it happens.
+ * The drawers' footer facts: Updated (who, when — the draft's own change marked) and Synced, the
+ * same in both drawers; a change on the published graph since the draft began called out; the
+ * live graph's catch-up shown while it happens.
  */
 import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -23,20 +23,16 @@ const summary = (over: Partial<EntitySummary> = {}): EntitySummary => ({
   ...over,
 } as EntitySummary)
 
-const card = (label: string) => screen.getByText(label).closest('div') as HTMLElement
-
 beforeEach(() => {
   h.watermark = { committed: 5, projected: 5, fresh: true, status: 'idle', lastProjectedAt: '2026-02-01T00:05:00Z' }
 })
 
 describe('DrawerActivity', () => {
-  it('says who created and last changed it, tags the draft’s own change, and when the live graph caught up', () => {
+  it('says who last changed it — marking the draft’s own change — and when the live graph caught up', () => {
     render(<DrawerActivity summary={summary()} loading={false} wsId="ws" graphId="g" inDraft />)
-    expect(card('Created')).toHaveTextContent('Ana')
-    expect(card('Created')).not.toHaveTextContent('draft')
-    expect(card('Updated')).toHaveTextContent('Bo')
-    expect(card('Updated')).toHaveTextContent('draft')
-    expect(card('Synced')).toHaveTextContent('Live graph')
+    expect(screen.getByText('Updated · draft').closest('div')).toHaveTextContent('Bo')
+    expect(screen.getByText('Synced')).toBeInTheDocument()
+    expect(screen.queryByText(/Created/)).not.toBeInTheDocument()
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
@@ -48,12 +44,11 @@ describe('DrawerActivity', () => {
   it('shows the live graph catching up', () => {
     h.watermark = { committed: 6, projected: 5, fresh: false, status: 'projecting', lastProjectedAt: '2026-02-01T00:05:00Z' }
     render(<DrawerActivity summary={summary()} loading={false} wsId="ws" graphId="g" inDraft={false} />)
-    expect(card('Syncing')).toHaveTextContent('Catching up…')
+    expect(screen.getByText('Syncing').closest('div')).toHaveTextContent('In progress…')
   })
 
-  it('says so when nothing is recorded', () => {
-    render(<DrawerActivity summary={summary({ created: null, updated: null })} loading={false} wsId="ws" graphId="g" inDraft={false} />)
-    expect(card('Created')).toHaveTextContent('Not recorded')
-    expect(card('Updated')).toHaveTextContent('No changes yet')
+  it('says so when nothing has changed', () => {
+    render(<DrawerActivity summary={summary({ updated: null })} loading={false} wsId="ws" graphId="g" inDraft={false} />)
+    expect(screen.getByText('Updated').closest('div')).toHaveTextContent('No changes yet')
   })
 })

@@ -65,13 +65,15 @@ relationships on the published graph are read-only, and say why.
   in it, focus moves to the new title. When it closes, focus goes back to where it came from. An edit
   in progress shows a stage bar, with Cancel and "Stage changes", on every tab. "Updated" names who
   made the change.
-- **Both drawers end on the same three cards: Created, Updated and Synced.** Each says when, and who
-  (with their avatar), or what: a draft's own change is tagged "draft". The exact time, revision
-  counts and who a published change is credited to are in the tooltips. A change made on the
-  published graph after your draft began is called out above the cards. The relationship drawer's
-  Provenance section is gone; the cards say the same. Its Details name each end and its type first,
-  with the identifiers as a detail you can copy. An entity that isn't loaded on the canvas (the real
-  end of a relationship inside a collapsed card) is named by the data source, not shown as its id.
+- **Both drawers end on the same two cards: Updated and Synced.** The cards fill the footer row
+  (Synced no longer floats in the middle of it). Updated says when, and who (with their avatar), and
+  marks a draft's own change. Its tooltip has the exact time, when and by whom the entity was
+  created, and its revision counts. A change made on the published graph after your draft began is
+  called out above the cards. The relationship drawer's Provenance section is gone; the cards and
+  their tooltips say the same. Its Details say what the relationship means (in plain words, even
+  when its type has no description of its own) and name each end and its type first, with the
+  identifiers as a detail you can copy. An entity that isn't loaded on the canvas (the real end of a
+  relationship inside a collapsed card) is named by the data source, not shown as its id.
 - **The drawers stay fast on large canvases.** They read their own entity rather than the whole
   graph, so a pan, a pulse or a page of children arriving elsewhere no longer re-renders them. The
   list of places to move an entity is built only when you open it, and is searchable. Reading the

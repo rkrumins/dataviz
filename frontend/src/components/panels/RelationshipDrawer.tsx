@@ -370,19 +370,8 @@ function RelationshipPanel({
                       {copy.label.toUpperCase() !== type.toUpperCase() && <code className="text-[11px] font-mono text-ink-muted">{type}</code>}
                     </span>
                   </DetailRow>
-                  {copy.description && <DetailRow label="Meaning">{copy.description}</DetailRow>}
+                  <DetailRow label="Meaning">{copy.description ?? KIND_COPY[kind].meaning}</DetailRow>
                   <DetailRow label="Kind">{KIND_COPY[kind].label}</DetailRow>
-                  {confidence !== undefined && confidence !== null && (
-                    <DetailRow label="Confidence">
-                      <span className="flex items-center gap-2">
-                        <span className="flex-1 h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden"
-                          role="meter" aria-label="Confidence" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(confidence * 100)}>
-                          <span className="block h-full rounded-full" style={{ width: `${Math.round(confidence * 100)}%`, backgroundColor: color }} />
-                        </span>
-                        <span className="tabular-nums">{Math.round(confidence * 100)}%</span>
-                      </span>
-                    </DetailRow>
-                  )}
                   <DetailRow label="From"><EntityRef endpoint={source} onOpen={opener.open} /></DetailRow>
                   <DetailRow label="To"><EntityRef endpoint={dest} onOpen={opener.open} /></DetailRow>
                   <DetailRow label="ID"><CopyableId id={entityId ?? target.id} /></DetailRow>

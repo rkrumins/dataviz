@@ -22,19 +22,23 @@ export function relationshipCopy(
   }
 }
 
-/** What each kind of relationship is, and — for all but lineage — why it is not edited here. */
-export const KIND_COPY: Readonly<Record<EdgeKind, { label: string; readOnly?: string }>> = {
-  lineage: { label: 'Lineage' },
+/** What each kind of relationship is — its name, what it means when its type has no description
+ *  of its own, and, for all but lineage, why it is not edited here. */
+export const KIND_COPY: Readonly<Record<EdgeKind, { label: string; meaning: string; readOnly?: string }>> = {
+  lineage: { label: 'Lineage', meaning: 'Data moves from the first entity to the second.' },
   rollup: {
     label: 'Combined flow',
+    meaning: 'Many detailed flows between two items, shown as one connection.',
     readOnly: 'A summary the aggregation job computes from the relationships beneath it — change those instead.',
   },
   containment: {
     label: 'Hierarchy',
+    meaning: 'The second entity sits inside the first.',
     readOnly: 'A hierarchy link. Change where an item sits with “Move to”.',
   },
   other: {
     label: 'Association',
+    meaning: 'The two entities are associated.',
     readOnly: 'This type of relationship is not authored on the canvas.',
   },
 }
