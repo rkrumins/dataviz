@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Mapping, Optional
 
+from backend.app.services.versioning.typed_merge import preserve_stored_type
+
 __all__ = [
     "PROP_DELETE",
     "InvalidPatch",
@@ -85,13 +87,14 @@ def apply_patch(base: Optional[Mapping], patch: Mapping) -> dict:
 
     Top-level fields override; ``properties`` is merged one level deep; a
     property marked :data:`PROP_DELETE` is removed. The result never carries the
-    marker.
+    marker. A key the base already has keeps its stored value when the patch sends
+    the same value back in a lossier form (``typed_merge.preserve_stored_type``).
     """
     base = dict(base or {})
     out = {**base, **dict(patch)}
     if patch.get("properties") is not None or base.get("properties") is not None:
-        merged = {**(base.get("properties") or {}), **(patch.get("properties") or {})}
-        out["properties"] = {k: v for k, v in merged.items() if not _is_delete(v)}
+        out["properties"] = {k: v for k, v in _merge_props(base, patch).items()
+                             if not _is_delete(v)}
     return out
 
 
@@ -100,12 +103,22 @@ def compose_patches(first: Mapping, second: Mapping) -> dict:
 
     The second's top-level fields win. Property entries merge with the second
     winning — KEEPING removal markers, so a removal in the first survives, and a
-    value set by the second re-adds a property the first removed.
+    value set by the second re-adds a property the first removed. A value the
+    second re-sends in a lossier form keeps the first's, as two saves in turn would.
     """
     out = {**dict(first), **dict(second)}
     if first.get("properties") is not None or second.get("properties") is not None:
-        out["properties"] = {**(first.get("properties") or {}), **(second.get("properties") or {})}
+        out["properties"] = _merge_props(first, second)
     return out
+
+
+def _merge_props(base: Mapping, patch: Mapping) -> dict:
+    """``base``'s properties with ``patch``'s merged over them, key by key."""
+    before = base.get("properties") or {}
+    merged = dict(before)
+    for k, v in (patch.get("properties") or {}).items():
+        merged[k] = preserve_stored_type(before[k], v) if k in before else v
+    return merged
 
 
 def strip_deletes(payload: Optional[Mapping]):

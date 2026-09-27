@@ -35,14 +35,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from . import config, db
-from .changeset import Delta, compose_updates, fold_batch_ops, materialize, net_delta, diff_states
-from backend.common.property_patch import apply_patch, strip_deletes
+from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
+from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
-from .typed_merge import preserve_stored_type
 from .ontology import (
     Ontology, OntologyRules, canonicalize_payload_types,
     validate_entities, validate_entities_rich,
@@ -5651,30 +5650,15 @@ class GraphVersioningService:
     def _patch_payload(base: Optional[dict], patch: dict) -> dict:
         """Apply a partial update `patch` onto `base` (see ``backend.common.property_patch``):
         top-level fields override, ``properties`` is merged key by key, and a property marked
-        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed.
-
-        A key the base already has keeps its stored value when the patch sends the same
-        value back in a lossier form — the browser's rounded copy of a 19-digit integer,
-        or digits as text (``typed_merge.preserve_stored_type``) — so a drawer edit of
-        one field can no longer rewrite every other property it round-trips."""
-        base_props = (base or {}).get("properties") or {}
-        patch_props = patch.get("properties")
-        if base_props and isinstance(patch_props, dict):
-            patch = {**patch, "properties": {
-                k: preserve_stored_type(base_props[k], v) if k in base_props else v
-                for k, v in patch_props.items()
-            }}
+        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed."""
         return apply_patch(base, patch)
 
     @staticmethod
     def _compose_patches(first: dict, second: dict) -> dict:
-        """Two partial updates of ONE entity in one batch, as the one patch they make in order:
-        ``second`` wins field by field and, inside ``properties``, key by key. A removal
-        (``__nx_prop_delete__``) is kept for the stored value to lose — :meth:`_patch_payload`
-        treats its base as a stored payload and would drop the marker, bringing the key back. A
-        value the second re-sends in a lossier form keeps the first's, as two saves in turn would.
-        (The batch fold's own composition — :func:`changeset.compose_updates`.)"""
-        return compose_updates(first, second)
+        """Two partial updates of ONE entity in one batch, as the one patch they make in order
+        (see ``backend.common.property_patch.compose_patches``): a removal stays a removal until
+        it meets the stored value."""
+        return compose_patches(first, second)
 
     async def _payloads_by_content_hash(
         self, s, graph_id: str, eid_to_token: Mapping[str, str], kind_by_entity: Mapping[str, str]

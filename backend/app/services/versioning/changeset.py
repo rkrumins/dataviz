@@ -25,20 +25,17 @@ from typing import Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 try:
     from .merkle import content_hash
-    from .typed_merge import preserve_stored_type
     from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 except ImportError:  # script mode
     import pathlib
     import sys
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
     from merkle import content_hash  # type: ignore
-    from typed_merge import preserve_stored_type  # type: ignore
     from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 
 __all__ = [
     "Delta",
     "BatchFold",
-    "compose_updates",
     "fold_batch_ops",
     "materialize",
     "net_delta",
@@ -98,21 +95,6 @@ class BatchFold:
     base_versions: Dict[str, str] = field(default_factory=dict)
 
 
-def compose_updates(first: Mapping, second: Mapping) -> dict:
-    """Two updates of one entity in one batch, as the one patch they make in order (see
-    ``compose_patches``): the later wins key by key, and a removal stays a removal for the stored
-    value to lose. A value the second re-sends in a lossier form — a browser-rounded 64-bit id,
-    digits as text — keeps the first's (``typed_merge.preserve_stored_type``), as two saves in
-    turn would."""
-    before = first.get("properties") or {}
-    after = second.get("properties")
-    if before and isinstance(after, Mapping):
-        second = {**second, "properties": {
-            k: preserve_stored_type(before[k], v) if k in before else v for k, v in after.items()
-        }}
-    return compose_patches(first, second)
-
-
 def fold_batch_ops(
     ops: List[Mapping],
     *,
@@ -134,7 +116,7 @@ def fold_batch_ops(
                                    or ("edge" if is_edge_payload(payload) else "node"))
         earlier = out.new_vals.get(eid)
         if op["op"] == "update" and earlier is not None:
-            out.new_vals[eid] = (compose_updates(earlier, payload) if eid in out.update_ids
+            out.new_vals[eid] = (compose_patches(earlier, payload) if eid in out.update_ids
                                  else apply_patch(earlier, payload))
         else:
             if op["op"] == "delete":
