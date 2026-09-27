@@ -23,13 +23,14 @@
  * state AND sessionStorage, so a bounce to /login sees it too): a
  * corporate IdP that is genuinely down must not be hammered once per
  * access lifetime, and the user must land on a visible form with the
- * reason — not in a loop. A transient one (our own completion answering
- * 429 / 5xx, or not at all) is retried once and does not latch. Every path
+ * reason — not in a loop. A transient one (either call answering 429 /
+ * 5xx, or not at all) is retried once and does not latch. Every path
  * terminates: recovered, or on the sign-in page with an explanation.
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
 import {
     BackchannelLoginError,
+    GatewayCallError,
     loginWithBackchannel,
     type AuthUser,
     type LoginContext,
@@ -192,6 +193,17 @@ async function resolveProvider(
     return ctx.providers?.find((p) => p.slug === slug) ?? null
 }
 
+/** A fresh session exists: clear what the failures latched, and let the
+ *  caches catch up WITHOUT waiting for them. This runs inside the refresh
+ *  machinery's lock, and the hydrate's own requests can need that
+ *  machinery — a 401 or a CSRF repair joins the in-flight refresh, which
+ *  is waiting on this. Awaited here, that is a cycle nothing resolves. */
+function recovered(user: AuthUser | undefined): void {
+    clearReauthFailure()
+    clearAutoPortalSentinel()
+    void hydrateAfterRecovery(user)
+}
+
 async function hydrateAfterRecovery(user: AuthUser | undefined): Promise<void> {
     // Mirrors the post-refresh block in fetchWithTimeout: the app never
     // noticed the session die, so only the caches need to catch up.
@@ -227,8 +239,9 @@ async function hydrateAfterRecovery(user: AuthUser | undefined): Promise<void> {
  * as having succeeded. `'failed'` — the browser's half was tried (or is
  * in cooldown) and did not produce a session; the caller takes the user
  * to the sign-in page, which explains. `'not-applicable'` — this provider has no
- * browser half to run, or could not be resolved; the caller keeps its
- * existing navigation behaviour. `'gone'` — the catalog answered and
+ * browser half to run and its cookie could not be redeemed in place, or
+ * it could not be resolved; the caller keeps its existing navigation
+ * behaviour. `'gone'` — the catalog answered and
  * this slug is not in it (the connection was disabled or deleted, or
  * the master switch is off); the caller must land on the login PAGE,
  * because the provider's own login URL is now a dead route.
@@ -260,10 +273,35 @@ export async function attemptSilentReauth(
     }
     if (provider.kind !== 'backchannel') return 'not-applicable'
     if (!isGatewayProvider(provider)) {
-        // No browser half is published — a plain ambient row whose
-        // corporate session may well still be alive. The server-leg
-        // navigation covers that case; nothing here would add to it.
-        return 'not-applicable'
+        // No browser half is published — a plain ambient row, whose
+        // corporate cookie rides every request to us. The empty-body
+        // POST redeems it exactly as the server-leg navigation would,
+        // but answers JSON, so a live corporate session renews without
+        // the page going anywhere.
+        try {
+            const { user } = await loginWithBackchannel(provider.slug, {}, {
+                skipAuthRefresh: true,
+            })
+            recovered(user)
+            return 'recovered'
+        } catch (err) {
+            // The server's own refusal — no corporate cookie, the gateway
+            // saying no — is the answer the navigation would get too, one
+            // exchange later and without the page to come back to. Say it
+            // on the sign-in page instead. A row that reads no cookie
+            // refuses the shape itself (a bare 404), and a failure that
+            // was only load or the network says nothing: both keep the
+            // navigation.
+            if (
+                err instanceof BackchannelLoginError
+                && !err.code.startsWith('http_')
+                && !isTransientFailure(err)
+            ) {
+                markReauthFailure(err.message)
+                return 'failed'
+            }
+            return 'not-applicable'
+        }
     }
 
     let lastError: unknown
@@ -283,19 +321,19 @@ export async function attemptSilentReauth(
         try {
             body = await gatewaySignInBody(provider)
         } catch (err) {
-            // The browser's own call to the corporate host. Its failures
-            // are verdicts — see ``isTransientFailure``.
+            // The browser's own call to the corporate host — see
+            // ``isTransientFailure`` for which of its failures are worth
+            // the second attempt.
             lastError = err
-            transient = false
-            break
+            transient = isTransientFailure(err)
+            if (!transient) break
+            continue
         }
         try {
             const { user } = await loginWithBackchannel(provider.slug, body, {
                 skipAuthRefresh: true,
             })
-            await hydrateAfterRecovery(user)
-            clearReauthFailure()
-            clearAutoPortalSentinel()
+            recovered(user)
             return 'recovered'
         } catch (err) {
             lastError = err
@@ -319,18 +357,20 @@ export async function attemptSilentReauth(
 }
 
 /**
- * Did the completion POST fail without saying anything about the corporate
- * session?
+ * Did the attempt fail without saying anything about the corporate session?
  *
- * Called only on OUR half: the POST answering 429 or 5xx (``http_<status>``
- * — the body was not our structured refusal), the gateway timing out behind
- * it (``backchannel_unavailable``), or the POST never getting an answer. A
- * refusal — no corporate session, the gateway saying no, an account-linking
- * rule — is a verdict. So is any failure of the browser's own call to the
- * corporate host, which never reaches here: that is usually a machine
- * outside the domain or a CORS rule, and repeating it changes nothing.
+ * On OUR half: the POST answering 429 or 5xx (``http_<status>`` — the body
+ * was not our structured refusal), the gateway timing out behind it
+ * (``backchannel_unavailable``), or the POST never getting an answer. On
+ * the browser's own call to the corporate host: a timeout, a 429 or 5xx,
+ * or no answer at all — a VPN still connecting, a Wi-Fi hop. A refusal —
+ * no corporate session, the gateway saying no, an account-linking rule, a
+ * 4xx from the corporate host, this page's security policy blocking the
+ * call — is a verdict. A CORS rule fails exactly like the network does,
+ * so it costs the one retry before it latches.
  */
 function isTransientFailure(err: unknown): boolean {
+    if (err instanceof GatewayCallError) return err.transient
     if (err instanceof BackchannelLoginError) {
         return /^http_(429|5\d\d)$/.test(err.code)
             || err.code === 'backchannel_unavailable'

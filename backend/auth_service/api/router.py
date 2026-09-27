@@ -1199,6 +1199,25 @@ async def logout(request: Request, response: Response):
 # ── POST /auth/refresh ────────────────────────────────────────────────
 
 
+def _refresh_refused(request: Request, detail) -> JSONResponse:
+    """The 401 for a refused rotation, with the session cookies deleted ON IT.
+
+    Returned, never raised. Each refusal used to call
+    ``clear_session_cookies(response)`` and then raise ``HTTPException`` —
+    and FastAPI builds a fresh response for a raised exception, discarding
+    the injected one and every Set-Cookie on it. So no refusal ever cleared
+    anything: the access cookie outlived its own session, ``/auth/me`` kept
+    accepting it, and a user whose session had just ended was told
+    "You're already signed in" instead of why. The body is the same
+    ``{"detail": ...}`` shape a raised ``HTTPException`` produces.
+    """
+    refused = JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": detail},
+    )
+    clear_session_cookies(refused, request)
+    return refused
+
+
 @router.post(
     "/refresh",
     response_model=SessionResponse,
@@ -1209,11 +1228,7 @@ async def refresh(request: Request, response: Response):
     svc = _identity_service(request)
     token = read_refresh_cookie(request)
     if not token:
-        clear_session_cookies(response, request)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing refresh token",
-        )
+        return _refresh_refused(request, "Missing refresh token")
     try:
         # The request's own cookies and headers ride along so a
         # back-channel session can be re-confirmed with its IdP on this
@@ -1226,18 +1241,13 @@ async def refresh(request: Request, response: Response):
             ambient_headers=dict(request.headers),
         )
     except SsoReauthRequired as exc:
-        clear_session_cookies(response, request)
         logger.info("SSO re-auth required (provider=%s)", exc.provider)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={
-                "error": "sso_reauth_required",
-                "provider": exc.provider,
-                "login_url": exc.login_url,
-            },
-        )
+        return _refresh_refused(request, {
+            "error": "sso_reauth_required",
+            "provider": exc.provider,
+            "login_url": exc.login_url,
+        })
     except InvalidRefreshToken as exc:
-        clear_session_cookies(response, request)
         if getattr(exc, "foreign", False):
             # The cookie was signed by a key outside this deployment's
             # ring, or carries another environment's issuer. Retrying
@@ -1248,21 +1258,15 @@ async def refresh(request: Request, response: Response):
                 "cookies evicted across all scopes",
                 request.url.hostname, exc,
             )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={
-                    "error": "session_foreign",
-                    "message": (
-                        "Session belongs to a different environment or "
-                        "signing key; please sign in again."
-                    ),
-                },
-            )
+            return _refresh_refused(request, {
+                "error": "session_foreign",
+                "message": (
+                    "Session belongs to a different environment or "
+                    "signing key; please sign in again."
+                ),
+            })
         logger.info("Refresh rejected: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token invalid or expired",
-        )
+        return _refresh_refused(request, "Refresh token invalid or expired")
 
     set_session_cookies(response, tokens)
     return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
@@ -1297,6 +1301,20 @@ def _heal_csrf_cookie(request: Request, response: Response) -> None:
     )
 
 
+async def _signed_in_but_revoked(svc, request: Request) -> bool:
+    """A valid token whose session has since been revoked.
+
+    Refused with a plain 401 and NO cookie clearing: a revoked sid is also
+    how a role change forces the next request to re-mint its claims, and
+    that renewal needs the refresh cookie. The client refreshes on this
+    401 exactly as it does for any other; only a session that is really
+    over is refused there. Optional on the service, like the rest of the
+    injected hooks.
+    """
+    check = getattr(svc, "session_revoked", None)
+    return check is not None and await check(read_access_cookie(request))
+
+
 @router.get(
     "/me",
     response_model=SessionResponse,
@@ -1305,6 +1323,8 @@ def _heal_csrf_cookie(request: Request, response: Response) -> None:
 async def me(request: Request, response: Response):
     svc = _identity_service(request)
     user = await svc.validate_session(read_access_cookie(request))
+    if user is not None and await _signed_in_but_revoked(svc, request):
+        user = None
     if user is None:
         # This is the first call the app makes after a page load, so it
         # is where a foreign cookie usually surfaces. Classify before
@@ -1355,6 +1375,8 @@ async def csrf(request: Request, response: Response):
     """
     svc = _identity_service(request)
     user = await svc.validate_session(read_access_cookie(request))
+    if user is not None and await _signed_in_but_revoked(svc, request):
+        user = None
     if user is None:
         # Same classify-before-answering as ``/me``: a cookie from another
         # environment can never be healed here, so evict it rather than

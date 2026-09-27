@@ -1140,3 +1140,34 @@ async def test_a_handle_rehearsal_carries_no_verification_verdict(
     )
     assert resp.status_code == 200, resp.text
     assert "verification" not in resp.json()["outcome"]
+
+
+# ── a gateway's clock a few seconds ahead of ours ────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim", ["iat", "nbf"])
+async def test_a_gateway_a_few_seconds_ahead_still_signs_in(monkeypatch, claim):
+    """pyjwt checks ``iat`` and ``nbf`` with ZERO tolerance, and the browser
+    posts the assertion milliseconds after the gateway mints it — so a
+    corporate clock even one second ahead of ours refused a share of every
+    sign-in as ``backchannel_jwt_invalid``, and a silent re-sign-in latched
+    it as a verdict. The portal kind fixed the same thing long ago."""
+    _routes(monkeypatch)
+    token = _assertion(jti=f"skew-{claim}", **{claim: int(time.time()) + 5})
+
+    identity = await BackchannelProvider(_settings()).identity_from_assertion(token)
+
+    assert identity.email == "ada.lovelace@corporate.com"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim", ["iat", "nbf"])
+async def test_a_token_from_well_past_the_tolerance_is_still_refused(
+    monkeypatch, claim,
+):
+    _routes(monkeypatch)
+    token = _assertion(jti=f"future-{claim}", **{claim: int(time.time()) + 3600})
+
+    with pytest.raises(BackchannelError):
+        await BackchannelProvider(_settings()).identity_from_assertion(token)

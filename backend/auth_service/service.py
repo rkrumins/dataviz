@@ -15,6 +15,7 @@ imports from ``backend.auth_service.*`` (enforced by
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import time
@@ -136,6 +137,17 @@ class _PendingLiveness:
     user_id: str
 
 
+#: The most a back-channel liveness check may take, whatever the
+#: connection's per-call timeouts add up to. It runs AFTER the rotation has
+#: committed, inside the refresh request. Past the route's own deadline the
+#: client gets a 504 and retries with the token that was already consumed —
+#: and a retry arriving outside the rotation grace reads as token reuse,
+#: revoking the family: the user signed out because the gateway was slow.
+#: Well inside both windows, and running out of it is an outage (the
+#: liveness grace decides), never a verdict.
+_LIVENESS_DEADLINE_SECONDS = 10.0
+
+
 class _RefreshRejected(Exception):
     """Carries a refresh rejection out of the DB session scope.
 
@@ -193,6 +205,8 @@ class LocalIdentityService:
       * ``session_revoker(sid)`` -> None — tombstone ONE session. The
         narrow sibling of ``session_killer``: sign-out on this device
         must not end the user's sessions on their other devices.
+      * ``revocation_checker(sid)`` -> bool — is this sid tombstoned?
+        Read by :meth:`session_revoked`.
 
     The new ``user_identity_repo`` is required for the SSO paths; the
     constructor accepts ``None`` so the local-only login flow works
@@ -214,6 +228,7 @@ class LocalIdentityService:
         sso_role_preview: Optional[Callable[..., Awaitable[dict]]] = None,
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
         session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
+        revocation_checker: Optional[Callable[[str], Awaitable[bool]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
         avatar_fetcher: Optional[
             Callable[..., Awaitable[tuple[bytes, str]]]
@@ -241,6 +256,10 @@ class LocalIdentityService:
         # at most once per person per window. See ``activity.py``.
         self._seen_gate = ActivityGate()
         self._session_revoker = session_revoker
+        # (sid) -> bool. Injected by app startup, for the same isolation
+        # reason as the killer and revoker: is this session's sid on the
+        # revocation list? See ``session_revoked``.
+        self._revocation_checker = revocation_checker
         # (url, *, provider_id=None) -> (bytes, content_type). Injected
         # by app startup, which binds the outbound guard and the
         # operator's host allowlist — auth_service may not import
@@ -279,6 +298,37 @@ class LocalIdentityService:
             roles = await self._user_repo.get_user_roles(session, orm.id)
         await self._note_seen(orm.id)
         return _orm_to_user(orm, role=_primary_role(roles))
+
+    async def session_revoked(self, access_token: Optional[str]) -> bool:
+        """Whether this access token's session has been revoked.
+
+        ``validate_session`` answers "is this a live account with a valid
+        token" and deliberately stops there — it is on every request's path,
+        and the per-request revocation check lives in ``get_current_user``.
+        The routes that tell the page whether it is signed in (``/me``,
+        ``/csrf``) ask this as well, so "am I signed in" cannot say yes to
+        a session every other request refuses.
+
+        Fail-open on the same terms as ``get_current_user``: a revocation
+        store that cannot answer is not a verdict, and a Redis incident
+        must not sign everyone out. False when nothing is injected.
+        """
+        if self._revocation_checker is None or not access_token:
+            return False
+        try:
+            sid = decode_token(access_token).get("sid") or ""
+        except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+            return False
+        if not sid:
+            return False
+        try:
+            return bool(await self._revocation_checker(sid))
+        except Exception as exc:  # noqa: BLE001 — fail-open by design
+            logger.warning(
+                "Revocation check unavailable (sid=%s): %s — honouring the "
+                "token", sid, exc,
+            )
+            return False
 
     async def _note_seen(self, user_id: str) -> None:
         """Stamp "last seen" — this is every authenticated request, so gated.
@@ -531,6 +581,7 @@ class LocalIdentityService:
 
     async def _expired_sso_session(
         self, session, user_id: str, *, reason: str, elapsed_seconds: int,
+        provider_id: Optional[str],
     ) -> "_RefreshRejected":
         """The rejection for an SSO session past its idle or absolute ceiling.
 
@@ -541,7 +592,7 @@ class LocalIdentityService:
         this session ends: the ceiling is this session's, and so is the
         consequence.
         """
-        provider_slug = await self._latest_identity_slug(session, user_id)
+        provider_slug = await self._reauth_slug(session, user_id, provider_id)
         return _RefreshRejected(
             SsoReauthRequired(
                 _build_reauth_url(provider_slug, next_path="/", force=False),
@@ -628,6 +679,13 @@ class LocalIdentityService:
             auth_time = (
                 outcome.record.auth_time if outcome.record is not None
                 else claims.auth_time
+            )
+            # Which provider THIS session signed in with — carried on every
+            # successor's record. Re-authentication goes back to it, not to
+            # whichever of the user's identities was used most recently.
+            session_provider_id = (
+                outcome.record.idp_provider_id if outcome.record is not None
+                else None
             )
 
             is_replay = outcome.status == "replay"
@@ -722,6 +780,7 @@ class LocalIdentityService:
                         raise await self._expired_sso_session(
                             session, orm.id, reason="idle",
                             elapsed_seconds=idle_seconds,
+                            provider_id=session_provider_id,
                         )
                     raise _RefreshRejected(
                         InvalidRefreshToken("session_idle"),
@@ -741,6 +800,7 @@ class LocalIdentityService:
                             raise await self._expired_sso_session(
                                 session, orm.id, reason="absolute",
                                 elapsed_seconds=age_seconds,
+                                provider_id=session_provider_id,
                             )
                         raise _RefreshRejected(
                             InvalidRefreshToken("session_expired"),
@@ -777,7 +837,9 @@ class LocalIdentityService:
                 # The slug lookup needs the session, so resolve it here; the
                 # revocation and the audit event happen after this scope
                 # closes — see ``refresh``.
-                provider_slug = await self._latest_identity_slug(session, orm.id)
+                provider_slug = await self._reauth_slug(
+                    session, orm.id, session_provider_id,
+                )
                 logger.info(
                     "SSO session expired (user=%s, slug=%s, age=%ds)",
                     orm.id, provider_slug, sso_age,
@@ -818,7 +880,9 @@ class LocalIdentityService:
                 # can live thirty minutes; tombstoning every other session
                 # each time one lapsed forced every other device to renew,
                 # on every expiry, for nothing its own token had done.
-                provider_slug = await self._latest_identity_slug(session, orm.id)
+                provider_slug = await self._reauth_slug(
+                    session, orm.id, session_provider_id,
+                )
                 logger.info(
                     "Upstream credential expired (user=%s, slug=%s, "
                     "idp_exp=%d)",
@@ -1744,7 +1808,27 @@ class LocalIdentityService:
             BackchannelUnavailable, SessionRevokedUpstream,
         )
         try:
-            await provider.confirm_still_authenticated(raw)
+            await asyncio.wait_for(
+                provider.confirm_still_authenticated(raw),
+                _LIVENESS_DEADLINE_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # Ran out of time: not an answer, so an outage — the grace
+            # window decides, exactly as for a 5xx. See the deadline.
+            exc = BackchannelUnavailable(
+                f"liveness_deadline:{_LIVENESS_DEADLINE_SECONDS:g}s",
+            )
+            if self._liveness_grace_expired(pending, settings):
+                await self._end_session_upstream(
+                    pending, claims, reason=f"idp_unconfirmed:{exc}",
+                )
+                return
+            logger.warning(
+                "Back-channel liveness unconfirmed for user=%s provider=%s "
+                "(%s); inside the grace window, allowing this rotation",
+                pending.user_id, pending.provider_id, exc,
+            )
+            return
         except SessionRevokedUpstream as exc:
             await self._end_session_upstream(
                 pending, claims, reason=f"idp_rejected:{exc}",
@@ -1882,7 +1966,9 @@ class LocalIdentityService:
         try:
             async with self._session_factory() as session:
                 provider_slug = (
-                    await self._latest_identity_slug(session, pending.user_id)
+                    await self._reauth_slug(
+                        session, pending.user_id, pending.provider_id,
+                    )
                 ) or "sso"
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not resolve provider slug: %s", exc)
@@ -1947,6 +2033,29 @@ class LocalIdentityService:
         await self._emit_audit(event_type, payload)
 
     # ── Identity helpers (refresh path) ──────────────────────────────
+
+    async def _reauth_slug(
+        self, session, user_id: str, provider_id: Optional[str],
+    ) -> Optional[str]:
+        """The slug to send this session back to for re-authentication.
+
+        The provider the session itself signed in with, when its record
+        says. Picking the user's most recently used identity instead sent a
+        gateway session on one machine to an OIDC provider signed into on
+        another — or ran a gateway's browser half on a laptop that has
+        none. Falls back to that only for sessions with no provider on
+        record (older rows).
+        """
+        if provider_id and self._user_identity_repo is not None:
+            for identity in await self._user_identity_repo.list_for_user(
+                session, user_id,
+            ):
+                if getattr(identity, "provider_id", None) != provider_id:
+                    continue
+                slug = getattr(getattr(identity, "provider", None), "slug", None)
+                if slug:
+                    return slug
+        return await self._latest_identity_slug(session, user_id)
 
     async def _latest_identity_slug(
         self, session, user_id: str,

@@ -180,6 +180,85 @@ export async function runAuthenticateTrigger(
  *  leaving the login page silently stuck. */
 export const AUTHENTICATE_TIMEOUT_MS = 10_000
 
+/** A failed call from this page to the provider's own authenticate or
+ *  translate endpoint. ``transient`` says whether it is worth one more
+ *  try: a timeout, a 429 or a 5xx says nothing about the corporate
+ *  session — a VPN still connecting looks exactly like this — while a 4xx
+ *  or this page's own security policy refusing the call is an answer. */
+export class GatewayCallError extends Error {
+    readonly transient: boolean
+
+    constructor(message: string, transient: boolean) {
+        super(message)
+        this.name = 'GatewayCallError'
+        this.transient = transient
+    }
+}
+
+function originOf(url: string): string | null {
+    try {
+        return new URL(url, window.location.href).origin
+    } catch {
+        return null
+    }
+}
+
+/** ``fetch`` for the two browser-side gateway calls, with a timeout of
+ *  our own and failures that say what happened.
+ *
+ *  One failure needs detecting rather than reporting: the page's
+ *  Content-Security-Policy refusing the call. The browser blocks it before
+ *  it is sent, so neither server logs anything, and ``fetch`` rejects with
+ *  the same bare ``TypeError`` as a network outage. The
+ *  ``securitypolicyviolation`` event is the only witness, and it is a
+ *  task of its own that can land just after the rejection it caused —
+ *  hence the short wait, paid only on a call that already failed. */
+async function gatewayFetch(url: string, init: RequestInit): Promise<Response> {
+    const target = originOf(url)
+    let blocked = false
+    const onViolation = (e: SecurityPolicyViolationEvent) => {
+        if (
+            e.disposition === 'enforce'
+            && e.effectiveDirective === 'connect-src'
+            && originOf(e.blockedURI) === target
+        ) {
+            blocked = true
+        }
+    }
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
+    document.addEventListener('securitypolicyviolation', onViolation)
+    let res: Response
+    try {
+        res = await fetch(url, { ...init, signal: abort.signal })
+    } catch (err) {
+        if (abort.signal.aborted) {
+            throw new GatewayCallError(
+                'The sign-in service did not answer in time.', true,
+            )
+        }
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 50))
+        if (blocked) {
+            throw new GatewayCallError(
+                "Blocked by this site's security policy — add "
+                + `${target} to CSP_CONNECT_SRC on the frontend.`,
+                false,
+            )
+        }
+        throw err
+    } finally {
+        clearTimeout(timer)
+        document.removeEventListener('securitypolicyviolation', onViolation)
+    }
+    if (!res.ok) {
+        throw new GatewayCallError(
+            `The sign-in service answered ${res.status}.`,
+            res.status === 429 || res.status >= 500,
+        )
+    }
+    return res
+}
+
 export async function runAuthenticateCall(cfg: {
     url?: string
     method?: string
@@ -192,32 +271,15 @@ export async function runAuthenticateCall(cfg: {
     const tokenPath = cfg.tokenPath || ''
 
     // Raw fetch on purpose (cross-origin, no CSRF, no refresh-on-401) —
-    // but that also means no timeout unless we bring one. A hung
-    // corporate endpoint must not hang the silent sign-in forever.
-    const abort = new AbortController()
-    const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
-    let res: Response
-    try {
-        res = await fetch(url, {
-            method,
-            headers,
-            // The whole point. Without it the browser neither sends the
-            // provider's existing cookies nor offers to answer a Negotiate
-            // challenge from the OS.
-            credentials: 'include',
-            signal: abort.signal,
-        })
-    } catch (err) {
-        if (abort.signal.aborted) {
-            throw new Error('The sign-in service did not answer in time.')
-        }
-        throw err
-    } finally {
-        clearTimeout(timer)
-    }
-    if (!res.ok) {
-        throw new Error(`The sign-in service answered ${res.status}.`)
-    }
+    // see ``gatewayFetch`` for the timeout and failures it brings.
+    const res = await gatewayFetch(url, {
+        method,
+        headers,
+        // The whole point. Without it the browser neither sends the
+        // provider's existing cookies nor offers to answer a Negotiate
+        // challenge from the OS.
+        credentials: 'include',
+    })
     if (!tokenPath) return null
 
     let body: unknown
@@ -322,28 +384,12 @@ export async function runBrowserExchangeCall(cfg: {
             headers.set('content-type', 'application/json')
         }
     }
-    const abort = new AbortController()
-    const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
-    let res: Response
-    try {
-        res = await fetch(cfg.url as string, {
-            method: cfg.method || 'GET',
-            headers,
-            credentials: 'include',
-            signal: abort.signal,
-            ...(body !== undefined ? { body } : {}),
-        })
-    } catch (err) {
-        if (abort.signal.aborted) {
-            throw new Error('The sign-in service did not answer in time.')
-        }
-        throw err
-    } finally {
-        clearTimeout(timer)
-    }
-    if (!res.ok) {
-        throw new Error(`The sign-in service answered ${res.status}.`)
-    }
+    const res = await gatewayFetch(cfg.url as string, {
+        method: cfg.method || 'GET',
+        headers,
+        credentials: 'include',
+        ...(body !== undefined ? { body } : {}),
+    })
 
     const path = cfg.tokenPath || ''
     let token: unknown

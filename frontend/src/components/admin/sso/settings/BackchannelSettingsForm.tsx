@@ -254,6 +254,31 @@ function Toggle({
     )
 }
 
+/** The trigger and the translate call are fetches from the sign-in page
+ *  itself, and that page's Content-Security-Policy allows only its own
+ *  origin — so until the deployment lists the provider's, the browser
+ *  blocks the call before it is sent, and neither server has anything to
+ *  say about why sign-in failed. The list lives on the frontend container
+ *  (CSP_CONNECT_SRC), not here, hence a note naming the exact origin
+ *  rather than a field. Absolute https URLs only: the container refuses
+ *  an http:// origin, and a half-typed URL has no origin to name yet. */
+function CspOriginNote({ url }: { url: string | null | undefined }) {
+    let origin: string
+    try {
+        const u = new URL((url ?? '').trim())
+        if (u.protocol !== 'https:') return null
+        origin = u.origin
+    } catch {
+        return null
+    }
+    return (
+        <p className="text-[11px] text-ink-muted leading-relaxed">
+            This page&rsquo;s security policy must allow <code>{origin}</code>{' '}
+            &mdash; add it to <code>CSP_CONNECT_SRC</code> on the frontend.
+        </p>
+    )
+}
+
 type VerifyChoice =
     | 'none' | 'jwks' | 'public_key' | 'shared_secret' | 'unsigned'
 
@@ -560,6 +585,7 @@ export function BackchannelSettingsForm({
                         placeholder="https://sso.corp.example/authenticate"
                     />
                 </Field>
+                <CspOriginNote url={value.authenticate_url} />
                 {hasTrigger && (
                     <>
                         <Toggle
@@ -867,6 +893,7 @@ export function BackchannelSettingsForm({
                         placeholder="https://sso.corporate.com/auth-service/translate"
                     />
                 </Field>
+                <CspOriginNote url={value.browser_exchange_url} />
                 <FieldGrid>
                     <Field label="Method">
                         <select
@@ -941,6 +968,7 @@ export function BackchannelSettingsForm({
                         <TextField
                             type="number"
                             min={1}
+                            max={30}
                             mono={false}
                             value={value.timeout_seconds == null ? '' : String(value.timeout_seconds)}
                             placeholder="5"

@@ -738,3 +738,23 @@ def test_settings_from_snapshot_parses_tls_verify():
     assert settings_from_snapshot(
         _snap({**base, "tls_verify": True})
     ).tls_verify is True
+
+
+def test_a_per_call_timeout_is_capped_where_it_is_read():
+    """Each gateway call's timeout applies per phase, and every call runs
+    inside a request with its own deadline — so a connection saved with a
+    minute-long timeout could hold a sign-in or a renewal past it. Capped
+    where the setting is read rather than refused by validation, which
+    runs whenever a row is built: refusing would take a live connection
+    down on upgrade."""
+    snap = ProviderConfigSnapshot(
+        id="idp_1", slug="corp", display_name="Corp", kind="backchannel",
+        enabled=True, priority=100,
+        settings={
+            "token_source": "cookie", "token_source_key": "corp_session",
+            "gateway_url": GATEWAY, "timeout_seconds": "120",
+        },
+        claim_mapping={}, linking_policy="strict",
+        button_label=None, button_icon=None,
+    )
+    assert build_backchannel_provider(snap).settings.timeout_seconds == 30.0

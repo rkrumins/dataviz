@@ -103,8 +103,8 @@ async function renew(myEpoch: number): Promise<void> {
   }
   if (myEpoch !== epoch) return
   if (outcome === 'expired' || outcome === 'reauth') {
-    // 'expired' — the 401 handler has already announced the lost
-    // session and the store is signing out; scheduling another rotation
+    // 'expired' — the refresh has already announced the lost session
+    // and the store is signing out; scheduling another rotation
     // would just re-ask a settled question. 'reauth' — we are mid-bounce
     // to the IdP and this document is about to be replaced.
     return

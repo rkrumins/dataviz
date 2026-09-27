@@ -325,7 +325,35 @@ keep working for the connection's grace period (15 minutes unless the
 connection sets otherwise), measured from the last time the gateway actually
 answered rather than the last time we tried. A brief outage is invisible. A
 long one ends sessions rather than extending them indefinitely, which is
-deliberate: an outage should spend that allowance down, not renew it.
+deliberate: an outage should spend that allowance down, not renew it. A
+re-check that has not answered within 10 seconds counts as the gateway being
+down for that renewal.
+
+**Set the grace to at least twice the access-token lifetime.** The gateway is
+asked once per renewal, and a renewal comes round once per access-token
+lifetime (`JWT_EXPIRY_MINUTES`). A grace shorter than two of those can end
+sessions at the first renewal that finds the gateway down, and against the
+Helm chart's 60-minute tokens the default 15 minutes always does. *Outage
+grace (seconds)* is on the connection's settings.
+
+**Two settings that pass a rehearsal and fail at the first renewal.** A
+rehearsal proves the sign-in; neither of these touches it:
+
+* **A sign-in trigger connection whose *Cookie name* is the portal's own
+  host-only cookie.** The renewal re-check reads that cookie off requests to
+  *this* application, and a cookie scoped to the SSO host
+  (`sso.corp.example`) never arrives here. Every renewal then reads as
+  "signed out upstream": people are signed in again silently every token
+  lifetime, and their other sessions end. Name a cookie set on a domain both
+  hosts share, or turn off *Re-check with the provider on every session
+  renewal*.
+* **A handle-only connection that presents the handle as a cookie with no
+  name.** With *Present the ambient token* on cookie and neither a *Cookie
+  name* nor *Send it under a different cookie name* filled in, the gateway
+  receives a cookie with no name. Name it, or present the token as a header.
+
+**Tabs left open across an upgrade** keep running the page they loaded until
+they are reloaded, including its sign-in and renewal code.
 
 ---
 

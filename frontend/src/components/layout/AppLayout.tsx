@@ -8,7 +8,7 @@
  * Refactored from AppShell + App.tsx to support route-based navigation.
  */
 import { useEffect, useState } from 'react'
-import { Outlet, Navigate, useNavigate } from 'react-router-dom'
+import { Outlet, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { AlertTriangle, Home } from 'lucide-react'
 import { TopBar } from './TopBar'
 import { GlobalAnnouncementBanner } from './GlobalAnnouncementBanner'
@@ -40,6 +40,7 @@ export { useViewEditorModal }
 export function AppLayout() {
   const status = useAuthStore((s) => s.status)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const location = useLocation()
   // Selector subscriptions (not whole-store) so this always-mounted shell
   // only re-renders when these specific fields change, not on every
   // unrelated preference write (sidebar collapse, pinned views, …).
@@ -140,7 +141,10 @@ export function AppLayout() {
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace />
+    // With the way back: a session that ended mid-task signs in again
+    // onto the same page, not the home screen.
+    const here = location.pathname + location.search
+    return <Navigate to={here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`} replace />
   }
 
   return (

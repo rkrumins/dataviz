@@ -22,6 +22,7 @@ substantially and is where the standard mitigations sit.
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
@@ -230,6 +231,20 @@ def host_port_key(url: str) -> str:
     return f"{host}:{port}"
 
 
+async def _assert_fetchable_off_loop(
+    url: str, *, allow_hosts: frozenset[str] | set[str] = frozenset(),
+) -> None:
+    """:func:`assert_fetchable` from async code, on a worker thread.
+
+    The check resolves the host with ``socket.getaddrinfo``, which blocks —
+    and these callers run on the event loop, one of them (the gateway
+    liveness check) once per active session per access lifetime. A slow
+    corporate resolver froze every request on the worker for as long as it
+    took. Same check, same answer; only where it waits has changed.
+    """
+    await asyncio.to_thread(assert_fetchable, url, allow_hosts=allow_hosts)
+
+
 def assert_fetchable(
     url: str, *, allow_hosts: frozenset[str] | set[str] = frozenset(),
 ) -> None:
@@ -323,7 +338,7 @@ async def fetch_metadata(
     an internal address is the standard way around a pre-flight check,
     and no IdP needs one to serve its own metadata.
     """
-    assert_fetchable(url)
+    await _assert_fetchable_off_loop(url)
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
         verify=resolve_outbound_verify(verify),
@@ -390,7 +405,7 @@ async def request_json(
     what an internal address replied would turn a blocked request into a
     working one.
     """
-    assert_fetchable(url, allow_hosts=allow_hosts)
+    await _assert_fetchable_off_loop(url, allow_hosts=allow_hosts)
 
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
@@ -499,7 +514,7 @@ async def fetch_image(
                         f"fetched. Add {key!r} to the list to allow it.",
                         reason="host_not_allowlisted",
                     )
-            assert_fetchable(current, allow_hosts=allow_hosts)
+            await _assert_fetchable_off_loop(current, allow_hosts=allow_hosts)
             async with client.stream("GET", current) as resp:
                 if 300 <= resp.status_code < 400:
                     location = resp.headers.get("location")

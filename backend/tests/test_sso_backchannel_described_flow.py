@@ -253,6 +253,13 @@ async def test_a_gateway_reporting_an_old_login_is_anchored_not_born_dead(
     )
     assert ended.status_code == 401
     assert ended.json()["detail"]["error"] == "sso_reauth_required"
+    # And it ends in the browser: the access cookie that would otherwise
+    # keep answering /auth/me for its last minute is deleted with it.
+    deleted = {
+        h.split("=", 1)[0] for h in ended.headers.get_list("set-cookie")
+        if "max-age=0" in h.lower()
+    }
+    assert any(name.startswith("nx_access") for name in deleted), deleted
 
 
 @pytest.mark.asyncio

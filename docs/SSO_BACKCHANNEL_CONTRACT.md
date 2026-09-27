@@ -205,6 +205,16 @@ The token's own `exp` bounds the application session instead: when it
 passes, the user's browser silently repeats the exchange, and your
 endpoint answering 401 there is what actually signs them out.
 
+**On the application's side: its page's Content-Security-Policy.**
+Both browser calls in this section — the authenticate call and the
+translate call — are fetches from the application's page, and its
+policy allows only its own origin (`connect-src 'self'`). Until the
+operator lists your origins in the frontend container's
+`CSP_CONNECT_SRC` (space-separated `https://` origins, no paths —
+e.g. `CSP_CONNECT_SRC="https://sso.corp.example"`), the browser
+refuses the call before it is sent, and nothing reaches your service
+or its logs.
+
 ---
 
 ## 3. Status codes — the part that matters most

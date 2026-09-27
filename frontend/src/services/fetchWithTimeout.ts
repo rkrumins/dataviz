@@ -54,6 +54,12 @@ const REFRESH_URL = '/api/v1/auth/refresh'
  *  the client can repair a lost cookie in place. See {@link healCsrfToken}. */
 const CSRF_HEAL_URL = '/api/v1/auth/csrf'
 const LOGIN_PATH = '/login'
+/** How long one POST to /auth/refresh may take before it counts as no
+ *  answer. Under the server's 30s rotation grace on purpose: a refresh
+ *  that did rotate server-side but answered too slowly is retried, and the
+ *  retry must present the old token while it still reads as a racer
+ *  rather than as a stolen token being replayed — which ends the session. */
+const REFRESH_TIMEOUT_MS = 20_000
 const SESSION_LOST_EVENT = 'auth:session-lost'
 /** Dispatched after the session cookies have been rotated, by either
  *  trigger. {@link module:store/sessionKeepalive} listens so it can
@@ -185,6 +191,8 @@ async function attemptRefresh(): Promise<{
   outcome: RefreshOutcome
   retryAfterMs: number | null
 }> {
+  const abort = new AbortController()
+  const timer = setTimeout(() => abort.abort(), REFRESH_TIMEOUT_MS)
   try {
     // Bare fetch — avoids the circular import that would exist if this
     // module pulled in authService, and avoids recursing through the
@@ -194,7 +202,9 @@ async function attemptRefresh(): Promise<{
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
+      signal: abort.signal,
     })
+    clearTimeout(timer)
     if (res.ok) {
       // Before anything reads the rotated cookies: the retried request
       // mirrors ``nx_csrf_<env>`` and the keepalive re-arms from
@@ -311,7 +321,7 @@ async function attemptRefresh(): Promise<{
                 // ignore — the bounce still happens
               }
               if (typeof window !== 'undefined') {
-                window.location.href = LOGIN_PATH
+                window.location.href = withReturnPath(LOGIN_PATH)
               }
               return { outcome: 'reauth', retryAfterMs: null }
             }
@@ -331,7 +341,7 @@ async function attemptRefresh(): Promise<{
             // ignore — bounce still happens
           }
           if (typeof window !== 'undefined') {
-            window.location.href = detail.login_url
+            window.location.href = withReturnPath(detail.login_url)
           }
           // Not "success", but not a lost session either: we're about
           // to navigate, so nobody should be signed out or shown the
@@ -355,10 +365,26 @@ async function attemptRefresh(): Promise<{
       retryAfterMs: parseRetryAfterMs(res.headers.get('Retry-After')),
     }
   } catch {
-    // Threw — DNS, offline, connection reset. Says nothing about the
-    // session either.
+    // Threw — DNS, offline, connection reset, no answer in time. Says
+    // nothing about the session either.
+    clearTimeout(timer)
     return { outcome: 'retryable', retryAfterMs: null }
   }
+}
+
+/**
+ * ``url`` with ``next`` pointing back at this page, so signing in again
+ * lands the user where they were. The server's re-auth URL can only say
+ * ``/`` — it never saw the page — and every sign-in path honours ``next``
+ * (the server re-checks it with ``_safe_next``, the login page with the
+ * same rule).
+ */
+function withReturnPath(url: string): string {
+  const here = window.location.pathname + window.location.search
+  if (here === '/' || window.location.pathname === LOGIN_PATH) return url
+  const target = new URL(url, window.location.origin)
+  target.searchParams.set('next', here)
+  return target.pathname + target.search
 }
 
 /**
@@ -624,6 +650,12 @@ async function tryRefresh(): Promise<RefreshOutcome> {
           window.dispatchEvent(new CustomEvent(SESSION_REFRESHED_EVENT))
         }
       }
+      // Announced here, whoever asked. The proactive renewal and the
+      // CSRF repair both learn of a dead session from this call alone,
+      // and neither announced it — an idle tab sat signed in on a page
+      // whose every request would fail. The latch dedupes the 401 path's
+      // own announcement.
+      if (outcome === 'expired') notifySessionLost()
       return outcome
     } finally {
       queueMicrotask(() => {

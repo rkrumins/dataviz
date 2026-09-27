@@ -1009,6 +1009,12 @@ async def lifespan(_app: FastAPI):
     async def _revoke_one_session(sid: str) -> None:
         await get_revocation_service().revoke_session(sid)
 
+    # And the question both of those answer: is this sid tombstoned? Read
+    # by /auth/me and /auth/csrf, so the page is never told it is signed
+    # in by a session every other request refuses.
+    async def _is_session_revoked(sid: str) -> bool:
+        return await get_revocation_service().is_revoked(sid)
+
     # Phase 4: inject the platform SSO posture provider. The
     # ``auth_service`` stays free of ``backend.app.*`` imports —
     # the loader closure does the DB hit; the service only sees a
@@ -1112,6 +1118,7 @@ async def lifespan(_app: FastAPI):
         sso_role_preview=_preview_sso_targets,
         session_killer=_kill_user_sessions,
         session_revoker=_revoke_one_session,
+        revocation_checker=_is_session_revoked,
         auth_config_provider=_auth_config_provider,
         avatar_fetcher=_fetch_avatar_image,
     )

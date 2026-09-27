@@ -27,6 +27,9 @@ spec:
           ports:
             - name: http
               containerPort: 80
+          env:
+            - name: CSP_CONNECT_SRC
+              value: {{ .Values.services.frontend.cspConnectSrc | default "" | quote }}
           livenessProbe:
             httpGet:
               path: /health

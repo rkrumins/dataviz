@@ -352,3 +352,53 @@ async def test_a_recent_auth_time_is_kept_as_asserted(svc_and_events, provider):
     login = next(p for t, p in events if t == "user.logged_in")
     assert login["auth_time"] == authenticated
     assert login["auth_time_anchored"] is False
+
+
+@pytest.mark.asyncio
+async def test_reauth_goes_back_to_the_sessions_own_provider(
+    svc_and_events, provider, db_session,
+):
+    """A user with a gateway identity and an OIDC one. The gateway session
+    reaches its ceiling after the OIDC identity was used more recently —
+    and must be sent back to the GATEWAY. Picking the most recent identity
+    sent it to OIDC with prompt=login, or ran a gateway's browser half on a
+    machine that had none."""
+    import time
+
+    from sqlalchemy import update
+
+    from backend.app.db.models import RefreshTokenORM
+    from backend.auth_service.core.tokens import decode_refresh_token
+    from backend.auth_service.interface import SsoReauthRequired
+
+    svc, _events = svc_and_events
+    gateway = await idp_provider_repo.create_provider(
+        db_session, slug="corp-gw", display_name="Corporate Gateway",
+        kind="backchannel", settings={}, claim_mapping={},
+        linking_policy="allow_verified",
+    )
+    await db_session.flush()
+    now = int(time.time())
+
+    _user, gw_tokens = await svc.complete_sso_login(
+        _identity(external_id="gw-1", auth_time=now - 60),
+        provider_id=gateway.id, provider_slug=gateway.slug,
+        linking_policy="allow_verified",
+    )
+    # Later, the same person signs in with OIDC somewhere else.
+    await svc.complete_sso_login(
+        _identity(external_id="sub-1", auth_time=now - 30),
+        provider_id=provider.id, provider_slug=provider.slug,
+        linking_policy="allow_verified",
+    )
+    # The gateway session reaches its ceiling.
+    family = decode_refresh_token(gw_tokens.refresh_token).family_id
+    await db_session.execute(
+        update(RefreshTokenORM).where(RefreshTokenORM.family_id == family)
+        .values(auth_time=now - 2 * 24 * 3600)
+    )
+    await db_session.flush()
+
+    with pytest.raises(SsoReauthRequired) as err:
+        await svc.refresh(gw_tokens.refresh_token)
+    assert err.value.login_url.startswith("/api/v1/auth/corp-gw/login")

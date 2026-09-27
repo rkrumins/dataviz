@@ -53,6 +53,45 @@ retries once; if the corporate side really says no, the sign-in page opens with 
 minute, in that tab only, so a new tab signed the person straight back in. It now waits, in every tab,
 until someone signs in.
 
+**A gateway whose sign-in runs in the browser could not sign anyone in behind the shipped frontend
+image.** The page's Content-Security-Policy allows only its own origin (`connect-src 'self'`), so the
+browser refused the sign-in trigger and the browser-side translate call before they were sent — the
+button, the automatic sign-in and the silent re-sign-in all failed, and nothing reached either
+server's logs. The frontend container now takes the gateway's origins in `CSP_CONNECT_SRC`, and a
+call the policy blocks says exactly that, naming the origin to add. The connection form names it too.
+
+**A failed renewal could land on "You're already signed in".** A refused renewal cleared no cookies —
+the framework drops a response's headers when the route raises — so the sign-in page found the
+still-valid access cookie and, since `GET /auth/me` did not consult revocations, reported a live
+session. A refused renewal now clears the session cookies, and `/auth/me` and `/auth/csrf` refuse a
+revoked session, so the page shows why sign-in is needed instead.
+
+**Re-authenticating now keeps your place.** A session that ends mid-task — renewal refused, or
+signed out by the server — returns to the page and query it was on after signing in again, through
+the identity provider or on the sign-in page, instead of the home page.
+
+**More gateway renewals finish without anyone noticing:**
+
+- **A gateway with no browser half renews in place.** Its corporate cookie rides every request, so
+  renewal now redeems it with one call instead of navigating the page away and back.
+- **Re-authentication goes back to the session's own connection**, not to whichever connection the
+  person used most recently.
+- **A gateway token stamped a few seconds in the future is accepted.** Its issue and not-before
+  times now get the same clock-skew allowance (`JWT_CLOCK_SKEW_LEEWAY_SECONDS`) as everything else.
+- **A failure that was only the network is retried.** The browser's own call to the corporate host
+  timing out, answering 429 or 5xx, or not answering at all (a VPN still connecting) is retried once
+  and is not held against the next attempt; the sign-in page also tries again once its one-minute
+  hold lapses and when the network comes back.
+- **A slow gateway cannot outlast the renewal.** The renewal re-check gives up after 10 seconds and
+  counts that as an outage (the connection's grace applies); a connection's per-call timeout is
+  capped at 30 seconds; the browser gives up on a renewal after 20, inside the server's 30-second
+  rotation grace, so its retry is never mistaken for a replayed token; and name lookups for the
+  gateway no longer hold up other requests while they wait.
+
+**A session found dead by the background renewal left the tab signed in**, on a page whose every
+request would fail, until something else noticed. The renewal now signs the tab out itself, as a
+failed request does.
+
 ### Added
 
 **When each person last used the platform, in Admin → Users.** A sortable **Last seen** column, and an
@@ -72,6 +111,13 @@ recorded to five minutes, one conditional row update per person per window.
 
 ### Upgrading
 
+- **A gateway connection with a sign-in trigger or a browser-side translate call needs its origins in
+  the frontend container's `CSP_CONNECT_SRC`** (space-separated `https://` origins, e.g.
+  `CSP_CONNECT_SRC="https://sso.corp.example"`): `env` in the k8s frontend Deployment,
+  `services.frontend.cspConnectSrc` in Helm, the environment in docker-compose. Unset, the policy is
+  exactly as before. A value that is not a bare `https://` or `wss://` origin stops the container from
+  starting.
+- A gateway connection's per-call timeout above 30 seconds is used as 30.
 - A migration adds `users.last_login_at`, `last_seen_at` and `last_active_at`, and backfills
   `last_login_at` from each person's identity sign-ins. Password-only accounts fill in at their next
   sign-in; the other two as people use the platform.
@@ -82,9 +128,10 @@ recorded to five minutes, one conditional row update per person per window.
 ### Known limitations
 
 - A 403 for a missing permission still shows on the canvas as slow.
-- After re-authenticating, people land on the home page rather than the page they were on, as they do
-  after a password sign-in.
-- The Helm chart's `expiryMinutes` default is 60; the other deploy configs use 15.
+- The Helm chart's `expiryMinutes` default is 60; the other deploy configs use 15. Against 60-minute
+  tokens, a gateway connection's default 15-minute outage grace ends sessions at the first renewal
+  that finds the gateway down: set it to at least twice the token lifetime.
+- Tabs left open across the upgrade run the previous page until they are reloaded.
 
 ---
 

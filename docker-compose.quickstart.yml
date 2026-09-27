@@ -97,6 +97,10 @@ services:
       dockerfile: frontend/Dockerfile
     ports:
       - "3080:80"
+    environment:
+      # Extra origins for the page's CSP connect-src (space-separated
+      # https:// origins) — only needed for an Enterprise Gateway sign-in.
+      CSP_CONNECT_SRC: ${CSP_CONNECT_SRC:-}
     depends_on:
       viz-service:
         condition: service_healthy

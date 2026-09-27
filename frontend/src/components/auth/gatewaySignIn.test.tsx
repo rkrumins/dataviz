@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
     BackchannelLoginError,
+    GatewayCallError,
     leavesForIdp,
     loginWithBackchannel,
     needsAuthenticateFirst,
@@ -174,6 +175,75 @@ describe('the authenticate call', () => {
         expect(await runAuthenticateTrigger(provider({
             config: { ...provider().config, authenticateTokenPath: 'token' },
         }))).toBe('····not-a-jwt····')
+    })
+
+    it('says whether a failure is worth one more try', async () => {
+        // A 5xx or 429 says nothing about the corporate session; a 4xx is
+        // the corporate host's answer. The silent re-sign-in retries only
+        // the first.
+        for (const [status, transient] of [[503, true], [429, true], [401, false]] as const) {
+            global.fetch = vi.fn().mockResolvedValue(new Response(null, { status }))
+            const err = await runAuthenticateTrigger(provider()).catch((e) => e)
+            expect(err).toBeInstanceOf(GatewayCallError)
+            expect((err as GatewayCallError).transient).toBe(transient)
+        }
+    })
+})
+
+// ── this page's own security policy ──────────────────────────────────
+
+describe('a call this page\'s security policy blocks', () => {
+    // The browser refuses the call before it is sent — nothing reaches
+    // either server's logs — and ``fetch`` rejects exactly as it does for
+    // a network outage. The violation event is the only witness.
+
+    function violation(blockedURI: string, over: Record<string, string> = {}) {
+        return Object.assign(new Event('securitypolicyviolation'), {
+            disposition: 'enforce',
+            effectiveDirective: 'connect-src',
+            blockedURI,
+            ...over,
+        })
+    }
+
+    it('names the origin to allow, and is not worth a retry', async () => {
+        global.fetch = vi.fn().mockImplementation(async () => {
+            document.dispatchEvent(violation('https://sso.corporate.com/authenticate'))
+            throw new TypeError('Failed to fetch')
+        })
+        const err = await runAuthenticateTrigger(provider()).catch((e) => e)
+        expect(err).toBeInstanceOf(GatewayCallError)
+        expect((err as Error).message).toBe(
+            "Blocked by this site's security policy — add "
+            + 'https://sso.corporate.com to CSP_CONNECT_SRC on the frontend.',
+        )
+        expect((err as GatewayCallError).transient).toBe(false)
+    })
+
+    it('still names it when the event lands after the rejection', async () => {
+        global.fetch = vi.fn().mockImplementation(async () => {
+            setTimeout(() => document.dispatchEvent(
+                violation('https://sso.corporate.com/authenticate'),
+            ), 0)
+            throw new TypeError('Failed to fetch')
+        })
+        await expect(runAuthenticateTrigger(provider()))
+            .rejects.toThrow(/add https:\/\/sso\.corporate\.com to CSP_CONNECT_SRC/)
+    })
+
+    it('leaves a plain network failure as it was', async () => {
+        // Another origin's violation, and a report-only one, are not this
+        // call's — the original error stands, and is retried upstream.
+        global.fetch = vi.fn().mockImplementation(async () => {
+            document.dispatchEvent(violation('https://elsewhere.example/x'))
+            document.dispatchEvent(violation(
+                'https://sso.corporate.com/authenticate', { disposition: 'report' },
+            ))
+            throw new TypeError('Failed to fetch')
+        })
+        const err = await runAuthenticateTrigger(provider()).catch((e) => e)
+        expect(err).toBeInstanceOf(TypeError)
+        expect((err as Error).message).toBe('Failed to fetch')
     })
 })
 

@@ -15,11 +15,12 @@
  * for that host, must not be navigated into a sign-in that cannot work,
  * and must not be re-attempted on every render.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LoginPage } from './LoginPage'
+import { REAUTH_COOLDOWN_MS } from '@/services/backchannelReauth'
 
 const {
     loginContext, resolveEmailDomain, runAuthenticateTrigger,
@@ -262,6 +263,51 @@ describe('silent sign-in', () => {
         expect(runAuthenticateTrigger).not.toHaveBeenCalled()
     })
 
+    describe('a failure that was only the network', () => {
+        // A VPN still connecting when the page loaded, a Wi-Fi hop: the
+        // page tries again by itself rather than waiting for a click or a
+        // reload — but boundedly, so a gateway that is down is not polled.
+        beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }) })
+        afterEach(() => { vi.useRealTimers() })
+
+        it('is tried once more when the hold lapses', async () => {
+            runAuthenticateTrigger.mockRejectedValue(new TypeError('Failed to fetch'))
+            renderLogin()
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
+
+            runAuthenticateTrigger.mockResolvedValue(null)
+            await act(() => vi.advanceTimersByTimeAsync(REAUTH_COOLDOWN_MS + 1_000))
+            await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
+            expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2)
+        })
+
+        it('only once — after that, the button', async () => {
+            runAuthenticateTrigger.mockRejectedValue(new TypeError('Failed to fetch'))
+            renderLogin()
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
+            await act(() => vi.advanceTimersByTimeAsync(REAUTH_COOLDOWN_MS + 1_000))
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2))
+
+            await act(() => vi.advanceTimersByTimeAsync(5 * REAUTH_COOLDOWN_MS))
+            expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2)
+        })
+
+        it('is tried again when the network comes back, outside the hold', async () => {
+            runAuthenticateTrigger.mockRejectedValue(new TypeError('Failed to fetch'))
+            renderLogin()
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
+
+            // Inside the hold, coming back online changes nothing.
+            act(() => { window.dispatchEvent(new Event('online')) })
+            await act(() => vi.advanceTimersByTimeAsync(20))
+            expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
+
+            vi.setSystemTime(Date.now() + REAUTH_COOLDOWN_MS)
+            act(() => { window.dispatchEvent(new Event('online')) })
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2))
+        })
+    })
+
     it('does not fire when two providers could both claim it', async () => {
         // Which one would it pick? Guessing on a user's behalf is worse
         // than showing them the buttons.
@@ -464,6 +510,41 @@ describe('email-first with a gateway connection', () => {
             /don't recognise that email's domain/i,
         )).toBeInTheDocument()
         expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+})
+
+// ── where it lands ───────────────────────────────────────────────────
+
+describe('the way back', () => {
+    // A session that ended mid-task arrives here with ``?next=`` — the
+    // page the user was on — and signing in again returns them to it.
+    const renderAt = (url: string) =>
+        render(<MemoryRouter initialEntries={[url]}><LoginPage /></MemoryRouter>)
+
+    it('a sign-in returns to the page in next, query and all', async () => {
+        renderAt('/login?next=%2Fviews%2Fv1%3Ftab%3Dlineage')
+        await waitFor(() => expect(navigate)
+            .toHaveBeenCalledWith('/views/v1?tab=lineage', { replace: true }))
+    })
+
+    it('anything that could leave this site is ignored', async () => {
+        for (const next of ['//evil.example', 'https://evil.example', '/\\evil.example']) {
+            navigate.mockClear()
+            window.sessionStorage.clear()
+            const { unmount } = renderAt(`/login?next=${encodeURIComponent(next)}`)
+            await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
+            unmount()
+        }
+    })
+
+    it('rides a redirect sign-in too', async () => {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: false, providers: [OIDC],
+        })
+        renderAt('/login?next=%2Fviews%2Fv1')
+        const link = await screen.findByRole('link', { name: /entra/i })
+        expect(link.getAttribute('href'))
+            .toBe('/api/v1/auth/entra/login?next=%2Fviews%2Fv1')
     })
 })
 

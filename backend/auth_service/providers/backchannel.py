@@ -87,6 +87,7 @@ from .outbound import (
     request_json,
 )
 from .registry import ProviderConfigSnapshot
+from ..core.config import CLOCK_SKEW_LEEWAY_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +391,15 @@ class BackchannelSettings:
     linking_policy: str = "strict"
 
 
+#: The most any single gateway call may wait. Every call runs inside a
+#: request with a deadline of its own — a sign-in, or a renewal whose
+#: liveness check has a tighter one still — and a per-phase timeout past
+#: it only turns a slow gateway into a 504. Applied where the setting is
+#: read rather than refused by ``validate_settings``, which runs whenever
+#: a row is built: refusing would take a live connection down on upgrade.
+_MAX_TIMEOUT_SECONDS = 30.0
+
+
 def _as_bool(v: Any) -> bool:
     if isinstance(v, bool):
         return v
@@ -474,7 +484,11 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         trust_unsigned=_as_bool(s.get("trust_unsigned")),
         jwt_issuer=str(s.get("jwt_issuer") or "").strip(),
         jwt_audience=str(s.get("jwt_audience") or "").strip(),
-        timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
+        # Capped here, not refused by validation — see
+        # ``_MAX_TIMEOUT_SECONDS``.
+        timeout_seconds=min(
+            _as_float(s.get("timeout_seconds"), 5.0), _MAX_TIMEOUT_SECONDS,
+        ),
         max_response_bytes=_as_int(s.get("max_response_bytes"), MAX_JSON_BYTES),
         tls_verify=_as_bool(s.get("tls_verify", True)),
         map_avatar=_as_bool(s.get("map_avatar")),
@@ -996,7 +1010,18 @@ class BackchannelProvider:
         else:
             key = await self._verification_key(header.get("kid"))
 
-        options: dict[str, Any] = {"require": ["exp"]}
+        options: dict[str, Any] = {
+            "require": ["exp"],
+            # ``iat`` / ``nbf`` are checked below instead. pyjwt judges them
+            # with ZERO tolerance, and the browser posts the assertion
+            # milliseconds after the gateway mints it — so a corporate
+            # clock one second ahead of ours refused a share of every
+            # sign-in. Its ``leeway`` knob would loosen ``exp`` too, which
+            # this single-use token should not get; the same split as
+            # ``custom_profile``.
+            "verify_iat": False,
+            "verify_nbf": False,
+        }
         kwargs: dict[str, Any] = {}
         if s.jwt_audience:
             kwargs["audience"] = s.jwt_audience
@@ -1005,7 +1030,7 @@ class BackchannelProvider:
         if s.jwt_issuer:
             kwargs["issuer"] = s.jwt_issuer
         try:
-            return pyjwt.decode(
+            claims = pyjwt.decode(
                 token, key=key, algorithms=list(allowed),
                 options=options, **kwargs,
             )
@@ -1022,6 +1047,25 @@ class BackchannelProvider:
                 f"jwt_refused:{type(exc).__name__}",
                 code="backchannel_jwt_invalid",
             ) from exc
+        # A token from further in the future than clock drift explains is
+        # still refused — tolerance is for skew, not for post-dated tokens.
+        now = time.time()
+        for claim in ("iat", "nbf"):
+            value = claims.get(claim) if isinstance(claims, dict) else None
+            if value is None:
+                continue
+            try:
+                ahead = float(value) - now
+            except (TypeError, ValueError):
+                raise BackchannelError(
+                    f"jwt_refused:bad_{claim}", code="backchannel_jwt_invalid",
+                ) from None
+            if ahead > CLOCK_SKEW_LEEWAY_SECONDS:
+                raise BackchannelError(
+                    f"jwt_refused:future_{claim}",
+                    code="backchannel_jwt_invalid",
+                )
+        return claims
 
     async def _verification_key(self, kid: Any):
         """The key *kid* names, from the configured JWKS.

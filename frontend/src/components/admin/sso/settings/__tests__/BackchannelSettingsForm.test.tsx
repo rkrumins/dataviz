@@ -282,6 +282,46 @@ describe('reaching the allowlist', () => {
     })
 })
 
+describe("the page's own security policy", () => {
+    // The browser-made calls have the mirror-image problem: the page's
+    // CSP allows only its own origin, so the browser blocks them before
+    // they are sent, and no server log says why. The fix is on the
+    // frontend container, so the form names the exact origin to add.
+    it('names the trigger origin — scheme, host and port, no path', () => {
+        renderForm({ authenticate_url: 'https://sso.corp.example:8443/authenticate?x=1' })
+        expect(screen.getByText('https://sso.corp.example:8443')).toBeInTheDocument()
+        expect(screen.getByText('CSP_CONNECT_SRC')).toBeInTheDocument()
+    })
+
+    it('names the translate origin when the browser makes that call', () => {
+        renderForm({
+            exchange_mode: 'browser',
+            browser_exchange_url: 'https://sso.corporate.com/auth-service/translate',
+        })
+        expect(screen.getByText('https://sso.corporate.com')).toBeInTheDocument()
+    })
+
+    it('says nothing about a translate URL the browser never calls', () => {
+        // Server mode: the translate fields are hidden and the call is
+        // not the browser's to make.
+        renderForm({
+            exchange_mode: 'server',
+            browser_exchange_url: 'https://sso.corporate.com/auth-service/translate',
+        })
+        expect(screen.queryByText('CSP_CONNECT_SRC')).not.toBeInTheDocument()
+    })
+
+    it.each([
+        ['blank', ''],
+        ['not absolute', 'sso.corp.example/authenticate'],
+        ['plain http', 'http://sso.corp.example/authenticate'],
+        ['half-typed', 'https://'],
+    ])('says nothing for a %s URL', (_, url) => {
+        renderForm({ authenticate_url: url })
+        expect(screen.queryByText('CSP_CONNECT_SRC')).not.toBeInTheDocument()
+    })
+})
+
 describe('editing', () => {
     it('reports a change without dropping the rest of the settings', async () => {
         const onChange = renderForm({
