@@ -907,6 +907,8 @@ class RebaseResponse(_ApiModel):
     is why a pull could never tell the user what it had pulled."""
     clean: bool
     conflicts: List[dict] = Field(default_factory=list)
+    # On conflict: the draft's own value of each conflicting entity, to resolve from.
+    seeds: Dict[str, Optional[dict]] = Field(default_factory=dict)
     changes: Dict[str, int] = Field(default_factory=dict)
     incoming: Optional[IncomingModel] = None
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")

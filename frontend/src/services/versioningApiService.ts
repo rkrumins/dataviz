@@ -292,6 +292,8 @@ export interface IncomingChanges {
 export interface RebaseResponse {
   clean: boolean
   conflicts: Array<Record<string, unknown>>
+  /** On conflict: the draft's own value of each conflicting entity, to resolve from. */
+  seeds?: Record<string, Record<string, unknown> | null>
   /** How YOUR OWN edits had to be rewritten to sit on the new base — usually nothing. */
   changes?: Record<string, number>
   /** What actually arrived from Published. Distinct from `changes`; conflating the two is why a

@@ -1100,7 +1100,10 @@ class GraphVersioningService:
                 s, graph_id, graph, draft, main_id, dict(resolutions or {})
             )
             if conflicts:
-                return {"clean": False, "conflicts": conflicts}
+                # The draft's own value of each conflicting entity, to resolve from — just those.
+                seeds = await self._current_values(
+                    s, graph_id, branch_id, sorted({c["entity_id"] for c in conflicts}))
+                return {"clean": False, "conflicts": conflicts, "seeds": seeds}
 
             # What arrived from main in (from_seq, to_seq] — the record of what this pull brought in.
             incoming = await self._incoming_from_main(s, graph_id, main_id, from_seq, to_seq)

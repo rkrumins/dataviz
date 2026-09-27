@@ -74,6 +74,9 @@ async def _run() -> None:
         await svc.merge_mr(mr_id=mr3a, actor="carol", message="merge z")
     rc = await svc.rebase_draft(graph_id=gid, branch_id=d3, actor="carol")
     assert rc["clean"] is False and rc["conflicts"][0]["entity_id"] == "A"
+    # …with the draft's own value of each conflicting entity to resolve from — just those, never
+    # the whole draft's diff (which a client had to fetch for this, at any draft size).
+    assert set(rc["seeds"]) == {"A"} and rc["seeds"]["A"]["f"] == 99, rc["seeds"]
     rc2 = await svc.rebase_draft(graph_id=gid, branch_id=d3, actor="carol",
                                  resolutions={"A": {"displayName": "A", "entityType": "Dataset", "f": 99}})
     assert rc2["clean"] is True
