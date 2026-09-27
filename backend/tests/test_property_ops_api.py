@@ -16,7 +16,7 @@ from backend.app.api.v1.endpoints.versioning import get_import_export_service, g
 from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
 from backend.app.services.view_scope import EffectiveViewScope
 from backend.app.services.versioning import config
-from backend.app.services.versioning.property_ops import PropertyOpRunning, PublishRunning
+from backend.app.services.versioning.property_ops import CannotUndo, PropertyOpRunning, PublishRunning
 from backend.common.models.search import SearchQuery
 
 BASE = "/api/v1/ws1/versioning/graphs/g1/branches"
@@ -63,8 +63,9 @@ def _job(job_id, branch="br_1", **extra):
 
 class _Ops:
     def __init__(self):
-        self.created, self.cancelled = [], []
-        self.jobs = {"vjob_1": _job("vjob_1"), "vjob_other": _job("vjob_other", branch="br_2")}
+        self.created, self.cancelled, self.undone = [], [], []
+        self.jobs = {"vjob_1": _job("vjob_1"), "vjob_other": _job("vjob_other", branch="br_2"),
+                     "vjob_undone": _job("vjob_undone"), "vjob_busy": _job("vjob_busy")}
 
     async def create(self, **kw):
         if kw["branch_id"] == "br_opbusy":
@@ -84,6 +85,15 @@ class _Ops:
     async def cancel(self, job_id):
         self.cancelled.append(job_id)
         return {**self.jobs[job_id], "cancelRequested": True}
+
+    async def create_undo(self, *, job_id, actor):
+        if job_id == "vjob_undone":
+            raise CannotUndo("already_undone", "The operation is undone already.")
+        if job_id == "vjob_busy":
+            raise PropertyOpRunning("vjob_live")
+        self.undone.append((job_id, actor))
+        self.jobs["vjob_undo"] = _job("vjob_undo", kind="undo", undoOf=job_id)
+        return "vjob_undo"
 
     async def running(self, *, graph_id, branch_id):
         return "vjob_live" if branch_id == "br_busy" else None
@@ -211,8 +221,8 @@ async def test_the_draft_must_take_it(test_client, services):
 async def test_a_drafts_operations_are_listed_followed_and_stopped(test_client, services):
     listed = await test_client.get(f"{BASE}/br_1/property-ops")
     assert listed.status_code == 200, listed.text
-    assert listed.json() == {"ops": [_job("vjob_1")], "draftChanges": 7,
-                             "maxDraftChanges": config.PROPERTY_OP_MAX_DRAFT_CHANGES}
+    assert listed.json() == {"ops": [_job("vjob_1"), _job("vjob_undone"), _job("vjob_busy")],
+                             "draftChanges": 7, "maxDraftChanges": config.PROPERTY_OP_MAX_DRAFT_CHANGES}
     one = await test_client.get(f"{BASE}/br_1/property-ops/vjob_1")
     assert one.status_code == 200 and one.json()["jobId"] == "vjob_1"
     for other in ("vjob_other", "vjob_missing"):
@@ -221,6 +231,22 @@ async def test_a_drafts_operations_are_listed_followed_and_stopped(test_client, 
     stopped = await test_client.post(f"{BASE}/br_1/property-ops/vjob_1/cancel")
     assert stopped.status_code == 200 and stopped.json()["cancelRequested"] is True
     assert services.ops.cancelled == ["vjob_1"]
+
+
+async def test_an_operation_is_undone_by_a_job(test_client, services):
+    r = await test_client.post(f"{BASE}/br_1/property-ops/vjob_1/undo")
+    assert r.status_code == 202, r.text
+    assert r.json()["jobId"] == "vjob_undo" and r.json()["undoOf"] == "vjob_1"
+    assert services.ops.undone == [("vjob_1", "usr_test000000")], "undone as the caller"
+    assert services.jobs.started == ["vjob_undo"]
+
+    undone = await test_client.post(f"{BASE}/br_1/property-ops/vjob_undone/undo")
+    assert undone.status_code == 409 and undone.json()["detail"]["type"] == "already_undone", undone.text
+    busy = await test_client.post(f"{BASE}/br_1/property-ops/vjob_busy/undo")
+    assert busy.status_code == 409 and busy.json()["detail"]["type"] == "property_op_running"
+    other = await test_client.post(f"{BASE}/br_1/property-ops/vjob_other/undo")
+    assert other.status_code == 404
+    assert services.jobs.started == ["vjob_undo"]
 
 
 async def test_a_draft_being_written_is_not_published_merged_or_pulled(test_client, services):
@@ -379,6 +405,13 @@ async def test_the_job_waits_while_the_published_graph_catches_up(hook):
     hook.state.svc.fresh = True
     hook.state.engine = SimpleNamespace(provider=_Searchable(), _branch_id="br_main")   # stale again
     assert await hook.run(JOB) is None
+
+
+async def test_an_undo_searches_nothing_so_it_does_not_wait(hook):
+    hook.state.svc.fresh = False
+    ctx = await hook.run({**JOB, "kind": "undo"})
+    assert ctx is not None and ctx.provider is None and ctx.run_context is None
+    assert ctx.containment_edge_types == ["CONTAINS"] and ctx.ontology_rules == "rules"
 
 
 async def test_a_graph_that_cannot_be_searched_fails_the_job(hook):

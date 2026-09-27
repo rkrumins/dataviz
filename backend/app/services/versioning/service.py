@@ -3859,6 +3859,29 @@ class GraphVersioningService:
         async with self._session() as s:
             return await self._change_count(s, graph_id, branch_id)
 
+    async def draft_entity_ids(self, *, graph_id: str, branch_id: str) -> set:
+        """The ids of the entities a draft changes: its own heads."""
+        async with self._session() as s:
+            return set((await s.execute(select(EntityHeadORM.entity_id).where(
+                EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id))).scalars())
+
+    async def commit_node_changes(self, *, graph_id: str, commit_id: str, after: Optional[str] = None,
+                                  limit: int = 10_000) -> List[Tuple[str, Optional[dict], Optional[dict]]]:
+        """A commit's node changes a page at a time, keyset on entity id through ``ix_nv_commit``:
+        ``(entity_id, before, after)`` — each node as it was just before the commit and as the
+        commit left it (``None``: absent). What undoing a property operation reverts."""
+        async with self._session() as s:
+            query = select(NodeVersionORM.entity_id, NodeVersionORM.op, NodeVersionORM.payload,
+                           NodeVersionORM.prev_content_hash).where(
+                NodeVersionORM.graph_id == graph_id, NodeVersionORM.commit_id == commit_id)
+            if after is not None:
+                query = query.where(NodeVersionORM.entity_id > after)
+            rows = (await s.execute(query.order_by(NodeVersionORM.entity_id).limit(limit))).all()
+            before = await self._payloads_by_content_hash(
+                s, graph_id, {eid: prev for eid, _op, _p, prev in rows if prev}, {})
+        return [(eid, before.get(eid), None if op == "delete" else payload)
+                for eid, op, payload, _prev in rows]
+
     async def draft_node_urns(self, *, graph_id: str, branch_id: str) -> List[str]:
         """The URNs, as ``main`` has them now, of the nodes a draft changed and still has — not the
         ones it created, which ``main`` doesn't have. A property operation's search judges each node
@@ -5390,7 +5413,8 @@ class GraphVersioningService:
         (:mod:`.property_directive`), one op per entity: it is decided on the entity's value in
         this branch inside the commit, and ``outcome`` (when given) is filled with the entity ids
         it ``changed``, left ``unchanged``, found ``notInDraft`` (not live in the branch), or
-        skipped because a rename's ``targetExists``.
+        skipped because a rename's ``targetExists`` or a revert's key was edited since
+        (``changedSince``).
 
         Cost is **O(ops)**, not O(graph): it resolves only the affected entities' current
         values (``_current_values``), cascades node deletes to their live incident edges
@@ -5492,7 +5516,7 @@ class GraphVersioningService:
             # Property operations are decided HERE, on each entity's value in this branch now (and
             # again on a retry, which re-enters with a fresh read) — never on what the caller saw.
             decided: Dict[str, List[str]] = {"changed": [], "unchanged": [], "notInDraft": [],
-                                             "targetExists": []}
+                                             "targetExists": [], "changedSince": []}
             for eid, directive in directives.items():
                 cur = cur_vals.get(eid)
                 if cur is None:
@@ -5750,8 +5774,9 @@ class GraphVersioningService:
         for model, ids in ((NodeVersionORM, node_ids), (EdgeVersionORM, edge_ids)):
             if not ids:
                 continue
-            tokens = list({eid_to_token[e] for e in ids})
-            for chunk in _chunks(ids, _IN_LIST_MAX):
+            # Each chunk sends its ids and just their tokens: at most _IN_LIST_MAX parameters.
+            for chunk in _chunks(ids, _IN_LIST_MAX // 2):
+                tokens = list({eid_to_token[e] for e in chunk})
                 rows = (await s.execute(
                     select(model.entity_id, model.content_hash, model.payload).where(
                         model.graph_id == graph_id, model.entity_id.in_(chunk),

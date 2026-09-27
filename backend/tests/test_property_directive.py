@@ -114,3 +114,58 @@ def test_a_malformed_directive_is_refused(directive):
 ])
 def test_a_well_formed_directive_passes(directive):
     check(directive)
+
+
+# ---------------------------------------------------------------------------
+# revert: an operation undone on one entity, only where nothing edited it since
+# ---------------------------------------------------------------------------
+
+def _revert(**restore):
+    return {"kind": "revert", "restore": restore}
+
+
+@pytest.mark.parametrize("props, directive, outcome, after", [
+    # A set that added a key: it goes. One that replaced a value: the value comes back, as typed.
+    ({"owner": "alice", "x": 1}, _revert(owner={"after": "alice"}), "changed", {"x": 1}),
+    ({"code": 42}, _revert(code={"before": "42", "after": 42}), "changed", {"code": "42"}),
+    ({"id": INT64_MAX}, _revert(id={"before": 0, "after": INT64_MAX}), "changed", {"id": 0}),
+    # A remove: the value comes back whatever it held.
+    ({}, _revert(cfg={"before": {"a": [1, {"b": 2}]}}), "changed", {"cfg": {"a": [1, {"b": 2}]}}),
+    # A rename: the old key back, the new one as it was (absent, or the blank it overwrote).
+    ({"steward": "alice"}, _revert(owner={"before": "alice"}, steward={"after": "alice"}),
+     "changed", {"owner": "alice"}),
+    ({"steward": "alice"}, _revert(owner={"before": "alice"}, steward={"before": " ", "after": "alice"}),
+     "changed", {"owner": "alice", "steward": " "}),
+    # Already as it was (an undo run again): nothing to do.
+    ({"x": 1}, _revert(owner={"after": "alice"}), "unchanged", None),
+    ({"code": "42"}, _revert(code={"before": "42", "after": 42}), "unchanged", None),
+    # Edited since — another value, another type, removed, or one key of a rename moved on: left alone.
+    ({"owner": "carol"}, _revert(owner={"after": "alice"}), "changedSince", None),
+    ({"flag": 1}, _revert(flag={"before": False, "after": True}), "changedSince", None),
+    ({}, _revert(code={"before": "42", "after": 42}), "changedSince", None),
+    ({"steward": "alice", "owner": "dave"}, _revert(owner={"before": "alice"}, steward={"after": "alice"}),
+     "changedSince", None),
+])
+def test_a_revert_puts_back_only_what_nothing_edited_since(props, directive, outcome, after):
+    res = resolve(_node(**props), directive)
+    assert res.outcome == outcome
+    assert (res.payload["properties"] if res.payload else None) == after
+    if after:
+        for key, value in after.items():
+            assert type(res.payload["properties"][key]) is type(value)
+
+
+@pytest.mark.parametrize("directive", [
+    {"kind": "revert"},
+    {"kind": "revert", "restore": {}},
+    {"kind": "revert", "restore": {"owner": "alice"}},
+    {"kind": "revert", "restore": {"": {"after": 1}}},
+    {"kind": "revert", "restore": {"owner": {"later": 1}}},
+])
+def test_a_malformed_revert_is_refused(directive):
+    with pytest.raises(ValueError):
+        check(directive)
+
+
+def test_a_well_formed_revert_passes():
+    check(_revert(owner={"before": "a", "after": "b"}, steward={}))

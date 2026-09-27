@@ -18,6 +18,12 @@ For the key ``k`` (``n`` the new key of a rename):
 
 "Blank" is exactly what search's ``isEmpty`` matches (:func:`search_semantics.is_blank`), so an
 operation acts on what a search for it finds.
+
+Undoing an operation is a ``revert`` per entity: ``restore`` holds each key the operation changed,
+as it was ``before`` and as the operation left it (``after``) — a side left out is an absent key.
+Every key still as the operation left it goes back; every key already back is unchanged; anything
+else was edited since (``changedSince``) and is left as it is. Values compare by type as well:
+``42`` is not ``"42"``.
 """
 from __future__ import annotations
 
@@ -29,7 +35,7 @@ KINDS = ("set", "fillEmpty", "rename", "remove")
 
 
 class Resolution(NamedTuple):
-    outcome: str                    # "changed" | "unchanged" | "targetExists"
+    outcome: str                    # "changed" | "unchanged" | "targetExists" | "changedSince"
     payload: Optional[dict] = None  # the entity's new payload, when changed
 
 
@@ -39,6 +45,13 @@ _UNCHANGED = Resolution("unchanged")
 def check(directive: Mapping[str, Any]) -> None:
     """Raise ``ValueError`` for a directive no entity could be decided by."""
     kind, key = directive.get("kind"), directive.get("key")
+    if kind == "revert":
+        restore = directive.get("restore")
+        if not isinstance(restore, Mapping) or not restore or not all(
+                isinstance(k, str) and k and isinstance(v, Mapping) and set(v) <= {"before", "after"}
+                for k, v in restore.items()):
+            raise ValueError("a revert needs each key it restores, with its value before and after")
+        return
     if kind not in KINDS:
         raise ValueError(f"unknown property operation {kind!r}")
     if not isinstance(key, str) or not key:
@@ -53,9 +66,20 @@ def check(directive: Mapping[str, Any]) -> None:
 
 def resolve(current: Mapping[str, Any], directive: Mapping[str, Any]) -> Resolution:
     """What ``directive`` does to an entity whose current payload is ``current``."""
-    kind, key = directive["kind"], directive["key"]
+    kind, key = directive["kind"], directive.get("key")
     props = dict(current.get("properties") or {})
-    if kind == "set":
+    if kind == "revert":
+        restore = directive["restore"]
+        if all(_holds(props, k, side, "before") for k, side in restore.items()):
+            return _UNCHANGED
+        if not all(_holds(props, k, side, "after") for k, side in restore.items()):
+            return Resolution("changedSince")
+        for k, side in restore.items():
+            if "before" in side:
+                props[k] = side["before"]
+            else:
+                props.pop(k, None)
+    elif kind == "set":
         value = directive["value"]
         if key in props and type(props[key]) is type(value) and props[key] == value:
             return _UNCHANGED
@@ -78,3 +102,21 @@ def resolve(current: Mapping[str, Any], directive: Mapping[str, Any]) -> Resolut
     else:
         raise ValueError(f"unknown property operation {kind!r}")
     return Resolution("changed", {**current, "properties": props})
+
+
+def _holds(props: Mapping[str, Any], key: str, side: Mapping[str, Any], which: str) -> bool:
+    """Whether ``props`` holds ``key`` as ``side[which]`` has it — absent when that is left out."""
+    if which not in side:
+        return key not in props
+    return key in props and _identical(props[key], side[which])
+
+
+def _identical(a: Any, b: Any) -> bool:
+    """Equal and of the same type all the way down: ``42`` is not ``"42"``, ``True`` is not ``1``."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, list):
+        return len(a) == len(b) and all(_identical(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_identical(a[k], b[k]) for k in a)
+    return a == b

@@ -73,6 +73,7 @@ async def test_writes_blocked_when_disabled(test_client: AsyncClient):
         ("POST", f"/api/v1/{WS}/versioning/graphs/g1/branches/b1/publish"),
         ("POST", f"/api/v1/{WS}/versioning/graphs/g1/branches/b1/property-ops"),
         ("POST", f"/api/v1/{WS}/versioning/graphs/g1/branches/b1/property-ops/j1/cancel"),
+        ("POST", f"/api/v1/{WS}/versioning/graphs/g1/branches/b1/property-ops/j1/undo"),
         ("PATCH", f"/api/v1/{WS}/versioning/graphs/g1/branches/b1"),
         ("POST", f"/api/v1/{WS}/versioning/graphs/g1/commits/c1/revert"),
         ("POST", f"/api/v1/{WS}/versioning/pulls/pr1/merge"),

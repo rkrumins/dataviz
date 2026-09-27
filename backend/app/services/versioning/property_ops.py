@@ -19,6 +19,10 @@ The Property Manager picks entities with an Advanced Search and one operation on
 Between windows it stops when asked (:meth:`PropertyOps.cancel`), or when the draft was published or
 discarded; what it already wrote stays. A draft runs one operation at a time, never beside its
 publish.
+
+An operation is undone by another job (:meth:`PropertyOps.create_undo`): its commits are read back a
+page at a time and each entity reverted inside a new commit — only the keys the operation changed,
+and only where nothing edited them since (a ``revert`` directive).
 """
 from __future__ import annotations
 
@@ -90,6 +94,14 @@ def running_refusal(job_id: str) -> Dict[str, Any]:
                        "finish, or stop it, first."}
 
 
+class CannotUndo(RuntimeError):
+    """An operation that can't be undone: it changed nothing, is an undo, or is undone already."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class _Stopped(Exception):
     """The job ends here as ``status``, telling the user ``message`` (none when asked to stop)."""
 
@@ -113,6 +125,16 @@ def op_label(op: Dict[str, Any]) -> str:
 def _shown(value: Any) -> str:
     text = value if isinstance(value, str) else json.dumps(value)
     return text if len(text) <= 80 else text[:79] + "…"
+
+
+def _sides(before: Dict[str, Any], after: Dict[str, Any], key: str) -> Dict[str, Any]:
+    """``key`` as it was before a commit and as the commit left it — a side left out when absent."""
+    sides: Dict[str, Any] = {}
+    for which, payload in (("before", before), ("after", after)):
+        props = payload.get("properties") or {}
+        if key in props:
+            sides[which] = props[key]
+    return sides
 
 
 def _narrowed(query: SearchQuery, op: Dict[str, Any]) -> Optional[SearchQuery]:
@@ -170,7 +192,8 @@ def _wire(row: JobORM) -> Dict[str, Any]:
     fields = row.field_scope or {}
     phase = QUEUED if row.status == "pending" else row.current_phase if row.status == "running" else None
     return {
-        "jobId": row.id, "kind": fields.get("kind", "apply"), "status": row.status, "phase": phase,
+        "jobId": row.id, "kind": fields.get("kind", "apply"), "undoOf": fields.get("undoOf"),
+        "undoneBy": fields.get("undoneBy"), "status": row.status, "phase": phase,
         "cancelRequested": bool(fields.get("cancel")), "graphId": row.graph_id,
         "branchId": row.branch_id, "viewId": row.scope_view_id, "actor": fields.get("actor"),
         "op": fields.get("op"), "predicate": (fields.get("query") or {}).get("predicate"),
@@ -180,14 +203,19 @@ def _wire(row: JobORM) -> Dict[str, Any]:
     }
 
 
-def _too_many(room: int, before: int) -> str:
-    return (f"This operation would change more than {room:,} entities, and a draft holds at most "
-            f"{config.PROPERTY_OP_MAX_DRAFT_CHANGES:,} changes ({before:,} here already). Narrow the "
-            "search, or publish this draft and continue in a new one.")
+def _too_broad() -> str:
+    return (f"This search matches more than {config.PROPERTY_OP_MAX_DRAFT_CHANGES:,} entities, more "
+            "than a draft may hold. Narrow the search.")
+
+
+def _too_many(new: int, before: int) -> str:
+    return (f"This operation would change {new:,} entities this draft doesn't change yet, and it "
+            f"holds {before:,} changes already: more than the {config.PROPERTY_OP_MAX_DRAFT_CHANGES:,} "
+            "a draft may hold. Narrow the search, or publish this draft and continue in a new one.")
 
 
 class PropertyOps:
-    """Create, follow, stop and run property operations."""
+    """Create, follow, stop, undo and run property operations."""
 
     def __init__(self, versioning: GraphVersioningService,
                  context: Optional[Callable[[Dict[str, Any]], Awaitable[Optional[OpContext]]]]) -> None:
@@ -203,18 +231,7 @@ class PropertyOps:
         :class:`PublishRunning` while the draft has one, or its publish, under way."""
         property_directive.check(op)
         async with db.graphver_session() as s:
-            # Two requests at once would each see no job under way and each add one: the draft's
-            # row, locked, puts them one after the other.
-            branch = (await s.execute(select(BranchORM).where(BranchORM.id == branch_id)
-                                      .with_for_update())).scalar_one_or_none()
-            if branch is None or branch.graph_id != graph_id:
-                raise ValueError(f"unknown branch {branch_id}")
-            if branch.kind == "main" or branch.status != "open":
-                raise ValueError(f"branch {branch_id} is not an open draft")
-            await self._svc._assert_not_bootstrapping(s, graph_id)
-            live = await _live_job(s, graph_id, branch_id, ("property_op", "publish"))
-            if live is not None:
-                raise (PropertyOpRunning if live.job_type == "property_op" else PublishRunning)(live.id)
+            await self._open_draft(s, graph_id, branch_id)
             job = JobORM(job_type="property_op", graph_id=graph_id, workspace_id=workspace_id,
                          data_source_id=data_source_id, branch_id=branch_id, scope_view_id=view_id,
                          status="pending", field_scope={
@@ -224,6 +241,52 @@ class PropertyOps:
             s.add(job)
             await s.flush()
             return job.id
+
+    async def create_undo(self, *, job_id: str, actor: str) -> str:
+        """Queue the undo of an operation: what it changed put back, entity by entity, where
+        nothing edited it since. :class:`CannotUndo` for one that changed nothing, is itself an
+        undo, or is undone already; otherwise refused as :meth:`create` is."""
+        async with db.graphver_session() as s:
+            where = (await s.execute(select(JobORM.graph_id, JobORM.branch_id).where(
+                JobORM.id == job_id, JobORM.job_type == "property_op"))).first()
+            if where is None:
+                raise ValueError(f"unknown property operation {job_id}")
+            graph_id, branch_id = where
+            await self._open_draft(s, graph_id, branch_id)
+            target = (await s.execute(select(JobORM).where(JobORM.id == job_id)
+                                      .with_for_update())).scalar_one()
+            fields = target.field_scope or {}
+            if fields.get("kind") != "apply":
+                raise CannotUndo("undo_not_undone", "An undo isn't undone: run the operation again.")
+            if not (target.summary or {}).get("commits"):
+                raise CannotUndo("nothing_to_undo", "The operation changed nothing, so there is "
+                                                    "nothing to undo.")
+            prior = await s.get(JobORM, fields["undoneBy"]) if fields.get("undoneBy") else None
+            if prior is not None and prior.status == "completed":
+                raise CannotUndo("already_undone", "The operation is undone already.")
+            undo = JobORM(job_type="property_op", graph_id=graph_id, workspace_id=target.workspace_id,
+                          data_source_id=target.data_source_id, branch_id=branch_id,
+                          scope_view_id=target.scope_view_id, status="pending", field_scope={
+                              "kind": "undo", "actor": actor, "undoOf": job_id, "op": fields.get("op"),
+                              "query": fields.get("query"), "scopeHash": fields.get("scopeHash")})
+            s.add(undo)
+            await s.flush()
+            target.field_scope = {**fields, "undoneBy": undo.id}
+            return undo.id
+
+    async def _open_draft(self, s, graph_id: str, branch_id: str) -> None:
+        """Lock the draft's row and check it takes a new operation now. The lock puts two requests
+        at once one after the other: each would otherwise see no job under way and add one."""
+        branch = (await s.execute(select(BranchORM).where(BranchORM.id == branch_id)
+                                  .with_for_update())).scalar_one_or_none()
+        if branch is None or branch.graph_id != graph_id:
+            raise ValueError(f"unknown branch {branch_id}")
+        if branch.kind == "main" or branch.status != "open":
+            raise ValueError(f"branch {branch_id} is not an open draft")
+        await self._svc._assert_not_bootstrapping(s, graph_id)
+        live = await _live_job(s, graph_id, branch_id, ("property_op", "publish"))
+        if live is not None:
+            raise (PropertyOpRunning if live.job_type == "property_op" else PublishRunning)(live.id)
 
     async def running(self, *, graph_id: str, branch_id: str) -> Optional[str]:
         """The operation being written into this draft — pending or running, and alive — or None."""
@@ -270,13 +333,17 @@ class PropertyOps:
         job = await self._begin(job_id)
         if job is None:                                   # stopped before it started
             return ((await self.get(job_id)) or {}).get("summary") or {}
+        undo = job["kind"] == "undo"
         summary: Dict[str, Any] = {
+            "restored": 0, "unchanged": 0, "changedSince": 0, "missing": 0,
+            "skipped": {"ontology": 0}, "commits": [], "timings": {},
+        } if undo else {
             "matched": 0, "applied": 0, "unchanged": 0, "notInDraft": 0,
             "skipped": {"targetExists": 0, "ontology": 0}, "commits": [],
             "draftChangesBefore": None, "timings": {}}
         beat = asyncio.create_task(heartbeat(job_id))
         try:
-            await self._run(job_id, job, summary)
+            await (self._undo if undo else self._apply)(job_id, job, summary)
             status, error = "completed", None
         except _Stopped as stop:
             status, error = stop.status, stop.message
@@ -301,85 +368,144 @@ class PropertyOps:
             fields = row.field_scope or {}
             return {"jobId": row.id, "graphId": row.graph_id, "branchId": row.branch_id,
                     "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id,
-                    "viewId": row.scope_view_id, "actor": fields.get("actor"), "op": fields["op"],
-                    "query": fields["query"], "scopeHash": fields.get("scopeHash")}
+                    "viewId": row.scope_view_id, "kind": fields.get("kind", "apply"),
+                    "undoOf": fields.get("undoOf"), "actor": fields.get("actor"), "op": fields["op"],
+                    "query": fields.get("query"), "scopeHash": fields.get("scopeHash")}
 
-    async def _run(self, job_id: str, job: Dict[str, Any], summary: Dict[str, Any]) -> None:
-        graph_id, branch_id, op = job["graphId"], job["branchId"], job["op"]
-        timings = summary["timings"]
+    async def _wait(self, job_id: str, job: Dict[str, Any], summary: Dict[str, Any]) -> OpContext:
+        """The job's context, once the API layer gives it: while the published graph catches up
+        it has none, and the job waits."""
         if self._context is None:
             raise _Stopped("failed", "Property operations can't run here: no search is configured.")
-
         started = time.monotonic()
         await self._phase(job_id, "waiting")
         while True:
-            await self._check(job_id, branch_id)
+            await self._check(job_id, job["branchId"])
             ctx = await self._context(job)
             if ctx is not None:
-                break
+                summary["timings"]["waitingMs"] = int((time.monotonic() - started) * 1000)
+                return ctx
             if time.monotonic() - started > _WAIT_MAX_S:
                 raise _Stopped("failed", "The published graph didn't catch up with the latest "
                                          "changes in time. Try again in a few minutes.")
             await asyncio.sleep(_WAIT_POLL_S)
-        timings["waitingMs"] = int((time.monotonic() - started) * 1000)
+
+    async def _apply(self, job_id: str, job: Dict[str, Any], summary: Dict[str, Any]) -> None:
+        graph_id, branch_id, op = job["graphId"], job["branchId"], job["op"]
+        timings = summary["timings"]
+        ctx = await self._wait(job_id, job, summary)
 
         started = time.monotonic()
         await self._phase(job_id, "finding")
+        cap = config.PROPERTY_OP_MAX_DRAFT_CHANGES
         before = await self._svc.branch_change_count(graph_id=graph_id, branch_id=branch_id)
         summary["draftChangesBefore"] = before
-        room = config.PROPERTY_OP_MAX_DRAFT_CHANGES - before
-        if room <= 0:
-            raise _Stopped("failed", f"This draft already holds {before:,} changes, the most a "
-                                     "property operation may leave it with. Publish it and continue "
-                                     "in a new draft.")
         query = SearchQuery.model_validate(job["query"])
         narrowed = _narrowed(query, op)
-        found = await ctx.provider.deep_search_scan(narrowed or query, context=ctx.run_context, cap=room)
+        found = await ctx.provider.deep_search_scan(narrowed or query, context=ctx.run_context, cap=cap)
         if found.over_cap:
-            raise _Stopped("failed", _too_many(room, before))
+            raise _Stopped("failed", _too_broad())
         urns = list(dict.fromkeys(found.urns))
         if narrowed is not None:
             urns += await self._recheck(ctx, job, query, set(urns))
-            if len(urns) > room:
-                raise _Stopped("failed", _too_many(room, before))
+        # The search's URNs are the published graph's: its ids for them are main's, and each is then
+        # decided on its value in the draft (not live there: skipped as notInDraft).
+        ids = await (await open_snapshot(graph_id=graph_id)).nodes_by_urn(urns)
+        # An entity the draft changes already adds nothing to it (one undone, then applied again).
+        known = await self._svc.draft_entity_ids(graph_id=graph_id, branch_id=branch_id)
+        new = sum(1 for eid in ids.values() if eid not in known)
+        if before + new > cap:
+            raise _Stopped("failed", _too_many(new, before))
         summary["matched"] = len(urns)
         timings["findingMs"] = int((time.monotonic() - started) * 1000)
 
         started = time.monotonic()
         await self._phase(job_id, "applying", total=len(urns), processed=0, progress=0)
-        # The search's URNs are the published graph's: its ids for them are main's, and each is then
-        # decided on its value in the draft (not live there: skipped as notInDraft).
-        published = await open_snapshot(graph_id=graph_id)
         label, window = op_label(op), max(1, config.PROPERTY_OP_WINDOW)
         parts = -(-len(urns) // window)
         for part in range(parts):
             await self._check(job_id, branch_id, done=part, parts=parts)
-            chunk = urns[part * window:(part + 1) * window]
-            ids = await published.nodes_by_urn(chunk)
-            summary["notInDraft"] += len(chunk) - len(ids)
-            outcome: Dict[str, List[str]] = {}
-            try:
-                commit = await self._write(ctx, job, [
-                    {"op": "update", "entity_kind": "node", "entity_id": eid, "directive": op}
-                    for eid in ids.values()],
-                    label if parts == 1 else f"{label} · part {part + 1} of {parts}", outcome, summary)
-            except ValueError:
-                # Refused because the draft closed since the check above: say that, not the refusal.
-                await self._check(job_id, branch_id, done=part, parts=parts)
-                raise
+            window_urns = urns[part * window:(part + 1) * window]
+            chunk = [ids[u] for u in window_urns if u in ids]
+            summary["notInDraft"] += len(window_urns) - len(chunk)
+            outcome = await self._commit(ctx, job_id, job, [
+                {"op": "update", "entity_kind": "node", "entity_id": eid, "directive": op}
+                for eid in chunk],
+                label if parts == 1 else f"{label} · part {part + 1} of {parts}", summary,
+                part=part, parts=parts)
             summary["applied"] += len(outcome.get("changed", ()))
             summary["unchanged"] += len(outcome.get("unchanged", ()))
             summary["notInDraft"] += len(outcome.get("notInDraft", ()))
             summary["skipped"]["targetExists"] += len(outcome.get("targetExists", ()))
-            if commit is not None:
-                summary["commits"].append(commit)
-                await ctx.on_written()
-            processed = min(len(urns), (part + 1) * window)
-            async with db.graphver_session() as s:
-                await s.execute(update(JobORM).where(JobORM.id == job_id).values(
-                    processed=processed, progress=processed * 100 // len(urns), summary=summary,
-                    updated_at=_now()))
+            await self._progress(job_id, min(len(urns), (part + 1) * window), len(urns), summary)
         timings["applyingMs"] = int((time.monotonic() - started) * 1000)
+
+    async def _undo(self, job_id: str, job: Dict[str, Any], summary: Dict[str, Any]) -> None:
+        """Put back what the operation ``undoOf`` changed: its commits read a page at a time, and
+        each entity reverted inside the commit on its value now — only the keys the operation
+        changed, and only where nothing edited them since."""
+        ctx = await self._wait(job_id, job, summary)
+        started = time.monotonic()
+        async with db.graphver_session() as s:
+            done = (await s.get(JobORM, job["undoOf"])).summary or {}
+        commits, total = list(done.get("commits") or []), int(done.get("applied") or 0)
+        op = job["op"]
+        keys = [op["key"], *([op["newKey"]] if op["kind"] == "rename" else [])]
+        label, window, parts = f"Undo: {op_label(op)}", max(1, config.PROPERTY_OP_WINDOW), len(commits)
+        await self._phase(job_id, "applying", total=total, processed=0, progress=0)
+        processed = 0
+        for part, commit_id in enumerate(commits):
+            after: Optional[str] = None
+            while True:
+                await self._check(job_id, job["branchId"], done=part, parts=parts)
+                changes = await self._svc.commit_node_changes(
+                    graph_id=job["graphId"], commit_id=commit_id, after=after, limit=window)
+                if not changes:
+                    break
+                after = changes[-1][0]
+                reverts = []
+                for eid, before, written in changes:
+                    if before is None or written is None:
+                        summary["missing"] += 1            # nothing known to put back
+                        continue
+                    reverts.append({"op": "update", "entity_kind": "node", "entity_id": eid,
+                                    "directive": {"kind": "revert", "restore": {
+                                        k: _sides(before, written, k) for k in keys}}})
+                outcome = await self._commit(
+                    ctx, job_id, job, reverts,
+                    label if parts == 1 else f"{label} · part {part + 1} of {parts}", summary,
+                    part=part, parts=parts)
+                summary["restored"] += len(outcome.get("changed", ()))
+                summary["unchanged"] += len(outcome.get("unchanged", ()))
+                summary["changedSince"] += len(outcome.get("changedSince", ()))
+                summary["missing"] += len(outcome.get("notInDraft", ()))
+                processed += len(changes)
+                await self._progress(job_id, processed, total, summary)
+                if len(changes) < window:
+                    break
+        summary["timings"]["applyingMs"] = int((time.monotonic() - started) * 1000)
+
+    async def _commit(self, ctx: OpContext, job_id: str, job: Dict[str, Any], ops: List[Dict[str, Any]],
+                      message: str, summary: Dict[str, Any], *, part: int, parts: int) -> Dict[str, List[str]]:
+        """Write one window as one commit, then refresh the draft's reads. What each entity came
+        to is the window's outcome."""
+        outcome: Dict[str, List[str]] = {}
+        try:
+            commit = await self._write(ctx, job, ops, message, outcome, summary)
+        except ValueError:
+            # Refused because the draft closed since the check before it: say that, not the refusal.
+            await self._check(job_id, job["branchId"], done=part, parts=parts)
+            raise
+        if commit is not None:
+            summary["commits"].append(commit)
+            await ctx.on_written()
+        return outcome
+
+    async def _progress(self, job_id: str, processed: int, total: int, summary: Dict[str, Any]) -> None:
+        async with db.graphver_session() as s:
+            await s.execute(update(JobORM).where(JobORM.id == job_id).values(
+                processed=processed, progress=min(100, processed * 100 // max(total, 1)),
+                summary=summary, updated_at=_now()))
 
     async def _recheck(self, ctx: OpContext, job: Dict[str, Any], query: SearchQuery,
                        found: set) -> List[str]:

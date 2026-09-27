@@ -16,7 +16,9 @@ import pytest
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning import property_ops as ops_mod
 from backend.app.services.versioning.import_export.service import ImportExportService
-from backend.app.services.versioning.property_ops import OpContext, PropertyOpRunning, PublishRunning
+from backend.app.services.versioning.property_ops import (
+    CannotUndo, OpContext, PropertyOpRunning, PublishRunning,
+)
 from backend.app.services.versioning.service import GraphVersioningService, OntologyViolation
 from backend.app.services.deep_search import SearchRunContext
 from backend.app.providers.falkordb_search.scan import ScanResult
@@ -268,6 +270,112 @@ async def _run() -> None:
     assert "ok" not in props["N4"] and props["N6"]["ok"] == 1
 
     await db.dispose_engine()
+
+
+async def _run_undo() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    gid = await _setup(svc)
+    search = _Search(svc, gid)
+
+    async def context(job):
+        async def on_written():
+            return None
+        return OpContext(provider=search, run_context=SearchRunContext(data_version="1"),
+                         containment_edge_types=["CONTAINS"], ontology_rules=None, on_written=on_written)
+
+    ie = ImportExportService(versioning=svc, property_op_context=context)
+    ops = ie.property_ops
+    draft = await svc.open_draft(graph_id=gid, owner="alice")
+
+    async def create(op, predicate=None):
+        return await ops.create(workspace_id="ws1", data_source_id="ds1", graph_id=gid, branch_id=draft,
+                                view_id="v", actor="alice", op=op, query=_query(predicate), scope_hash="h")
+
+    # ── A rename across the 13 nodes whose owner is bob, in two windows ──
+    renamed = await create({"kind": "rename", "key": "owner", "newKey": "steward"},
+                           {"kind": "property", "key": "owner", "op": "eq", "value": "bob"})
+    assert (await ops.run(renamed))["applied"] == 13
+
+    # Since: N0's new key edited, N2 given another key, N4 deleted.
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", ops=[
+        _update("N0", steward="carol"), _update("N2", note="kept"),
+        {"op": "delete", "entity_kind": "node", "entity_id": "N4"}])
+
+    # ── Undone entity by entity: only what nothing edited since ──
+    undo = await ops.create_undo(job_id=renamed, actor="alice")
+    assert (await ops.get(renamed))["undoneBy"] == undo
+    job = await ops.get(undo)
+    assert (job["kind"], job["undoOf"], job["op"]["kind"]) == ("undo", renamed, "rename"), job
+    summary = await ops.run(undo)
+    assert (summary["restored"], summary["changedSince"], summary["missing"]) == (11, 1, 1), summary
+    assert (await ops.get(undo))["status"] == "completed"
+    props = await _props(svc, gid, draft)
+    assert props["N2"] == {"owner": "bob", "note": "kept"}, "another key edited since is kept"
+    assert props["N0"] == {"steward": "carol"}, "a key edited since is left as it is"
+    assert props["N6"] == {"owner": "bob"} and "N4" not in props
+    log = await svc.commit_log(graph_id=gid, branch_id=draft)
+    assert [c["message"] for c in log[:2]] == [f"Undo: Rename owner to steward · part {i} of 2" for i in (2, 1)]
+
+    # ── Undone once; an undo isn't undone; nothing changed, nothing to undo ──
+    for job_id in (renamed, undo):
+        with pytest.raises(CannotUndo):
+            await ops.create_undo(job_id=job_id, actor="alice")
+    nothing = await create({"kind": "remove", "key": "nobody-has-this"})
+    assert (await ops.run(nothing))["applied"] == 0
+    with pytest.raises(CannotUndo):
+        await ops.create_undo(job_id=nothing, actor="alice")
+
+    # ── One operation at a time: no undo beside one under way ──
+    stamp = await create({"kind": "set", "key": "stamp", "value": 1})
+    with pytest.raises(PropertyOpRunning):
+        await ops.create_undo(job_id=renamed, actor="alice")
+
+    # ── A stopped operation is undone: what it wrote, no more ──
+    real_apply = svc.apply_ops
+
+    async def then_stop(**kw):
+        out = await real_apply(**kw)
+        await ops.cancel(stamp)
+        return out
+
+    svc.apply_ops = then_stop
+    try:
+        stamped = (await ops.run(stamp))["applied"]      # the first window (N4 may be in it)
+    finally:
+        svc.apply_ops = real_apply
+    assert 0 < stamped <= 10 and sum("stamp" in p for p in (await _props(svc, gid, draft)).values()) == stamped
+    undo = await ops.create_undo(job_id=stamp, actor="alice")
+    assert (await ops.run(undo))["restored"] == stamped
+    assert not any("stamp" in p for p in (await _props(svc, gid, draft)).values())
+
+    # ── Applied, undone, applied again near the cap: what the draft changes already adds nothing ──
+    again = await svc.open_draft(graph_id=gid, owner="alice")
+
+    async def apply_again():
+        job_id = await ops.create(workspace_id="ws1", data_source_id="ds1", graph_id=gid, branch_id=again,
+                                  view_id="v", actor="alice", op={"kind": "set", "key": "again", "value": 1},
+                                  query=_query(), scope_hash="h")
+        return job_id, await ops.run(job_id)
+
+    config.PROPERTY_OP_MAX_DRAFT_CHANGES = 30
+    try:
+        first, summary = await apply_again()
+        assert summary["applied"] == 25, summary
+        assert (await ops.run(await ops.create_undo(job_id=first, actor="alice")))["restored"] == 25
+        second, summary = await apply_again()
+    finally:
+        config.PROPERTY_OP_MAX_DRAFT_CHANGES = 100_000
+    assert (await ops.get(second))["status"] == "completed" and summary["applied"] == 25, summary
+    assert summary["draftChangesBefore"] == 25
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_an_operation_is_undone_where_nothing_edited_it_since(monkeypatch):
+    monkeypatch.setattr(config, "PROPERTY_OP_WINDOW", 10, raising=False)
+    monkeypatch.setattr(ops_mod, "_WAIT_POLL_S", 0.01, raising=False)
+    asyncio.run(_run_undo())
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")

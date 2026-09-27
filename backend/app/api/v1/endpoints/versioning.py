@@ -49,6 +49,7 @@ from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.property_ops import (
+    CannotUndo,
     OpContext,
     PropertyOpRunning,
     PublishRunning,
@@ -1890,6 +1891,11 @@ async def _operation_search(session: AsyncSession, ws_id: str, meta: dict, branc
     return query, scope_hash
 
 
+def _publishing(job_id: str) -> dict:
+    return {"type": "publish_running", "jobId": job_id,
+            "message": "This draft is being published. Wait for it to finish."}
+
+
 async def _refuse_while_written(ie, graph_id: str, branch_id: str) -> None:
     """409 while a property operation is being written into the draft: publishing, merging or
     pulling it now would take part of the operation, or move the draft under it."""
@@ -1901,7 +1907,8 @@ async def _refuse_while_written(ie, graph_id: str, branch_id: str) -> None:
 async def _property_op_context(job: dict) -> Optional[OpContext]:
     """What a property operation's job searches and writes with — or None while the published
     graph catches up with main (the job waits): its search runs there, as Advanced Search's does in
-    a draft, with each statement admitted like a search's. This may be the versioning worker."""
+    a draft, with each statement admitted like a search's. An undo searches nothing, so it doesn't
+    wait. This may be the versioning worker."""
     from backend.app.api.v1.endpoints.graph import _search_data_version
     from backend.app.db.engine import get_async_session
     from backend.app.providers.manager import provider_manager
@@ -1910,22 +1917,27 @@ async def _property_op_context(job: dict) -> Optional[OpContext]:
 
     svc = get_versioning_service()
     graph_id, ws, ds = job["graphId"], job["workspaceId"], job["dataSourceId"]
-    if not (await svc.projection_watermark(graph_id))["fresh"]:
+    searching = job.get("kind", "apply") == "apply"
+    if searching and not (await svc.projection_watermark(graph_id))["fresh"]:
         return None
     meta = await svc.get_graph(graph_id)
+    engine = None
     async with get_async_session() as session:
-        engine = await ContextEngine.for_workspace(ws, provider_manager, session, data_source_id=ds,
-                                                   actor=job.get("actor"))
+        if searching:
+            engine = await ContextEngine.for_workspace(ws, provider_manager, session, data_source_id=ds,
+                                                       actor=job.get("actor"))
         cset = await _live_containment_types(session, ws, ds)
         rules = await _rules_for_meta(session, ws, meta)
-    if getattr(engine, "_branch_id", None):
-        return None                                  # main went stale since: served from Postgres
-    provider = engine.provider
-    if not hasattr(provider, "deep_search_scan"):
-        raise RuntimeError("This data source's graph can't be searched for a property operation.")
-    context = SearchRunContext(data_version=await _search_data_version(engine),
-                               scope_hash=job.get("scopeHash") or "",
-                               admit=provider_manager.statement_admission(provider))
+    provider = context = None
+    if searching:
+        if getattr(engine, "_branch_id", None):
+            return None                              # main went stale since: served from Postgres
+        provider = engine.provider
+        if not hasattr(provider, "deep_search_scan"):
+            raise RuntimeError("This data source's graph can't be searched for a property operation.")
+        context = SearchRunContext(data_version=await _search_data_version(engine),
+                                   scope_hash=job.get("scopeHash") or "",
+                                   admit=provider_manager.statement_admission(provider))
 
     async def on_written() -> None:
         # The draft's canvas reads are cached per draft: each window changes them.
@@ -1974,9 +1986,7 @@ async def create_property_op(
     except PropertyOpRunning as exc:
         raise HTTPException(status_code=409, detail=running_refusal(exc.job_id)) from exc
     except PublishRunning as exc:
-        raise HTTPException(status_code=409, detail={
-            "type": "publish_running", "jobId": exc.job_id,
-            "message": "This draft is being published. Wait for it to finish."}) from exc
+        raise HTTPException(status_code=409, detail=_publishing(exc.job_id)) from exc
     await ie.start_property_op(job_id)
     return JSONResponse(status_code=202, content=await ie.property_ops.get(job_id))
 
@@ -2031,6 +2041,34 @@ async def cancel_property_op(
     with _domain_errors():
         await svc.assert_branch_editable(graph_id=graph_id, branch_id=branch_id, actor=user.id)
     return await ie.property_ops.cancel(job_id)
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/property-ops/{job_id}/undo", status_code=202,
+             dependencies=[Depends(_GATE_EDIT)])
+async def undo_property_op(
+    ws_id: str, graph_id: str, branch_id: str, job_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Put back what a property operation changed, entity by entity, where nothing edited it since
+    — as a job, like the operation: 202 with it. 409 while the draft has an operation or its
+    publish under way, and for an operation that changed nothing, is an undo, or is undone."""
+    _op_on(await ie.property_ops.get(job_id), graph_id, branch_id)
+    with _domain_errors():
+        await svc.assert_branch_editable(graph_id=graph_id, branch_id=branch_id, actor=user.id)
+    try:
+        with _domain_errors():
+            undo_id = await ie.property_ops.create_undo(job_id=job_id, actor=user.id)
+    except PropertyOpRunning as exc:
+        raise HTTPException(status_code=409, detail=running_refusal(exc.job_id)) from exc
+    except PublishRunning as exc:
+        raise HTTPException(status_code=409, detail=_publishing(exc.job_id)) from exc
+    except CannotUndo as exc:
+        raise HTTPException(status_code=409, detail={"type": exc.reason, "message": str(exc)}) from exc
+    await ie.start_property_op(undo_id)
+    return JSONResponse(status_code=202, content=await ie.property_ops.get(undo_id))
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/abandon", response_model=BranchResponse)

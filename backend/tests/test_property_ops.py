@@ -62,3 +62,24 @@ def test_a_search_within_hops_is_not_narrowed():
     within = {"kind": "group", "op": "and", "children": [
         OWNER_FINANCE, {"kind": "withinHops", "urns": ["urn:a"], "hops": 2}]}
     assert _narrowed(_query(within), {"kind": "remove", "key": "tier"}) is None
+
+
+async def test_the_values_before_a_commit_are_read_within_the_bind_limit():
+    """An undo reads each changed entity's value before the operation by its content hash. The
+    lookup sent every hash with each 20,000-id chunk: past ~16k entities one statement carried more
+    than Postgres's 32,767 bind parameters and failed."""
+    from sqlalchemy.dialects import postgresql
+
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    sent = []
+
+    class _Session:
+        async def execute(self, statement):
+            params = statement.compile(dialect=postgresql.dialect()).params
+            sent.append(sum(len(v) if isinstance(v, (list, tuple)) else 1 for v in params.values()))
+            return type("R", (), {"all": lambda self: []})()
+
+    tokens = {f"N{i}": f"h{i}" for i in range(50_000)}
+    await GraphVersioningService()._payloads_by_content_hash(_Session(), "g1", tokens, {})
+    assert sent and max(sent) <= 32_767, sent

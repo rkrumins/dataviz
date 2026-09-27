@@ -56,7 +56,7 @@ async def _run() -> None:
         _op("GHOST", kind="rename", key="owner", newKey="steward")])
     assert cid
     assert outcome == {"changed": ["A"], "unchanged": ["C"], "notInDraft": ["D", "GHOST"],
-                       "targetExists": ["B"]}, outcome
+                       "targetExists": ["B"], "changedSince": []}, outcome
     props = await _props(svc, gid, draft)
     assert props["A"] == {"steward": "bob", "code": "42"}, props["A"]
     assert props["B"] == {"owner": "carol", "steward": "dave"}, props["B"]
