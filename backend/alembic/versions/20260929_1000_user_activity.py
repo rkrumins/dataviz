@@ -21,8 +21,8 @@ from typing import Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "20260928_1000_user_activity"
-down_revision: Union[str, None] = "20260927_1000_import_indexes"
+revision: str = "20260929_1000_user_activity"
+down_revision: Union[str, None] = "20260928_1000_jobs_publish"
 branch_labels = None
 depends_on = None
 
