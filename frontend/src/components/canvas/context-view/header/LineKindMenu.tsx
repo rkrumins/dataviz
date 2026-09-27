@@ -5,8 +5,12 @@
  * draft change — drawn between the cards that hold its two ends. With roll-ups: the summaries the
  * aggregation job computes between cards are drawn too, for an overview of lineage inside cards
  * nobody has opened. The same choice as the chip at the end of the canvas's layer strip.
+ *
+ * Portalled to the body and placed below its button: the header is `backdrop-blur`, a stacking
+ * context a menu inside it could never rise out of.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Check, GitBranch, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePreferencesStore } from '@/store/preferences'
@@ -27,6 +31,8 @@ const OPTIONS = [
   },
 ] as const
 
+const WIDTH = 320
+
 export function LineKindMenu({ onClose, triggerRef }: {
   onClose: () => void
   /** The button that opened the menu — a click on it is its own toggle, not an outside click. */
@@ -35,9 +41,28 @@ export function LineKindMenu({ onClose, triggerRef }: {
   const showRollups = usePreferencesStore((s) => s.showLineageRollups)
   const setShowRollups = usePreferencesStore((s) => s.setShowLineageRollups)
   const menuRef = useRef<HTMLDivElement>(null)
+  const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null)
 
-  // Opens on the current choice.
-  useEffect(() => { menuRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus() }, [])
+  // Below the button, kept inside the window; it follows a resize or a scroll.
+  useLayoutEffect(() => {
+    const place = () => {
+      const r = triggerRef.current?.getBoundingClientRect()
+      if (r) setAnchor({ top: r.bottom + 8, left: Math.max(8, Math.min(r.left, window.innerWidth - WIDTH - 8)) })
+    }
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [triggerRef])
+
+  // Opens on the current choice, once it is placed.
+  const placed = anchor !== null
+  useEffect(() => {
+    if (placed) menuRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus()
+  }, [placed])
   // Closes on a click anywhere else, or Esc — which hands focus back to the button.
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -58,14 +83,16 @@ export function LineKindMenu({ onClose, triggerRef }: {
     }
   }, [onClose, triggerRef])
 
-  return (
+  if (!anchor) return null
+  return createPortal(
     <div
       ref={menuRef}
       role="menu"
       aria-label="Lines on the canvas"
       // Keys pressed in the menu are the menu's, not the canvas's (Esc must not clear the selection).
       {...keyboardScopeProps('line-kind-menu')}
-      className="absolute left-0 top-full mt-2 z-50 w-80 p-1.5 rounded-xl border border-glass-border bg-canvas-elevated shadow-xl"
+      style={{ position: 'fixed', top: anchor.top, left: anchor.left, width: WIDTH, zIndex: 1000 }}
+      className="p-1.5 rounded-xl border border-glass-border bg-canvas-elevated shadow-xl"
     >
       <p className="px-2.5 pt-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wide text-ink-muted">Lines on the canvas</p>
       {OPTIONS.map(({ rollups, icon: Icon, title, detail }) => {
@@ -92,6 +119,7 @@ export function LineKindMenu({ onClose, triggerRef }: {
           </button>
         )
       })}
-    </div>
+    </div>,
+    document.body,
   )
 }

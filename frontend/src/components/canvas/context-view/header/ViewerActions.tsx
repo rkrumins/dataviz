@@ -181,7 +181,7 @@ export function ComprehensionTools({
           through the colored dot + active gradient. Trace state lives
           on its own button below; this label no longer encodes it. Its
           chevron chooses WHICH lines: relationships only, or roll-ups too. */}
-      <div className="relative flex items-stretch">
+      <div className="flex items-stretch">
       <HoverTip
         className="inline-flex"
         label={showLineageFlow
