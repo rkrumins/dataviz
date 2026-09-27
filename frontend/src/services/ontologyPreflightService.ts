@@ -209,6 +209,30 @@ export function isDrawableLineageType(
   return rt.isLineage ?? true
 }
 
+/**
+ * What an existing edge IS, for deciding who maintains it. Only `lineage` is
+ * authored and kept by the graph's owners; a roll-up is materialized by the
+ * aggregation job, containment is the hierarchy (changed via "Move to"), and
+ * `other` is a type the connect picker refuses to draw. Classified by TYPE only —
+ * `data.isAggregated` is set on raw trace edges too, so it cannot tell. A type the
+ * ontology does not declare is lineage, as every non-containment line on the
+ * canvas is.
+ */
+export type EdgeKind = 'lineage' | 'rollup' | 'containment' | 'other'
+
+export function edgeKind(
+  type: string,
+  relationshipTypes: RelationshipTypeSchema[],
+  containmentEdgeTypes: string[],
+): EdgeKind {
+  if (!type) return 'other'
+  if (NON_DRAWABLE_EDGE_TYPES.has(type.toUpperCase())) return 'rollup'
+  const rt = relationshipTypes.find((r) => sameId(r.id, type))
+  if (rt?.isContainment || containmentEdgeTypes.some((t) => sameId(t, type))) return 'containment'
+  if (!rt) return 'lineage'
+  return isDrawableLineageType(rt, containmentEdgeTypes) ? 'lineage' : 'other'
+}
+
 /** True when `type` satisfies an endpoint constraint (empty / '*' = wildcard; membership is case-insensitive). */
 export function endpointOk(type: string | null, allowedTypes: string[] | undefined): boolean {
   return !type || !allowedTypes?.length || allowedTypes.includes('*') || allowedTypes.some((t) => sameId(t, type))

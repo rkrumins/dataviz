@@ -54,6 +54,7 @@ from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
+from backend.common.property_patch import apply_properties_patch
 
 logger = logging.getLogger(__name__)
 
@@ -6585,6 +6586,22 @@ class FalkorDBProvider(GraphDataProvider):
         op = "edges.between" if is_between else "edges.query"
         timeout = self._EDGES_BETWEEN_TIMEOUT if is_between else None
 
+        # A few PAIRS (a drawer reading one relationship, a handful of known
+        # endpoints): bind BOTH ends by their URN index and expand between
+        # them. Anchoring on the source alone walks its whole out-degree and
+        # filters targets afterwards — a hub source read every edge it has
+        # to find one.
+        if is_between and offset == 0 and not query.any_urns:
+            n_src = len(set(filter(None, query.source_urns)))
+            n_tgt = len(set(filter(None, query.target_urns)))
+            if n_src * n_tgt <= self._PAIR_BIND_MAX_PAIRS:
+                paired = await self._edges_between_pairs(
+                    query.source_urns, query.target_urns, rel_pattern,
+                    extra_conditions, extra_params, limit, timeout, op,
+                )
+                if paired is not None:
+                    return paired
+
         # URN-anchored reads (the /edges/between hydration path) run one
         # urn-index-seeked sub-query per label bucket, gathered — an
         # unlabeled `a.urn IN $list` anchor is a FULL node scan on builds
@@ -6669,6 +6686,65 @@ class FalkorDBProvider(GraphDataProvider):
         for row in (result.result_set or []):
             src, tgt, rel_type, rprops = row[0], row[1], row[2], (row[3] or {})
             edges.append(_edge_from_row(src, tgt, rel_type, rprops))
+        return edges
+
+    #: Source × target URN pairs up to which ``get_edges`` binds both ends by index.
+    _PAIR_BIND_MAX_PAIRS = 64
+
+    async def _edges_between_pairs(
+        self,
+        source_urns: List[str],
+        target_urns: List[str],
+        rel_pattern: str,
+        conditions: List[str],
+        params: Dict[str, Any],
+        limit: int,
+        timeout: Optional[float],
+        op: str,
+    ) -> Optional[List[GraphEdge]]:
+        """Edges from ``source_urns`` to ``target_urns``, both ends seeked by
+        their label's URN index, then expanded between (an Expand Into, not a
+        scan of either end's edges). One sub-query per (source label, target
+        label) bucket pair; the buckets are disjoint, so the rows merge as-is.
+
+        ``None`` when an end's label is unknown: an unlabeled ``urn IN`` anchor
+        is a full scan, so the caller's one-sided path is the better plan."""
+        src_buckets, tgt_buckets = await asyncio.gather(
+            self._label_buckets(list(source_urns)), self._label_buckets(list(target_urns)),
+        )
+        if not src_buckets or not tgt_buckets:
+            return []
+        if any(not label for label, _ in src_buckets) or any(not label for label, _ in tgt_buckets):
+            return None
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        async def _run_pair(src_label: str, srcs: List[str], tgt_label: str, tgts: List[str]) -> list:
+            try:
+                res = await self._ro_query(
+                    f"MATCH (a:{src_label}) WHERE a.urn IN $sourceUrns "
+                    f"MATCH (b:{tgt_label}) WHERE b.urn IN $targetUrns "
+                    f"MATCH (a)-{rel_pattern}->(b){where} "
+                    "RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, "
+                    "properties(r) AS rprops LIMIT $limit",
+                    params={**params, "sourceUrns": srcs, "targetUrns": tgts, "limit": limit},
+                    timeout=timeout, op=op,
+                )
+                return res.result_set or []
+            except asyncio.TimeoutError:
+                raise
+            except Exception as exc:
+                logger.warning("get_edges pair query failed: %s", exc)
+                return []
+
+        rows_per_pair = await asyncio.gather(*[
+            _run_pair(sl, srcs, tl, tgts) for sl, srcs in src_buckets for tl, tgts in tgt_buckets
+        ])
+        edges: List[GraphEdge] = []
+        for rows in rows_per_pair:
+            for row in rows:
+                edges.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
+                if len(edges) >= limit:
+                    return edges
         return edges
 
     async def scan_nodes(self, page_size: int = 2000) -> AsyncIterator[List[GraphNode]]:
@@ -15428,14 +15504,29 @@ class FalkorDBProvider(GraphDataProvider):
             return False
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
-        """Update edge properties by edge ID."""
+        """PATCH an edge's properties by edge ID (see the provider interface).
+
+        ``r.properties`` is one JSON string, so the stored bag is read, patched and written
+        back — SETting the patch alone replaced the bag and dropped every property it didn't
+        name. (Two queries: a concurrent PATCH of the same edge can interleave; the versioned
+        write path above this provider is what serialises edits.)
+        """
         await self._ensure_connected()
         try:
+            read = await self._query(
+                "MATCH ()-[r]->() WHERE r.id = $eid RETURN r.properties LIMIT 1",
+                params={"eid": edge_id},
+            )
+            if not read.result_set:
+                return None
+            raw = read.result_set[0][0]
+            existing = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
             result = await self._query(
                 "MATCH (a)-[r]->(b) WHERE r.id = $eid "
                 "SET r.properties = $props "
                 "RETURN a.urn, b.urn, type(r), properties(r)",
-                params={"eid": edge_id, "props": json.dumps(properties)},
+                params={"eid": edge_id,
+                        "props": json.dumps(apply_properties_patch(existing, properties))},
             )
             if not result.result_set:
                 return None

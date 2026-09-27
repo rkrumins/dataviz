@@ -32,7 +32,8 @@ import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, t
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
 import { useSaveProblemsStore } from '@/store/saveProblemsStore'
-import { OntologyViolationError } from '@/services/versioningApiService'
+import { IntegrityError, MergeConflictError, OntologyViolationError } from '@/services/versioningApiService'
+import { markConflicts } from '@/features/versioning/model/mapConflicts'
 import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -80,7 +81,9 @@ import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 import { renderedAggregationTargets, unparentedRows } from './aggregationTargets'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
-import { EntityDrawer } from '../../panels/EntityDrawer'
+import { EntityDrawer } from '../../panels/entity/EntityDrawer'
+import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
+import { targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
@@ -412,6 +415,7 @@ export function ContextViewCanvas({
   // Set form for the columns, which ask "is this row selected?" per row.
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  const drawerEdge = useCanvasStore((s) => s.drawerEdge)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
   const edgesTruncated = useCanvasStore((s) => s.edgesTruncated)
@@ -774,12 +778,17 @@ export function ContextViewCanvas({
       // Implementation handled by the existing moveToLayer function
     },
     onCloseEdgePanel: () => {
-      if (isEdgePanelOpen) { closeEdgePanel(); return true }
+      // The Explorer is only on screen when neither drawer is.
+      if (isEdgePanelOpen && !drawerNodeId && !drawerEdge) { closeEdgePanel(); return true }
       return false
     },
     onCloseEntityDrawer: () => {
       if (isStagedPanelOpen) { closeStagedChangesPanel(); return true }
-      if (drawerNodeId) { closeNodeDrawer(); clearSelection(); return true }
+      if (drawerNodeId || drawerEdge) {
+        // One move: with unsaved edits in the drawer, neither happens until the reader decides.
+        useCanvasStore.getState().requestDrawerMove(() => { closeNodeDrawer(); clearSelection() })
+        return true
+      }
       return false
     },
     // ESC exits an active trace before any other panel close — gives the
@@ -1388,7 +1397,7 @@ export function ContextViewCanvas({
 
 
   // Edge details
-  const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
+  const { isOpen: isEdgePanelOpen, close: closeEdgePanel } = useEdgeDetailPanel()
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
   const ontologyMetadata = useMemo(() => ({ edgeTypeMetadata }), [edgeTypeMetadata])
   const selectEdge = useCanvasStore((s) => s.selectEdge)
@@ -1827,7 +1836,15 @@ export function ContextViewCanvas({
     const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
     const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
     return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
-  }, [drawerNodeId, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+  }, [drawerNodeId, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+
+  // A relationship the drawer shows was resolved from THIS view's lines. Leaving
+  // the view (or this canvas) closes it, trail and all, rather than carrying a
+  // snapshot of lines that are no longer drawn into another view.
+  useEffect(() => () => {
+    const s = useCanvasStore.getState()
+    if (s.drawerEdge || s.drawerHistory.entries.some(e => e.kind === 'edge')) s.forceCloseDrawer()
+  }, [activeView?.id])
 
   // ─── Node sort modes ────────────────────────────────────────────────────────
   // Persisted state: view-wide `defaultNodeSortMode` + per-layer `nodeSortMode`
@@ -2227,35 +2244,39 @@ export function ContextViewCanvas({
     nodeId: string | readonly string[],
     direction: 'up' | 'down' | 'both' = 'both',
   ) => {
-    // A bulk trace walks every selected entity and the overlay draws their
-    // UNION. History, re-centre and the "already tracing this" check are all
-    // about a single focal, so they follow the FIRST seed — which for an
-    // ordinary one-entity trace is the only one, and nothing changes.
-    const nodeIds = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
-    if (nodeIds.length === 0) return
-    const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
-    const urn = urns[0]!
-    const view = {
-      showUpstream: direction !== 'down',
-      showDownstream: direction !== 'up',
-      depthUp: FULL_WALK_INITIAL_DEPTH,
-      depthDown: FULL_WALK_INITIAL_DEPTH,
-      // Re-pressing Trace on the focal already on screen does NOT re-seed the
-      // overlay, so recording an empty picture here would leave the entry
-      // describing a trace nobody is looking at. A genuinely new focal has no
-      // picture yet: empty means "as it opens", and the seed decides.
-      traceExpansion: canvasTraceRef.current.tracedUrn === urn
-        ? [...(overlayRef.current?.traceExpansion ?? [])]
-        : [],
-    }
-    setTraceShowUpstream(view.showUpstream)
-    setTraceShowDownstream(view.showDownstream)
-    setTraceDepthUp(view.depthUp)
-    setTraceDepthDown(view.depthDown)
-    // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
-    flushExpansionRecord()
-    setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeIds[0]!, view, timestamp: Date.now() }))
-    beginTrace(urns)
+    // A trace takes the canvas over and closes the drawer: a drawer move, held — whole — while
+    // the drawer has edits not staged yet.
+    useCanvasStore.getState().requestDrawerMove(() => {
+      // A bulk trace walks every selected entity and the overlay draws their
+      // UNION. History, re-centre and the "already tracing this" check are all
+      // about a single focal, so they follow the FIRST seed — which for an
+      // ordinary one-entity trace is the only one, and nothing changes.
+      const nodeIds = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
+      if (nodeIds.length === 0) return
+      const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
+      const urn = urns[0]!
+      const view = {
+        showUpstream: direction !== 'down',
+        showDownstream: direction !== 'up',
+        depthUp: FULL_WALK_INITIAL_DEPTH,
+        depthDown: FULL_WALK_INITIAL_DEPTH,
+        // Re-pressing Trace on the focal already on screen does NOT re-seed the
+        // overlay, so recording an empty picture here would leave the entry
+        // describing a trace nobody is looking at. A genuinely new focal has no
+        // picture yet: empty means "as it opens", and the seed decides.
+        traceExpansion: canvasTraceRef.current.tracedUrn === urn
+          ? [...(overlayRef.current?.traceExpansion ?? [])]
+          : [],
+      }
+      setTraceShowUpstream(view.showUpstream)
+      setTraceShowDownstream(view.showDownstream)
+      setTraceDepthUp(view.depthUp)
+      setTraceDepthDown(view.depthDown)
+      // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
+      flushExpansionRecord()
+      setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeIds[0]!, view, timestamp: Date.now() }))
+      beginTrace(urns)
+    })
   }, [displayMap, beginTrace, flushExpansionRecord])
 
   // History restore: the entry's own view params, no push (back/forward
@@ -5498,10 +5519,21 @@ export function ContextViewCanvas({
 
   const clearSelection = useCanvasStore((s) => s.clearSelection)
 
+  // A click on a line opens what it stands for in the relationship drawer —
+  // resolved NOW, against the lines as drawn, because a line's id does not
+  // outlive the next expand, drill or filter.
+  const handleEdgeClick = useCallback((lineId: string) => {
+    const line = visibleLineageEdges.find(e => e.id === lineId)
+    if (!line) return
+    const { edges: storeEdges, openEdgeDrawer } = useCanvasStore.getState()
+    selectEdge(lineId)
+    openEdgeDrawer(targetFromLine(line as DrawnLine, (id) => storeEdges.find(e => e.id === id)))
+  }, [visibleLineageEdges, selectEdge])
+
   // Drill-down: double-click an AGGREGATED edge to fetch finer-level lineage
   // between the two ancestors and merge it into the canvas. The trace store
   // tracks each drilldown by `${sourceUrn}->${targetUrn}@${atLevel}` so collapse
-  // can revert. Single-click still selects/opens the EdgeDetailPanel.
+  // can revert. Single-click opens the relationship drawer (handleEdgeClick).
   const handleEdgeDoubleClick = useCallback(async (edgeId: string) => {
     // Resolve the bundle from the projected edges first — bundle ids look
     // like `bundle-${sourceId}->${targetId}` and are not in the canvas
@@ -5536,6 +5568,14 @@ export function ContextViewCanvas({
           && (((trySource.data?.childCount as number) ?? trySource.children?.length ?? 0) > 0)
         const targetHasChildren = !!tryTarget && !openNow.has(bundle.target)
           && (((tryTarget.data?.childCount as number) ?? tryTarget.children?.length ?? 0) > 0)
+        if (sourceHasChildren || targetHasChildren) {
+          // The two clicks of this double-click opened the drawer on the line
+          // being drilled. The drill replaces that line — don't leave its drawer behind.
+          const open = useCanvasStore.getState().drawerEdge
+          if (open && (open.kind === 'connection' ? open.id : open.lineId) === edgeId) {
+            useCanvasStore.getState().closeNodeDrawer()
+          }
+        }
         if (sourceHasChildren) await toggleNode(bundle.source)
         if (targetHasChildren) await toggleNode(bundle.target)
         // If neither side had unrevealed children, fall through and let the
@@ -5593,6 +5633,13 @@ export function ContextViewCanvas({
   // ITS type (falling back to buildLayerId). Derived from the view's own layer
   // config — ontology-agnostic.
   const buildTypeLayerMapMemo = useMemo(() => buildTypeLayerMap(sortedLayers), [sortedLayers])
+
+  // The drawers are memoised: what this canvas hands them must keep its identity across renders.
+  const drawerTraceUp = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'up'), [startCanvasTrace])
+  const drawerTraceDown = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'down'), [startCanvasTrace])
+  const drawerFullTrace = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'both'), [startCanvasTrace])
+  const drawerLocateMany = useCallback((ids: string[]) => { void locateManyOnCanvas(ids) }, [locateManyOnCanvas])
+  const drawerStartEditing = canManage && versioningEnabled && canEnterEdit && editModeEnabled && !traceActive ? handleEnterEdit : undefined
 
   return (
     <div
@@ -6046,19 +6093,34 @@ export function ContextViewCanvas({
                   ? `Nothing was saved. ${problems[0].reason}`
                   : `Nothing was saved. ${problems.length} changes need attention.`,
                   { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
+              } else if (e instanceof MergeConflictError && Object.keys(e.current).length > 0) {
+                // Refused as a whole: someone else changed fields these edits change. Put each
+                // conflict on its change — with the current value — for the user to settle there.
+                const n = markConflicts(e) || e.conflicts.length
+                useStagedChangesStore.getState().openReviewPanel()
+                notify('error', `Nothing was saved — ${n === 1 ? 'a change conflicts' : `${n} changes conflict`} with edits made since you opened ${n === 1 ? 'it' : 'them'}.`,
+                  { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
+              } else if (e instanceof IntegrityError) {
+                notify('error', `Nothing was saved. ${e.message}`)
               } else {
                 notify('error', (e as Error).message)
               }
             }
             return
           }
-          // Main mode: legacy per-change apply.
+          // Main mode: the view's layout changes persist with the view; graph edits never write to
+          // the published graph — they stay staged, marked, for the user to take to a draft.
           const result = stagedChangeList.length > 0
-            ? await applyStagedChanges(provider, scopeWsId)
+            ? await applyStagedChanges(provider, scopeWsId, { graphWrites: false })
             : { ok: 0, failed: 0 }
           if (result.failed === 0) {
             await flushLayoutSave()
             closeStagedChangesPanel()
+          } else {
+            if (result.ok > 0) await flushLayoutSave()
+            notify('warning', `${result.failed} ${result.failed === 1 ? 'change edits' : 'changes edit'} the published graph — open a draft to save ${result.failed === 1 ? 'it' : 'them'}.`,
+              canManage && versioningEnabled && canEnterEdit && editModeEnabled
+                ? { label: 'Open a draft', onClick: handleEnterEdit } : undefined)
           }
         }} />
 
@@ -6444,9 +6506,8 @@ export function ContextViewCanvas({
               nodes={renderFlat}
               edges={effectiveLineageEdges}
               expandedNodes={expandedForRender}
-              selectEdge={selectEdge}
-              isEdgePanelOpen={isEdgePanelOpen}
-              toggleEdgePanel={toggleEdgePanel}
+              onEdgeClick={handleEdgeClick}
+              openLineId={drawerEdge ? (drawerEdge.kind === 'connection' ? drawerEdge.id : drawerEdge.lineId ?? null) : null}
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={overlay.active}
               traceResult={overlay.active ? nativeTraceResult : trace.result}
@@ -6749,22 +6810,38 @@ export function ContextViewCanvas({
         {!builderOpen && !buildOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
-            // Read-only for the whole trace window, like the canvas behind it.
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable}
+            onStartEditing={drawerStartEditing}
             writesLocked={traceActive}
             resolveNode={resolveTraceNode}
             onFocusConnections={openLens}
-            onTraceUp={(nodeId) => startCanvasTrace(nodeId, 'up')}
-            onTraceDown={(nodeId) => startCanvasTrace(nodeId, 'down')}
-            onFullTrace={(nodeId) => startCanvasTrace(nodeId, 'both')}
+            onTraceUp={drawerTraceUp}
+            onTraceDown={drawerTraceDown}
+            onFullTrace={drawerFullTrace}
             onFocusNode={revealOnCanvas}
             onRevealPath={revealSearchHit}
-            onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
+            onLocateMany={drawerLocateMany}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && drawerEdge && (
+          <RelationshipDrawer
+            key="relationship-drawer"
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable}
+            writesLocked={traceActive}
+            resolveNode={resolveTraceNode}
+            onFocusNode={revealOnCanvas}
+            onLocateMany={drawerLocateMany}
+            onDeleteEdge={canvasWritable ? interactions.deleteEdge : undefined}
+            onStartEditing={drawerStartEditing}
+          />
+        )}
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}
+            canEdit={canvasWritable}
             onClose={closeEdgePanel}
             edgeFilters={dynamicEdgeFilters}
             onToggleFilter={toggleEdgeFilter}

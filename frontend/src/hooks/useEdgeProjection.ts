@@ -448,7 +448,14 @@ export function useEdgeProjection({
     const addEdgeToGroup = (sourceId: string, targetId: string, edge: any, type: string, lifted = false) => {
       const groupKey = `${sourceId}->${targetId}`
       if (!edgeGroups.has(groupKey)) edgeGroups.set(groupKey, [])
-      edgeGroups.get(groupKey)!.push({ ...edge, source: sourceId, target: targetId, originalType: type, _lifted: lifted })
+      edgeGroups.get(groupKey)!.push({
+        ...edge, source: sourceId, target: targetId, originalType: type, _lifted: lifted,
+        // The endpoints the relationship itself names, before they are filed
+        // under the cards that draw it — what lets a line say which
+        // relationships it stands for (the relationship drawer's member list).
+        _origSource: edge._origSource ?? edge.source,
+        _origTarget: edge._origTarget ?? edge.target,
+      })
     }
 
     // The row an end is drawn on: itself, or the collapsed row it is folded
@@ -694,6 +701,8 @@ export function useEdgeProjection({
       } else {
         addEdgeToGroup(S.id, T.id, {
           id: agg.id,
+          _origSource: agg.sourceUrn,
+          _origTarget: agg.targetUrn,
           // Into an open container's children not loaded yet: drawn faint.
           _residual: isHolder(agg.sourceUrn) || isHolder(agg.targetUrn),
           data: {
@@ -836,6 +845,8 @@ export function useEdgeProjection({
             || ancestorMap.get(edge.sourceUrn) === undefined || ancestorMap.get(edge.targetUrn) === undefined
           addEdgeToGroup(S.id, T.id, {
             id: edge.id,
+            _origSource: edge.sourceUrn,
+            _origTarget: edge.targetUrn,
             data: { edgeType: edge.edgeType, relationship: edge.edgeType, confidence: edge.confidence }
           }, edge.edgeType, lifted)
         }
@@ -964,7 +975,9 @@ export function useEdgeProjection({
         isDelegated: false,
         isResidual,
         isBidirectional: false,
-        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount, bundleSize }
+        // `members`: the relationships this line stands for (by reference —
+        // nothing is copied), read when the line is clicked.
+        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount, bundleSize, members }
       })
     })
 
@@ -1015,7 +1028,10 @@ export function useEdgeProjection({
           isDelegated: false,
           isResidual: fwd.isResidual && rev.isResidual,
           isBidirectional: true,
-          data: { edgeTypes: typesArr, confidence: Math.max(fwd.confidence, rev.confidence), edgeCount, bundleSize },
+          data: {
+            edgeTypes: typesArr, confidence: Math.max(fwd.confidence, rev.confidence), edgeCount, bundleSize,
+            members: [...(fwd.data?.members ?? []), ...(rev.data?.members ?? [])],
+          },
         })
         consumed.add(fwd)
         consumed.add(rev)

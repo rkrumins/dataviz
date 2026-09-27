@@ -15,6 +15,7 @@ import {
   connectedEdgeTypes,
   typesValidForNode,
   planRetype,
+  edgeKind,
 } from '../ontologyPreflightService'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { RetypeContext, RetypeNode } from '../ontologyPreflightService'
@@ -53,6 +54,39 @@ describe('isDrawableLineageType', () => {
   it('includes lineage types and defaults unknown non-containment types to drawable', () => {
     expect(isDrawableLineageType(rt('FLOWS_TO', [], [], { isLineage: true }), [])).toBe(true)
     expect(isDrawableLineageType(rt('CUSTOM_REL', [], []), [])).toBe(true)
+  })
+})
+
+describe('edgeKind', () => {
+  const rels = [
+    rt('FLOWS_TO', [], [], { isLineage: true }),
+    rt('CONTAINS', [], [], { isContainment: true }),
+    rt('TAGGED_WITH', [], [], { isLineage: false }),
+    rt('AGGREGATED', [], [], { isLineage: true }),
+  ]
+
+  it('classifies an authored lineage type, whatever its casing', () => {
+    expect(edgeKind('FLOWS_TO', rels, [])).toBe('lineage')
+    expect(edgeKind('flows_to', rels, [])).toBe('lineage')
+  })
+
+  it('treats a type the ontology does not declare as lineage', () => {
+    expect(edgeKind('CUSTOM_REL', rels, [])).toBe('lineage')
+  })
+
+  it('classifies the synthetic roll-up by type, although it is declared lineage', () => {
+    expect(edgeKind('AGGREGATED', rels, [])).toBe('rollup')
+    expect(edgeKind('aggregated', [], [])).toBe('rollup')
+  })
+
+  it('classifies containment by flag or by the containment list', () => {
+    expect(edgeKind('CONTAINS', rels, [])).toBe('containment')
+    expect(edgeKind('BELONGS_TO', rels, ['belongs_to'])).toBe('containment')
+  })
+
+  it('classifies a declared non-lineage type, and an untyped edge, as other', () => {
+    expect(edgeKind('TAGGED_WITH', rels, [])).toBe('other')
+    expect(edgeKind('', rels, [])).toBe('other')
   })
 })
 

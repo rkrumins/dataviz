@@ -38,6 +38,8 @@ from backend.common.models.search import (
     SearchMembershipRequest,
     SearchQuery,
 )
+from backend.common.property_patch import (
+    InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
@@ -3481,8 +3483,12 @@ async def update_edge(
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Update mutable properties of an existing edge. Edge type is immutable."""
-    result = await engine.update_edge(edge_id, request)
+    """Update mutable properties of an existing edge — a PATCH: ``properties`` sets the
+    named keys, ``unsetProperties`` removes keys, the rest are kept. Edge type is immutable."""
+    try:
+        result = await engine.update_edge(edge_id, request)
+    except InvalidPatch as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
     await _invalidate_cache(engine)
     return result
 
@@ -3562,6 +3568,10 @@ class GraphChangeOp(BaseModel):
     id: Optional[str] = Field(default=None, description="entity id / urn (update/delete, or an explicit create id)")
     ref: Optional[str] = Field(default=None, description="client temp ref → echoed back in `assigned` for creates")
     payload: Optional[dict] = None
+    unset_properties: Optional[List[str]] = Field(
+        default=None, alias="unsetProperties",
+        description="update only: property names to REMOVE. An update merges `payload.properties` "
+        "key by key, so a property left out is kept — this is how one is removed.")
     base_version: Optional[str] = Field(
         default=None, alias="baseVersion",
         description="optimistic-concurrency token: the `version` (content hash) the client read for "
@@ -3580,6 +3590,12 @@ class GraphChangesRequest(BaseModel):
 class GraphChangesResponse(BaseModel):
     commit_id: Optional[str] = Field(default=None, alias="commitId")
     assigned: dict = Field(default_factory=dict)
+    # Every entity the save addressed (or its cascade removed), as a reader returns it now —
+    # `{id: {kind, version, node|edge}}`, `{kind, version: null, deleted: true}` once gone — so
+    # the client refreshes its copies and their tokens without a re-read, and the next edit of
+    # the same entity is not a conflict with its own last save. Capped (`entitiesTruncated`).
+    entities: dict = Field(default_factory=dict)
+    entities_truncated: bool = Field(default=False, alias="entitiesTruncated")
 
     class Config:
         populate_by_name = True
@@ -3622,6 +3638,9 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
     ops: List[dict] = []
     for i, o in enumerate(request_ops):
         kind = "edge" if o.kind == "edge" else "node"
+        unset = getattr(o, "unset_properties", None)
+        if unset and o.op != "update":
+            raise InvalidPatch(f"unsetProperties applies to an update, not a {o.op}")
         if o.op == "delete":
             if not o.id:
                 continue
@@ -3640,20 +3659,25 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             }})
         elif o.op == "create":
             eid = create_eid[i]
-            payload = dict(o.payload or {})
+            payload = dict(strip_deletes(o.payload) or {})     # a new entity has nothing to remove
             if kind == "edge":                 # an edge may point at nodes created in THIS same batch
                 for f in endpoint_fields:
                     if f in payload:
                         payload[f] = _ref(payload[f])
             else:                              # node — stamp the (minted-or-given) urn into the payload
+                payload = dict(lift_top_level_node_fields(payload))
                 payload["urn"] = eid
             ops.append({"op": "create", "entity_kind": kind, "entity_id": eid, "payload": payload})
-        else:  # update — forward the RAW partial patch + the OCC base_version; the service does the
+        else:  # update — forward the partial patch + the OCC base_version; the service does the
                # authoritative field-level merge (patch onto current, or a 3-way conflict check).
+               # `unsetProperties` becomes the service's one internal removal form here.
             if not o.id:
                 continue
+            payload = normalize_update(o.payload, unset)
+            if kind == "node":
+                payload = lift_top_level_node_fields(payload)
             ops.append({"op": "update", "entity_kind": kind, "entity_id": _ref(o.id),
-                        "payload": o.payload or {}, "base_version": o.base_version})
+                        "payload": payload, "base_version": o.base_version})
     return ops, assigned
 
 
@@ -3685,13 +3709,17 @@ async def apply_graph_changes(
     graph_id = g["graph_id"]
 
     from backend.app.ontology.urn import make_urn
-    ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+    try:
+        ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+    except InvalidPatch as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
 
     if not ops:
         return {"commitId": None, "assigned": assigned}
 
+    from backend.app.services.versioning.entity_audit import ENTITY_VIEW_CAP, entity_views
     try:
-        commit_id = await svc.apply_ops(
+        result = await svc.apply_ops_detailed(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
             message=request.message or "Canvas edits",
             containment_edge_types=await _resolve_containment_types(engine),
@@ -3700,7 +3728,10 @@ async def apply_graph_changes(
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except MergeConflict as exc:
-        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+        # `current`: each conflicting entity as it is now, for the client to rebase the edit onto.
+        raise HTTPException(status_code=409, detail={
+            "type": "merge_conflict", "conflicts": exc.conflicts,
+            "current": entity_views(exc.current)[0]})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
 
@@ -3715,7 +3746,9 @@ async def apply_graph_changes(
     await get_graph_cache().bump_generation(
         CacheScope(workspace_id=ws_id, data_source_id=dataSourceId, branch_id=branchId)
     )
-    return {"commitId": commit_id, "assigned": assigned}
+    entities, truncated = entity_views(result.written, result.urns, cap=ENTITY_VIEW_CAP)
+    return {"commitId": result.commit_id, "assigned": assigned,
+            "entities": entities, "entitiesTruncated": truncated}
 
 
 class DeleteImpactResponse(BaseModel):

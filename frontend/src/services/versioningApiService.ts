@@ -13,6 +13,7 @@
  * errors so the UI can route to a resolution flow instead of a generic notification.
  */
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
+import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
 import { readJsonLossless } from '@/lib/losslessJson'
@@ -235,6 +236,8 @@ export interface DiffSummaryResponse {
   entityCounts?: { added: number; modified: number; removed: number }
   edgeCounts?: { added: number; modified: number; removed: number }
   impact: Record<string, number>
+  /** A draft with more changes than the tree lists: counts only, no groups. */
+  tooLarge?: { changed: number; limit: number }
 }
 
 export interface DiffChildrenResponse {
@@ -254,10 +257,80 @@ export interface CommitLogResponse {
   userNames?: Record<string, string>
 }
 
+/** What one revision changed: a field (`[name]`) or a property (`['properties', name]`). */
+export interface RevisionChange {
+  path: string[]
+  kind: 'added' | 'removed' | 'changed'
+  before: unknown
+  after: unknown
+}
+
+/** One revision of an entity, as the paged history returns it. */
+export interface EntityRevision {
+  id: string
+  commit_id: string
+  commit_seq: number
+  branch_id: string
+  op: 'create' | 'update' | 'delete'
+  content_hash: string
+  prev_content_hash?: string | null
+  actor?: string | null
+  change_reason?: string | null
+  created_at: string
+  commit_kind?: string | null
+  commit_message?: string | null
+  /** Against the value it was made from; `null` when that value is no longer on record. */
+  changes: RevisionChange[] | null
+  /** The draft's own revision (not yet published). */
+  on_draft: boolean
+  /** Published after the draft being viewed branched — the draft does not have it. */
+  after_branch_point: boolean
+  payload?: Record<string, unknown> | null
+}
+
 export interface EntityHistoryResponse {
   entityId: string
-  versions: Array<Record<string, unknown>>
+  kind?: 'node' | 'edge' | null
+  versions: EntityRevision[]
   /** version actor id → resolved display name, covering every version in this response. */
+  userNames?: Record<string, string>
+  hasMore: boolean
+  /** Pass back as `before` for the next (older) page. */
+  nextBefore?: string | null
+}
+
+export type HistoryScope = 'all' | 'draft' | 'published'
+
+/** One event in an entity's life, as the summary reports it. */
+export interface EntityEvent {
+  at: string
+  actor?: string | null
+  op: 'create' | 'update' | 'delete'
+  commitId: string
+  inDraft: boolean
+}
+
+/** An entity as a reader returns it now, with the token its next edit echoes. */
+export type EntityView =
+  | { kind: 'node'; version: string; node: GraphNode; deleted?: undefined }
+  | { kind: 'edge'; version: string; edge: GraphEdge; deleted?: undefined }
+  | { kind: 'node' | 'edge'; version: null; deleted: true }
+
+export interface EntitySummary {
+  entityId: string
+  kind: 'node' | 'edge'
+  exists: boolean
+  version?: string | null
+  /** A fork's entity it never changed — its parent's. */
+  inherited: boolean
+  created?: EntityEvent | null
+  updated?: EntityEvent | null
+  revisions: { published: number; draft: number }
+  /** Viewing a draft: main changed this entity after the draft branched. */
+  changedOnMainSinceBranch: boolean
+  baseCommitSeq?: number | null
+  /** With `includeValue`: the entity as the line has it, and its token. */
+  value?: EntityView | null
   userNames?: Record<string, string>
 }
 
@@ -290,6 +363,8 @@ export interface IncomingChanges {
 export interface RebaseResponse {
   clean: boolean
   conflicts: Array<Record<string, unknown>>
+  /** On conflict: the draft's own value of each conflicting entity, to resolve from. */
+  seeds?: Record<string, Record<string, unknown> | null>
   /** How YOUR OWN edits had to be rewritten to sit on the new base — usually nothing. */
   changes?: Record<string, number>
   /** What actually arrived from Published. Distinct from `changes`; conflating the two is why a
@@ -344,10 +419,24 @@ export type ResolutionMap = Record<string, Record<string, unknown> | null>
 
 export class MergeConflictError extends Error {
   conflicts: Array<Record<string, unknown>>
-  constructor(conflicts: Array<Record<string, unknown>>) {
-    super('Main has moved — there are conflicting changes to resolve.')
+  /** A draft save's conflicts: each conflicting entity as it is now — what an edit rebases onto. */
+  current: Record<string, EntityView>
+  constructor(conflicts: Array<Record<string, unknown>>, current: Record<string, EntityView> = {}) {
+    super(Object.keys(current).length > 0
+      ? `Someone else changed ${conflicts.length === 1 ? 'a field' : 'fields'} you edited.`
+      : 'Main has moved — there are conflicting changes to resolve.')
     this.name = 'MergeConflictError'
     this.conflicts = conflicts
+    this.current = current
+  }
+}
+
+/** A save refused because it would leave the graph inconsistent (a relationship whose end was
+ *  removed, …) or because the draft kept moving under it. Nothing was saved. */
+export class IntegrityError extends Error {
+  constructor(message?: string) {
+    super(message || 'The draft changed while saving — nothing was saved. Try again.')
+    this.name = 'IntegrityError'
   }
 }
 
@@ -413,38 +502,62 @@ async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number 
     } catch {
       /* non-JSON error body */
     }
-    const detail = body?.detail
-    if (res.status === 409 && detail?.type === 'merge_conflict') {
-      throw new MergeConflictError(detail.conflicts ?? [])
-    }
-    if (res.status === 422 && detail?.type === 'ontology_violation') {
-      throw new OntologyViolationError(detail.violations ?? [])
-    }
-    if (res.status === 409 && detail?.type === 'not_up_to_date') {
-      throw new NotUpToDateError(detail)
-    }
-    if (res.status === 409 && detail?.type === 'pull_request_exists') {
-      throw new PullRequestExistsError(detail)
-    }
-    if (res.status === 422 && detail?.type === 'graph_name_unavailable') {
-      throw new GraphNameUnavailableError(
-        detail.message ?? 'That graph name is already taken on this connection.',
-        detail.suggestion ?? null,
-      )
-    }
-    if (res.status === 401) throw new Error('Session expired')
-    const msg =
-      typeof detail === 'string'
-        ? detail
-        : detail?.message
-        ? detail.message
-        : detail
-        ? JSON.stringify(detail)
-        : text || res.statusText
-    throw new Error(msg)
+    throw versioningError(res.status, body?.detail, text || res.statusText)
   }
   if (res.status === 204) return undefined as T
   return readJsonLossless<T>(res)
+}
+
+/** A refusal's `detail`: a message, or an object whose `type` names the refusal. */
+type RefusalDetail = string | {
+  type?: string
+  message?: string
+  conflicts?: Array<Record<string, unknown>>
+  /** A merge conflict's entities as they are now, by id. */
+  current?: Record<string, unknown>
+  violations?: Array<Record<string, unknown>>
+  branchId?: string
+  behindBy?: number
+  prId?: string
+  title?: string | null
+  suggestion?: string | null
+} | null | undefined
+
+/** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
+ *  from the request or from a job the request queued (a large draft's publish). */
+function versioningError(status: number, detail: RefusalDetail, fallback: string): Error {
+  const d = typeof detail === 'object' && detail ? detail : undefined
+  if (status === 409 && d?.type === 'merge_conflict') {
+    return new MergeConflictError(d.conflicts ?? [], (d.current ?? {}) as Record<string, EntityView>)
+  }
+  if (status === 409 && d?.type === 'integrity') {
+    return new IntegrityError(d.message)
+  }
+  if (status === 422 && d?.type === 'ontology_violation') {
+    return new OntologyViolationError(d.violations ?? [])
+  }
+  if (status === 409 && d?.type === 'not_up_to_date') {
+    return new NotUpToDateError(d)
+  }
+  if (status === 409 && d?.type === 'pull_request_exists') {
+    return new PullRequestExistsError(d as { prId: string })
+  }
+  if (status === 422 && d?.type === 'graph_name_unavailable') {
+    return new GraphNameUnavailableError(
+      d.message ?? 'That graph name is already taken on this connection.',
+      d.suggestion ?? null,
+    )
+  }
+  if (status === 401) return new Error('Session expired')
+  const msg =
+    typeof detail === 'string'
+      ? detail
+      : d?.message
+      ? d.message
+      : d
+      ? JSON.stringify(d)
+      : fallback
+  return new Error(msg)
 }
 
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`
@@ -750,6 +863,9 @@ export interface GraphChangeOp {
   id?: string
   ref?: string
   payload?: Record<string, unknown> | null
+  /** `update` only: property names to REMOVE. An update merges `payload.properties` key by key,
+   *  so a property left out is kept — naming it here is the only way to delete one. */
+  unsetProperties?: string[]
   /** Optimistic-concurrency token: the `version` (content hash) the entity was read at. On an
    *  update the server 3-way merges against it so a concurrent same-field edit conflicts instead
    *  of silently overwriting. Omit ⇒ plain patch (no OCC). */
@@ -759,6 +875,10 @@ export interface GraphChangeOp {
 export interface GraphChangesResult {
   commitId?: string | null
   assigned: Record<string, string>
+  /** Every entity the save addressed, as it is now — refresh copies and tokens from these. */
+  entities?: Record<string, EntityView>
+  /** The save touched more entities than it answers for; re-read the rest. */
+  entitiesTruncated?: boolean
 }
 
 /**
@@ -849,12 +969,40 @@ export function getSquashedCommits(
   )
 }
 
-export function getEntityHistory(
+/** One page of an entity's revisions, newest first: `main`'s and the viewed draft's own. */
+export function getEntityHistoryPage(
   wsId: string,
   graphId: string,
   entityId: string,
+  params: { branchId?: string | null; scope?: HistoryScope; limit?: number; before?: string | null; kind?: 'node' | 'edge' } = {},
 ): Promise<EntityHistoryResponse> {
-  return vfetch<EntityHistoryResponse>(`${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/history`)
+  const sp = new URLSearchParams()
+  if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.scope && params.scope !== 'all') sp.set('scope', params.scope)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.before) sp.set('before', params.before)
+  if (params.kind) sp.set('kind', params.kind)
+  const qs = sp.toString()
+  return vfetch<EntityHistoryResponse>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/history${qs ? `?${qs}` : ''}`,
+  )
+}
+
+/** Who created an entity and who last changed it, as the line being read has it. */
+export function getEntitySummary(
+  wsId: string,
+  graphId: string,
+  entityId: string,
+  params: { branchId?: string | null; kind?: 'node' | 'edge'; includeValue?: boolean } = {},
+): Promise<EntitySummary> {
+  const sp = new URLSearchParams()
+  if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.kind) sp.set('kind', params.kind)
+  if (params.includeValue) sp.set('include', 'value')
+  const qs = sp.toString()
+  return vfetch<EntitySummary>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/summary${qs ? `?${qs}` : ''}`,
+  )
 }
 
 export function getDiff(
@@ -885,8 +1033,13 @@ export function getDiffWindow(
 }
 
 /** UI-shaped diff of a draft vs its base (whole payloads + before/after). */
-export function getDiffVsMain(wsId: string, graphId: string, branchId: string): Promise<DiffVsMainResponse> {
-  return vfetch<DiffVsMainResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-vs-main`)
+/** `slim`: a modified entity by id and kind alone, without its before/after payloads — enough to
+ *  count a draft's changes and ring its nodes, at any draft size. */
+export function getDiffVsMain(
+  wsId: string, graphId: string, branchId: string, { slim = false }: { slim?: boolean } = {},
+): Promise<DiffVsMainResponse> {
+  const q = slim ? '?payloads=changes' : ''
+  return vfetch<DiffVsMainResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-vs-main${q}`)
 }
 
 // ============================================
@@ -1018,13 +1171,55 @@ export function mergePreview(wsId: string, graphId: string, branchId: string): P
 }
 
 /** Direct publish of a draft → main (the `:manage` shortcut). */
-export function publishBranch(
+export async function publishBranch(
   wsId: string,
   graphId: string,
   branchId: string,
   data: { message: string; resolutions?: ResolutionMap },
 ): Promise<CommitResponse> {
-  return vfetch<CommitResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/publish`, jsonBody(data))
+  return followPublish(wsId, await vfetch<CommitResponse | QueuedPublish>(
+    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/publish`, jsonBody(data)))
+}
+
+/** A draft too large to publish inside the request is published by a job (202): its id, and the
+ *  graph whose publish jobs to ask about it. */
+interface QueuedPublish {
+  jobId: string
+  graphId: string
+}
+
+interface PublishJob {
+  jobId: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  commitId: string | null
+  /** The refusal a publish inside the request would have given. */
+  error: { status: number; detail: RefusalDetail } | null
+}
+
+/** How often a queued publish is asked about, and for how long it may go unanswered (tests shorten
+ *  both). */
+export const PUBLISH_JOB_POLL = { ms: 2000, patienceMs: 120_000 }
+
+/** The commit a publish (or review merge) made — at once, or once the job it queued is done. A
+ *  refused job raises the error the request would have raised. A failed poll (a network blip, a web
+ *  pod restarting) doesn't stop the job, so it is asked again until it goes unanswered too long. */
+async function followPublish(wsId: string, answer: CommitResponse | QueuedPublish): Promise<CommitResponse> {
+  if (!('jobId' in answer)) return answer
+  let answeredAt = Date.now()
+  for (;;) {
+    let job: PublishJob | null = null
+    try {
+      job = await vfetch<PublishJob>(`${base(wsId)}/graphs/${answer.graphId}/publish-jobs/${answer.jobId}`)
+      answeredAt = Date.now()
+    } catch (err) {
+      if (Date.now() - answeredAt >= PUBLISH_JOB_POLL.patienceMs) throw err
+    }
+    if (job?.status === 'completed' && job.commitId) return { commitId: job.commitId }
+    if (job?.status === 'failed' || job?.status === 'cancelled') {
+      throw versioningError(job.error?.status ?? 500, job.error?.detail, 'Publishing failed')
+    }
+    await new Promise((resolve) => setTimeout(resolve, PUBLISH_JOB_POLL.ms))
+  }
 }
 
 // ============================================
@@ -1112,12 +1307,13 @@ export function closeMergeRequest(wsId: string, prId: string): Promise<PullReque
   return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/close`, jsonBody({}))
 }
 
-export function mergeMergeRequest(
+export async function mergeMergeRequest(
   wsId: string,
   prId: string,
   data: { message: string; resolutions?: ResolutionMap },
 ): Promise<CommitResponse> {
-  return vfetch<CommitResponse>(`${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data))
+  return followPublish(wsId, await vfetch<CommitResponse | QueuedPublish>(
+    `${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data)))
 }
 
 /** Itemised "Files Changed" for a PR (draft MR or fork PR — the endpoint dispatches

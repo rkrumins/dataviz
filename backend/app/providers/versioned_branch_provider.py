@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from backend.common.interfaces.provider import resolve_identities_by_query
+from backend.common.property_patch import apply_patch
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
     GraphEdge, GraphNode, GraphSchemaStats, NodePage, NodeQuery, TagSummary, TopLevelNodesResult,
@@ -646,9 +647,10 @@ class VersionedBranchProvider:
             graph_id=self._gid, entity_id=edge_id, branch_id=self._branch)
         if cur is None:
             return None
-        payload = {**cur, "properties": {**(cur.get("properties") or {}), **(properties or {})}}
+        patch = {"properties": dict(properties or {})}   # a removal is PROP_DELETE
         await self._commit([{"op": "update", "entity_kind": "edge", "entity_id": edge_id,
-                             "payload": payload}], f"update edge {edge_id}")
+                             "payload": patch}], f"update edge {edge_id}")
+        payload = apply_patch(cur, patch)
         return GraphEdge(
             id=edge_id,
             sourceUrn=payload.get("sourceEntityId") or payload.get("source_entity_id") or "",

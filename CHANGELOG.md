@@ -22,6 +22,17 @@ Resume and `curl -C -` send. Close the dialog while the file is being prepared a
 export again; the file is kept for a day. A data source without version control still streams its
 live graph as before.
 
+**Clicking a relationship opens its details, the way clicking an entity does.** A line on the canvas
+opens the relationship drawer. It shows the relationship's type and what it means, the two entities
+it joins, its confidence, its properties, and who created and last changed it and when, with its
+full revision history. Either end is one click away, on the same Back and Forward trail as the
+entity drawer, so a walk can go from an entity to a relationship and on to the next entity. In a
+draft, a lineage relationship's properties can be edited (staged with the rest of the canvas's
+changes and saved in Review & Save) and the relationship deleted. A line that stands for several
+relationships (a bundle, or one rolled up from children) opens as a connection that lists them at
+the entities they really join, and each opens on the same trail. Combined flows, hierarchy links and
+relationships on the published graph are read-only, and say why.
+
 ### Changed
 
 - **One export can be 50 GB** (`GRAPH_EXPORT_MAX_BYTES`, was 20 GiB).
@@ -30,9 +41,48 @@ live graph as before.
   bytes, until the finished summary replaces it; a finished one says whether its file is still
   `kept`. `POST …/exports` takes a `filename` for the download.
 - **A stored export downloads uncompressed**, so that the browser knows its size and can resume it.
+- **A click on a line opens the relationship drawer instead of the Edge Explorer.** The Explorer is
+  one click away from the drawer. Its cards gain an "Open details" button, and their pencil opens the
+  drawer in Edit.
+- **Entities and relationships are edited in a draft only.** On the published graph the entity
+  drawer and the Edge Explorer offer no edit controls; the drawer offers "Edit in a draft" instead,
+  and on a data source without version control its Edit tab is disabled and says why. The drawer's
+  JSON tab is read-only. A staged edit says it still needs Review & Save, with the way there.
+- **A save answers with what it stored.** `POST /graph/changes` returns `entities`: each entity the
+  save touched as a reader returns it now, with its `version` (`entitiesTruncated` past 500), and the
+  canvas takes it — so editing the same field again is not a conflict with your own last save.
+- **An entity's summary and its history, bounded.** New `GET …/entities/{id}/summary` says who
+  created the entity and who last changed it on the line you are reading (in a draft: main at the
+  draft's branch point, then the draft's own edits), how many revisions each line has, whether main
+  changed it after the draft began, and — `include=value` — its value and token. `…/history` now
+  pages newest first (`limit`, `before`/`nextBefore`, `scope=all|draft|published`, `branchId`), reads
+  only main and the draft you name (403 for a draft you cannot read), and says what each revision
+  changed, property by property. The drawers use these instead of downloading every revision.
+- **The entity and relationship drawers share one frame, and keep their keys to themselves.** Keys
+  typed in a drawer no longer reach the canvas: Backspace in a drawer does not delete the selected
+  entity, and the canvas's letter shortcuts do not fire. Esc leaves a field first, then closes the
+  drawer; ⌘S (Ctrl+S) stages an edit. When the drawer changes to another entity while you are working
+  in it, focus moves to the new title. When it closes, focus goes back to where it came from. An edit
+  in progress shows a stage bar, with Cancel and "Stage changes", on every tab. "Updated" names who
+  made the change.
+- **The drawers stay fast on large canvases.** They read their own entity rather than the whole
+  graph, so a pan, a pulse or a page of children arriving elsewhere no longer re-renders them. The
+  list of places to move an entity is built only when you open it, and is searchable. Reading the
+  relationships between a few known entities binds both ends in FalkorDB, so a relationship on a hub
+  no longer walks every edge the hub has.
+- **An update removes a property only when told to.** `POST /graph/changes`, the draft
+  `…/changes` (stage) route and `PATCH /edges/{id}` take `unsetProperties: [name, …]` beside the
+  payload. `properties` in an update merges key by key everywhere, including the stage route, which
+  used to replace the whole bag. Naming a property both in `properties` and in `unsetProperties`, or
+  `unsetProperties` on anything but an update, is a 422 (`invalid_patch`).
 
 ### Fixed
 
+- **An unstaged edit in a drawer could be lost without a word.** Esc, starting a trace, opening the
+  Hierarchy Builder or following a lineage row closed or swapped the drawer and dropped the edit, and
+  a canvas click selected the other entity while the drawer still showed the first. Now anything
+  that would move the drawer waits, selection included, and asks: stage the edit and go on, discard
+  it, or keep editing. Leaving the page asks too.
 - **A stored export's download could be cut short.** It was held to the API's two-minute deadline,
   which ends a response cleanly, so a large file (a view package's, say) could arrive incomplete while
   looking whole, and nginx buffered it to disk. It now runs as long as it takes, as the streamed
@@ -42,10 +92,49 @@ live graph as before.
   private draft, or of a view you can't read, was yours to download. Each now checks again what
   creating the export checked: an export you may not read is a 404, and missing from the list.
 - The download of an export whose file was swept now says so (404) instead of failing once started.
+- **Editing an edge's properties in the Edge Explorer crashed** before anything was staged, and
+  would have saved the canvas's own fields (`version`, `label`) as if they were properties. Edge
+  properties are now edited in the relationship drawer and saved as the properties the edit changed,
+  added or removed — so removing a property now removes it.
+- **History for an entity or relationship whose id holds a `/` returned 404.** The versioning routes
+  now keep an encoded `/` inside the id, as the graph routes already did — which covers a
+  relationship id made from two URNs with paths.
+- **Deleting an entity's property never persisted.** The save said "Saved" and the property came
+  back on reload: the drawer sent the whole property bag, and an update keeps every property it
+  doesn't mention. An edit now saves only what changed, and names each removed property. Around it,
+  every other write path removes a property the same way: two edits of one entity in one save no
+  longer lose the first one's removal; the stage-and-commit path no longer wipes the properties an
+  edit doesn't mention; a new entity never stores the removal marker; and `PATCH /edges/{id}` no longer
+  replaces a relationship's whole property bag with the few it names.
+- **Edits made on the published graph were dropped while Save reported success.** Save there now
+  keeps them, says they need a draft, and offers to open one.
+- **An entity's schema fields and business label were never saved.** Both are now stored as the
+  entity's properties, where the drawer reads them from.
+- **A rename and an edit of the same entity were two changes**, and discarding one put the other's
+  stale copy back on the canvas. They are one change now.
+- **Saving the same entity twice conflicted with yourself.** The canvas kept each entity as first
+  read, token included, so the second save merged against a value the draft had moved past.
+- **A conflicting save failed with "Main has moved".** The conflict now names each field someone else
+  changed, with the value it had, theirs and yours; Review & Save lets you keep yours or take theirs,
+  field by field, and saves only what you changed on top of their version. A 409 `merge_conflict`
+  from `/graph/changes` carries `current` (each conflicting entity as it is now) and each conflict's
+  `entity_kind`.
+- **In a draft, an entity's "Updated" could be a change the draft doesn't have** — the newest edit on
+  any branch, including main after the draft began. It is now the last change on the draft's own
+  line, and a note says when main has changed it since.
+- **The Hierarchy Builder lost a new entity's description** — it was filed among the properties,
+  where the save strips the name as reserved. It is saved as the entity's description.
+- **A removed property named like one of the platform's own (`id`, `weight`, `confidence`, …) stayed
+  on the live graph** — still shown, still matching search filters. The projection now removes any
+  property except the node's own reserved fields and its identity property.
 
 ### Upgrading
 
-No migration. The pod nginx's streamed-export location now also covers `…/exports/{job}/download`
+No migration. To clear properties the projection left behind on the live graph before this release,
+run `python backend/scripts/heal_native_leftovers.py` (a dry run, which lists what it would remove)
+and then with `--apply`; it removes only a property the entity's published version no longer has.
+A client that removed a property through the stage route by leaving it out of `properties` must now
+name it in `unsetProperties`. The pod nginx's streamed-export location now also covers `…/exports/{job}/download`
 (no buffering, an hour between reads): an nginx config of your own in front of the API needs the
 same. Exports are kept in the object store for a day: keep it on a mount
 (`OBJECT_STORE_BACKEND=local`) rather than in the database for exports of many gigabytes.
@@ -58,6 +147,10 @@ same. Exports are kept in the object store for a day: keep it on a mount
 - **A download longer than the load balancer allows one response is cut** (an hour, on the GKE
   manifests), and has to be resumed: the browser's Resume, or `curl -C -`.
 - **Exports aren't compressed**, on the server or on the way: a 50 GB CSV is 50 GB to download.
+- **A change on the main line names whoever published it**, not whoever made it in their draft.
+- **Only a relationship's properties are edited**; its confidence and type are shown, not changed.
+- **A line summarising a trace, or a combined flow drawn between two containers, lists no
+  relationships** — it says what it stands for. Expand either end to see them.
 
 ---
 

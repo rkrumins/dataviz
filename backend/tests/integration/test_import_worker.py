@@ -63,11 +63,12 @@ async def _run() -> None:
 
         # main is untouched — the import lives on a draft
         delta = await svc.branch_overlay_delta(graph_id=gid, branch_id=branch_id)
-        upsert_urns = {n["urn"] for n in delta["nodesUpsert"]}
-        assert {"urn:A", "urn:B"} <= upsert_urns, delta
+        assert {n["urn"] for n in delta["nodesUpsert"]} == {"urn:B"}, delta
         assert "urn:B" in delta["nodesNew"], delta                 # B created on the draft
-        a = next(n for n in delta["nodesUpsert"] if n["urn"] == "urn:A")
-        assert a["displayName"] == "A renamed"                     # A updated, not duplicated
+        modified = {m["urn"]: m["entityId"] for m in delta["nodesModified"]}
+        assert set(modified) == {"urn:A"}, delta                   # A updated, not duplicated
+        a, = await svc.overlay_payloads(graph_id=gid, branch_id=branch_id, entity_ids=[modified["urn:A"]])
+        assert a["displayName"] == "A renamed"
 
         # edge A->B created (branch_overlay_delta reports endpoints as entity_ids)
         b_eid = next(n["entityId"] for n in delta["nodesUpsert"] if n["urn"] == "urn:B")

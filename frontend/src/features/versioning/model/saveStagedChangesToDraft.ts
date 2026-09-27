@@ -11,9 +11,9 @@
  * one (via its `reconcile` hook, childCount-safe), layer assignments are re-keyed temp→real, and
  * user-drawn edges are re-pointed at the real endpoints.
  */
-import { applyGraphChanges, type GraphChangeOp } from '@/services/versioningApiService'
+import { applyGraphChanges, type EntityView, type GraphChangeOp } from '@/services/versioningApiService'
+import type { GraphDataProvider, GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import type { StagedChange } from '@/store/stagedChangesStore'
-import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { useCanvasStore } from '@/store/canvas'
 import { stagedChangesToOps, unsavedNodeFields } from './stagedChangesToOps'
 
@@ -107,7 +107,27 @@ export async function saveStagedChangesToDraft(
     })))
   }
 
+  // Replace the canvas's copies with what was stored — values AND tokens. Without this the next
+  // edit of an entity just saved three-way-merged against the value it was READ at, and
+  // conflicted with the user's own save.
+  applyServerEntities(res.entities)
+
   return { commitId: res.commitId ?? null, unsaved }
+}
+
+/** The save's answer (`entities`: each addressed entity as it is now) onto the canvas. */
+export function applyServerEntities(entities: Record<string, EntityView> | undefined): void {
+  if (!entities) return
+  const nodes: GraphNode[] = []
+  const edges: GraphEdge[] = []
+  for (const view of Object.values(entities)) {
+    if (view.deleted) continue
+    if (view.kind === 'node') nodes.push(view.node)
+    else edges.push(view.edge)
+  }
+  const cs = useCanvasStore.getState()
+  cs.applyServerNodes(nodes)
+  cs.applyServerEdges(edges)
 }
 
 /** Swap a just-created entity's optimistic temp node for its real minted id — generic over how the

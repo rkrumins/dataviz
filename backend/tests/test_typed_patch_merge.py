@@ -83,3 +83,29 @@ def test_patch_payload_takes_a_rename_as_the_drawer_sends_it():
                             "team": "__nx_prop_delete__"}}
     out = GraphVersioningService._patch_payload(stored, patch)
     assert out["properties"] == {"squad": "ops", "sourceId": BIG, "rows": 12}
+
+
+def test_two_edits_of_one_entity_compose_and_keep_a_removal():
+    """Two edits of one entity in one save become one patch. A removal in the first must reach the
+    stored value: merging the second onto the first as if the first were a stored payload dropped
+    the marker, so the removed key silently came back."""
+    first = {"properties": {"team": "__nx_prop_delete__", "squad": "ops"}}
+    second = {"displayName": "Y"}
+    assert GraphVersioningService._compose_patches(first, second) == {
+        "displayName": "Y", "properties": {"team": "__nx_prop_delete__", "squad": "ops"}}
+
+
+def test_the_later_edit_wins_key_by_key():
+    first = {"displayName": "X", "properties": {"a": 1, "b": "__nx_prop_delete__"}}
+    second = {"displayName": "Y", "properties": {"a": 2, "b": 3, "c": "__nx_prop_delete__"}}
+    assert GraphVersioningService._compose_patches(first, second) == {
+        "displayName": "Y", "properties": {"a": 2, "b": 3, "c": "__nx_prop_delete__"}}
+
+
+def test_a_composed_patch_lands_like_the_two_edits_in_order():
+    stored = {"urn": "u", "properties": {"team": "ops", "sourceId": BIG}}
+    composed = GraphVersioningService._compose_patches(
+        {"properties": {"team": "__nx_prop_delete__", "sourceId": BIG_AS_BROWSER_SENDS}},
+        {"displayName": "Renamed"})
+    out = GraphVersioningService._patch_payload(stored, composed)
+    assert out == {"urn": "u", "displayName": "Renamed", "properties": {"sourceId": BIG}}
