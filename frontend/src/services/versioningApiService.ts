@@ -1071,17 +1071,26 @@ interface PublishJob {
   error: { status: number; detail: RefusalDetail } | null
 }
 
-/** How often a queued publish is asked about (tests shorten it). */
-export const PUBLISH_JOB_POLL = { ms: 2000 }
+/** How often a queued publish is asked about, and for how long it may go unanswered (tests shorten
+ *  both). */
+export const PUBLISH_JOB_POLL = { ms: 2000, patienceMs: 120_000 }
 
 /** The commit a publish (or review merge) made — at once, or once the job it queued is done. A
- *  refused job raises the error the request would have raised. */
+ *  refused job raises the error the request would have raised. A failed poll (a network blip, a web
+ *  pod restarting) doesn't stop the job, so it is asked again until it goes unanswered too long. */
 async function followPublish(wsId: string, answer: CommitResponse | QueuedPublish): Promise<CommitResponse> {
   if (!('jobId' in answer)) return answer
+  let answeredAt = Date.now()
   for (;;) {
-    const job = await vfetch<PublishJob>(`${base(wsId)}/graphs/${answer.graphId}/publish-jobs/${answer.jobId}`)
-    if (job.status === 'completed' && job.commitId) return { commitId: job.commitId }
-    if (job.status === 'failed' || job.status === 'cancelled') {
+    let job: PublishJob | null = null
+    try {
+      job = await vfetch<PublishJob>(`${base(wsId)}/graphs/${answer.graphId}/publish-jobs/${answer.jobId}`)
+      answeredAt = Date.now()
+    } catch (err) {
+      if (Date.now() - answeredAt >= PUBLISH_JOB_POLL.patienceMs) throw err
+    }
+    if (job?.status === 'completed' && job.commitId) return { commitId: job.commitId }
+    if (job?.status === 'failed' || job?.status === 'cancelled') {
       throw versioningError(job.error?.status ?? 500, job.error?.detail, 'Publishing failed')
     }
     await new Promise((resolve) => setTimeout(resolve, PUBLISH_JOB_POLL.ms))

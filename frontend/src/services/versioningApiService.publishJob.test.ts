@@ -21,7 +21,7 @@ const JOB = '/api/v1/ws1/versioning/graphs/g1/publish-jobs/vjob_1'
 
 describe('publishing a large draft', () => {
     beforeEach(() => { PUBLISH_JOB_POLL.ms = 1 })
-    afterEach(() => { globalThis.fetch = realFetch; PUBLISH_JOB_POLL.ms = 2000 })
+    afterEach(() => { globalThis.fetch = realFetch; PUBLISH_JOB_POLL.ms = 2000; PUBLISH_JOB_POLL.patienceMs = 120_000 })
 
     it('publishes a small draft in the request, as before', async () => {
         const calls = serve([[200, { commitId: 'cmt_1' }]])
@@ -49,6 +49,24 @@ describe('publishing a large draft', () => {
             } }],
         ])
         await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).rejects.toBeInstanceOf(NotUpToDateError)
+    })
+
+    it('keeps following a job through a failed poll — the job runs on regardless', async () => {
+        serve([
+            [202, { jobId: 'vjob_1', graphId: 'g1', status: 'pending' }],
+            [502, { detail: 'Bad Gateway' }],
+            [200, { jobId: 'vjob_1', graphId: 'g1', status: 'completed', commitId: 'cmt_2', error: null }],
+        ])
+        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual({ commitId: 'cmt_2' })
+    })
+
+    it('gives up once the job has gone unanswered too long', async () => {
+        PUBLISH_JOB_POLL.patienceMs = 0
+        serve([
+            [202, { jobId: 'vjob_1', graphId: 'g1', status: 'pending' }],
+            [503, { detail: 'unavailable' }],
+        ])
+        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).rejects.toThrow('unavailable')
     })
 
     it('follows the merge of a large draft’s review the same way', async () => {
