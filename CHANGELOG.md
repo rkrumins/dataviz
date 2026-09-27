@@ -9,6 +9,99 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — One property changed on up to 100,000 entities, saved into your draft
+
+### Added
+
+**The Property Manager's bulk changes are saved.** Setting a property, filling it where it's empty,
+renaming it or removing it across everything a search finds used to be "staged in-session": it was
+held in the browser and never written. **Apply to draft** now writes it into your open draft, in the
+background: the Properties tab and the versioning panel show how far it has got, with **Stop**, and
+when it's done you're told what changed, with **Review changes**. It is written 10,000 entities to a
+commit, each named for the operation ("Set owner = alice · part 3 of 10"), and published, reviewed
+and pulled like any other change in the draft. The search matches what Advanced Search matches in a
+draft, and each change is made to the entity as your draft has it: a fill leaves a value your draft
+set alone, and a rename never overwrites a value the new name already has. A 64-bit integer is
+written exactly, as typed.
+
+**Undo an operation.** **Undo** puts back what one operation changed, entity by entity, where
+nothing edited it since: an entity you changed again afterwards keeps your later edit, and the
+result says how many were left as they are. What a stopped operation wrote can be undone too.
+
+**At 100,000 entities it takes under two minutes.** On a 1M-node graph with one worker, setting a
+property on 99,822 entities took 80 s (finding them 10 s, writing them 65 s), with the worker at
+330 MB; undoing it took 80 to 107 s. A search matching about 500,000 was refused in 3 s, with
+nothing written. Published, the change took about a minute to publish and another to reach the
+published graph, where Advanced Search found exactly the 99,822.
+
+### Changed
+
+- **A draft runs one operation at a time, never beside its publish.** Publish, review merge and
+  **Pull latest** answer 409 (`property_op_running`) while an operation is being written into the
+  draft, and **Publish** says which one it is waiting for.
+- **The Properties tab's "in this draft" badges come from the draft's operations**, and go when an
+  operation is undone.
+- **The Property Manager says when the published graph is catching up** (for a minute or so after a
+  large publish, when it can't be searched), rather than showing no count, or that property insights
+  "aren't available", and carries on by itself once it has.
+- **Finding 100,000 matched entities takes half the time:** mapping their URNs to entities took 13 to
+  15 s and takes 6 s. Imports resolve their rows through the same lookups.
+
+### Fixed
+
+- **Searches in a draft failed with an error while the published graph caught up.** The Properties
+  tab, display rules' counts and membership, and exports in a draft answered 500; they now say the
+  graph is catching up.
+
+### Upgrading
+
+One migration, `20260929_1000_jobs_propop`, which lets `graphver.jobs` hold `property_op` jobs (it
+only widens a check constraint). Operations run on the versioning worker, as imports do; with
+`GRAPHVER_TRANSFER_INPROCESS` on they run in the web process that took the request. The routes
+(`…/branches/{branchId}/property-ops`) need the edit mode feature (`editModeEnabled`). New settings,
+both optional: `GRAPHVER_PROPERTY_OP_WINDOW` (10000) and `GRAPHVER_PROPERTY_OP_MAX_DRAFT_CHANGES`
+(100000).
+
+### Known limitations
+
+- **A draft holds up to 100,000 changes.** An operation that would take it past that is refused
+  before it writes anything: narrow the search, or publish the draft and continue in a new one.
+- **Operations match the published graph**, as Advanced Search does in a draft: entities your draft
+  created aren't found, and entities published after your draft started are skipped.
+- **An interrupted operation doesn't resume.** What it wrote stays; if its worker stops, the draft
+  takes no new operation and can't be published until the job reads as failed, 15 minutes later.
+- **Send for review and Pull latest on a graph of a million entities** still rebuild the whole graph
+  in memory. Publishing directly works at this size.
+- **Review & Save of hand edits in a draft of a million-entity graph runs out of time**: its
+  checkpoint rebuilds the draft's hash tree over the whole graph (4.6 GB, over two minutes).
+  Property operations and imports don't checkpoint.
+- **A key an operation adds to a few entities isn't among Advanced Search's suggestions** at once
+  (they sample entities); the Properties tab lists it, and Code mode searches it.
+
+---
+
+## [Unreleased] — Drafts of 100,000 changes
+
+### Changed
+
+- **A draft changing more than 20,000 entities publishes in the background**, on the versioning
+  worker, as does the merge of its review: the dialog follows the job until it's done
+  (`GRAPHVER_SYNC_PUBLISH_MAX_CHANGES`).
+- **The Changes panel counts a draft of more than 20,000 changes instead of listing them**, and
+  points to Commits (`GRAPHVER_DIFF_TREE_MAX_CHANGES`).
+- **A large draft reads a page at a time.** Canvas reads in a draft load the changed entities they
+  show rather than every one, and the draft bar counts changes without loading them.
+- **Pull latest resolves its conflicts from what the pull returns**, instead of downloading the
+  draft's whole diff: for a 100,000-change draft that was 80 MB, and about a gigabyte in the web
+  process.
+
+### Fixed
+
+- **A draft changing more than 32,767 entities couldn't be published, merged or pulled.**
+- **Two edits of one entity in one save could lose a property removal.**
+
+---
+
 ## [Unreleased] — Exports up to 50 GB, with downloads that resume
 
 ### Added

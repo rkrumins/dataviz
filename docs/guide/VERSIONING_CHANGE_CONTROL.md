@@ -51,6 +51,40 @@ published version was never touched, so there's nothing to undo there.
 
 ---
 
+## Changing one property on many entities
+
+The **Property Manager** changes one property across everything a search
+finds, straight into your draft. On its **Properties** tab, choose a property
+and **Update** (or **Remove**, or **New property**), then choose what to do —
+**Set value**, **Fill if empty**, **Rename key** or **Remove** — and which
+entities, with the same conditions Advanced Search uses. The dialog counts the
+matches, and for a fill, a rename or a removal how many of them it can change.
+**Apply to draft** starts it.
+
+It runs in the background, so you can keep working. The Properties tab and the
+draft's versioning panel show how far it has got, with **Stop**; when it's done
+you're told what changed, with **Review changes**. It is written into your
+draft 10,000 entities at a time, each part a commit you'll find under
+**Commits** ("Set owner = alice · part 3 of 10").
+
+- **Undo** puts back what the operation changed, entity by entity. An entity
+  you edited again since keeps your later edit, and the result says how many
+  it left as they are.
+- **Stop** keeps what was already written; you can undo that too.
+- The search finds entities as they are **published**, as Advanced Search does
+  in a draft; each change is then made to the entity as your draft has it.
+  Entities your draft created aren't found, and one your draft deleted is
+  skipped.
+
+> **Note:** A draft holds up to **100,000** changes. An operation that would
+> take it past that is refused before it writes anything: narrow the search, or
+> publish this draft and continue in a new one. A draft runs one operation at a
+> time, and publishing waits until it has finished. Above 20,000 changes the
+> **Changes** panel counts what changed instead of listing it (see **Commits**),
+> and publishing runs in the background.
+
+---
+
 ## Submitting changes for review
 
 When your draft is ready, click **Publish your draft**. Give it a short

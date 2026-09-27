@@ -66,7 +66,8 @@ graph LR
 
 ## 2. Job model & dispatch
 
-A job is a row in `graphver.jobs` (`job_type ∈ ingest | export`) carrying full traceability —
+A job is a row in `graphver.jobs` (`job_type ∈ ingest | export`, and on the same queue `publish` for a
+large draft's publish and `property_op` for §12) carrying full traceability —
 workspace, data source, provider, graph, the draft `branch_id`, `reconcile_mode`, `import_format`,
 `scope_view_id`, `field_scope` (export options / import field allow-list), `source_uri`/`result_uri`
 artifact keys, `as_of_seq`, and a `summary` JSON tally (see the `JobORM` definition in
@@ -500,6 +501,91 @@ resolve outside the root, and the same sweep deletes files by age.
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always
   dispatches the async worker.
+
+---
+
+## 12. Property operations: a search's matches edited in a draft
+
+The Property Manager changes one property on everything an Advanced Search matches in a view — set a
+value, fill it where empty, rename the key, remove it — and writes it into the open draft. It is a
+job of this machinery (`job_type = 'property_op'`, queued and claimed as in §2), run by
+`backend/app/services/versioning/property_ops.py`; the routes are in
+[06 §2.14](06-api-reference.md#214-property-operations-one-property-everything-a-search-matches).
+
+**Phases.**
+
+1. **waiting** — the search runs on the published graph (FalkorDB), as Advanced Search's does in a
+   draft, so while the projection lags `main` the job waits (up to 30 minutes).
+2. **finding** — every match (`deep_search_scan`, the export's scan with a cap), narrowed to what the
+   operation can change: `fillEmpty` to the entities whose key is empty, `rename` and `remove` to
+   those that have it. The narrowing judges published values, so the nodes the draft changed are
+   then re-checked against the search alone (`deep_search_membership`, 1,000 at a time). URNs map to
+   entity ids through `main`'s snapshot.
+3. **applying** — `GRAPHVER_PROPERTY_OP_WINDOW` (10,000) entities per `apply_ops` commit, named for
+   the operation ("Set owner = alice · part 3 of 10"). Each entity is decided inside the commit on
+   its value in the draft (`property_directive.py`):
+
+| Operation | Key absent | Key blank | Key has a value | Not live in the draft |
+|---|---|---|---|---|
+| `set k = v` | added | set | set as typed (`"42"` becomes `42`); the same value and type is `unchanged` | skipped, `notInDraft` |
+| `fillEmpty k = v` | added | set | `unchanged` | skipped |
+| `rename k → n` | `unchanged` | moved | moved verbatim (type, list, nested kept); skipped as `targetExists` when `n` has a value | skipped |
+| `remove k` | `unchanged` | dropped | dropped | skipped |
+
+Blank is what `isEmpty` matches: `null`, `[]` or only spaces. A `number` value sent as its digits is
+kept as an exact 64-bit integer. What the ontology refuses is dropped from its window, counted
+(`skipped.ontology`) and the window written again, once; a window that keeps losing the race for the
+draft's next commit is tried again three times.
+
+**The cap.** A draft may hold `GRAPHVER_PROPERTY_OP_MAX_DRAFT_CHANGES` (100,000) changes: its own
+plus the entities the operation would change that it doesn't change yet (so applying again after an
+undo fits). The scan stops past the cap, and the job fails before it writes anything, saying to
+narrow the search or publish the draft and continue in a new one. The dialog holds Apply when its
+own count is over the cap.
+
+**Stop, and one at a time.** Between windows the job stops when asked (`…/cancel`), or when its
+draft was published or discarded; what it wrote stays. A draft runs one operation at a time and
+never beside its publish: starting one answers 409 while an operation or a publish job is live, and
+publish, review merge and Pull latest answer 409 `property_op_running` while an operation is. Each
+window's commit, and publish, merge and rebase, lock the draft's branch row, so a window lands
+wholly before a squash reads the draft, or is refused after it.
+
+**Undo.** Another job (`kind: undo`) reads the operation's commits back a page at a time, each
+entity's value before and after it, and reverts each entity inside a new commit with a `revert`
+directive: only the keys the operation changed, and only where they still hold what it wrote. An
+entity edited again since is left as it is and counted (`changedSince`); a later edit to another key
+is kept.
+
+**Measured** on `bench_1m` (1M nodes, one API and one worker, one machine;
+`backend/scripts/bench_property_ops.py`):
+
+| Step | Measured |
+|---|---|
+| `set` on the 99,822 entities whose `score` is between 0.2 and 0.3 | 80 s: finding them 9.7 s, writing them 65 s in 10 commits; the worker's peak 328 MB |
+| A search matching about 500,000 | refused in 3.1 s, nothing written |
+| Undo it | 80–107 s, every entity put back; the worker's peak 385 MB |
+| Apply it again, publish, project | publish (a job) 65–69 s, the projection 53–61 s; Advanced Search on `main` then counts exactly the 99,822 |
+
+**While the published graph catches up** (a minute or so after a large publish) it can't be
+searched: every search in a draft answers 501 "catching up", the operation dialog says so and counts
+once it has, the Properties tab likewise, and a queued operation waits in `waiting`.
+
+**Limits.**
+
+- **Matches come from the published graph.** Entities the draft created aren't matched, and entities
+  `main` added after the draft started are skipped (`notInDraft`); searching a draft's own edits is
+  a later change.
+- **A key an operation adds to a few entities isn't offered by Advanced Search's suggestions** at
+  once: they sample the entities of each type. The Properties tab lists it (its catalog reads every
+  entity); search for it in Code mode (`key = value`).
+- **100,000 changes per draft**, as above.
+- **An interrupted operation doesn't resume.** A worker that stops mid-job leaves what it wrote; the
+  job reads as failed once silent for `JOB_STALE_AFTER_SECS` (15 minutes), and until then the draft
+  takes no other operation and no publish. Undo what it wrote, or run it again: entities it already
+  changed come out `unchanged`.
+- **"Send for review" and "Pull latest" on a 1M-entity graph** rebuild the whole graph in memory,
+  with or without an operation ([09](09-scale-limits-and-roadmap.md)); publishing directly works at
+  this size.
 
 ---
 

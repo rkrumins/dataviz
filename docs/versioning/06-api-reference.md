@@ -108,7 +108,8 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`. "Gate" is the requ
 | `POST .../branches/{bid}/changes` (`:1283`) | `_MANAGE` | Bulk-stage edits. `{ops:[{op, entityKind, entityId?, payload?, ref?, changeReason?}]}` → `{assigned:{ref→entityId}, count}`. Resolves live `ontology_rules`. |
 | `POST .../branches/{bid}/commit` (`:1301`) | `_MANAGE` | Checkpoint the draft. `{message?, resolutions?}` → `{commitId?, stagedChanges}`. Resolves live containment types + ontology rules. |
 | `GET .../branches/{bid}/merge-preview` (`:1320`) | `_READ` | Dry-run publish → `{clean, conflicts, changes}`. |
-| `POST .../branches/{bid}/publish` (`:1331`) | `_MANAGE` | Squash-publish draft → `main`. `{message, resolutions?}` → `{commitId}`. Auto-rebases if `main` moved and it's clean. Post-write: invalidate main read-cache, stamp view data-freshness, schedule in-process FalkorDB catch-up. |
+| `POST .../branches/{bid}/publish` (`:1331`) | `_MANAGE` | Squash-publish draft → `main`. `{message, resolutions?}` → `{commitId}`. Auto-rebases if `main` moved and it's clean. Post-write: invalidate main read-cache, stamp view data-freshness, schedule in-process FalkorDB catch-up. A draft changing more than `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` (20k) entities publishes as a job on the versioning worker: **202** `{jobId}`. **409** `property_op_running` while a property operation is written into the draft (§2.14); the review merge and `rebase` answer the same. |
+| `GET /graphs/{gid}/publish-jobs/{jobId}` | `_MANAGE` | A large draft's publish or review merge: `{jobId, graphId, status, commitId?, error?}`; `error` is `{status, detail}`, the answer a publish inside the request would have given (a conflict, an ontology violation). |
 
 ### 2.5 Projection, Data health, rebuild & revert
 | Method · Path | Gate | Purpose / key fields |
@@ -201,6 +202,20 @@ See [08 · Import / Export](https://github.com/rkrumins/dataviz/blob/main/docs/v
 | `GET /data-sources/{ds_id}/pull-requests` (`:2420`) | `_READ` | All PRs on a data source (tenant-checked). |
 | `GET /merge-requests/{pr}` (+ `PATCH`, `/preview`, `/diff`, `/diff/summary`, `/diff/children`) (`:2442-2520`) | `_READ` / `_MANAGE` | The **unified** PR read surface (works for both draft MRs and fork PRs — the service dispatches). |
 | `POST /merge-requests/{pr}/approve · /close · /merge` (`:2523/2534/2545`) | `_MANAGE` | Merge resolves live containment + ontology rules from the **base** side, then `merge_mr`; base cache bump + view freshness + FalkorDB catch-up. |
+
+### 2.14 Property operations (one property, everything a search matches)
+One property set, filled, renamed or removed on every entity a search matches in a view, written into
+an open draft by a `property_op` job ([08 §12](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/08-import-export.md#12-property-operations-a-searchs-matches-edited-in-a-draft)).
+Under `/graphs/{gid}/branches/{bid}`; the writes need `editModeEnabled` and a draft the caller may
+edit, on a graph that isn't a fork.
+
+| Method · Path | Gate | Purpose |
+|---|---|---|
+| `POST .../property-ops` | `_MANAGE` | `{viewId, predicate, op:{kind: set\|fillEmpty\|rename\|remove, key, newKey?, value?, valueType?: string\|number\|boolean}, expectedCount?}` → **202** the job. `value` is typed as `valueType` says; a 64-bit integer sent as its digits stays exact. **422** `invalid_property_operation` (a key blank, over 128 characters or kept by the platform, a rename to the same key, a value that isn't its type) or `invalid_search` (a path search, too many conditions, another source's view); **409** `property_op_running` / `publish_running` / `fork_not_supported`. |
+| `GET .../property-ops` | `_READ` | `?limit` → `{ops, draftChanges, maxDraftChanges}`, newest first. |
+| `GET .../property-ops/{jobId}` | `_READ` | `{jobId, kind: apply\|undo, undoOf, undoneBy, status, phase: queued\|waiting\|finding\|applying, cancelRequested, viewId, actor, op, predicate, expectedCount, processed, total, percent, summary, error, createdAt, startedAt, completedAt}`. An apply's `summary`: `{matched, applied, unchanged, notInDraft, skipped:{targetExists, ontology}, commits, draftChangesBefore, timings}`; an undo's: `{restored, unchanged, changedSince, missing, skipped:{ontology}, commits, timings}`. |
+| `POST .../property-ops/{jobId}/cancel` | `_MANAGE` | Stop it: a queued one at once, a running one once the part it is writing lands. What it wrote stays. |
+| `POST .../property-ops/{jobId}/undo` | `_MANAGE` | → **202** the undo's job. **409** `nothing_to_undo`, `already_undone`, `undo_not_undone` (an undo), or while an operation or a publish is under way. |
 
 ---
 
