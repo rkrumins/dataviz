@@ -21,10 +21,7 @@
  * the drawer asks first.
  */
 import { memo, useEffect, useId, useMemo, useRef, useState } from 'react'
-import {
-  AlertCircle, Check, Code, Copy, Crosshair, Eye, FileText, History, Info, Link, Pencil, PencilLine,
-  Sparkles, Trash2, Waypoints,
-} from 'lucide-react'
+import { AlertCircle, Code, Crosshair, Eye, FileText, History, Info, Pencil, Trash2, Waypoints } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeature } from '@/store/features'
@@ -33,49 +30,26 @@ import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { useRelationshipRecord } from '@/hooks/useRelationshipRecord'
 import { edgeKind } from '@/services/ontologyPreflightService'
 import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
-import { actorName } from '@/features/versioning/model/branchVocab'
-import type { EntityEvent } from '@/services/versioningApiService'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { edgeIndexOf } from '@/lib/storeIndex'
-import { timeAgo, formatUtc } from '@/lib/timeAgo'
-import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { HoverTip } from '@/components/ui/HoverTip'
 import { SkeletonText } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { UserAvatar } from '@/components/ui/UserAvatar'
 import { Section } from './DrawerSection'
 import { PropertyEditor } from './PropertyEditor'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
 import { useDrawerHistoryScope } from './useDrawerHistoryScope'
 import { DrawerBody, DrawerFooter, DrawerFrame, DrawerHeader, DrawerShell } from './shell/DrawerShell'
 import { DrawerTopBar, KindBadge } from './shell/DrawerTopBar'
-import { FreshnessStat } from './shell/FreshnessStat'
+import { DrawerActivity } from './shell/DrawerActivity'
+import { CopyableId, EntityRef } from './shell/EntityRef'
 import { JsonView } from './shell/JsonView'
 import { StageBar } from './shell/StageBar'
 import { ConnectionView } from './relationship/ConnectionView'
-import { Bridge, DetailRow, Notice } from './relationship/RelationshipParts'
+import { Bridge, DetailRow, DetailList, Notice, TypeChip } from './relationship/RelationshipParts'
 import { useEndpoints, useOpenEndpoint } from './relationship/useEndpoints'
 import { KIND_COPY, openInEdgeExplorer, relationshipCopy } from './relationship/relationshipModel'
-
-/** Created / last changed, as the summary reports them for the line being read. */
-interface ProvenanceMark {
-  at?: string
-  /** The actor's id, when it is a person. */
-  userId: string | null
-  by: string
-  /** The draft's own change — not published yet. */
-  inDraft: boolean
-}
-
-const markOf = (e: EntityEvent | null | undefined, names?: Record<string, string>): ProvenanceMark | undefined =>
-  e ? {
-    at: e.at,
-    userId: e.actor && e.actor !== 'system' ? e.actor : null,
-    by: actorName(e.actor ?? undefined, names),
-    inDraft: e.inDraft,
-  } : undefined
 
 interface RelationshipDrawerProps {
   /** Graph writes are possible here: a draft is open and nothing locks the canvas. */
@@ -169,7 +143,7 @@ function RelationshipPanel({
   const dest = endpoints.get(target.target)!
   const opener = useOpenEndpoint(onFocusNode, resolveNode)
 
-  // ── Provenance: who created and last changed it, as this line (main, or the open draft) has it ──
+  // ── Its summary: who created and last changed it, as this line (main, or the open draft) has it ──
   const historyOn = versioningEnabled && !!scope.wsId && !!scope.graphId
   const draftId = scope.branchId && scope.branchId !== scope.mainBranchId ? scope.branchId : null
   const summaryQ = useEntitySummary(
@@ -180,10 +154,6 @@ function RelationshipPanel({
   )
   const summary = summaryQ.data
   const tracked = !!summary?.exists
-  const provenance = useMemo(() => ({
-    created: markOf(summary?.created, summary?.userNames),
-    updated: markOf(summary?.updated, summary?.userNames),
-  }), [summary])
   // The value this line holds, with its token — the baseline an edit is a patch against.
   const stored = summary?.value?.kind === 'edge' && !summary.value.deleted ? summary.value : undefined
 
@@ -232,7 +202,6 @@ function RelationshipPanel({
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [hasChanges, setHasChanges] = useState(false)
   const [justStaged, setJustStaged] = useState(false)
-  const [copied, setCopied] = useState(false)
   const shownMode: ViewMode = mode === 'edit' && !editable ? 'view' : mode
 
   // Entering Edit starts from what is shown — unless there are unsaved edits
@@ -282,12 +251,6 @@ function RelationshipPanel({
     setJustStaged(true)
     clearTimeout(stagedTimer.current)
     stagedTimer.current = setTimeout(() => setJustStaged(false), 2500)
-  }
-
-  const copyId = async () => {
-    await navigator.clipboard?.writeText(entityId ?? target.id)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
   }
 
   const canDelete = !!onDeleteEdge && kind === 'lineage' && !writesLocked && !!canvasEdge
@@ -351,9 +314,6 @@ function RelationshipPanel({
                 Locate both ends
               </Button>
             )}
-            <Button size="sm" variant="subtle" leftIcon={copied ? Check : Copy} onClick={() => { void copyId() }}>
-              {copied ? 'Copied' : 'Copy ID'}
-            </Button>
             <Button
               size="sm"
               variant="subtle"
@@ -402,58 +362,32 @@ function RelationshipPanel({
 
           <TabsContent value="view">
             <div className="divide-y divide-glass-border">
-              <Section title="Identifier" icon={Link}>
-                <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-black/[0.04] dark:bg-white/[0.05]">
-                  <code className="flex-1 text-xs font-mono text-ink-muted truncate" title={entityId ?? target.id}>{entityId ?? target.id}</code>
-                </div>
-              </Section>
-
               <Section title="Details" icon={Info}>
-                <div className="space-y-1">
-                  <DetailRow label="Type">{copy.label}{copy.label.toUpperCase() !== type.toUpperCase() && <span className="ml-1.5 font-mono text-ink-muted">{type}</span>}</DetailRow>
+                <DetailList>
+                  <DetailRow label="Relationship">
+                    <span className="flex items-center gap-1.5 flex-wrap">
+                      <TypeChip type={type} label={copy.label} />
+                      {copy.label.toUpperCase() !== type.toUpperCase() && <code className="text-[11px] font-mono text-ink-muted">{type}</code>}
+                    </span>
+                  </DetailRow>
                   {copy.description && <DetailRow label="Meaning">{copy.description}</DetailRow>}
                   <DetailRow label="Kind">{KIND_COPY[kind].label}</DetailRow>
-                  <DetailRow label="From" mono>{target.source}</DetailRow>
-                  <DetailRow label="To" mono>{target.target}</DetailRow>
                   {confidence !== undefined && confidence !== null && (
-                    <div className="py-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-ink-muted">Confidence</span>
-                        <span className="text-xs text-ink tabular-nums">{Math.round(confidence * 100)}%</span>
-                      </div>
-                      <div className="mt-1 h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden"
-                        role="meter" aria-label="Confidence" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(confidence * 100)}>
-                        <div className="h-full rounded-full" style={{ width: `${Math.round(confidence * 100)}%`, backgroundColor: color }} />
-                      </div>
-                    </div>
+                    <DetailRow label="Confidence">
+                      <span className="flex items-center gap-2">
+                        <span className="flex-1 h-1.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden"
+                          role="meter" aria-label="Confidence" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(confidence * 100)}>
+                          <span className="block h-full rounded-full" style={{ width: `${Math.round(confidence * 100)}%`, backgroundColor: color }} />
+                        </span>
+                        <span className="tabular-nums">{Math.round(confidence * 100)}%</span>
+                      </span>
+                    </DetailRow>
                   )}
-                </div>
+                  <DetailRow label="From"><EntityRef endpoint={source} onOpen={opener.open} /></DetailRow>
+                  <DetailRow label="To"><EntityRef endpoint={dest} onOpen={opener.open} /></DetailRow>
+                  <DetailRow label="ID"><CopyableId id={entityId ?? target.id} /></DetailRow>
+                </DetailList>
               </Section>
-
-              {historyOn && !unsaved && (
-                <Section title="Provenance" icon={Sparkles}>
-                  {summaryQ.isLoading ? (
-                    <SkeletonText lines={3} />
-                  ) : !summary?.created ? (
-                    <p className="text-xs text-ink-muted italic">No recorded history for this relationship.</p>
-                  ) : (
-                    <div className="space-y-1">
-                      <ProvenanceRow label="Created" mark={provenance.created} />
-                      <ProvenanceRow label="Last changed" mark={provenance.updated} />
-                      <DetailRow label="Revisions">
-                        {summary.revisions.published.toLocaleString()} published
-                        {draftId && <> · {summary.revisions.draft.toLocaleString()} in this draft</>}
-                      </DetailRow>
-                      {summary.changedOnMainSinceBranch && (
-                        <div className="pt-1">
-                          <Notice tone="info">Changed on the published graph since this draft began — this draft still shows it as it was.</Notice>
-                        </div>
-                      )}
-                      <p className="pt-1 text-[11px] text-ink-muted">Published changes name whoever published them.</p>
-                    </div>
-                  )}
-                </Section>
-              )}
 
               <Section title="Properties" icon={FileText} flush={hasProps}>
                 {recordLoading && !pendingEdit ? (
@@ -517,25 +451,7 @@ function RelationshipPanel({
           {editing ? (
             <StageBar dirty={hasChanges} justStaged={justStaged} onCancel={discard} onStage={stage} />
           ) : historyOn && !unsaved ? (
-            <div className="grid grid-cols-2 gap-2">
-              <FreshnessStat
-                icon={<Sparkles className="w-4 h-4" />}
-                label={provenance.created?.inDraft ? 'Created · draft' : 'Created'}
-                iso={provenance.created?.at}
-                tone="emerald"
-                loading={summaryQ.isLoading}
-                by={provenance.created ? { id: provenance.created.userId, name: provenance.created.by } : undefined}
-              />
-              <FreshnessStat
-                icon={<PencilLine className="w-4 h-4" />}
-                label={provenance.updated?.inDraft ? 'Updated · draft' : 'Updated'}
-                iso={provenance.updated?.at}
-                tone="indigo"
-                loading={summaryQ.isLoading}
-                emptyText="No changes yet"
-                by={provenance.updated ? { id: provenance.updated.userId, name: provenance.updated.by } : undefined}
-              />
-            </div>
+            <DrawerActivity summary={summary} loading={summaryQ.isLoading} wsId={scope.wsId} graphId={scope.graphId} inDraft={!!draftId} />
           ) : (
             <p className="text-[11px] text-ink-muted text-center py-1">
               {unsaved ? 'Save your changes to start this relationship’s history.' : 'History is available with version control.'}
@@ -544,21 +460,5 @@ function RelationshipPanel({
         </DrawerFooter>
       </Tabs>
     </DrawerShell>
-  )
-}
-
-function ProvenanceRow({ label, mark }: { label: string; mark?: ProvenanceMark }) {
-  return (
-    <DetailRow label={label}>
-      {mark ? (
-        <span className="inline-flex items-center gap-1.5 flex-wrap justify-end">
-          {mark.at ? <HoverTip label={formatUtc(mark.at)} width="data" className="inline-flex">{timeAgo(mark.at)}</HoverTip> : '—'}
-          <span className="text-ink-muted">· by</span>
-          <UserAvatar userId={mark.userId} name={mark.by} className="w-4 h-4 text-[8px]" />
-          <span className="font-medium">{mark.by}</span>
-          {mark.inDraft && <Badge tone="warning">in this draft</Badge>}
-        </span>
-      ) : '—'}
-    </DetailRow>
   )
 }

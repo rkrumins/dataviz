@@ -7,13 +7,13 @@ import { useId, useMemo } from 'react'
 import { ChevronRight, Crosshair, Waypoints } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type EdgeMemberRef, type LineageNode } from '@/store/canvas'
 import { useViewRelationshipTypes } from '@/hooks/useViewSchema'
-import { useEdgeVisual } from '@/hooks/useEntityVisual'
+import { useEdgeVisual, useEntityColorSet, useEntityTypeLabel } from '@/hooks/useEntityVisual'
 import { targetFromMember } from '@/lib/drawerEdgeTarget'
 import { Button } from '@/components/ui/Button'
 import { Section } from '../DrawerSection'
 import { DrawerBody, DrawerHeader, DrawerShell } from '../shell/DrawerShell'
 import { DrawerTopBar, KindBadge } from '../shell/DrawerTopBar'
-import { Bridge, Notice } from './RelationshipParts'
+import { Bridge, Notice, TypeChip } from './RelationshipParts'
 import { useEndpoints, useOpenEndpoint, type Endpoint } from './useEndpoints'
 import { openInEdgeExplorer, relationshipCopy } from './relationshipModel'
 
@@ -146,19 +146,6 @@ export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLo
   )
 }
 
-function TypeChip({ type, label }: { type: string; label: string }) {
-  const color = useEdgeVisual(type).strokeColor
-  return (
-    <span
-      className="px-2 py-0.5 rounded-full text-[11px] font-semibold border"
-      style={{ color, backgroundColor: `${color}14`, borderColor: `${color}40` }}
-      title={type}
-    >
-      {label}
-    </span>
-  )
-}
-
 function MemberRow({ member, label, source, target, onOpen }: {
   member: EdgeMemberRef
   label: string
@@ -182,12 +169,26 @@ function MemberRow({ member, label, source, target, onOpen }: {
               <span className="px-1.5 py-px rounded text-[10px] font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400">roll-up</span>
             )}
           </span>
-          <span className="block text-xs text-ink truncate" title={`${member.source} → ${member.target}`}>
-            {source?.name ?? member.source} <span className="text-ink-muted">→</span> {target?.name ?? member.target}
+          <span className="flex items-center gap-1 min-w-0 text-xs text-ink">
+            <EndName endpoint={source} id={member.source} />
+            <span className="text-ink-muted flex-shrink-0" aria-hidden>→</span>
+            <EndName endpoint={target} id={member.target} />
           </span>
         </span>
         <ChevronRight className="w-4 h-4 text-ink-muted flex-shrink-0" />
       </button>
     </li>
+  )
+}
+
+/** One end of a listed relationship: its name, a dot in its type's colour; type and id on hover. */
+function EndName({ endpoint, id }: { endpoint?: Endpoint; id: string }) {
+  const colors = useEntityColorSet(endpoint?.type ?? '')
+  const typeLabel = useEntityTypeLabel(endpoint?.type)
+  return (
+    <span className="flex items-center gap-1 min-w-0 max-w-[50%]" title={[typeLabel, id].filter(Boolean).join(' · ')}>
+      {endpoint?.type && <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: colors.hex }} aria-hidden />}
+      <span className="truncate">{endpoint?.name ?? id}</span>
+    </span>
   )
 }

@@ -17,6 +17,8 @@ import { useFeaturesStore } from '@/store/features'
 const h = vi.hoisted(() => ({
   record: undefined as GraphEdge | undefined,
   summary: undefined as Record<string, unknown> | undefined,
+  /** The data source, for ends the canvas has not loaded. */
+  provider: null as { getNodes: ReturnType<typeof vi.fn> } | null,
   scope: { wsId: 'ws' as string | undefined, graphId: 'g' as string | null, mainBranchId: 'main' as string | null, branchId: 'd1' as string | null },
 }))
 
@@ -37,6 +39,11 @@ vi.mock('@/features/versioning/hooks/useVersioning', () => ({
     isLoading: false,
   }),
   useBranches: () => ({ data: [] }),
+  useProjectionWatermark: () => ({ data: { committed: 3, projected: 3, fresh: true, status: 'idle', lastProjectedAt: '2026-02-02T00:00:00Z' } }),
+}))
+vi.mock('@/providers/GraphProviderContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/providers/GraphProviderContext')>()),
+  useGraphProviderIfAvailable: () => h.provider,
 }))
 vi.mock('@/features/versioning/components/EntityHistory', () => ({
   EntityHistory: ({ entityId }: { entityId: string }) => <div data-testid="entity-history">{entityId}</div>,
@@ -84,6 +91,7 @@ beforeEach(() => {
     userNames: { usr_ana: 'Ana', usr_bo: 'Bo' },
   }
   h.scope = { wsId: 'ws', graphId: 'g', mainBranchId: 'main', branchId: 'd1' }
+  h.provider = null
   useStagedChangesStore.setState({ changes: [], redoStack: [] })
   useFeaturesStore.setState({ values: { versioningEnabled: true, editModeEnabled: true } } as never)
 })
@@ -96,10 +104,30 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(within(bridge).getByText('Orders')).toBeInTheDocument()
     expect(within(bridge).getByText('Revenue')).toBeInTheDocument()
     expect(screen.getByText('owner')).toBeInTheDocument()
-    const provenance = screen.getByText('Provenance').closest('.px-5') as HTMLElement
-    expect(within(provenance).getByText('Created').closest('div')).toHaveTextContent(/by.*Ana/)
-    expect(within(provenance).getByText('Last changed').closest('div')).toHaveTextContent(/by.*Bo/)
+    // Created · Updated · Synced, each with who or what.
+    expect(screen.getByText('Created').closest('div')).toHaveTextContent(/Ana/)
+    expect(screen.getByText('Updated').closest('div')).toHaveTextContent(/Bo/)
+    expect(screen.getByText('Synced').closest('div')).toHaveTextContent(/Live graph/)
     expect(screen.getByTestId('entity-history')).toHaveTextContent('e1')
+  })
+
+  it('details name each end and its type first, with the ids as the detail', () => {
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    const details = screen.getByText('Details').closest('.px-5') as HTMLElement
+    const from = within(details).getByText('From').closest('div') as HTMLElement
+    expect(within(from).getByRole('button', { name: 'Orders' })).toBeInTheDocument()
+    expect(within(from).getByText('dataset')).toBeInTheDocument()
+    expect(within(from).getByText('a')).toBeInTheDocument()
+    expect(within(within(details).getByText('ID').closest('div') as HTMLElement).getByText('e1')).toBeInTheDocument()
+  })
+
+  it('an end the canvas has not loaded is named by the data source', async () => {
+    h.provider = { getNodes: vi.fn().mockResolvedValue([{ urn: 'urn:li:dataset:deep', displayName: 'Deep Orders', entityType: 'dataset', properties: {} }]) }
+    setup({ kind: 'relationship', id: 'e1', source: 'a', target: 'urn:li:dataset:deep', edgeType: 'FLOWS_TO' })
+    render(<RelationshipDrawer canEdit />)
+    expect(await within(screen.getByTestId('relationship-bridge')).findByText('Deep Orders')).toBeInTheDocument()
+    expect(h.provider.getNodes).toHaveBeenCalledWith({ urns: ['urn:li:dataset:deep'], limit: 1 })
   })
 
   it('opens an end in the drawer on the same trail — Back returns to the relationship', async () => {
@@ -190,11 +218,12 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(screen.getByText(/Not under version control/)).toBeInTheDocument()
   })
 
-  it('a read-only viewer sees no provenance and no history', () => {
+  it('without version control there is no created / updated and no history', () => {
     h.scope = { wsId: undefined, graphId: null, mainBranchId: null, branchId: null }
     setup(rel('e1'))
     render(<RelationshipDrawer />)
-    expect(screen.queryByText('Provenance')).not.toBeInTheDocument()
+    expect(screen.queryByText('Created')).not.toBeInTheDocument()
+    expect(screen.getByText('History is available with version control.')).toBeInTheDocument()
     expect(screen.queryByTestId('entity-history')).not.toBeInTheDocument()
   })
 
