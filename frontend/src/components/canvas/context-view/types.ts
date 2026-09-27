@@ -115,6 +115,8 @@ export type ComputedEdge = {
   edgeOpacity: number
   isGhost: boolean
   isBundled: boolean
+  /** It carries a roll-up — a summary the aggregation job computed. */
+  isAggregated?: boolean
   edgeCount: number
   /** SVG `stroke-dasharray` for this edge — see `edgeDash.ts`. */
   dashArray: string

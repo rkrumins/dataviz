@@ -13,6 +13,7 @@ import type { GraphEdge } from '@/providers/GraphDataProvider'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
+import { usePreferencesStore } from '@/store/preferences'
 
 const h = vi.hoisted(() => ({
   record: undefined as GraphEdge | undefined,
@@ -253,13 +254,40 @@ describe('RelationshipDrawer — a connection', () => {
     const user = userEvent.setup()
     setup(connection)
     render(<RelationshipDrawer canEdit />)
-    expect(screen.getByText(/relationships listed/)).toBeInTheDocument()
+    expect(screen.getByText(/Stands for/)).toHaveTextContent('Stands for 2 flows · 2 relationships')
+    expect(screen.queryByText(/join entities inside/)).not.toBeInTheDocument()
     const rows = within(screen.getByRole('list', { name: /Relationships this line stands for/ })).getAllByRole('button')
     expect(rows).toHaveLength(2)
     await user.click(rows[1])
     const s = useCanvasStore.getState()
     expect(s.drawerEdge).toMatchObject({ kind: 'relationship', id: 'e2', lineId: 'bundle-a->b' })
     expect(s.drawerHistory.entries).toHaveLength(2)
+  })
+
+  it('says so when the relationships join entities inside the two cards', () => {
+    setup({ ...connection, members: [{ id: 'e1', source: 'c1', target: 'b', edgeType: 'FLOWS_TO', rollup: false }] })
+    render(<RelationshipDrawer />)
+    expect(screen.getByText(/join entities inside Orders and Revenue/)).toBeInTheDocument()
+  })
+
+  it('lists roll-ups apart from the relationships, says what they are, and offers relationships only', async () => {
+    const user = userEvent.setup()
+    usePreferencesStore.setState({ showLineageRollups: true })
+    setup({
+      ...connection,
+      types: ['FLOWS_TO', 'AGGREGATED'],
+      members: [
+        { id: 'e1', source: 'a', target: 'b', edgeType: 'FLOWS_TO', rollup: false },
+        { id: 'agg1', source: 'a', target: 'b', edgeType: 'AGGREGATED', rollup: true },
+      ],
+    })
+    render(<RelationshipDrawer />)
+    expect(screen.getByText(/Stands for/)).toHaveTextContent('1 relationship · 1 roll-up')
+    expect(within(screen.getByRole('list', { name: /Relationships this line stands for/ })).getAllByRole('button')).toHaveLength(1)
+    expect(within(screen.getByRole('list', { name: /Roll-ups this line stands for/ })).getAllByRole('button')).toHaveLength(1)
+    expect(screen.getByText(/Summaries the aggregation job computes/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Relationships only' }))
+    expect(usePreferencesStore.getState().showLineageRollups).toBe(false)
   })
 
   it('a summary line explains how to see what it summarises', () => {

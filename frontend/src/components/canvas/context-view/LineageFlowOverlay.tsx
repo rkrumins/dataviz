@@ -642,6 +642,7 @@ export function LineageFlowOverlay({
             minY, maxY, pathD, color, dynamicStrokeWidth, edgeOpacity,
             isGhost: edge.isGhost || false,
             isBundled: edge.isBundled || false,
+            isAggregated: edge.isAggregated || false,
             edgeCount: edge.edgeCount || 0,
             dashArray,
             sx, sy, tx, ty,
@@ -2061,8 +2062,12 @@ export function LineageFlowOverlay({
                 {typeLabel}
               </span>
               {edge.edgeCount > 1 && (
+                // A roll-up stands for flows it summarises; otherwise the line
+                // is that many relationships drawn as one.
                 <span className="text-[10px] text-white/50 tabular-nums">
-                  ×{edge.edgeCount.toLocaleString()} bundled
+                  {edge.isAggregated
+                    ? `roll-up of ${edge.edgeCount.toLocaleString()}`
+                    : `${edge.edgeCount.toLocaleString()} relationships`}
                 </span>
               )}
               {edge.isBidirectional && (

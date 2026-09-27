@@ -2,10 +2,15 @@
  * A drawn line that stands for more than one relationship — a bundle, a
  * roll-up, a summary wire. Says what it summarises, and lists the relationships
  * behind it at the endpoints they really name; each opens on the drawer's trail.
+ *
+ * It guides to what can be changed: the relationships come first, with why the
+ * line joins these two cards when their ends are inside them; roll-ups — read-only
+ * summaries — are listed apart, with what they are and the way to hide them.
  */
 import { useId, useMemo } from 'react'
 import { ChevronRight, Crosshair, Waypoints } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type EdgeMemberRef, type LineageNode } from '@/store/canvas'
+import { usePreferencesStore } from '@/store/preferences'
 import { useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useEdgeVisual, useEntityColorSet, useEntityTypeLabel } from '@/hooks/useEntityVisual'
 import { targetFromMember } from '@/lib/drawerEdgeTarget'
@@ -31,6 +36,8 @@ export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLo
 }) {
   const relationshipTypes = useViewRelationshipTypes()
   const shown = target.members.slice(0, ROW_CAP)
+  const relationships = shown.filter((m) => !m.rollup)
+  const rollups = shown.filter((m) => m.rollup)
   const ids = useMemo(() => [...new Set([
     target.source, target.target,
     ...target.members.slice(0, ROW_CAP).flatMap((m) => [m.source, m.target]),
@@ -41,7 +48,13 @@ export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLo
   const label = target.types.length === 1
     ? relationshipCopy(target.types[0], relationshipTypes).label
     : `${target.types.length || 'Several'} relationship types`
-  const hasRollups = target.members.some((m) => m.rollup)
+  const relationshipCount = target.members.filter((m) => !m.rollup).length
+  const rollupCount = target.members.length - relationshipCount
+  // A relationship whose ends are inside the two cards, not the cards themselves.
+  const sameEnds = (m: EdgeMemberRef) => (m.source === target.source && m.target === target.target)
+    || (!!target.bidirectional && m.source === target.target && m.target === target.source)
+  const inside = target.members.some((m) => !m.rollup && !sameEnds(m))
+  const showRollups = usePreferencesStore((s) => s.showLineageRollups)
   const titleId = useId()
   const source = endpoints.get(target.source)!
   const dest = endpoints.get(target.target)!
@@ -72,8 +85,12 @@ export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLo
           Stands for <span className="font-semibold text-ink">{target.weight.toLocaleString()}</span>{' '}
           {target.weight === 1 ? 'flow' : 'flows'}
           {!target.summaryOnly && (
-            <> · <span className="font-semibold text-ink">{target.members.length.toLocaleString()}</span>{' '}
-              {target.members.length === 1 ? 'relationship' : 'relationships'} listed</>
+            <> · <span className="font-semibold text-ink">{relationshipCount.toLocaleString()}</span>{' '}
+              {relationshipCount === 1 ? 'relationship' : 'relationships'}
+              {rollupCount > 0 && (
+                <> · <span className="font-semibold text-ink">{rollupCount.toLocaleString()}</span>{' '}
+                  {rollupCount === 1 ? 'roll-up' : 'roll-ups'}</>
+              )}</>
           )}
         </p>
         <div className="flex items-center gap-2 flex-wrap mt-3">
@@ -114,32 +131,66 @@ export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLo
             </Notice>
           </Section>
         ) : (
-          <Section title="Relationships">
-            {hasRollups && (
-              <div className="mb-2">
-                <Notice tone="info">
-                  Roll-up rows are summaries the aggregation job computes — change the relationships beneath them instead.
-                </Notice>
-              </div>
+          <>
+            <Section title="Relationships">
+              {inside && (
+                <div className="mb-2">
+                  <Notice tone="info">
+                    These relationships join entities inside {source.name} and {dest.name}; the line is drawn
+                    between the cards that hold them. Open one to see it and, in a draft, change it.
+                  </Notice>
+                </div>
+              )}
+              {relationships.length > 0 ? (
+                <ul className="space-y-1.5" aria-label="Relationships this line stands for">
+                  {relationships.map((m) => (
+                    <MemberRow
+                      key={m.id}
+                      member={m}
+                      label={relationshipCopy(m.edgeType, relationshipTypes).label}
+                      source={endpoints.get(m.source)}
+                      target={endpoints.get(m.target)}
+                      onOpen={() => openMember(m)}
+                    />
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-ink-muted">
+                  Only roll-ups here. Expand either card to reach the relationships they summarise.
+                </p>
+              )}
+            </Section>
+            {rollups.length > 0 && (
+              <Section title="Roll-ups">
+                <div className="mb-2">
+                  <Notice
+                    tone="info"
+                    action={showRollups ? { label: 'Relationships only', onClick: () => usePreferencesStore.getState().setShowLineageRollups(false) } : undefined}
+                  >
+                    Summaries the aggregation job computes from relationships between entities inside these cards.
+                    Read-only: change the relationships they summarise.
+                  </Notice>
+                </div>
+                <ul className="space-y-1.5" aria-label="Roll-ups this line stands for">
+                  {rollups.map((m) => (
+                    <MemberRow
+                      key={m.id}
+                      member={m}
+                      label={relationshipCopy(m.edgeType, relationshipTypes).label}
+                      source={endpoints.get(m.source)}
+                      target={endpoints.get(m.target)}
+                      onOpen={() => openMember(m)}
+                    />
+                  ))}
+                </ul>
+              </Section>
             )}
-            <ul className="space-y-1.5" aria-label="Relationships this line stands for">
-              {shown.map((m) => (
-                <MemberRow
-                  key={m.id}
-                  member={m}
-                  label={relationshipCopy(m.edgeType, relationshipTypes).label}
-                  source={endpoints.get(m.source)}
-                  target={endpoints.get(m.target)}
-                  onOpen={() => openMember(m)}
-                />
-              ))}
-            </ul>
             {target.members.length > shown.length && (
-              <p className="mt-2 text-[11px] text-ink-muted">
+              <p className="px-5 pb-4 text-[11px] text-ink-muted">
                 +{(target.members.length - shown.length).toLocaleString()} more — expand either end to narrow down.
               </p>
             )}
-          </Section>
+          </>
         )}
       </DrawerBody>
     </DrawerShell>

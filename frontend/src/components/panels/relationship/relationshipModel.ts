@@ -29,7 +29,7 @@ export const KIND_COPY: Readonly<Record<EdgeKind, { label: string; meaning: stri
   rollup: {
     label: 'Combined flow',
     meaning: 'Many detailed flows between two items, shown as one connection.',
-    readOnly: 'A summary the aggregation job computes from the relationships beneath it — change those instead.',
+    readOnly: 'A roll-up: a summary the aggregation job computes from relationships between entities inside these two. It is read-only — expand either card to reach the relationships it summarises, and change those.',
   },
   containment: {
     label: 'Hierarchy',
