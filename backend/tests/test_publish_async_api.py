@@ -113,3 +113,38 @@ async def test_a_publish_job_says_what_the_request_would_have(test_client, servi
 
     for other in ("vjob_export", "vjob_missing"):
         assert (await test_client.get(f"{BASE}/graphs/g1/publish-jobs/{other}")).status_code == 404
+
+
+async def test_a_refused_publish_job_keeps_a_bounded_refusal(monkeypatch):
+    """A large draft can break the ontology on every entity it changes: 200k violations, 60 MB kept
+    on the job and sent to the client, which shows the first two. The job keeps a hundred and the
+    count."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.api.v1.endpoints import versioning as ep
+    from backend.app.services.versioning.service import OntologyViolation
+
+    class _Refusing:
+        async def get_graph(self, graph_id):
+            return {"graph_id": graph_id, "workspace_id": "ws1", "data_source_id": "ds1"}
+
+        async def publish(self, **kw):
+            raise OntologyViolation([{"kind": "node", "entity_id": f"e{i}", "reason": f"bad {i}"} for i in range(250)])
+
+    @asynccontextmanager
+    async def _session():
+        yield None
+
+    async def _nothing(*_args):
+        return None
+
+    monkeypatch.setattr(ep, "get_versioning_service", lambda: _Refusing())
+    monkeypatch.setattr("backend.app.db.engine.get_async_session", _session)
+    monkeypatch.setattr(ep, "_live_containment_types", _nothing)
+    monkeypatch.setattr(ep, "_rules_for_meta", _nothing)
+    out = await ep._publish_from_job({"graphId": "g1", "branchId": "br_big", "actor": "a",
+                                      "workspaceId": "ws1", "message": "m"})
+    assert out["error"]["status"] == 422
+    detail = out["error"]["detail"]
+    assert detail["type"] == "ontology_violation" and detail["total"] == 250
+    assert [v["reason"] for v in detail["violations"]] == [f"bad {i}" for i in range(100)]

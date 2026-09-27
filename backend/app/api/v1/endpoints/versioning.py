@@ -1737,6 +1737,19 @@ async def _queue_publish(ie, *, workspace_id, meta, graph_id, branch_id, actor, 
                                                   "status": started})
 
 
+_JOB_REFUSAL_MAX_VIOLATIONS = 100
+
+
+def _bounded_refusal(detail):
+    """A refusal as a publish job keeps it. A large draft can break the ontology on every entity it
+    changes (200k violations, 60 MB on the job and to the client, which shows the first two): keep
+    a hundred, and how many there were."""
+    violations = detail.get("violations") if isinstance(detail, dict) else None
+    if violations and len(violations) > _JOB_REFUSAL_MAX_VIOLATIONS:
+        return {**detail, "violations": violations[:_JOB_REFUSAL_MAX_VIOLATIONS], "total": len(violations)}
+    return detail
+
+
 async def _publish_from_job(job: dict) -> dict:
     """Run a queued publish — or the merge of a draft's review — as the route runs one inside the
     request: the target's live ontology, a refusal as the HTTP answer the route gives, then what a
@@ -1760,7 +1773,7 @@ async def _publish_from_job(job: dict) -> dict:
                     graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
                     resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
     except HTTPException as exc:
-        return {"error": {"status": exc.status_code, "detail": exc.detail}}
+        return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     await _bump_main_cache(graph_id)
     await _touch_views_data_updated(graph_id, actor)
     await _promote_view_layout_overlay(branch_id, actor)
