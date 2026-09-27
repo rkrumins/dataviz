@@ -173,10 +173,13 @@ export function useBranchFreshness(wsId?: string, graphId?: string | null, branc
   })
 }
 
-export function useDiffVsMain(wsId?: string, graphId?: string | null, branchId?: string | null) {
+export function useDiffVsMain(
+  wsId?: string, graphId?: string | null, branchId?: string | null, { slim = false }: { slim?: boolean } = {},
+) {
+  const key = VERSIONING_KEYS.diffVsMain(wsId, graphId, branchId)
   return useQuery({
-    queryKey: VERSIONING_KEYS.diffVsMain(wsId, graphId, branchId),
-    queryFn: () => api.getDiffVsMain(wsId!, graphId!, branchId!),
+    queryKey: slim ? [...key, 'slim'] : key,
+    queryFn: () => api.getDiffVsMain(wsId!, graphId!, branchId!, { slim }),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
   })

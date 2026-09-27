@@ -885,8 +885,13 @@ export function getDiffWindow(
 }
 
 /** UI-shaped diff of a draft vs its base (whole payloads + before/after). */
-export function getDiffVsMain(wsId: string, graphId: string, branchId: string): Promise<DiffVsMainResponse> {
-  return vfetch<DiffVsMainResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-vs-main`)
+/** `slim`: a modified entity by id and kind alone, without its before/after payloads — enough to
+ *  count a draft's changes and ring its nodes, at any draft size. */
+export function getDiffVsMain(
+  wsId: string, graphId: string, branchId: string, { slim = false }: { slim?: boolean } = {},
+): Promise<DiffVsMainResponse> {
+  const q = slim ? '?payloads=changes' : ''
+  return vfetch<DiffVsMainResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-vs-main${q}`)
 }
 
 // ============================================

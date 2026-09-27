@@ -28,7 +28,7 @@ import json
 import logging
 import re
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -2040,6 +2040,9 @@ async def get_diff_window(
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main", response_model=DiffVsMainResponse)
 async def get_diff_vs_main(
     ws_id: str, graph_id: str, branch_id: str,
+    payloads: Literal["all", "changes"] = Query(
+        "all", description="`changes`: a modified entity by id and kind alone, without its "
+                           "before/after payloads — enough to count changes and ring nodes."),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -2049,7 +2052,8 @@ async def get_diff_vs_main(
     as whole node/edge payloads with before/after — the shape the canvas diff overlay
     and Changes panel consume directly, without client-side state joins."""
     with _domain_errors():
-        return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+        return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id, viewer=viewer,
+                                             payloads=payloads)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/summary",

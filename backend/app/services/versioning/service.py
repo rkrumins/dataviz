@@ -78,6 +78,8 @@ _NODE_DENORM = {
 # content_hash of the empty/absent state — exactly what a tombstone (deleted) head row stores, and
 # the pre-image a "create" logically reads (the entity was absent). Used by the head CAS below.
 _HASH_NONE = content_hash(None)
+# ...and of an empty payload, which diffs read as absent (no urn, no type: not a live entity).
+_HASH_EMPTY = content_hash({})
 # Entity heads written per statement. Each column goes as one array parameter (unnest), so the
 # statements' text never changes: compiled and prepared once, whatever the batch.
 _HEAD_BATCH = 5000
@@ -3499,7 +3501,10 @@ class GraphVersioningService:
                     a.update({eid: v for eid, v in base_a.items() if v is not None})
             return diff_states(a, b)
 
-    async def diff_branch_vs_base(self, *, graph_id: str, branch_id: str, viewer: Optional[Viewer] = None) -> Dict[str, object]:
+    async def diff_branch_vs_base(
+        self, *, graph_id: str, branch_id: str, viewer: Optional[Viewer] = None,
+        payloads: str = "all",
+    ) -> Dict[str, object]:
         """UI-shaped net diff of a draft against its base (``main`` at the branch
         point): full node/edge payloads with before/after, classified
         added/removed/modified. This is the shape the canvas diff overlay needs —
@@ -3510,12 +3515,19 @@ class GraphVersioningService:
         diff: a draft numbers its commits in its own seq space, so the change set is
         the entities the draft wrote rows for (bounded by draft size). ``before`` is
         each entity's value on ``main`` at the branch point; ``after`` its effective
-        value on the draft (base overlaid with the draft's edits)."""
+        value on the draft (base overlaid with the draft's edits).
+
+        ``payloads="changes"`` classifies the same way from content hashes, without loading a
+        modified entity's payloads: a modified entry is its ``entityId`` and ``kind`` alone, while
+        added and removed entries keep the payload the canvas draws them from. It is what the
+        draft bar needs — counts and which nodes to ring — at any draft size."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
             main_id = await self._main_branch_id(s, graph_id)
             base_seq = branch.base_commit_seq or 0
+            if payloads == "changes":
+                return await self._diff_changes_vs_base(s, graph_id, branch_id, main_id, base_seq)
             changed: set = set()
             for model in (NodeVersionORM, EdgeVersionORM):
                 rows = (await s.execute(
@@ -3547,6 +3559,33 @@ class GraphVersioningService:
             elif b != a:
                 modified.append({"entityId": eid, "kind": kind, "before": b, "after": a})
         return {"added": added, "removed": removed, "modified": modified}
+
+    async def _diff_changes_vs_base(self, s, graph_id, branch_id, main_id, base_seq) -> Dict[str, object]:
+        """:meth:`diff_branch_vs_base` with ``payloads="changes"``: the draft's heads against
+        main's content hashes at the branch point. An empty payload counts as absent, as there."""
+        heads = await self._heads(s, graph_id, branch_id)
+        before = await self._hashes_at(s, graph_id, main_id, list(heads), base_seq)
+        added_refs: Dict[str, tuple] = {}
+        removed_ids: List[str] = []
+        modified: List[dict] = []
+        for eid, h in heads.items():
+            live = not h.is_tombstone and h.content_hash != _HASH_EMPTY
+            b = before.get(eid)                              # (kind, hash) when live at base
+            if b is None and live:
+                added_refs[eid] = (h.entity_kind, graph_id, h.head_version_id)
+            elif b is not None and not live:
+                removed_ids.append(eid)
+            elif b is not None and b[1] != h.content_hash:
+                modified.append({"entityId": eid, "kind": b[0]})
+        after = await self._payloads_by_version(s, added_refs.values())
+        gone = await self._values_at(s, graph_id, main_id, removed_ids, base_seq)
+        return {
+            "added": [{"entityId": eid, "kind": kind, "after": after[vid]}
+                      for eid, (kind, _, vid) in added_refs.items() if after.get(vid)],
+            "removed": [{"entityId": eid, "kind": before[eid][0], "before": gone[eid]}
+                        for eid in removed_ids if gone.get(eid)],
+            "modified": modified,
+        }
 
     async def branch_overlay_delta(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
         """The draft's patch set vs **main at the draft's fork point**, **reader-shaped** for a
@@ -5762,6 +5801,26 @@ class GraphVersioningService:
                 )
                 for eid, op, payload in (await s.execute(stmt)).all():
                     out[eid] = None if op == "delete" else payload
+        return out
+
+    async def _hashes_at(self, s, graph_id, branch_id, ids, seq) -> Dict[str, Tuple[str, str]]:
+        """:meth:`_values_at` without the payloads: ``{entity_id: (kind, content_hash)}`` for each
+        id live at ``seq`` (deleted, absent and empty-payload ids omitted) — whether a value
+        changed, told without loading it."""
+        out: Dict[str, Tuple[str, str]] = {}
+        id_list = list(ids)
+        for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
+            for chunk in _chunks(id_list, _IN_LIST_MAX):
+                stmt = (
+                    select(model.entity_id, model.op, model.content_hash)
+                    .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                           model.entity_id.in_(chunk), model.commit_seq <= seq)
+                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                    .distinct(model.entity_id)
+                )
+                for eid, op, chash in (await s.execute(stmt)).all():
+                    if op != "delete" and chash != _HASH_EMPTY:
+                        out[eid] = (kind, chash)
         return out
 
     async def _current_values(
