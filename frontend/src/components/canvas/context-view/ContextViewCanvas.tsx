@@ -32,7 +32,8 @@ import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, t
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
 import { useSaveProblemsStore } from '@/store/saveProblemsStore'
-import { OntologyViolationError } from '@/services/versioningApiService'
+import { IntegrityError, MergeConflictError, OntologyViolationError } from '@/services/versioningApiService'
+import { markConflicts } from '@/features/versioning/model/mapConflicts'
 import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -5779,6 +5780,15 @@ export function ContextViewCanvas({
                   ? `Nothing was saved. ${problems[0].reason}`
                   : `Nothing was saved. ${problems.length} changes need attention.`,
                   { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
+              } else if (e instanceof MergeConflictError && Object.keys(e.current).length > 0) {
+                // Refused as a whole: someone else changed fields these edits change. Put each
+                // conflict on its change — with the current value — for the user to settle there.
+                const n = markConflicts(e) || e.conflicts.length
+                useStagedChangesStore.getState().openReviewPanel()
+                notify('error', `Nothing was saved — ${n === 1 ? 'a change conflicts' : `${n} changes conflict`} with edits made since you opened ${n === 1 ? 'it' : 'them'}.`,
+                  { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
+              } else if (e instanceof IntegrityError) {
+                notify('error', `Nothing was saved. ${e.message}`)
               } else {
                 notify('error', (e as Error).message)
               }

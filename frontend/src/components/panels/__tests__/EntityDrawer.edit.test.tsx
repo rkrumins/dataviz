@@ -18,7 +18,7 @@ vi.mock('../useDrawerHistoryScope', () => ({
   useDrawerHistoryScope: () => ({ wsId: undefined, graphId: null, mainBranchId: null, branchId: null }),
 }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
-  useEntityHistory: () => ({ data: undefined, isLoading: false }),
+  useEntitySummary: () => ({ data: undefined, isLoading: false }),
   useProjectionWatermark: () => ({ data: undefined }),
   useBranches: () => ({ data: [] }),
 }))

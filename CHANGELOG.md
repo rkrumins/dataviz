@@ -47,6 +47,16 @@ relationships on the published graph are read-only, and say why.
 - **Entities and relationships are edited in a draft only.** On the published graph the entity
   drawer and the Edge Explorer offer no edit controls; the drawer offers "Edit in a draft" instead.
   The drawer's JSON tab is read-only.
+- **A save answers with what it stored.** `POST /graph/changes` returns `entities`: each entity the
+  save touched as a reader returns it now, with its `version` (`entitiesTruncated` past 500), and the
+  canvas takes it — so editing the same field again is not a conflict with your own last save.
+- **An entity's summary and its history, bounded.** New `GET …/entities/{id}/summary` says who
+  created the entity and who last changed it on the line you are reading (in a draft: main at the
+  draft's branch point, then the draft's own edits), how many revisions each line has, whether main
+  changed it after the draft began, and — `include=value` — its value and token. `…/history` now
+  pages newest first (`limit`, `before`/`nextBefore`, `scope=all|draft|published`, `branchId`), reads
+  only main and the draft you name (403 for a draft you cannot read), and says what each revision
+  changed, property by property. The drawers use these instead of downloading every revision.
 - **An update removes a property only when told to.** `POST /graph/changes`, the draft
   `…/changes` (stage) route and `PATCH /edges/{id}` take `unsetProperties: [name, …]` beside the
   payload. `properties` in an update merges key by key everywhere, including the stage route, which
@@ -84,6 +94,16 @@ relationships on the published graph are read-only, and say why.
   entity's properties, where the drawer reads them from.
 - **A rename and an edit of the same entity were two changes**, and discarding one put the other's
   stale copy back on the canvas. They are one change now.
+- **Saving the same entity twice conflicted with yourself.** The canvas kept each entity as first
+  read, token included, so the second save merged against a value the draft had moved past.
+- **A conflicting save failed with "Main has moved".** The conflict now names each field someone else
+  changed, with the value it had, theirs and yours; Review & Save lets you keep yours or take theirs,
+  field by field, and saves only what you changed on top of their version. A 409 `merge_conflict`
+  from `/graph/changes` carries `current` (each conflicting entity as it is now) and each conflict's
+  `entity_kind`.
+- **In a draft, an entity's "Updated" could be a change the draft doesn't have** — the newest edit on
+  any branch, including main after the draft began. It is now the last change on the draft's own
+  line, and a note says when main has changed it since.
 - **The Hierarchy Builder lost a new entity's description** — it was filed among the properties,
   where the save strips the name as reserved. It is saved as the entity's description.
 - **A removed property named like one of the platform's own (`id`, `weight`, `confidence`, …) stayed
@@ -109,8 +129,6 @@ same. Exports are kept in the object store for a day: keep it on a mount
 - **A download longer than the load balancer allows one response is cut** (an hour, on the GKE
   manifests), and has to be resumed: the browser's Resume, or `curl -C -`.
 - **Exports aren't compressed**, on the server or on the way: a 50 GB CSV is 50 GB to download.
-- **A relationship's history shows its properties as one row** per revision, as an entity's does,
-  not one row per property.
 - **A change on the main line names whoever published it**, not whoever made it in their draft.
 - **Only a relationship's properties are edited**; its confidence and type are shown, not changed.
 - **A line summarising a trace, or a combined flow drawn between two containers, lists no

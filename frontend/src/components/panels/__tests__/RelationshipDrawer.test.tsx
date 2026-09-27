@@ -16,7 +16,7 @@ import { useFeaturesStore } from '@/store/features'
 
 const h = vi.hoisted(() => ({
   record: undefined as GraphEdge | undefined,
-  versions: [] as Array<Record<string, unknown>>,
+  summary: undefined as Record<string, unknown> | undefined,
   scope: { wsId: 'ws' as string | undefined, graphId: 'g' as string | null, mainBranchId: 'main' as string | null, branchId: 'd1' as string | null },
 }))
 
@@ -32,8 +32,8 @@ vi.mock('@/hooks/useRelationshipRecord', () => ({
 }))
 vi.mock('../useDrawerHistoryScope', () => ({ useDrawerHistoryScope: () => h.scope }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
-  useEntityHistory: (ws?: string, g?: string | null, id?: string | null) => ({
-    data: ws && g && id ? { versions: h.versions, userNames: { usr_ana: 'Ana', usr_bo: 'Bo' } } : undefined,
+  useEntitySummary: (ws?: string, g?: string | null, id?: string | null) => ({
+    data: ws && g && id ? h.summary : undefined,
     isLoading: false,
   }),
   useBranches: () => ({ data: [] }),
@@ -73,10 +73,14 @@ function setup(target: DrawerEdgeTarget, opts: { canvasEdges?: LineageEdge[] } =
 
 beforeEach(() => {
   h.record = { id: 'e1', sourceUrn: 'a', targetUrn: 'b', edgeType: 'FLOWS_TO', confidence: 0.9, properties: { owner: 'ana' } }
-  h.versions = [
-    { commit_id: 'c1', commit_seq: 2, branch_id: 'main', op: 'create', actor: 'usr_ana', created_at: '2026-01-01T00:00:00Z' },
-    { commit_id: 'c2', commit_seq: 5, branch_id: 'main', op: 'update', actor: 'usr_bo', created_at: '2026-02-01T00:00:00Z' },
-  ]
+  h.summary = {
+    entityId: 'e1', kind: 'edge', exists: true, version: 'v9', inherited: false,
+    created: { at: '2026-01-01T00:00:00Z', actor: 'usr_ana', op: 'create', commitId: 'c1', inDraft: false },
+    updated: { at: '2026-02-01T00:00:00Z', actor: 'usr_bo', op: 'update', commitId: 'c2', inDraft: false },
+    revisions: { published: 2, draft: 0 }, changedOnMainSinceBranch: false, baseCommitSeq: null,
+    value: { kind: 'edge', version: 'v9', edge: { id: 'e1', sourceUrn: 'a', targetUrn: 'b', edgeType: 'FLOWS_TO', properties: { owner: 'ana' } } },
+    userNames: { usr_ana: 'Ana', usr_bo: 'Bo' },
+  }
   h.scope = { wsId: 'ws', graphId: 'g', mainBranchId: 'main', branchId: 'd1' }
   useStagedChangesStore.setState({ changes: [], redoStack: [] })
   useFeaturesStore.setState({ values: { versioningEnabled: true, editModeEnabled: true } } as never)
@@ -123,7 +127,7 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(change).toMatchObject({
       type: 'edit_edge',
       targetId: 'e1',
-      before: { properties: { owner: 'ana' } },
+      before: { properties: { owner: 'ana' }, version: 'v9' },
       after: { properties: { owner: 'ana', tier: 'gold' } },
     })
     // The drawer now shows the staged bag.
@@ -177,7 +181,7 @@ describe('RelationshipDrawer — a relationship', () => {
   })
 
   it('a relationship with no recorded history is not edited here', () => {
-    h.versions = []
+    h.summary = { ...h.summary, exists: false, version: null, created: null, updated: null, value: null }
     setup(rel('e1'))
     render(<RelationshipDrawer canEdit />)
     expect(screen.queryByRole('button', { name: /^Edit/ })).not.toBeInTheDocument()

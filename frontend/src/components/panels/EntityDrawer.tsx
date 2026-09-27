@@ -51,7 +51,7 @@ import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
-import { useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { useEntitySummary, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
 import { useBranchStore } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
@@ -176,25 +176,23 @@ export function EntityDrawer({
   const isGhost = (selectedNode?.data as { isGhost?: boolean } | undefined)?.isGhost === true
   const restoreGhost = useRestoreGhost()
 
-  // Real "last updated" timestamp — the most recent COMMIT that touched this entity (source of
-  // truth), not the stale `lastSyncedAt` (which is set at sync/creation and doesn't move on edits).
-  // Shared query with the History section (no extra fetch). Both are versioning
-  // surfaces: when the admin turns version control off, the queries stop and the
-  // History section disappears (undefined ids disable the hooks).
+  // Real "last updated" — the last commit that changed this entity ON THE LINE BEING READ (a draft
+  // sees main at its branch point plus its own edits), not the stale `lastSyncedAt`. A bounded
+  // summary, never the whole history; it also carries the entity's current value and token.
+  // Both are versioning surfaces: with version control off the query stops (undefined ids).
   const versioningEnabled = useFeature('versioningEnabled')
   // Independent switch: OFF means every canvas is view-only even with versioning on
   // (POST /nodes/create, /edges, PATCH/DELETE /edges, /changes all 403 server-side).
   const editModeEnabled = useFeature('editModeEnabled')
-  const entityHistory = useEntityHistory(
+  const draftId = historyBranchId && historyBranchId !== historyMainBranch ? historyBranchId : null
+  const isPendingCreate = (selectedNode?.data as { isPending?: string } | undefined)?.isPending === 'create'
+  const summaryQ = useEntitySummary(
     versioningEnabled ? historyWsId : undefined,
     versioningEnabled ? historyGraphId : undefined,
-    selectedNode?.id ?? undefined,
+    selectedNode && !isPendingCreate ? ((selectedNode.data.urn as string | undefined) ?? selectedNode.id) : undefined,
+    { branchId: draftId, kind: 'node', includeValue: true },
   )
-  const lastUpdatedAt = useMemo(() => {
-    const versions = (entityHistory.data?.versions ?? []) as Array<{ created_at?: string; commit_seq?: number }>
-    if (!versions.length) return undefined
-    return [...versions].sort((a, b) => (b.commit_seq ?? 0) - (a.commit_seq ?? 0))[0]?.created_at
-  }, [entityHistory.data])
+  const lastUpdatedAt = summaryQ.data?.updated?.at
   // "Synced" = when the live read layer (FalkorDB) last caught up — always >= the last update, so it
   // never conflicts with "Updated". While actively catching up we show a live "Syncing…" state.
   const watermark = useProjectionWatermark(historyWsId, historyGraphId)
@@ -237,6 +235,26 @@ export function EntityDrawer({
       setViewMode('view')
     }
   }, [selectedNode?.id, hasChanges])
+
+  // A clean drawer keeps the canvas copy current: when the summary holds a newer value than the
+  // canvas (a save elsewhere, another editor of this draft), take it — so an edit starts from, and
+  // is checked against, what is stored now. Never over an edit in progress or a staged one.
+  const summaryValue = summaryQ.data?.value
+  useEffect(() => {
+    if (hasChanges || !selectedNode || !summaryValue || summaryValue.deleted || summaryValue.kind !== 'node') return
+    if (summaryValue.version === (selectedNode.data as { version?: string }).version) return
+    if (useStagedChangesStore.getState().changes.some((c) => c.targetId === selectedNode.id)) return
+    useCanvasStore.getState().applyServerNodes([summaryValue.node])
+  }, [summaryValue, hasChanges, selectedNode])
+
+  // A clean form follows the node it shows (a refresh, a save's answer); an edit keeps its copy.
+  // Derived during render, so the form never shows one stale frame.
+  const shownData = selectedNode?.data
+  const [followed, setFollowed] = useState(shownData)
+  if (shownData !== followed && !hasChanges) {
+    setFollowed(shownData)
+    if (shownData) setFormData({ ...(shownData as Record<string, unknown>) })
+  }
 
   // Get entity type info from schema
   const entityType = useMemo(() => {
@@ -653,7 +671,7 @@ export function EntityDrawer({
                 <TimeStat
                   icon={<LucideIcons.PencilLine className="w-4 h-4" />}
                   label="Updated" iso={lastUpdatedAt} tone="indigo"
-                  loading={entityHistory.isLoading} emptyText="No changes yet"
+                  loading={summaryQ.isLoading} emptyText="No changes yet"
                 />
                 <TimeStat
                   icon={syncing
@@ -1245,7 +1263,7 @@ function ViewModeContent({
       {/* History — real per-entity revision history (main line). Hidden when version control is off. */}
       {versioningEnabledForHistory && wsId && graphId && (
         <Section title="History" icon={LucideIcons.History}>
-          <EntityHistory wsId={wsId} graphId={graphId} entityId={nodeId} mainBranchId={mainBranchId} branchId={branchId} />
+          <EntityHistory wsId={wsId} graphId={graphId} entityId={nodeId} mainBranchId={mainBranchId} branchId={branchId} kind="node" />
         </Section>
       )}
     </div>

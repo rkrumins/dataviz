@@ -13,6 +13,7 @@
  * errors so the UI can route to a resolution flow instead of a generic notification.
  */
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
+import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
 
@@ -253,10 +254,80 @@ export interface CommitLogResponse {
   userNames?: Record<string, string>
 }
 
+/** What one revision changed: a field (`[name]`) or a property (`['properties', name]`). */
+export interface RevisionChange {
+  path: string[]
+  kind: 'added' | 'removed' | 'changed'
+  before: unknown
+  after: unknown
+}
+
+/** One revision of an entity, as the paged history returns it. */
+export interface EntityRevision {
+  id: string
+  commit_id: string
+  commit_seq: number
+  branch_id: string
+  op: 'create' | 'update' | 'delete'
+  content_hash: string
+  prev_content_hash?: string | null
+  actor?: string | null
+  change_reason?: string | null
+  created_at: string
+  commit_kind?: string | null
+  commit_message?: string | null
+  /** Against the value it was made from; `null` when that value is no longer on record. */
+  changes: RevisionChange[] | null
+  /** The draft's own revision (not yet published). */
+  on_draft: boolean
+  /** Published after the draft being viewed branched — the draft does not have it. */
+  after_branch_point: boolean
+  payload?: Record<string, unknown> | null
+}
+
 export interface EntityHistoryResponse {
   entityId: string
-  versions: Array<Record<string, unknown>>
+  kind?: 'node' | 'edge' | null
+  versions: EntityRevision[]
   /** version actor id → resolved display name, covering every version in this response. */
+  userNames?: Record<string, string>
+  hasMore: boolean
+  /** Pass back as `before` for the next (older) page. */
+  nextBefore?: string | null
+}
+
+export type HistoryScope = 'all' | 'draft' | 'published'
+
+/** One event in an entity's life, as the summary reports it. */
+export interface EntityEvent {
+  at: string
+  actor?: string | null
+  op: 'create' | 'update' | 'delete'
+  commitId: string
+  inDraft: boolean
+}
+
+/** An entity as a reader returns it now, with the token its next edit echoes. */
+export type EntityView =
+  | { kind: 'node'; version: string; node: GraphNode; deleted?: undefined }
+  | { kind: 'edge'; version: string; edge: GraphEdge; deleted?: undefined }
+  | { kind: 'node' | 'edge'; version: null; deleted: true }
+
+export interface EntitySummary {
+  entityId: string
+  kind: 'node' | 'edge'
+  exists: boolean
+  version?: string | null
+  /** A fork's entity it never changed — its parent's. */
+  inherited: boolean
+  created?: EntityEvent | null
+  updated?: EntityEvent | null
+  revisions: { published: number; draft: number }
+  /** Viewing a draft: main changed this entity after the draft branched. */
+  changedOnMainSinceBranch: boolean
+  baseCommitSeq?: number | null
+  /** With `includeValue`: the entity as the line has it, and its token. */
+  value?: EntityView | null
   userNames?: Record<string, string>
 }
 
@@ -343,10 +414,24 @@ export type ResolutionMap = Record<string, Record<string, unknown> | null>
 
 export class MergeConflictError extends Error {
   conflicts: Array<Record<string, unknown>>
-  constructor(conflicts: Array<Record<string, unknown>>) {
-    super('Main has moved — there are conflicting changes to resolve.')
+  /** A draft save's conflicts: each conflicting entity as it is now — what an edit rebases onto. */
+  current: Record<string, EntityView>
+  constructor(conflicts: Array<Record<string, unknown>>, current: Record<string, EntityView> = {}) {
+    super(Object.keys(current).length > 0
+      ? `Someone else changed ${conflicts.length === 1 ? 'a field' : 'fields'} you edited.`
+      : 'Main has moved — there are conflicting changes to resolve.')
     this.name = 'MergeConflictError'
     this.conflicts = conflicts
+    this.current = current
+  }
+}
+
+/** A save refused because it would leave the graph inconsistent (a relationship whose end was
+ *  removed, …) or because the draft kept moving under it. Nothing was saved. */
+export class IntegrityError extends Error {
+  constructor(message?: string) {
+    super(message || 'The draft changed while saving — nothing was saved. Try again.')
+    this.name = 'IntegrityError'
   }
 }
 
@@ -414,7 +499,10 @@ async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number 
     }
     const detail = body?.detail
     if (res.status === 409 && detail?.type === 'merge_conflict') {
-      throw new MergeConflictError(detail.conflicts ?? [])
+      throw new MergeConflictError(detail.conflicts ?? [], detail.current ?? {})
+    }
+    if (res.status === 409 && detail?.type === 'integrity') {
+      throw new IntegrityError(detail.message)
     }
     if (res.status === 422 && detail?.type === 'ontology_violation') {
       throw new OntologyViolationError(detail.violations ?? [])
@@ -761,6 +849,10 @@ export interface GraphChangeOp {
 export interface GraphChangesResult {
   commitId?: string | null
   assigned: Record<string, string>
+  /** Every entity the save addressed, as it is now — refresh copies and tokens from these. */
+  entities?: Record<string, EntityView>
+  /** The save touched more entities than it answers for; re-read the rest. */
+  entitiesTruncated?: boolean
 }
 
 /**
@@ -851,12 +943,40 @@ export function getSquashedCommits(
   )
 }
 
-export function getEntityHistory(
+/** One page of an entity's revisions, newest first: `main`'s and the viewed draft's own. */
+export function getEntityHistoryPage(
   wsId: string,
   graphId: string,
   entityId: string,
+  params: { branchId?: string | null; scope?: HistoryScope; limit?: number; before?: string | null; kind?: 'node' | 'edge' } = {},
 ): Promise<EntityHistoryResponse> {
-  return vfetch<EntityHistoryResponse>(`${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/history`)
+  const sp = new URLSearchParams()
+  if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.scope && params.scope !== 'all') sp.set('scope', params.scope)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.before) sp.set('before', params.before)
+  if (params.kind) sp.set('kind', params.kind)
+  const qs = sp.toString()
+  return vfetch<EntityHistoryResponse>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/history${qs ? `?${qs}` : ''}`,
+  )
+}
+
+/** Who created an entity and who last changed it, as the line being read has it. */
+export function getEntitySummary(
+  wsId: string,
+  graphId: string,
+  entityId: string,
+  params: { branchId?: string | null; kind?: 'node' | 'edge'; includeValue?: boolean } = {},
+): Promise<EntitySummary> {
+  const sp = new URLSearchParams()
+  if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.kind) sp.set('kind', params.kind)
+  if (params.includeValue) sp.set('include', 'value')
+  const qs = sp.toString()
+  return vfetch<EntitySummary>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/summary${qs ? `?${qs}` : ''}`,
+  )
 }
 
 export function getDiff(

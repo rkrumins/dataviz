@@ -116,3 +116,17 @@ export function toPayloadShape(data: unknown): NodePayloadShape {
   if ('properties' in d) out.properties = userProperties(d.properties)
   return out
 }
+
+/** `data` (canvas shape) with a node patch applied: stored fields set under their canvas keys,
+ *  `properties` merged with `unset` removed, and the business-label mirror kept in step. */
+export function applyNodePatch(data: Bag, payload: Bag, unset: readonly string[] = []): Bag {
+  const out: Bag = { ...data }
+  for (const [field, value] of Object.entries(payload)) {
+    if (field !== 'properties') out[CANVAS_KEY[field] ?? field] = value
+  }
+  const properties = { ...asBag(data.properties), ...asBag(payload.properties) }
+  for (const k of unset) delete properties[k]
+  out.properties = properties
+  out.businessLabel = typeof properties.businessLabel === 'string' ? properties.businessLabel : undefined
+  return out
+}

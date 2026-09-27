@@ -3,6 +3,8 @@ import type { Node, Edge, Viewport } from '@xyflow/react'
 import type { HydrationPhase, HydrationStatus } from '@/hooks/useGraphHydration'
 import { useStagedChangesStore } from './stagedChangesStore'
 import { filterIncomingEdges, overlayOnReplace } from './stagedOverlay'
+import { toCanvasEdge, toCanvasNode } from '@/lib/canvasNodeMapper'
+import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 
 export interface LineageNode extends Node {
   data: {
@@ -314,6 +316,13 @@ interface CanvasState {
 
   // Node/Edge CRUD (Manual)
   updateNode: (id: string, data: Partial<LineageNode['data']>) => void
+  /** Replace the server-owned fields (name, description, properties, `version`, …) of the nodes
+   *  the canvas holds with the server's — after a save, so the canvas shows exactly what was
+   *  stored and the next edit's token is current. Client state (position, pending flags) and the
+   *  reader-stamped `childCount` stay, unless the server sends one. One store write. */
+  applyServerNodes: (nodes: readonly GraphNode[]) => void
+  /** The same for edges: `version`, confidence and the roll-up flags. */
+  applyServerEdges: (edges: readonly GraphEdge[]) => void
   removeNode: (id: string) => void
   removeEdge: (id: string) => void
   removeNodes: (ids: string[]) => void
@@ -706,6 +715,31 @@ export const useCanvasStore = create<CanvasState>()(
           n.id === id ? { ...n, data: { ...n.data, ...data } } : n
         )
       })),
+      applyServerNodes: (fresh) => set((state) => {
+        if (fresh.length === 0) return state
+        const byUrn = new Map(fresh.map((g) => [g.urn, g]))
+        let changed = false
+        const nodes = state.nodes.map((n) => {
+          const g = byUrn.get(n.id) ?? byUrn.get(n.data.urn as string)
+          if (!g) return n
+          changed = true
+          const { childCount, ...server } = toCanvasNode(g).data
+          return { ...n, data: { ...n.data, ...server, ...(g.childCount != null ? { childCount } : {}) } }
+        })
+        return changed ? { nodes } : state
+      }),
+      applyServerEdges: (fresh) => set((state) => {
+        if (fresh.length === 0) return state
+        const byId = new Map(fresh.map((g) => [g.id, g]))
+        let changed = false
+        const edges = state.edges.map((e) => {
+          const g = byId.get(e.id)
+          if (!g) return e
+          changed = true
+          return { ...e, data: { ...e.data, ...toCanvasEdge(g).data } }
+        })
+        return changed ? { edges } : state
+      }),
       removeNode: (id) => set((state) => {
         const nextNodeIndex = new Set(state._nodeIndex)
         nextNodeIndex.delete(id)

@@ -3183,6 +3183,12 @@ class GraphChangesRequest(BaseModel):
 class GraphChangesResponse(BaseModel):
     commit_id: Optional[str] = Field(default=None, alias="commitId")
     assigned: dict = Field(default_factory=dict)
+    # Every entity the save addressed (or its cascade removed), as a reader returns it now —
+    # `{id: {kind, version, node|edge}}`, `{kind, version: null, deleted: true}` once gone — so
+    # the client refreshes its copies and their tokens without a re-read, and the next edit of
+    # the same entity is not a conflict with its own last save. Capped (`entitiesTruncated`).
+    entities: dict = Field(default_factory=dict)
+    entities_truncated: bool = Field(default=False, alias="entitiesTruncated")
 
     class Config:
         populate_by_name = True
@@ -3304,8 +3310,9 @@ async def apply_graph_changes(
     if not ops:
         return {"commitId": None, "assigned": assigned}
 
+    from backend.app.services.versioning.entity_audit import ENTITY_VIEW_CAP, entity_views
     try:
-        commit_id = await svc.apply_ops(
+        result = await svc.apply_ops_detailed(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
             message=request.message or "Canvas edits",
             containment_edge_types=await _resolve_containment_types(engine),
@@ -3314,7 +3321,10 @@ async def apply_graph_changes(
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except MergeConflict as exc:
-        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+        # `current`: each conflicting entity as it is now, for the client to rebase the edit onto.
+        raise HTTPException(status_code=409, detail={
+            "type": "merge_conflict", "conflicts": exc.conflicts,
+            "current": entity_views(exc.current)[0]})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
 
@@ -3329,7 +3339,9 @@ async def apply_graph_changes(
     await get_graph_cache().bump_generation(
         CacheScope(workspace_id=ws_id, data_source_id=dataSourceId, branch_id=branchId)
     )
-    return {"commitId": commit_id, "assigned": assigned}
+    entities, truncated = entity_views(result.written, result.urns, cap=ENTITY_VIEW_CAP)
+    return {"commitId": result.commit_id, "assigned": assigned,
+            "entities": entities, "entitiesTruncated": truncated}
 
 
 class DeleteImpactResponse(BaseModel):

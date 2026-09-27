@@ -23,6 +23,7 @@ import {
   type StagedChangeType,
 } from '@/store/stagedChangesStore'
 import { CascadeImpactList } from '@/features/versioning/components/CascadeImpactList'
+import { ConflictChoices } from '@/features/versioning/components/ConflictChoices'
 
 // Section labels — slight tone shift from the change type for human readability.
 const TYPE_LABELS: Record<StagedChangeType, string> = {
@@ -648,6 +649,7 @@ function ChangeRow({
               <span>{change.error}</span>
             </p>
           )}
+          {change.conflict && <ConflictChoices change={change} />}
 
           <AnimatePresence initial={false}>
             {isExpanded && (

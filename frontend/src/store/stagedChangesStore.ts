@@ -24,6 +24,7 @@
 import { create } from 'zustand'
 import { generateId } from '@/lib/utils'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
+import type { EntityView } from '@/services/versioningApiService'
 
 export type StagedChangeType =
   | 'create_entity'
@@ -73,6 +74,25 @@ export interface StagedChange {
   timestamp: number
   /** Set on apply failure so retry can target only failing changes. */
   error?: string
+  /** The last save found someone else changed fields this change edits (see `mapConflicts`). */
+  conflict?: StagedConflict
+}
+
+/** One field both this change and someone else changed since it was read. */
+export interface ConflictField {
+  /** `path.join('.')` — the key a resolution choice is given under. */
+  key: string
+  /** `[field]` or `['properties', name, …]`, as the server reports it. */
+  path: string[]
+  base: unknown
+  mine: unknown
+  theirs: unknown
+}
+
+export interface StagedConflict {
+  fields: ConflictField[]
+  /** The entity as it is now — what the change is rebased onto. */
+  current: EntityView
 }
 
 export interface ApplyContext {

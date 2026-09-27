@@ -30,7 +30,9 @@ import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/u
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { useRelationshipRecord } from '@/hooks/useRelationshipRecord'
 import { edgeKind } from '@/services/ontologyPreflightService'
-import { useEntityHistory } from '@/features/versioning/hooks/useVersioning'
+import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
+import { actorName } from '@/features/versioning/model/branchVocab'
+import type { EntityEvent } from '@/services/versioningApiService'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
 import { MOTION } from '@/lib/motion'
@@ -44,7 +46,17 @@ import { ConnectionView } from './relationship/ConnectionView'
 import { Bridge, ConfirmDiscard, DetailRow, DrawerHeaderRow, Notice } from './relationship/RelationshipParts'
 import { useEndpoints, useOpenEndpoint } from './relationship/useEndpoints'
 import { KIND_COPY, openInEdgeExplorer, relationshipCopy } from './relationship/relationshipModel'
-import { summarizeProvenance, type HistoryVersion, type ProvenanceMark } from './relationship/edgeProvenance'
+
+/** Created / last changed, as the summary reports them for the line being read. */
+interface ProvenanceMark {
+  at?: string
+  by: string
+  /** The draft's own change — not published yet. */
+  inDraft: boolean
+}
+
+const markOf = (e: EntityEvent | null | undefined, names?: Record<string, string>): ProvenanceMark | undefined =>
+  e ? { at: e.at, by: actorName(e.actor ?? undefined, names), inDraft: e.inDraft } : undefined
 
 interface RelationshipDrawerProps {
   /** Graph writes are possible here: a draft is open and nothing locks the canvas. */
@@ -170,25 +182,32 @@ function RelationshipPanel({
   const dest = endpoints.get(target.target)!
   const opener = useOpenEndpoint(onFocusNode, resolveNode)
 
-  // ── History: the same query the History section renders ──
+  // ── Provenance: who created and last changed it, as this line (main, or the open draft) has it ──
   const historyOn = versioningEnabled && !!scope.wsId && !!scope.graphId
-  const history = useEntityHistory(
+  const draftId = scope.branchId && scope.branchId !== scope.mainBranchId ? scope.branchId : null
+  const summaryQ = useEntitySummary(
     historyOn ? scope.wsId : undefined,
     historyOn ? scope.graphId : undefined,
     historyOn && !unsaved && entityId ? entityId : undefined,
+    { branchId: draftId, kind: 'edge', includeValue: true },
   )
-  const versions = useMemo(() => (history.data?.versions ?? []) as HistoryVersion[], [history.data])
-  const provenance = useMemo(
-    () => summarizeProvenance(versions, { mainBranchId: scope.mainBranchId, branchId: scope.branchId, userNames: history.data?.userNames }),
-    [versions, scope.mainBranchId, scope.branchId, history.data?.userNames],
-  )
+  const summary = summaryQ.data
+  const tracked = !!summary?.exists
+  const provenance = useMemo(() => ({
+    created: markOf(summary?.created, summary?.userNames),
+    updated: markOf(summary?.updated, summary?.userNames),
+  }), [summary])
+  // The value this line holds, with its token — the baseline an edit is a patch against.
+  const stored = summary?.value?.kind === 'edge' && !summary.value.deleted ? summary.value : undefined
 
   // ── Staged work on this relationship ──
   const pendingEdit = useStagedChangesStore((s) =>
     entityId ? s.changes.find((c) => c.type === 'edit_edge' && c.targetId === entityId) : undefined)
   const pendingDelete = useStagedChangesStore((s) =>
     s.changes.find((c) => c.type === 'delete_edge' && (c.targetId === target.id || c.targetId === entityId)))
-  const storedProps = useMemo(() => (record?.properties ?? {}) as Record<string, unknown>, [record])
+  const storedProps = useMemo(
+    () => (stored?.edge.properties ?? record?.properties ?? {}) as Record<string, unknown>, [stored, record])
+  const baseVersion = stored?.version ?? record?.version
   const shownProps = useMemo(
     () => ((pendingEdit?.after as { properties?: Record<string, unknown> } | undefined)?.properties) ?? storedProps,
     [pendingEdit, storedProps],
@@ -196,7 +215,7 @@ function RelationshipPanel({
 
   // ── Can this relationship be changed here? ──
   const editable = kind === 'lineage' && !unsaved && !writesLocked && versioningEnabled && editModeEnabled
-    && canEdit && !!record && versions.length > 0 && !pendingDelete
+    && canEdit && !!record && tracked && !pendingDelete
   const readOnlyNotice = ((): { tone: 'info' | 'warn'; text: string; action?: { label: string; onClick: () => void } } | null => {
     if (kind !== 'lineage') return { tone: 'info', text: KIND_COPY[kind].readOnly! }
     if (unsaved) {
@@ -222,9 +241,9 @@ function RelationshipPanel({
         ...(onStartEditing ? { action: { label: 'Open a draft', onClick: onStartEditing } } : {}),
       }
     }
-    if (recordLoading || (historyOn && history.isLoading)) return null
+    if (recordLoading || (historyOn && summaryQ.isLoading)) return null
     if (!record) return { tone: 'warn', text: 'This relationship could not be found in the graph, so it can’t be edited here.' }
-    if (historyOn && versions.length === 0) return { tone: 'info', text: 'Not under version control yet, so it can’t be edited here.' }
+    if (historyOn && !tracked) return { tone: 'info', text: 'Not under version control yet, so it can’t be edited here.' }
     return null
   })()
 
@@ -270,8 +289,9 @@ function RelationshipPanel({
       {
         type: 'edit_edge',
         targetId: entityId,
-        // What was read — the diff base for the save. A later re-stage keeps the first one.
-        before: { properties: storedProps },
+        // What was read, and its token — the diff base for the save and its concurrency check.
+        // A later re-stage keeps the first one.
+        before: { properties: storedProps, ...(baseVersion ? { version: baseVersion } : {}) },
         after: { properties: draft },
         summary: `Edit relationship '${source.name}' → '${dest.name}'`,
       },
@@ -415,14 +435,23 @@ function RelationshipPanel({
 
             {historyOn && !unsaved && (
               <Section title="Provenance" icon={Sparkles}>
-                {history.isLoading ? (
+                {summaryQ.isLoading ? (
                   <p className="text-xs text-ink-muted inline-flex items-center gap-2"><Loader2 className="w-3.5 h-3.5 animate-spin" />Loading…</p>
-                ) : versions.length === 0 ? (
+                ) : !summary?.created ? (
                   <p className="text-xs text-ink-muted italic">No recorded history for this relationship.</p>
                 ) : (
                   <div className="space-y-1">
                     <ProvenanceRow label="Created" mark={provenance.created} />
                     <ProvenanceRow label="Last changed" mark={provenance.updated} />
+                    <DetailRow label="Revisions">
+                      {summary.revisions.published.toLocaleString()} published
+                      {draftId && <> · {summary.revisions.draft.toLocaleString()} in this draft</>}
+                    </DetailRow>
+                    {summary.changedOnMainSinceBranch && (
+                      <div className="pt-1">
+                        <Notice tone="info">Changed on the published graph since this draft began — this draft still shows it as it was.</Notice>
+                      </div>
+                    )}
                     <p className="pt-1 text-[11px] text-ink-muted">Published changes name whoever published them.</p>
                   </div>
                 )}
@@ -455,6 +484,7 @@ function RelationshipPanel({
                   entityId={entityId}
                   mainBranchId={scope.mainBranchId}
                   branchId={scope.branchId}
+                  kind="edge"
                 />
               </Section>
             )}
@@ -518,7 +548,7 @@ function RelationshipPanel({
               label={provenance.created?.inDraft ? 'Created · draft' : 'Created'}
               iso={provenance.created?.at}
               tone="emerald"
-              loading={history.isLoading}
+              loading={summaryQ.isLoading}
               emptyText="—"
             />
             <TimeStat
@@ -526,7 +556,7 @@ function RelationshipPanel({
               label={provenance.updated?.inDraft ? 'Updated · draft' : 'Updated'}
               iso={provenance.updated?.at}
               tone="indigo"
-              loading={history.isLoading}
+              loading={summaryQ.isLoading}
               emptyText="No changes yet"
             />
           </div>
