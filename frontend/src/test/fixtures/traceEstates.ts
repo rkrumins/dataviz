@@ -322,3 +322,39 @@ export function perTypeEstate() {
   ]
   return { model, layers, assignments: {} }
 }
+
+/**
+ * One column per entity, curated, as in a Snowflake / Postgres view:
+ *
+ *   pg ⊃ {pg.raw_orders, pg.raw_items}                  anchor of "Sources"
+ *   snow ⊃ {GOLD ⊃ {gold.fct_orders, gold.dim_items},   anchor of "Snowflake"
+ *           INTERMEDIATE_T1 ⊃ {int_clean_order_items_t2, int_clean_orders_t2, int_stg_orders_t2}}
+ *   ext                                                  held by no column
+ */
+export function snowflakeColumnEstate() {
+  const nodes = [
+    wn('pg', 'dataPlatform', 2), wn('pg.raw_orders', 'dataset'), wn('pg.raw_items', 'dataset'),
+    wn('snow', 'dataPlatform', 2),
+    wn('GOLD', 'container', 2), wn('gold.fct_orders', 'dataset'), wn('gold.dim_items', 'dataset'),
+    wn('INTERMEDIATE_T1', 'container', 3),
+    wn('int_clean_order_items_t2', 'dataset'), wn('int_clean_orders_t2', 'dataset'), wn('int_stg_orders_t2', 'dataset'),
+    wn('ext', 'dataset'),
+  ]
+  const containmentEdges = [
+    has('pg', 'pg.raw_orders'), has('pg', 'pg.raw_items'),
+    has('snow', 'GOLD'), has('GOLD', 'gold.fct_orders'), has('GOLD', 'gold.dim_items'),
+    has('snow', 'INTERMEDIATE_T1'), has('INTERMEDIATE_T1', 'int_clean_order_items_t2'),
+    has('INTERMEDIATE_T1', 'int_clean_orders_t2'), has('INTERMEDIATE_T1', 'int_stg_orders_t2'),
+  ]
+  const model: LensWalkModel = {
+    focusUrn: 'int_clean_orders_t2', nodes, lineageEdges: [], containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'sources', name: 'Sources', order: 0, entityTypes: [], anchorUrn: 'pg' },
+    { id: 'snowflake', name: 'Snowflake', order: 1, entityTypes: [], anchorUrn: 'snow' },
+  ]
+  const assignments = { pg: { layerId: 'sources' }, snow: { layerId: 'snowflake' } }
+  return { model, layers, assignments }
+}
