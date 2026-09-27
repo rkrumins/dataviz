@@ -896,7 +896,9 @@ class GraphVersioningService:
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)       # serialize same-graph merges (see _lock_graph)
                 graph = await s.get(GraphORM, graph_id)
-                draft = await s.get(BranchORM, branch_id)
+                # The draft's row, before reading the draft: a property operation's window being
+                # written into it lands first, and the next is refused (see _apply_ops_once).
+                draft = await s.get(BranchORM, branch_id, with_for_update=True)
                 if graph is None or draft is None or draft.graph_id != graph_id:
                     raise ValueError("unknown graph/branch")
                 self._require_open(draft)
@@ -1084,7 +1086,9 @@ class GraphVersioningService:
         collision, so it must re-read all state from a fresh session (it does)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
-            draft = await s.get(BranchORM, branch_id)
+            # The draft's row first, as publish takes it: a property operation's window being
+            # written from the draft's old base lands before the base moves.
+            draft = await s.get(BranchORM, branch_id, with_for_update=True)
             if graph is None or draft is None or draft.graph_id != graph_id:
                 raise ValueError("unknown graph/branch")
             self._require_open(draft)
@@ -2089,7 +2093,8 @@ class GraphVersioningService:
                 if pr.status in ("merged", "closed"):
                     raise ValueError(f"merge request {mr_id} is {pr.status}")
                 graph = await s.get(GraphORM, pr.target_graph_id)
-                draft = await s.get(BranchORM, pr.source_branch_id)
+                # The draft's row first, as publish takes it (a property operation's window).
+                draft = await s.get(BranchORM, pr.source_branch_id, with_for_update=True)
                 if graph is None or draft is None:
                     raise ValueError("merge request endpoints missing")
                 self._require_open(draft)
@@ -4448,6 +4453,16 @@ class GraphVersioningService:
         async with self._session() as s:
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
 
+    async def assert_branch_editable(self, *, graph_id: str, branch_id: str, actor: str) -> None:
+        """Raise ``ValueError`` unless ``branch_id`` is an open draft of the graph, and
+        ``AccessDenied`` when ``actor`` may not edit it (a shared draft they aren't an editor of)."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise ValueError("main changes by publishing a draft, not directly")
+            self._require_open(branch)
+            await self._require_edit(s, branch, actor, ())
+
     async def _readable_branch_ids(self, s, branch_ids, viewer: "Viewer") -> set:
         """Subset of *branch_ids* the viewer may read — for filtering cross-branch results
         (view-scoped commit logs, entity history). Bounded by the distinct branches involved."""
@@ -5408,7 +5423,13 @@ class GraphVersioningService:
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             bid = branch_id or await self._main_branch_id(s, graph_id)
-            branch = await s.get(BranchORM, bid)
+            # A property operation writes into a draft over many commits, for minutes: each one
+            # holds the draft's row, which a publish, merge or pull of the draft takes before it
+            # reads the draft — so a window lands wholly before one, or is refused after it.
+            directed = any(op.get("directive") is not None for op in ops)
+            branch = await s.get(BranchORM, bid, with_for_update=directed or None)
+            if directed:
+                self._require_open(branch)
 
             # Serialize main-advancing writes on this graph BEFORE reading the head, so a
             # write-through composes against — and advances — the current main atomically

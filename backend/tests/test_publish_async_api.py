@@ -35,9 +35,15 @@ class _Versioning:
         return {"pr_id": pr_id, "target_graph_id": "g1", "source_branch_id": "br_big", "actor": "someone"}
 
 
+class _NoOperation:
+    async def running(self, *, graph_id, branch_id):
+        return None
+
+
 class _Jobs:
     def __init__(self):
         self.created, self.started = [], []
+        self.property_ops = _NoOperation()
         self.jobs = {
             "vjob_done": {"jobId": "vjob_done", "jobType": "publish", "graphId": "g1",
                           "status": "completed", "summary": {"commitId": "cmt_9"}},

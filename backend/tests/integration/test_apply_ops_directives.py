@@ -101,9 +101,53 @@ async def _run() -> None:
         await svc.stage_changes(graph_id=gid, branch_id=draft, actor="alice",
                                 ops=[_op("A", kind="remove", key="code")])
     assert (await _props(svc, gid, draft))["A"]["code"] == 42, "nothing refused was written"
+
+    # A draft published or discarded takes no more of an operation.
+    await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="publish")
+    gone = await svc.open_draft(graph_id=gid, owner="alice")
+    await svc.abandon_draft(graph_id=gid, branch_id=gone, actor="alice")
+    for closed in (draft, gone):
+        with pytest.raises(ValueError, match="merged|abandoned"):
+            await svc.apply_ops(graph_id=gid, branch_id=closed, actor="alice",
+                                ops=[_op("A", kind="set", key="late", value=1)])
+    await db.dispose_engine()
+
+
+async def _run_publish_waits() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                                  actor="alice"))["graph_id"]
+    await svc.apply_ops(graph_id=gid, actor="alice", ops=[_node("A", owner="bob"), _node("B")])
+    draft = await svc.open_draft(graph_id=gid, owner="alice")
+    await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", ops=[_op("B", kind="set", key="x", value=1)])
+
+    # A window part-way through its commit when the publish starts: it has read A's value and not
+    # yet written. The publish must wait for it and publish what it wrote.
+    real, reading = svc._current_values, asyncio.Event()
+
+    async def slow(*args, **kwargs):
+        reading.set()
+        await asyncio.sleep(0.5)
+        return await real(*args, **kwargs)
+
+    svc._current_values = slow
+    window = asyncio.create_task(svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice",
+                                               ops=[_op("A", kind="set", key="reviewed", value=True)]))
+    await reading.wait()
+    svc._current_values = real
+    await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="publish")
+    assert await window
+    main = await svc.main_branch_id(gid)
+    assert (await _props(svc, gid, main))["A"] == {"owner": "bob", "reviewed": True}, "the window was published"
     await db.dispose_engine()
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_directives_are_decided_on_the_drafts_value_and_say_what_they_did():
     asyncio.run(_run())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_a_publish_waits_for_an_operations_window_and_publishes_it():
+    asyncio.run(_run_publish_waits())

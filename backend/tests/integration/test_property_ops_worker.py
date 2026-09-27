@@ -175,6 +175,16 @@ async def _run() -> None:
         await create(draft3, {"kind": "remove", "key": "owner"})
     assert [o["jobId"] for o in await ops.list(graph_id=gid, branch_id=draft3)] == [first, capped]
 
+    # ── A publish job queued as an operation started refuses when it runs ──
+    draft9 = await svc.open_draft(graph_id=gid, owner="alice")
+    writing = await create(draft9, {"kind": "remove", "key": "owner"})
+    queued = (await ie.create_publish_job(workspace_id="ws1", data_source_id="ds1", graph_id=gid,
+                                          branch_id=draft9, actor="alice", message="m"))["job_id"]
+    result = await ie.run_publish(queued)
+    assert result["error"]["status"] == 409 and result["error"]["detail"]["jobId"] == writing, result
+    assert (await ie.get_job(queued))["status"] == "failed"
+    await ops.cancel(writing)
+
     # ── A job that died with its process holds the draft no longer ──
     draft7 = await svc.open_draft(graph_id=gid, owner="alice")
     dead = await create(draft7, {"kind": "remove", "key": "owner"})
@@ -212,6 +222,25 @@ async def _run() -> None:
         return out
 
     svc.apply_ops = then_discard
+    try:
+        await ops.run(job_id)
+    finally:
+        svc.apply_ops = real_apply
+    job = await ops.get(job_id)
+    assert job["status"] == "failed" and "discarded" in job["error"] and len(job["summary"]["commits"]) == 1, job
+
+    # …and discarded as a window was about to be written: the window is refused, and says why.
+    draft8 = await svc.open_draft(graph_id=gid, owner="alice")
+    job_id = await create(draft8, {"kind": "set", "key": "gone", "value": 1})
+    calls = {"n": 0}
+
+    async def discard_first(**kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            await svc.abandon_draft(graph_id=gid, branch_id=draft8, actor="alice")
+        return await real_apply(**kw)
+
+    svc.apply_ops = discard_first
     try:
         await ops.run(job_id)
     finally:

@@ -83,6 +83,13 @@ class PublishRunning(RuntimeError):
         self.job_id = job_id
 
 
+def running_refusal(job_id: str) -> Dict[str, Any]:
+    """How a publish, merge or pull of a draft is refused while an operation is written into it."""
+    return {"type": "property_op_running", "jobId": job_id,
+            "message": "A property operation is being written into this draft. Wait for it to "
+                       "finish, or stop it, first."}
+
+
 class _Stopped(Exception):
     """The job ends here as ``status``, telling the user ``message`` (none when asked to stop)."""
 
@@ -137,6 +144,16 @@ def _alive(row: JobORM) -> bool:
     queued = row.status == "pending" and row.current_phase == QUEUED
     return row.status in _LIVE and _silent_secs(row) <= (
         config.TRANSFER_QUEUE_TIMEOUT_SECS if queued else config.JOB_STALE_AFTER_SECS)
+
+
+async def _live_job(s, graph_id: str, branch_id: str, job_types: Sequence[str]) -> Optional[JobORM]:
+    """A job of ``job_types`` on this draft that is pending or running, and alive."""
+    for row in (await s.execute(select(JobORM).where(
+            JobORM.graph_id == graph_id, JobORM.branch_id == branch_id,
+            JobORM.job_type.in_(job_types), JobORM.status.in_(_LIVE)))).scalars():
+        if _alive(row):
+            return row
+    return None
 
 
 def _expire(row: JobORM) -> None:
@@ -194,12 +211,10 @@ class PropertyOps:
                 raise ValueError(f"unknown branch {branch_id}")
             if branch.kind == "main" or branch.status != "open":
                 raise ValueError(f"branch {branch_id} is not an open draft")
-            for row in (await s.execute(select(JobORM).where(
-                    JobORM.graph_id == graph_id, JobORM.branch_id == branch_id,
-                    JobORM.job_type.in_(("property_op", "publish")),
-                    JobORM.status.in_(_LIVE)))).scalars():
-                if _alive(row):
-                    raise (PropertyOpRunning if row.job_type == "property_op" else PublishRunning)(row.id)
+            await self._svc._assert_not_bootstrapping(s, graph_id)
+            live = await _live_job(s, graph_id, branch_id, ("property_op", "publish"))
+            if live is not None:
+                raise (PropertyOpRunning if live.job_type == "property_op" else PublishRunning)(live.id)
             job = JobORM(job_type="property_op", graph_id=graph_id, workspace_id=workspace_id,
                          data_source_id=data_source_id, branch_id=branch_id, scope_view_id=view_id,
                          status="pending", field_scope={
@@ -209,6 +224,12 @@ class PropertyOps:
             s.add(job)
             await s.flush()
             return job.id
+
+    async def running(self, *, graph_id: str, branch_id: str) -> Optional[str]:
+        """The operation being written into this draft — pending or running, and alive — or None."""
+        async with db.graphver_session() as s:
+            live = await _live_job(s, graph_id, branch_id, ("property_op",))
+            return live.id if live is not None else None
 
     async def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         async with db.graphver_session() as s:
@@ -337,10 +358,15 @@ class PropertyOps:
             ids = await published.nodes_by_urn(chunk)
             summary["notInDraft"] += len(chunk) - len(ids)
             outcome: Dict[str, List[str]] = {}
-            commit = await self._write(ctx, job, [
-                {"op": "update", "entity_kind": "node", "entity_id": eid, "directive": op}
-                for eid in ids.values()],
-                label if parts == 1 else f"{label} · part {part + 1} of {parts}", outcome, summary)
+            try:
+                commit = await self._write(ctx, job, [
+                    {"op": "update", "entity_kind": "node", "entity_id": eid, "directive": op}
+                    for eid in ids.values()],
+                    label if parts == 1 else f"{label} · part {part + 1} of {parts}", outcome, summary)
+            except ValueError:
+                # Refused because the draft closed since the check above: say that, not the refusal.
+                await self._check(job_id, branch_id, done=part, parts=parts)
+                raise
             summary["applied"] += len(outcome.get("changed", ()))
             summary["unchanged"] += len(outcome.get("unchanged", ()))
             summary["notInDraft"] += len(outcome.get("notInDraft", ()))

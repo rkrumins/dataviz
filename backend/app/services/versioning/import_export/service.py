@@ -25,7 +25,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 
 from .. import config, db
 from ..models import BranchORM, ImportRowORM, JobORM
-from ..property_ops import PropertyOps
+from ..property_ops import PropertyOps, running_refusal
 from ..service import GraphVersioningService
 from .export_worker import ExportWorker, example_template_records, records_from_state
 from .formats import get_adapter
@@ -391,11 +391,17 @@ class ImportExportService:
             row.updated_at = _now()
             job = {**(row.field_scope or {}), "graphId": row.graph_id, "branchId": row.branch_id,
                    "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id}
-        beat = asyncio.create_task(heartbeat(job_id))
-        try:
-            result = await self._publish_hook(job)
-        finally:
-            beat.cancel()
+        # A property operation started on the draft since the request checked: publishing now
+        # would take part of it.
+        writing = await self.property_ops.running(graph_id=job["graphId"], branch_id=job["branchId"])
+        if writing is not None:
+            result = {"error": {"status": 409, "detail": running_refusal(writing)}}
+        else:
+            beat = asyncio.create_task(heartbeat(job_id))
+            try:
+                result = await self._publish_hook(job)
+            finally:
+                beat.cancel()
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             row.summary = result
