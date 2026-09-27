@@ -9,6 +9,9 @@ import { bySignificance, lineDash, nextRenderTier, type RenderTier } from './lin
 import { delegatedLineState, hoverSpotlight, type Spotlight } from './hoverSpotlight'
 import type { LineMotion } from './lineMotion'
 import { LineMotionLayer } from './LineMotionLayer'
+import { useSchemaStore } from '@/store/schema'
+import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
+import { formatUrnLabel } from '@/lib/urnLabels'
 
 /**
  * Keep the previous viewport object when neither number moved.
@@ -1465,6 +1468,12 @@ export function LineageFlowOverlay({
   // viewport. Memoized: this ran on EVERY render of the overlay, re-walking the
   // full edge list each time — and with the two guards above the common render is
   // now one where neither `computedEdges` nor `viewport` moved at all.
+  // The hover card names each end as its card does — name and type — never by its id.
+  const nodeById = useMemo(
+    () => new Map<string, { name?: string; typeId?: string }>(nodes.map((n: { id: string; name?: string; typeId?: string }) => [n.id, n])),
+    [nodes],
+  )
+
   const visibleEdges = useMemo(() => computedEdges.filter(edge => {
     if (edge.maxY < viewport.scrollTop - VIEWPORT_MARGIN) return false
     if (edge.minY > viewport.scrollTop + viewport.clientHeight + VIEWPORT_MARGIN) return false
@@ -1999,23 +2008,30 @@ export function LineageFlowOverlay({
     {hoveredEdgeId && hoverMousePos && (() => {
       const edge = computedEdges.find(e => e.id === hoveredEdgeId)
       if (!edge) return null
-      // Resolve source/target node display names via DOM — the elementCache
-      // already has the rendered node refs.
-      const sourceEl = document.getElementById(`layer-node-${edge.source}`)
-      const targetEl = document.getElementById(`layer-node-${edge.target}`)
-      // A line into a folded layer ends on a fold anchor, which carries the
-      // row's name as `data-label` (LayerColumn) instead of the row's text.
-      const sourceName = sourceEl?.querySelector('.line-clamp-2')?.textContent?.trim()
-        || sourceEl?.getAttribute('data-label') || edge.source
-      const targetName = targetEl?.querySelector('.line-clamp-2')?.textContent?.trim()
-        || targetEl?.getAttribute('data-label') || edge.target
-      const typeLabel = edge.types.length > 0 ? edge.types.join(' · ') : 'RELATIONSHIP'
+      // Each end by the name and type its card shows. A line into a folded
+      // layer ends on a fold anchor, which carries the row's name as
+      // `data-label` (LayerColumn); an id is the last resort, and then only its tail.
+      const nameOf = (id: string) => nodeById.get(id)?.name
+        || document.getElementById(`layer-node-${id}`)?.getAttribute('data-label') || formatUrnLabel(id, 40)
+      const typeOf = (id: string) => {
+        const typeId = nodeById.get(id)?.typeId
+        if (!typeId) return undefined
+        const types = useSchemaStore.getState().schema?.entityTypes ?? []
+        return (types.find(t => t.id === typeId) ?? types.find(t => t.id.toLowerCase() === typeId.toLowerCase()))?.name || typeId
+      }
+      const sourceName = nameOf(edge.source)
+      const targetName = nameOf(edge.target)
+      const sourceType = typeOf(edge.source)
+      const targetType = typeOf(edge.target)
+      const typeLabel = edge.types.length > 0
+        ? edge.types.map(t => edgeTypeCopy(t)?.label ?? relationshipLabel(t)).join(' · ')
+        : 'Relationship'
       const confPct = edge.confidence > 0 ? Math.round(edge.confidence * 100) : null
 
       // Position above-right of the cursor; flip below if near top, left if near right edge.
       const margin = 18
       const panelW = 280
-      const panelH = 140
+      const panelH = 156
       let left = hoverMousePos.x + margin
       let top = hoverMousePos.y - panelH - margin
       if (left + panelW > window.innerWidth - 8) left = hoverMousePos.x - panelW - margin
@@ -2065,6 +2081,7 @@ export function LineageFlowOverlay({
               <div className="flex-1 min-w-0">
                 <p className="text-[9px] font-semibold uppercase tracking-wider text-white/40 mb-0.5">From</p>
                 <p className="text-white/90 truncate font-medium" title={sourceName}>{sourceName}</p>
+                {sourceType && <p className="text-[10px] text-white/45 truncate">{sourceType}</p>}
               </div>
               <svg width="22" height="14" viewBox="0 0 22 14" className="flex-shrink-0">
                 <defs>
@@ -2077,6 +2094,7 @@ export function LineageFlowOverlay({
               <div className="flex-1 min-w-0">
                 <p className="text-[9px] font-semibold uppercase tracking-wider text-white/40 mb-0.5">To</p>
                 <p className="text-white/90 truncate font-medium" title={targetName}>{targetName}</p>
+                {targetType && <p className="text-[10px] text-white/45 truncate">{targetType}</p>}
               </div>
             </div>
 

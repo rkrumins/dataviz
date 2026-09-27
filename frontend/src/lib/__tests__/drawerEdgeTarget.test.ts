@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { targetFromLine, targetFromEdge, type DrawnLine } from '../drawerEdgeTarget'
+import { lineForTarget, targetFromLine, targetFromEdge, type DrawnLine } from '../drawerEdgeTarget'
 import type { LineageEdge } from '@/store/canvas'
 
 const storeEdge = (id: string, source: string, target: string, edgeType = 'FLOWS_TO'): LineageEdge =>
@@ -97,5 +97,36 @@ describe('targetFromLine', () => {
 describe('targetFromEdge', () => {
   it('opens a store edge as a relationship', () => {
     expect(targetFromEdge(storeEdge('e1', 'a', 'b'))).toEqual({ kind: 'relationship', id: 'e1', source: 'a', target: 'b', edgeType: 'FLOWS_TO' })
+  })
+})
+
+describe('lineForTarget — the line an open drawer stands on, as drawn now', () => {
+  const lines: DrawnLine[] = [
+    { id: 'bundle-p->b', source: 'p', target: 'b', data: { members: [member('e1', 'c1', 'b'), member('e2', 'c2', 'b')] } },
+    { id: 'bundle-a->b', source: 'a', target: 'b', data: { members: [member('e3', 'a', 'b')] } },
+    { id: 'bundle-bi-x->y', source: 'x', target: 'y', isBidirectional: true },
+  ]
+
+  it('finds the line by its id', () => {
+    expect(lineForTarget({ kind: 'relationship', id: 'e3', source: 'a', target: 'b', edgeType: 'FLOWS_TO', lineId: 'bundle-a->b' }, lines)?.id)
+      .toBe('bundle-a->b')
+  })
+
+  it('after the line was rebuilt under a new id, finds the one carrying the relationship', () => {
+    expect(lineForTarget({ kind: 'relationship', id: 'e2', source: 'c2', target: 'b', edgeType: 'FLOWS_TO', lineId: 'bundle-gone' }, lines)?.id)
+      .toBe('bundle-p->b')
+    expect(lineForTarget({
+      kind: 'connection', id: 'bundle-gone', source: 'p', target: 'b', types: [], weight: 2,
+      members: [{ id: 'e1', source: 'c1', target: 'b', edgeType: 'FLOWS_TO', rollup: false }],
+    }, lines)?.id).toBe('bundle-p->b')
+  })
+
+  it('else the line joining the same two ends, either way round on a two-way line', () => {
+    expect(lineForTarget({ kind: 'relationship', id: 'wire', source: 'y', target: 'x', edgeType: 'FLOWS_TO' }, lines)?.id)
+      .toBe('bundle-bi-x->y')
+  })
+
+  it('is null when nothing it stands for is drawn', () => {
+    expect(lineForTarget({ kind: 'relationship', id: 'e9', source: 'q', target: 'r', edgeType: 'FLOWS_TO' }, lines)).toBeNull()
   })
 })

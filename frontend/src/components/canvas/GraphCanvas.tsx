@@ -48,7 +48,7 @@ import { CanvasControls } from './CanvasControls'
 import { EdgeLegend } from './EdgeLegend'
 import { EntityDrawer } from '../panels/entity/EntityDrawer'
 import { RelationshipDrawer } from '../panels/RelationshipDrawer'
-import { targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
+import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
@@ -556,13 +556,27 @@ export function GraphCanvas({ className }: { className?: string }) {
     childMap,
     isClickHighlightActive,
   })
-  const isHighlightActive = isClickHighlightActive || isHoverActive
-  const mergedHighlightNodes = isClickHighlightActive
-    ? highlightState.nodes
-    : hoverHighlight.nodes
-  const mergedHighlightEdges = isClickHighlightActive
-    ? highlightState.edges
-    : hoverHighlight.edges
+  // The line the relationship drawer is open on lights like a selection — it and its two ends —
+  // for as long as the drawer is open on it.
+  const openLine = useMemo(
+    () => (drawerEdge ? lineForTarget(drawerEdge, allVisibleEdges as DrawnLine[]) : null),
+    [drawerEdge, allVisibleEdges],
+  )
+  const openLineHighlight = useMemo(
+    () => (openLine ? { nodes: new Set([openLine.source, openLine.target]), edges: new Set([openLine.id]) } : null),
+    [openLine],
+  )
+  const isHighlightActive = isClickHighlightActive || isHoverActive || openLineHighlight !== null
+  const mergedHighlightNodes = openLineHighlight
+    ? openLineHighlight.nodes
+    : isClickHighlightActive
+      ? highlightState.nodes
+      : hoverHighlight.nodes
+  const mergedHighlightEdges = openLineHighlight
+    ? openLineHighlight.edges
+    : isClickHighlightActive
+      ? highlightState.edges
+      : hoverHighlight.edges
 
   // 13. Edge filters
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } =
@@ -901,6 +915,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           target: edge.target,
           // Use 'aggregated' edge component for rolled-up edges (shows edge count badge)
           type: isAggregated ? 'aggregated' as const : 'lineage' as const,
+          selected: edge.id === openLine?.id,
           animated: !isProjected && !isAggregated && (!isHighlightActive || mergedHighlightEdges.has(edge.id)),
           style: {
             opacity: isHighlightActive && !mergedHighlightEdges.has(edge.id) ? 0.15 : (isProjected ? 0.7 : 1),
@@ -917,7 +932,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           },
         }
       })
-  }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges, enabledEdgeTypes, directionEdgeIds, isolateMode, highlightedEdgeIds])
+  }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges, enabledEdgeTypes, directionEdgeIds, isolateMode, highlightedEdgeIds, openLine])
   // (trace.isTracing/trace.result kept in deps because the map step inside reads them for isTraced flagging)
 
   // 16. Display nodes with visual state — only VISIBLE nodes (expand/collapse aware)

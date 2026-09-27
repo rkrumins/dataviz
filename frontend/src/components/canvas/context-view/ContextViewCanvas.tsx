@@ -77,7 +77,7 @@ import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/us
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/entity/EntityDrawer'
 import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
-import { targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
+import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
@@ -132,7 +132,7 @@ import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
 import { BRING_IN_BATCH } from './ghostCues'
-import { shiftToClear } from './drawerClearance'
+import { keepClearOfDrawer } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
   EMPTY_LENS_HISTORY,
@@ -3592,27 +3592,7 @@ export function ContextViewCanvas({
   useEffect(() => {
     const container = horizontalScrollRef.current
     if (!drawerNodeId || !container) return
-    let frame = 0
-    let width = -1
-    let still = 0
-    let frames = 0
-    const whenSettled = () => {
-      const now = container.clientWidth
-      still = now === width ? still + 1 : 0
-      width = now
-      frames += 1
-      // Three identical frames means the width has stopped moving — which is
-      // true immediately when the drawer merely swapped entities and never
-      // resized. The frame cap keeps a window being dragged from holding
-      // this open indefinitely.
-      if (still < 3 && frames < 60) { frame = requestAnimationFrame(whenSettled); return }
-      const row = document.getElementById(`layer-node-${drawerNodeId}`)
-      if (!row) return                       // off-window: the reveal paths own that
-      const shift = shiftToClear(row.getBoundingClientRect(), container.getBoundingClientRect())
-      if (shift !== 0) container.scrollLeft += shift
-    }
-    frame = requestAnimationFrame(whenSettled)
-    return () => cancelAnimationFrame(frame)
+    return keepClearOfDrawer(container, [drawerNodeId])
   }, [drawerNodeId])
 
   // F9 — REVEAL WHILE TRACING opens the OVERLAY's chain. The browse reveal
@@ -4466,6 +4446,20 @@ export function ContextViewCanvas({
       }))
   }, [overlay.active, overlay.view, browseVisibleLineageEdges, traceHiddenTypes, traceLaneIndex])
 
+  // The line the relationship drawer is open on, as it is drawn now. While the drawer is open it
+  // stays drawn (whatever the density mode), lit with its two cards while the rest dims, and clear
+  // of the drawer — the reader sees what they are reading about.
+  const openLine = useMemo(
+    () => (drawerEdge ? lineForTarget(drawerEdge, visibleLineageEdges) : null),
+    [drawerEdge, visibleLineageEdges],
+  )
+  const openLineEnds = openLine ? `${openLine.source}\n${openLine.target}` : null
+  useEffect(() => {
+    const container = horizontalScrollRef.current
+    if (!openLineEnds || !container) return
+    return keepClearOfDrawer(container, openLineEnds.split('\n'))
+  }, [openLineEnds])
+
   // Publish the projected lineage edge set to the canvas store so panels
   // outside the canvas (EntityDrawer's Lineage section) can mirror exactly
   // what the user sees. THIS IS A LEGAL WRITE DURING A TRACE: `visibleEdges`
@@ -4529,7 +4523,7 @@ export function ContextViewCanvas({
   // noise; the Lineage Lens enumerates the full fan properly and the chip
   // points there. A HOVERED entity's lines follow the same rule, drawn by
   // the overlay from `hoverPool` so a hover never re-renders the canvas.
-  const edgePresentation = useMemo(() => {
+  const basePresentation = useMemo(() => {
     if (!isStubsMode) {
       return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
     }
@@ -4559,6 +4553,12 @@ export function ContextViewCanvas({
       focusTotal: focusAll.length,
     }
   }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
+  // The open line is drawn whatever the mode would otherwise show.
+  const edgePresentation = useMemo(() => (
+    openLine && !basePresentation.edges.some(e => e.id === openLine.id)
+      ? { ...basePresentation, edges: [...basePresentation.edges, openLine] }
+      : basePresentation
+  ), [basePresentation, openLine])
   const effectiveLineageEdges = edgePresentation.edges
 
   // ── Fold distant layers (useLayerFold, layerFold.ts) ────────────────────
@@ -5166,11 +5166,18 @@ export function ContextViewCanvas({
     isTracing: traceActive, displayMap, childMap,
   })
 
-  // The HOVER highlight (lighter, deferring to this one) is the overlay's,
-  // applied to the DOM — see hoverSpotlight.ts.
-  const isHighlightActive = isClickHighlightActive
-  const mergedHighlightNodes = highlightState.nodes
-  const mergedHighlightEdges = highlightState.edges
+  // The line the drawer is open on lights the same way: it and its two cards,
+  // with the rest dimmed. The HOVER highlight (lighter, deferring to these) is
+  // the overlay's, applied to the DOM — see hoverSpotlight.ts.
+  const isHighlightActive = isClickHighlightActive || openLine !== null
+  const mergedHighlightNodes = useMemo(
+    () => (openLine ? new Set([...highlightState.nodes, openLine.source, openLine.target]) : highlightState.nodes),
+    [highlightState.nodes, openLine],
+  )
+  const mergedHighlightEdges = useMemo(
+    () => (openLine ? new Set([...highlightState.edges, openLine.id]) : highlightState.edges),
+    [highlightState.edges, openLine],
+  )
 
   // The Connections panel's highlight is a deliberate gesture on the panel,
   // so while it is active it wins over hover/click — on the OVERLAY only.
@@ -6168,7 +6175,7 @@ export function ContextViewCanvas({
               edges={effectiveLineageEdges}
               expandedNodes={expandedForRender}
               onEdgeClick={handleEdgeClick}
-              openLineId={drawerEdge ? (drawerEdge.kind === 'connection' ? drawerEdge.id : drawerEdge.lineId ?? null) : null}
+              openLineId={openLine?.id ?? null}
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={overlay.active}
               traceResult={overlay.active ? nativeTraceResult : trace.result}

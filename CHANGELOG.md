@@ -87,6 +87,13 @@ relationships on the published graph are read-only, and say why.
 
 ### Fixed
 
+- **The line you clicked disappeared while you read about it.** In the default "On Hover" density a
+  line is drawn only for the selected entity, and clicking the line took the selection, so the line
+  vanished as its drawer opened. Now the line a drawer is open on stays drawn, whatever the density.
+  It stays lit, with its two cards, while everything else dims, and the board scrolls just enough to
+  keep both ends clear of the drawer. The Graph canvas lights it the same way. The card that appears
+  when you hover over a line names both ends and their types (it could show ids) and gives each
+  relationship type its readable name.
 - **An unstaged edit in a drawer could be lost without a word.** Esc, starting a trace, opening the
   Hierarchy Builder or following a lineage row closed or swapped the drawer and dropped the edit, and
   a canvas click selected the other entity while the drawer still showed the first. Now anything
