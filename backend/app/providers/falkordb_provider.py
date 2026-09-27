@@ -6733,8 +6733,11 @@ class FalkorDBProvider(GraphDataProvider):
             except asyncio.TimeoutError:
                 raise
             except Exception as exc:
-                logger.warning("get_edges pair query failed: %s", exc)
-                return []
+                if await self._is_verified_missing_graph(exc):
+                    return []
+                # As a label bucket's above: a failed pair fails the read,
+                # never a 200 missing that pair's edges.
+                raise
 
         rows_per_pair = await asyncio.gather(*[
             _run_pair(sl, srcs, tl, tgts) for sl, srcs in src_buckets for tl, tgts in tgt_buckets

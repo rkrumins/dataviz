@@ -262,11 +262,14 @@ def test_a_batch_lost_to_anything_else_keeps_its_prefix_and_says_why(monkeypatch
 # ── /edges/between: one label bucket failing fails the read ──────────────
 
 
-def _bucketed_edges_provider(fail_with):
-    """``get_edges`` over two label buckets, where urn:b's bucket raises."""
+def _bucketed_edges_provider(fail_with, *, pairs=True):
+    """``get_edges`` over two label buckets, where urn:b's bucket raises —
+    by pairs of buckets (both ends bound), or anchored on one end."""
     from types import SimpleNamespace
 
     p = fp.FalkorDBProvider(host="x", graph_name="g")
+    if not pairs:
+        p._PAIR_BIND_MAX_PAIRS = 0
 
     async def _connected():
         return None
@@ -275,9 +278,12 @@ def _bucketed_edges_provider(fail_with):
         return [("A", ["urn:a"]), ("B", ["urn:b"])]
 
     async def _ro_query(cypher, params=None, timeout=None, **kw):
-        if params["anchorUrns"] == ["urn:b"]:
+        sources = params.get("sourceUrns", params.get("anchorUrns"))
+        if sources == ["urn:b"]:
             raise fail_with
-        return SimpleNamespace(result_set=[["urn:a", "urn:b", "FLOWS_TO", {}]])
+        targets = params.get("targetUrns", ["urn:b"])
+        rows = [["urn:a", "urn:b", "FLOWS_TO", {}]] if "urn:b" in targets else []
+        return SimpleNamespace(result_set=rows)
 
     p._ensure_connected = _connected
     p._label_buckets = _buckets
@@ -291,22 +297,28 @@ def _between():
     return EdgeQuery(source_urns=["urn:a", "urn:b"], target_urns=["urn:a", "urn:b"])
 
 
-async def test_a_failed_label_bucket_fails_edges_between_instead_of_answering_part_of_it():
+both_paths = pytest.mark.parametrize("pairs", [True, False], ids=["pair-bound", "one-sided"])
+
+
+@both_paths
+async def test_a_failed_label_bucket_fails_edges_between_instead_of_answering_part_of_it(pairs):
     """Answering with the other buckets' edges was a 200 missing a whole
     label's lineage, which the response cache kept for its full TTL."""
-    p = _bucketed_edges_provider(QUEUE_FULL)
+    p = _bucketed_edges_provider(QUEUE_FULL, pairs=pairs)
     with pytest.raises(ResponseError):
         await p.get_edges(_between())
 
 
-async def test_through_the_breaker_a_full_bucket_is_a_429_not_a_short_200():
-    proxy = CircuitBreakerProxy(_bucketed_edges_provider(QUEUE_FULL), name="p")
+@both_paths
+async def test_through_the_breaker_a_full_bucket_is_a_429_not_a_short_200(pairs):
+    proxy = CircuitBreakerProxy(_bucketed_edges_provider(QUEUE_FULL, pairs=pairs), name="p")
     with pytest.raises(ProviderBusy):
         await proxy.get_edges(_between())
 
 
-async def test_a_graph_that_does_not_exist_yet_still_has_no_edges():
-    p = _bucketed_edges_provider(ResponseError("Invalid graph operation on empty key"))
+@both_paths
+async def test_a_graph_that_does_not_exist_yet_still_has_no_edges(pairs):
+    p = _bucketed_edges_provider(ResponseError("Invalid graph operation on empty key"), pairs=pairs)
     edges = await p.get_edges(_between())
     assert [(e.source_urn, e.target_urn) for e in edges] == [("urn:a", "urn:b")]
 
