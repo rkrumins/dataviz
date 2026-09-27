@@ -44,12 +44,20 @@ class PagingMain:
                                    rootTypeCount=len(page), orphanCount=0)
 
 
+
 class FakeSvc:
     def __init__(self, delta):
         self._delta = delta
+        self._version = object()                 # each stub is its own draft: no shared cached delta
+
+    async def overlay_version(self, *, graph_id, branch_id):
+        return (self._version,)
 
     async def branch_overlay_delta(self, *, graph_id, branch_id):
         return self._delta
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids):
+        return []
 
 
 def _edge(i, src, tgt):

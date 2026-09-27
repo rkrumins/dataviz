@@ -28,9 +28,10 @@ import json
 import logging
 import re
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +52,7 @@ from backend.app.services.versioning.service import (
     AccessDenied,
     ApprovalRequired,
     ConcurrencyError,
+    DiffTooLarge,
     GraphVersioningService,
     MergeConflict,
     NotUpToDate,
@@ -108,6 +110,22 @@ _service = GraphVersioningService()
 def get_versioning_service() -> GraphVersioningService:
     """Injectable service handle (overridable in tests)."""
     return _service
+
+
+_ie_service = None
+
+
+def get_import_export_service():
+    """Injectable Import/Export service (reuses the versioning singleton; overridable in tests)."""
+    global _ie_service
+    if _ie_service is None:
+        from backend.app.services.versioning.import_export.service import ImportExportService
+        _ie_service = ImportExportService(
+            versioning=_service, scope_resolver=_resolve_export_view_scope,
+            ontology_resolver=_resolve_ontology_types,
+            layout_writer=_write_view_import_assignments,
+            publish_hook=_publish_from_job)
+    return _ie_service
 
 
 _read_factory = None  # lazily built FalkorDB read-client factory (name -> graph)
@@ -454,6 +472,10 @@ def _domain_errors():
             "title": exc.title, "message": str(exc)})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
+    except DiffTooLarge as exc:
+        raise HTTPException(status_code=409, detail={
+            "type": "too_large_for_tree", "changed": exc.changed, "limit": exc.limit,
+            "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -744,6 +766,16 @@ class CommitResponse(_ApiModel):
     commit_id: str = Field(alias="commitId")
 
 
+class PublishJobResponse(_ApiModel):
+    """A large draft's publish (or review merge), run as a job: poll until it's done. ``error`` is
+    ``{status, detail}``, the answer the route gives when it publishes inside the request."""
+    job_id: str = Field(alias="jobId")
+    graph_id: str = Field(alias="graphId")
+    status: str
+    commit_id: Optional[str] = Field(default=None, alias="commitId")
+    error: Optional[dict] = None
+
+
 class RevisionModel(_ApiModel):
     """The main commit a side of the watermark is at — so "version #12" names a real revision."""
     commit_id: str = Field(alias="commitId")
@@ -875,6 +907,8 @@ class RebaseResponse(_ApiModel):
     is why a pull could never tell the user what it had pulled."""
     clean: bool
     conflicts: List[dict] = Field(default_factory=list)
+    # On conflict: the draft's own value of each conflicting entity, to resolve from.
+    seeds: Dict[str, Optional[dict]] = Field(default_factory=dict)
     changes: Dict[str, int] = Field(default_factory=dict)
     incoming: Optional[IncomingModel] = None
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
@@ -948,6 +982,9 @@ class DiffSummaryResponse(_ApiModel):
     entity_counts: Dict[str, int] = Field(default_factory=dict, alias="entityCounts")
     edge_counts: Dict[str, int] = Field(default_factory=dict, alias="edgeCounts")
     impact: Dict[str, int]
+    # ``{changed, limit}`` when the draft changes more entities than the tree lays out: counts
+    # only, no groups, and its children route answers 409 ``too_large_for_tree``.
+    too_large: Optional[Dict[str, int]] = Field(default=None, alias="tooLarge")
 
 
 class DiffChildrenResponse(_ApiModel):
@@ -1667,7 +1704,13 @@ async def publish(
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
+    ie=Depends(get_import_export_service),
 ):
+    """Publish a draft. One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities is
+    published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``)."""
+    if await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
+        return await _queue_publish(ie, workspace_id=ws_id, meta=_meta, graph_id=graph_id,
+                                    branch_id=branch_id, actor=user.id, body=body)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, _meta)
     with _domain_errors():
@@ -1681,6 +1724,81 @@ async def publish(
     await _promote_view_layout_overlay(branch_id, user.id)   # fold the draft's layer/assignment edits into the published view
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": commit_id}
+
+
+async def _queue_publish(ie, *, workspace_id, meta, graph_id, branch_id, actor, body,
+                         merge_request_id=None) -> JSONResponse:
+    job = await ie.create_publish_job(
+        workspace_id=workspace_id, data_source_id=(meta or {}).get("data_source_id"),
+        graph_id=graph_id, branch_id=branch_id, actor=actor, message=body.message,
+        resolutions=body.resolutions, merge_request_id=merge_request_id)
+    started = await ie.start_publish(job["job_id"])
+    return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": graph_id,
+                                                  "status": started})
+
+
+_JOB_REFUSAL_MAX_VIOLATIONS = 100
+
+
+def _bounded_refusal(detail):
+    """A refusal as a publish job keeps it. A large draft can break the ontology on every entity it
+    changes (200k violations, 60 MB on the job and to the client, which shows the first two): keep
+    a hundred, and how many there were."""
+    violations = detail.get("violations") if isinstance(detail, dict) else None
+    if violations and len(violations) > _JOB_REFUSAL_MAX_VIOLATIONS:
+        return {**detail, "violations": violations[:_JOB_REFUSAL_MAX_VIOLATIONS], "total": len(violations)}
+    return detail
+
+
+async def _publish_from_job(job: dict) -> dict:
+    """Run a queued publish — or the merge of a draft's review — as the route runs one inside the
+    request: the target's live ontology, a refusal as the HTTP answer the route gives, then what a
+    publish sets off. This may be the versioning worker, so the projection is started with
+    ``project_now``, which hands over to the worker when it can't finish here."""
+    from backend.app.db.engine import get_async_session
+    svc = get_versioning_service()
+    graph_id, branch_id, actor = job["graphId"], job["branchId"], job["actor"]
+    try:
+        with _domain_errors():
+            meta = await svc.get_graph(graph_id)
+            async with get_async_session() as session:
+                cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
+                rules = await _rules_for_meta(session, job["workspaceId"], meta)
+            if job.get("mergeRequestId"):
+                commit_id = await svc.merge_mr(
+                    mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
+                    resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
+            else:
+                commit_id = await svc.publish(
+                    graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
+                    resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
+    except HTTPException as exc:
+        return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
+    await _bump_main_cache(graph_id)
+    await _touch_views_data_updated(graph_id, actor)
+    await _promote_view_layout_overlay(branch_id, actor)
+    await project_now(graph_id)
+    return {"commitId": commit_id}
+
+
+@router.get("/graphs/{graph_id}/publish-jobs/{job_id}", response_model=PublishJobResponse)
+async def get_publish_job(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Where a large draft's publish (or review merge) is: pending, running, completed with its
+    commit, or failed with the answer a publish inside the request would have given."""
+    job = await ie.get_job(job_id)
+    if job is None or job["jobType"] != "publish" or job["graphId"] != graph_id:
+        raise HTTPException(status_code=404, detail="publish job not found")
+    summary = job.get("summary") or {}
+    error = summary.get("error")
+    if job["status"] == "failed" and error is None:          # died rather than refused
+        error = {"status": 500, "detail": job.get("errorMessage") or "publishing failed"}
+    return {"job_id": job_id, "graph_id": graph_id, "status": job["status"],
+            "commit_id": summary.get("commitId"), "error": error}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/abandon", response_model=BranchResponse)
@@ -2040,6 +2158,9 @@ async def get_diff_window(
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main", response_model=DiffVsMainResponse)
 async def get_diff_vs_main(
     ws_id: str, graph_id: str, branch_id: str,
+    payloads: Literal["all", "changes"] = Query(
+        "all", description="`changes`: a modified entity by id and kind alone, without its "
+                           "before/after payloads — enough to count changes and ring nodes."),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -2049,7 +2170,8 @@ async def get_diff_vs_main(
     as whole node/edge payloads with before/after — the shape the canvas diff overlay
     and Changes panel consume directly, without client-side state joins."""
     with _domain_errors():
-        return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+        return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id, viewer=viewer,
+                                             payloads=payloads)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/summary",
@@ -2334,7 +2456,6 @@ async def sync_ingest(
 # Backend-driven + automation-friendly: the same endpoints power the UI and a  #
 # scripted client. Independent of the aggregation/ingestion worker.            #
 # --------------------------------------------------------------------------- #
-_ie_service = None
 
 
 async def _resolve_export_view_scope(workspace_id, data_source_id, view_id, branch_id=None):
@@ -2444,18 +2565,6 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
         await view_repo.update_view_layout(
             session, view_id, ViewLayoutUpdateRequest(reference_layout=new_ref))
     return {"added": len(new_entries)}
-
-
-def get_import_export_service():
-    """Injectable Import/Export service (reuses the versioning singleton; overridable in tests)."""
-    global _ie_service
-    if _ie_service is None:
-        from backend.app.services.versioning.import_export.service import ImportExportService
-        _ie_service = ImportExportService(
-            versioning=_service, scope_resolver=_resolve_export_view_scope,
-            ontology_resolver=_resolve_ontology_types,
-            layout_writer=_write_view_import_assignments)
-    return _ie_service
 
 
 class CreateImportResponse(_ApiModel):
@@ -3360,7 +3469,16 @@ async def merge_merge_request(
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
+    ie=Depends(get_import_export_service),
 ):
+    """Merge a merge request. A draft that changes more than ``SYNC_PUBLISH_MAX_CHANGES``
+    entities is merged by a job instead: 202 with the job to poll, as for publish."""
+    target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
+    if source and await svc.branch_change_count(
+            graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
+        return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
+                                    graph_id=target, branch_id=str(source), actor=user.id,
+                                    body=body, merge_request_id=pr_id)
     cset = await _pr_containment_types(svc, session, ws_id, _pr)
     rules = await _pr_ontology_rules(svc, session, ws_id, _pr)
     with _domain_errors():
