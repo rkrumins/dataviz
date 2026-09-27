@@ -53,6 +53,8 @@ import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
+import { useViewLibrary } from '@/hooks/useViewLibrary'
+import { useEffectiveBranchId } from '@/store/branchStore'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
@@ -177,6 +179,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   useDisplayRuleEngine(activeView?.id ?? null)
+  // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
+  const libraryBranchId = useEffectiveBranchId(
+    activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
+  useViewLibrary(activeView?.id ?? null, libraryBranchId)
   // A relationship the drawer shows was resolved from THIS view's lines —
   // leaving the view (or this canvas) closes it, trail and all.
   useEffect(() => () => {

@@ -23,6 +23,7 @@ import { useFeature } from '@/store/features'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useEntitySummary, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
+import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { userProperties } from '@/lib/nodeFields'
 import { nodeIndexOf } from '@/lib/storeIndex'
@@ -89,8 +90,6 @@ function OpenEntityDrawer({
   const colors = useEntityColorSet(typeId)
   const personaMode = usePersonaStore((s) => s.mode)
   const versioningEnabled = useFeature('versioningEnabled')
-  // Independent switch: off means every canvas is view-only even with versioning on.
-  const editModeEnabled = useFeature('editModeEnabled')
 
   // ── What is stored: the summary for the line being read (a draft sees main at its branch
   // point plus its own edits) — its last change, and its current value and token. ──
@@ -109,7 +108,12 @@ function OpenEntityDrawer({
   const session = useEntityEditSession(node, summaryQ.data?.value)
   const { form, dirty, justStaged, edit, stage, discard } = session
   const isGhost = data.isGhost === true
-  const editable = canEdit && !isGhost && versioningEnabled && editModeEnabled && !writesLocked
+  // An edit is kept only as a change in a draft (useEntityEditing). Where editing isn't offered at
+  // all — switched off, a read-only view, a ghost, a locked surface — nothing is offered; where it
+  // is but can't be kept here yet, the header says why (or offers a draft).
+  const editing = useEntityEditing()
+  const editOffered = !isGhost && !writesLocked && editing.offered
+  const editable = canEdit && editOffered && !editing.blocked
 
   // A new entity opens on View; a drawer that cannot edit (a trace began) never shows Edit.
   const [tab, setTab] = useState<EntityTab>('view')
@@ -178,7 +182,8 @@ function OpenEntityDrawer({
             externalUrl={externalUrl}
             editable={editable}
             dirty={dirty}
-            onStartEditing={!isGhost && !writesLocked && versioningEnabled && editModeEnabled ? onStartEditing : undefined}
+            editBlocked={editOffered && !editable ? editing.blocked : null}
+            onStartEditing={editOffered && editing.blocked !== NO_VERSION_CONTROL ? onStartEditing : undefined}
             onClose={close}
             onFocusNode={onFocusNode}
           />

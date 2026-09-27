@@ -1,9 +1,10 @@
 /**
  * StageBar — a drawer's footer while editing: where the edit stands, Cancel, and "Stage changes"
- * (its shortcut in the tooltip). Staging records the edit for Review & Save; nothing is saved
- * until then.
+ * (its shortcut in the tooltip). Staging records the edit for Review & Save; nothing is kept until
+ * then — which is what it says right after staging, with the way there.
  */
 import { AlertCircle, CheckCircle2 } from 'lucide-react'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { Button } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { formatShortcut, isApplePlatform } from '@/lib/platform'
@@ -15,13 +16,24 @@ export function StageBar({ dirty, justStaged, onCancel, onStage }: {
   onCancel: () => void
   onStage: () => void
 }) {
+  if (justStaged && !dirty) {
+    return (
+      <div className="flex items-center justify-between gap-3">
+        <span role="status" className="min-w-0 flex items-center gap-1.5 text-xs">
+          <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" aria-hidden />
+          <span className="text-ink-secondary truncate">Staged — Review &amp; Save to keep it</span>
+        </span>
+        <Button variant="subtle" onClick={() => useStagedChangesStore.getState().openReviewPanel()} className="shrink-0">
+          Review &amp; Save
+        </Button>
+      </div>
+    )
+  }
   return (
     <div className="flex items-center justify-between gap-3">
       <span role="status" className="min-w-0 flex items-center gap-1.5 text-xs">
         {dirty ? (
           <><AlertCircle className="w-3.5 h-3.5 shrink-0 text-amber-500" aria-hidden /><span className="text-ink-secondary truncate">Unsaved changes</span></>
-        ) : justStaged ? (
-          <><CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" aria-hidden /><span className="text-ink-secondary truncate">Staged for review</span></>
         ) : (
           <span className="text-ink-muted truncate">No changes yet</span>
         )}

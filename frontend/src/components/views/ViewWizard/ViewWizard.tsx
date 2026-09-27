@@ -87,6 +87,7 @@ import { SchemaScope } from '@/components/schema/SchemaScope'
 import { OntologyDriftBanner, hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
 import { useViewMetadata, useViewFull, VIEW_QUERY_KEY, type ViewMetadata } from '@/hooks/useViewMetadata'
 import { invalidateViewVersions } from '@/hooks/useViewVersions'
+import { reloadViewLibrary } from '@/store/viewLibraryStore'
 import { useWizardScope } from '@/hooks/useWizardScope'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { resolveWizardEntityScope } from './effectivePlacement'
@@ -1315,6 +1316,8 @@ function ViewWizardBody({
                 useSchemaStore.getState().addOrUpdateView(saved)
                 createdViewRef.current = saved
                 invalidateViewVersions(queryClient, result.viewId)
+                // Its display rules are the file's: a canvas that has it open reads them again.
+                reloadViewLibrary(result.viewId)
                 void queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, result.viewId] })
                 void queryClient.invalidateQueries({ queryKey: ['views'] })
                 void queryClient.invalidateQueries({ queryKey: ['explorer-views'] })

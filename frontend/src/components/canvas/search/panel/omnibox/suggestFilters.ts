@@ -305,18 +305,17 @@ export function suggestFilters(input: SuggestInput): SuggestSection[] {
             title: `Has a ${key} value`, match: query,
             predicate: { kind: 'hasProperty', key, negate: false } as Predicate,
         }))
-        // The escape hatch from sampling: offer to compare this key
-        // against the literal text typed, even when that exact value
-        // never appeared in the sample. Samples are 20 values per key
-        // — absence is not evidence, and gating on them would make the
-        // omnibox confidently wrong.
+        // Compare this key to a value — any value, not only the sampled
+        // ones (samples are 20 values per key; absence is not evidence).
+        // What was typed names the key, so the value is left for the row
+        // to take: an incomplete row never runs.
         push('propertyKey', suggestion({
             id: `keyeq:${key}`, group: 'propertyKey', icon: 'Equal',
             score: score - 30,
-            title: `${key} is "${query}"`,
-            hint: 'use exactly what you typed',
+            title: `${key} is …`,
+            hint: 'compare it to a value',
             predicate: {
-                kind: 'property', key, op: 'eq', value: query,
+                kind: 'property', key, op: 'eq', value: '',
             } as Predicate,
         }))
     }
@@ -425,7 +424,7 @@ function startHere(input: SuggestInput, perGroup: number): SuggestSection[] {
     if (key) {
         items.push(suggestion({
             id: `key:${key}`, group: 'propertyKey', icon: 'KeyRound', score: 0,
-            title: `Has a ${key} value`, hint: 'most common property in this view',
+            title: `Has a ${key} value`, hint: 'a property in this view',
             predicate: { kind: 'hasProperty', key, negate: false } as Predicate,
         }))
     }

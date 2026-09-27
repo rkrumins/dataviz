@@ -10,6 +10,7 @@ import {
 import { useCanvasStore } from '@/store/canvas'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { DrawerHeader } from '../shell/DrawerShell'
 import { DrawerTopBar, KindBadge } from '../shell/DrawerTopBar'
@@ -28,7 +29,7 @@ interface TraceAction {
 export function EntityHeader({
   nodeId, titleId, typeName, colors, confidence, title, technicalLine, isGhost, onRestore,
   onTraceUp, onTraceDown, onFullTrace, onFocusConnections, copiedUrn, onCopyUrn, externalUrl,
-  editable, dirty, onStartEditing, onClose, onFocusNode,
+  editable, editBlocked, dirty, onStartEditing, onClose, onFocusNode,
 }: {
   nodeId: string
   titleId: string
@@ -48,6 +49,9 @@ export function EntityHeader({
   externalUrl: string | null
   /** The Edit tab is offered. */
   editable: boolean
+  /** Why an edit offered here can't be kept yet — shown on a disabled Edit tab when there is no
+   *  draft to offer instead. */
+  editBlocked?: string | null
   dirty: boolean
   /** Offered instead of Edit on the published graph. */
   onStartEditing?: () => void
@@ -148,12 +152,17 @@ export function EntityHeader({
       <div className="flex items-center gap-2 mt-4">
         <TabsList aria-label="Entity details" className="flex-1">
           <TabsTrigger value="view" icon={Eye}>View</TabsTrigger>
-          {editable && (
+          {editable ? (
             <TabsTrigger value="edit" icon={Pencil}
               badge={dirty ? <span className="w-1.5 h-1.5 rounded-full bg-amber-500" aria-label="unsaved changes" /> : undefined}>
               Edit
             </TabsTrigger>
-          )}
+          ) : editBlocked && !onStartEditing ? (
+            // Offered, but not keepable here — the tab stays, disabled, and says why.
+            <HoverTip label={editBlocked} className="flex-1 flex">
+              <TabsTrigger value="edit" icon={Pencil} disabled>Edit</TabsTrigger>
+            </HoverTip>
+          ) : null}
           <TabsTrigger value="json" icon={Code}>JSON</TabsTrigger>
         </TabsList>
         {!editable && onStartEditing && (

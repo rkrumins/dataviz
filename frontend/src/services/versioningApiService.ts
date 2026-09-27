@@ -16,6 +16,7 @@ import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
+import { readJsonLossless } from '@/lib/losslessJson'
 
 // ============================================
 // Wire types (match the backend `_ApiModel` aliases — camelCase)
@@ -531,7 +532,7 @@ async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number 
     throw new Error(msg)
   }
   if (res.status === 204) return undefined as T
-  return res.json()
+  return readJsonLossless<T>(res)
 }
 
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`

@@ -45,8 +45,9 @@ relationships on the published graph are read-only, and say why.
   one click away from the drawer. Its cards gain an "Open details" button, and their pencil opens the
   drawer in Edit.
 - **Entities and relationships are edited in a draft only.** On the published graph the entity
-  drawer and the Edge Explorer offer no edit controls; the drawer offers "Edit in a draft" instead.
-  The drawer's JSON tab is read-only.
+  drawer and the Edge Explorer offer no edit controls; the drawer offers "Edit in a draft" instead,
+  and on a data source without version control its Edit tab is disabled and says why. The drawer's
+  JSON tab is read-only. A staged edit says it still needs Review & Save, with the way there.
 - **A save answers with what it stored.** `POST /graph/changes` returns `entities`: each entity the
   save touched as a reader returns it now, with its `version` (`entitiesTruncated` past 500), and the
   canvas takes it — so editing the same field again is not a conflict with your own last save.

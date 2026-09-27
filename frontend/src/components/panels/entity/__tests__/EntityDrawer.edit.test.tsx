@@ -22,6 +22,12 @@ vi.mock('@/features/versioning/hooks/useVersioning', () => ({
   useProjectionWatermark: () => ({ data: undefined }),
   useBranches: () => ({ data: [] }),
 }))
+/** In a draft: the drawer's own `canEdit` decides. */
+const editingNow = { offered: true, blocked: null }
+vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/versioning/hooks/useEntityEditing')>()),
+  useEntityEditing: () => editingNow,
+}))
 vi.mock('@/features/versioning/components/EntityHistory', () => ({ EntityHistory: () => null }))
 vi.mock('@/components/panels/LineageNeighbors', () => ({ LineageNeighbors: () => null }))
 vi.mock('@/components/canvas/context-view/useReparentNode', () => ({ useReparentNode: () => ({ reparent: vi.fn() }) }))

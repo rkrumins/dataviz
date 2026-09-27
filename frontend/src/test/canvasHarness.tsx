@@ -415,7 +415,11 @@ function stubFetch(estate: TraceEstate): () => void {
   }
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-    const body = url.includes('/api/v1/views/') ? view : {}
+    // The view's library (display rules, saved queries): empty, and editable.
+    const library = { viewId: view.id, displayRules: [], savedQueries: [], canEdit: true }
+    const body = url.includes('/api/v1/views/')
+      ? (url.includes('/library') ? library : view)
+      : {}
     return new Response(JSON.stringify(body), {
       status: 200, headers: { 'content-type': 'application/json' },
     })

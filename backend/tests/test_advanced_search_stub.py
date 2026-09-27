@@ -233,6 +233,42 @@ async def test_property_predicate_between(stub):
 
 
 @pytest.mark.asyncio
+async def test_typed_comparisons_on_mixed_stored_kinds():
+    """The stub answers with the reference evaluator — FalkorDB's typed
+    semantics — so a stored "15" is a number under a number comparison,
+    a list matches by element, a 19-digit id compares exactly, and a
+    missing key is decided explicitly."""
+    nodes = [
+        {"urn": "urn:a", "entityType": "dataset", "size": "15",
+         "labels": ["gold", "pii"]},
+        {"urn": "urn:b", "entityType": "dataset", "size": 9,
+         "labels": ["bronze"]},
+        {"urn": "urn:c", "entityType": "dataset",
+         "id": "-3746471915534727923"},
+    ]
+    stub = StubDeepSearchProvider(nodes=nodes)
+
+    async def urns(pred):
+        page = await stub.deep_search(_query(pred))
+        return sorted(h.node.urn for h in page.hits)
+
+    assert await urns(PropertyPredicate(key="size", op="gt", value=10)) == ["urn:a"]
+    assert await urns(PropertyPredicate(key="labels", op="eq", value="PII")) == ["urn:a"]
+    assert await urns(PropertyPredicate(
+        key="labels", op="containsAll", value=["gold", "pii"])) == ["urn:a"]
+    assert await urns(PropertyPredicate(key="size", op="neq", value=9)) == ["urn:a"]
+    assert await urns(PropertyPredicate(
+        key="size", op="neq", value=9, include_missing=True)) == ["urn:a", "urn:c"]
+    assert await urns(PropertyPredicate(
+        key="id", op="eq", value="-3746471915534727923",
+        value_type="number")) == ["urn:c"]
+    assert await urns(PropertyPredicate(key="size", op="isNotSet")) == ["urn:c"]
+    assert await urns(HasPropertyPredicate(key="LAB", key_match="prefix")) == [
+        "urn:a", "urn:b"]
+    assert await urns(HasPropertyPredicate(key="size", negate=True)) == ["urn:c"]
+
+
+@pytest.mark.asyncio
 async def test_has_property_predicate(stub):
     query = _query(HasPropertyPredicate(key="sourceSystem"))
     page = await stub.deep_search(query)

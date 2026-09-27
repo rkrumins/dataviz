@@ -130,6 +130,30 @@ python backend/scripts/seed_large_lineage.py --scale 10.0 --push-falkordb
 
 ---
 
+### `seed_search_bench.py` + `bench_search_engine.py` — Search Engine Benchmark
+
+`seed_search_bench.py` writes a graph built to test property search at scale. It has:
+
+- a `Domain → Container → Dataset → SchemaField` hierarchy, plus `TRANSFORMS` lineage;
+- typed properties of every kind a search compares: int64 ids, numeric text, floats, booleans and their text, ISO dates, lists, mixed kinds, and missing keys.
+
+`bench_search_engine.py` times the search engine's statements on that graph and prints a Markdown report. It uses the real compiler. `docs/search-engine/S0_FINDINGS.md` quotes one run.
+
+```bash
+python -m backend.scripts.seed_search_bench --nodes 1000000 --graph search_bench
+python -m backend.scripts.bench_search_engine --graph search_bench --width 50000
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--nodes` | `1000000` | Total nodes (seeder) |
+| `--owners` | `5000` | Distinct `owner` values (seeder) |
+| `--seed` | `42` | Random seed (seeder); the graph is dropped first |
+| `--width` | `200000` | ID-range width per chunk (benchmark) |
+| `--host` / `--port` / `--graph` | `localhost` / `6379` / `search_bench` | Target (both) |
+
+---
+
 ### `seed_neo4j.py` — Neo4j Seeder
 
 Same generation logic as `seed_falkordb.py` but pushes to Neo4j via the `Neo4jProvider`.

@@ -229,6 +229,112 @@ function collectAncestorCounts(
 }
 
 
+/** The server's default ``maxBuckets`` for a facet that names none. */
+const DEFAULT_MAX_BUCKETS = 50
+
+/** The server reads at most this many containers a request. */
+const ANCESTOR_URNS_PER_REQUEST = 2000
+
+/** Let a burst of loads (an expand-all) settle before asking. */
+const CONTAINER_COUNTS_DEBOUNCE_MS = 150
+
+/**
+ * Where a finished search's ``ancestor`` facet is, when it came back full:
+ * it lists only the ``maxBuckets`` fullest containers, so a container on
+ * the canvas holding fewer matches is missing from it — its exact count
+ * is read from the search's session instead. -1 when there is nothing to
+ * read: no such facet, a facet that already lists every container holding
+ * a match, or a search that did not finish.
+ */
+function fullAncestorFacet(query: SearchQuery, result: SearchResultPage): number {
+    if (result.status !== 'complete' || !result.sessionId) return -1
+    const specs = query.options?.aggregations ?? []
+    const i = specs.findIndex(isAncestorFacet)
+    const facet = i >= 0 ? result.aggregates?.[i] : undefined
+    if (!facet) return -1
+    return facet.length >= (specs[i].maxBuckets ?? DEFAULT_MAX_BUCKETS) ? i : -1
+}
+
+/** ``result`` with the containers read from its session that its full
+ *  ``ancestor`` facet doesn't list appended to it — the same object when it
+ *  lacks none. */
+function withContainers(
+    query: SearchQuery,
+    result: SearchResultPage,
+    found: ReadonlyMap<string, SearchAggregateBucket> | undefined,
+): SearchResultPage {
+    const index = fullAncestorFacet(query, result)
+    if (index < 0 || !found || found.size === 0) return result
+    const listed = new Set((result.aggregates?.[index] ?? []).map((b) => b.ancestorUrn))
+    const missing = [...found.values()].filter((b) => !listed.has(b.ancestorUrn))
+    if (missing.length === 0) return result
+    return {
+        ...result,
+        aggregates: result.aggregates?.map((f, i) => (i === index ? [...f, ...missing] : f)),
+    }
+}
+
+/** The containers the canvas has loaded — nodes with children, expanded
+ *  or not. */
+function loadedContainerUrns(): string[] {
+    const urns = new Set<string>()
+    for (const n of useCanvasStore.getState().nodes) {
+        const d = n.data
+        const children = d?.childCount || d?._collapsedChildCount || d?.childIds?.length || 0
+        const urn = d?.urn ?? n.id
+        if (children > 0 && urn) urns.add(urn)
+    }
+    return [...urns]
+}
+
+
+// ---------------------------------------------------------------------------
+// Progressive search
+// ---------------------------------------------------------------------------
+
+/** How long the server may take before answering with what its scan has
+ *  found so far. It keeps scanning across the follow-up requests, each of
+ *  which waits as long again — so a large graph shows its first matches
+ *  within a second and its exact count when the scan ends. */
+export const PROGRESS_WAIT_MS = 800
+
+/** A follow-up that fails is retried this often, backing off, before the
+ *  search stops where it is. */
+const CONTINUE_ATTEMPTS = 3
+
+function progressive(query: SearchQuery): SearchQuery {
+    return { ...query, options: { ...(query.options ?? {}), waitMs: PROGRESS_WAIT_MS } }
+}
+
+/**
+ * The next answer of a running search: the same request, naming its
+ * session. A failure is retried; if it persists, the search stops at the
+ * last answer — marked as cut short, so the count reads as a floor and the
+ * panel says the search did not finish.
+ */
+async function continueSession(
+    provider: RemoteGraphProvider,
+    query: SearchQuery,
+    last: SearchResultPage,
+    signal: AbortSignal,
+): Promise<SearchResultPage> {
+    const next: SearchQuery = {
+        ...query, options: { ...(query.options ?? {}), sessionId: last.sessionId ?? undefined },
+    }
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await provider.searchAdvanced(next, { signal })
+        } catch (e) {
+            if (signal.aborted || attempt + 1 >= CONTINUE_ATTEMPTS) {
+                if (signal.aborted) throw e
+                return { ...last, status: undefined, truncated: true, deadlineExceeded: true }
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt))
+        }
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -347,6 +453,93 @@ export function useAdvancedSearch(
         if (clearOnUnmountRef.current) useSearchStore.getState().clear()
     }, [])
 
+    // Exact badges for every loaded container, not only the fullest ones
+    // the ``ancestor`` facet lists: once a search has finished with a full
+    // facet, the containers it left out are read from the search's session
+    // — each once, and later-loaded ones as they arrive — and added to the
+    // facet, so every publish (and every later page) carries them. What was
+    // read is kept per session: a later page is built from the result as
+    // it rendered, which may not have them yet.
+    const containersAsked = useRef<{
+        sessionId: string
+        urns: Set<string>
+        found: Map<string, SearchAggregateBucket>
+    } | null>(null)
+    useEffect(() => {
+        if (view.kind !== 'results' || !(provider instanceof RemoteGraphProvider)) return
+        const { query, result } = view
+        const index = fullAncestorFacet(query, result)
+        const sessionId = result.sessionId
+        if (index < 0 || !sessionId) return
+        if (containersAsked.current?.sessionId !== sessionId) {
+            containersAsked.current = { sessionId, urns: new Set(), found: new Map() }
+        }
+        const { urns: asked, found } = containersAsked.current
+        // The scope the search resolved (its hash binds the session);
+        // the visible-URN list plays no part in it and can be long.
+        const scope: SearchScope = { ...query.scope, visibleUrns: undefined }
+        const controller = new AbortController()
+        let timer: ReturnType<typeof setTimeout> | undefined
+
+        const fill = async () => {
+            const facet = result.aggregates?.[index] ?? []
+            const listed = new Set(facet.map((b) => b.ancestorUrn))
+            const pending = loadedContainerUrns().filter((u) => !listed.has(u) && !asked.has(u))
+            for (let i = 0; i < pending.length; i += ANCESTOR_URNS_PER_REQUEST) {
+                const batch = pending.slice(i, i + ANCESTOR_URNS_PER_REQUEST)
+                try {
+                    const answer = await provider.searchAncestorCounts(
+                        { scope, sessionId, urns: batch }, { signal: controller.signal })
+                    if (controller.signal.aborted) return
+                    for (const urn of batch) asked.add(urn)
+                    // Expired: the session is gone and nothing more can be read.
+                    if (answer.status !== 'complete') break
+                    for (const [urn, c] of Object.entries(answer.counts)) {
+                        if (c.count <= 0) continue
+                        found.set(urn, {
+                            ancestorUrn: urn,
+                            ancestorDisplayName: c.displayName ?? '',
+                            ancestorEntityType: c.entityType ?? '',
+                            ancestorDepthFromScopeRoot: 0,
+                            matchCount: c.count,
+                            typeCounts: c.typeCounts,
+                            sampleHits: [],
+                        })
+                    }
+                } catch (err) {
+                    if (controller.signal.aborted) return
+                    // Non-fatal: those containers keep the page's rollup.
+                    console.warn('[advancedSearch] container counts failed', err)
+                    break
+                }
+            }
+            const augmented = withContainers(query, result, found)
+            if (augmented === result) return
+            setView((v) => (v.kind === 'results' && v.result === result
+                ? { ...v, result: augmented } : v))
+            useSearchStore.getState().setResult({
+                viewId,
+                matchUrns: collectMatchUrns(augmented),
+                ancestorPaths: collectAncestorPaths(augmented),
+                ancestorCounts: collectAncestorCounts(query, augmented),
+                queryHash: JSON.stringify(query),
+            })
+        }
+        const ask = () => {
+            clearTimeout(timer)
+            timer = setTimeout(() => void fill(), CONTAINER_COUNTS_DEBOUNCE_MS)
+        }
+        ask()
+        const unsubscribe = useCanvasStore.subscribe((s, prev) => {
+            if (s.nodes !== prev.nodes) ask()
+        })
+        return () => {
+            unsubscribe()
+            clearTimeout(timer)
+            controller.abort()
+        }
+    }, [view, provider, viewId])
+
     const selectTemplate = useCallback((templateId: string) => {
         const t = findTemplate(templateId)
         setView({
@@ -450,12 +643,36 @@ export function useAdvancedSearch(
         setView({ kind: 'running', template, inputs, query, startedAt })
         if (runKey) setRunState({ hash: runKey, status: 'running' })
 
+        // Every page of a running search is shown as it lands: the hits are
+        // already in their final order, only more of them are still coming.
+        const show = (result: SearchResultPage) => {
+            setView({
+                kind: 'results', template, inputs, query, result,
+                elapsedMs: Math.round(performance.now() - startedAt),
+            })
+            const ancestorPaths = collectAncestorPaths(result)
+            rememberUrnLabels(ancestorPaths.flatMap((p) => p.path))
+            useSearchStore.getState().setResult({
+                viewId,
+                matchUrns: collectMatchUrns(result),
+                ancestorPaths,
+                ancestorCounts: collectAncestorCounts(query, result),
+                queryHash: JSON.stringify(query),
+            })
+        }
+
         try {
-            const result = await provider.searchAdvanced(
-                query, { signal: controller.signal })
+            let result = await provider.searchAdvanced(
+                progressive(query), { signal: controller.signal })
             // An aborted run has been superseded — the newer run owns
             // both the view and the run state, so touch neither.
             if (controller.signal.aborted) return
+            while (result.status === 'running' && result.sessionId) {
+                show(result)
+                result = await continueSession(
+                    provider, progressive(query), result, controller.signal)
+                if (controller.signal.aborted) return
+            }
             setView({
                 kind: 'results', template, inputs, query, result,
                 elapsedMs: Math.round(performance.now() - startedAt),
@@ -636,9 +853,16 @@ export function useAdvancedSearch(
                     results: 'hits',
                 },
             }
-            const nextPage = await provider.searchAdvanced(
+            let nextPage = await provider.searchAdvanced(
                 nextQuery, { signal: controller.signal })
             if (controller.signal.aborted) return
+            // A later page past what the search's session holds is a scan
+            // of its own; a large one may take more than one request.
+            while (nextPage.status === 'running' && nextPage.sessionId) {
+                nextPage = await continueSession(
+                    provider, nextQuery, nextPage, controller.signal)
+                if (controller.signal.aborted) return
+            }
             // Merge: append new hits, replace cursor (may now be null
             // signalling "no more pages"), keep aggregates from p1.
             //
@@ -654,13 +878,14 @@ export function useAdvancedSearch(
                 ...(view.result.hits ?? []),
                 ...(nextPage.hits ?? []),
             ]
-            const merged: SearchResultPage = {
+            const asked = containersAsked.current
+            const merged = withContainers(view.query, {
                 ...view.result,
                 hits: mergedHits,
                 cursor: nextPage.cursor ?? undefined,
                 candidateCount: nextPage.candidateCount
                     ?? view.result.candidateCount,
-            }
+            }, asked?.sessionId === view.result.sessionId ? asked?.found : undefined)
             setView({
                 ...view,
                 result: merged,

@@ -55,6 +55,7 @@ from backend.app.providers.falkordb_provider import (  # noqa: E402
     _RESERVED_NODE_KEYS,
     _admit_native_keys,
     _compute_searchable_text,
+    _text_properties,
     _native_property_budget,
     _sanitize_label,
     _split_user_properties,
@@ -317,7 +318,7 @@ def _node_item(entity_id: str, urn: str, payload: dict,
         "lastSyncedAt": payload.get("lastSyncedAt") or "",
         "level": lvl,
         "searchableText": _compute_searchable_text(
-            dn, qn, desc, native, tags=payload.get("tags"),
+            dn, qn, desc, _text_properties(payload.get("properties")), tags=payload.get("tags"),
         ),
     }
 

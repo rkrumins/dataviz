@@ -42,6 +42,7 @@ from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
+from .typed_merge import preserve_stored_type
 from .ontology import (
     Ontology, OntologyRules, canonicalize_payload_types,
     validate_entities, validate_entities_rich,
@@ -5503,7 +5504,19 @@ class GraphVersioningService:
     def _patch_payload(base: Optional[dict], patch: dict) -> dict:
         """Apply a partial update `patch` onto `base` (see ``backend.common.property_patch``):
         top-level fields override, ``properties`` is merged key by key, and a property marked
-        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed."""
+        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed.
+
+        A key the base already has keeps its stored value when the patch sends the same
+        value back in a lossier form — the browser's rounded copy of a 19-digit integer,
+        or digits as text (``typed_merge.preserve_stored_type``) — so a drawer edit of
+        one field can no longer rewrite every other property it round-trips."""
+        base_props = (base or {}).get("properties") or {}
+        patch_props = patch.get("properties")
+        if base_props and isinstance(patch_props, dict):
+            patch = {**patch, "properties": {
+                k: preserve_stored_type(base_props[k], v) if k in base_props else v
+                for k, v in patch_props.items()
+            }}
         return apply_patch(base, patch)
 
     async def _payloads_by_content_hash(

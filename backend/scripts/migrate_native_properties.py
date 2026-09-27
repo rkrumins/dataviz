@@ -249,6 +249,14 @@ async def _backfill_searchable_text(
                     if k in _RESERVED_NODE_KEYS:
                         continue
                     user_props[k] = v
+                # The values kept raw, past the native budget, are text a
+                # person searches for too.
+                try:
+                    raw = json.loads(props.get("propertiesRaw") or "{}")
+                except (TypeError, ValueError):
+                    raw = {}
+                if isinstance(raw, dict):
+                    user_props.update({k: v for k, v in raw.items() if k not in user_props})
             # n.tags is stored as a JSON-encoded string on the node;
             # _compute_searchable_text parses it.
             raw_tags = props.get("tags") if isinstance(props, dict) else None
