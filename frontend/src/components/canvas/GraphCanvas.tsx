@@ -46,7 +46,7 @@ import { LineageEdge } from './edges/LineageEdge'
 import { AggregatedEdge } from './edges/AggregatedEdge'
 import { CanvasControls } from './CanvasControls'
 import { EdgeLegend } from './EdgeLegend'
-import { EntityDrawer } from '../panels/EntityDrawer'
+import { EntityDrawer } from '../panels/entity/EntityDrawer'
 import { RelationshipDrawer } from '../panels/RelationshipDrawer'
 import { targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { SearchMapPanel } from './search/SearchMapPanel'
@@ -100,6 +100,7 @@ import {
   useViewEntityTypes,
   useViewSchemaIsReady,
 } from '@/hooks/useViewSchema'
+import { useShallow } from 'zustand/react/shallow'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { useSearchStore } from '@/store/searchStore'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
@@ -131,7 +132,11 @@ export function GraphCanvas({ className }: { className?: string }) {
 
   const { notify } = useAppNotifications()
   // 2. Canvas store
-  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges } = useCanvasStore()
+  // Actions only (stable) — never the whole store, which re-rendered this canvas on every write.
+  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges } = useCanvasStore(useShallow((s) => ({
+    setNodes: s.setNodes, setEdges: s.setEdges, selectNode: s.selectNode, selectEdge: s.selectEdge,
+    clearSelection: s.clearSelection, addEdges: s.addEdges,
+  })))
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
@@ -174,16 +179,16 @@ export function GraphCanvas({ className }: { className?: string }) {
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   useDisplayRuleEngine(activeView?.id ?? null)
-  // A relationship the drawer shows was resolved from THIS view's lines —
-  // leaving the view (or this canvas) closes it, trail and all.
-  useEffect(() => () => {
-    const s = useCanvasStore.getState()
-    if (s.drawerEdge || s.drawerHistory.entries.some((e) => e.kind === 'edge')) s.closeNodeDrawer()
-  }, [activeView?.id])
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   const libraryBranchId = useEffectiveBranchId(
     activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
   useViewLibrary(activeView?.id ?? null, libraryBranchId)
+  // A relationship the drawer shows was resolved from THIS view's lines —
+  // leaving the view (or this canvas) closes it, trail and all.
+  useEffect(() => () => {
+    const s = useCanvasStore.getState()
+    if (s.drawerEdge || s.drawerHistory.entries.some((e) => e.kind === 'edge')) s.forceCloseDrawer()
+  }, [activeView?.id])
 
   // Viewport-aware node filtering for large graphs
   const [viewportBounds, setViewportBounds] = useState<{ x: number; y: number; zoom: number } | null>(null)
@@ -1291,8 +1296,10 @@ export function GraphCanvas({ className }: { className?: string }) {
     },
     onCloseEntityDrawer: () => {
       if (drawerEdge) {
-        useCanvasStore.getState().closeNodeDrawer()
-        clearSelection()
+        useCanvasStore.getState().requestDrawerMove(() => {
+          useCanvasStore.getState().closeNodeDrawer()
+          clearSelection()
+        })
         return true
       }
       if (selectedNodeId) {
@@ -1597,9 +1604,9 @@ export function GraphCanvas({ className }: { className?: string }) {
       </AnimatePresence>
       {!builderOpen && !buildOpen && (
         <EntityDrawer
-          onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
-          onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
-          onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
+          onTraceUp={trace.traceUpstream}
+          onTraceDown={trace.traceDownstream}
+          onFullTrace={trace.traceFullLineage}
           onFocusNode={revealAndFocus}
           onLocateMany={locateManyOnCanvas}
         />

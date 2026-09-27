@@ -1,7 +1,7 @@
 /**
  * DrawerTrailNav — the back/forward trail both drawers share. A step lands on
- * a node or a relationship and the canvas selection follows; the owning
- * drawer's guard can hold a step while there are unsaved edits.
+ * a node or a relationship and the canvas selection follows; with unsaved
+ * edits in the drawer the store's gate holds a step until the reader decides.
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -19,6 +19,8 @@ beforeEach(() => {
     drawerHistory: { entries: [], cursor: -1 },
     selectedNodeIds: [],
     selectedEdgeIds: [],
+    drawerDirty: false,
+    pendingDrawerMove: null,
   })
 })
 
@@ -52,15 +54,18 @@ describe('DrawerTrailNav', () => {
     expect(useCanvasStore.getState().selectedEdgeIds).toEqual(['bundle-a->b'])
   })
 
-  it('a guard holds the step until the drawer lets it go', async () => {
+  it('with unsaved edits, the store holds the step — whole — until the drawer lets it go', async () => {
     const user = userEvent.setup()
-    let held: (() => void) | null = null
     useCanvasStore.getState().openEdgeDrawer(rel)
     useCanvasStore.getState().openNodeDrawer('a')
-    render(<DrawerTrailNav guard={(step) => { held = step }} />)
+    useCanvasStore.getState().setDrawerDirty(true)
+    render(<DrawerTrailNav />)
     await user.click(screen.getByRole('button', { name: 'Back to the previous entity' }))
     expect(useCanvasStore.getState().drawerNodeId).toBe('a')
-    held!()
+    expect(useCanvasStore.getState().selectedEdgeIds).toEqual([])
+    expect(useCanvasStore.getState().pendingDrawerMove).not.toBeNull()
+    useCanvasStore.getState().resolveDrawerMove('proceed')
     expect(useCanvasStore.getState().drawerEdge?.id).toBe('e1')
+    expect(useCanvasStore.getState().selectedEdgeIds).toEqual(['bundle-a->b'])
   })
 })

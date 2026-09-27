@@ -47,7 +47,9 @@ tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_drift_probe_cost.py
 tests/test_edge_update_patch_semantics.py
+tests/test_entity_audit_unit.py
 tests/test_export_downloads.py
+tests/test_falkordb_edges_pair_binding.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
 tests/test_falkordb_native_properties.py

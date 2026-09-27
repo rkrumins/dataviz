@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Collection, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
@@ -153,9 +153,26 @@ class MergeConflict(RuntimeError):
     the chosen payloads to land the merge.
     """
 
-    def __init__(self, conflicts):
+    def __init__(self, conflicts, current: Optional[Mapping[str, Tuple[str, Optional[dict]]]] = None):
         super().__init__(f"{len(conflicts)} unresolved merge conflict(s)")
         self.conflicts = conflicts
+        #: entity_id → (kind, the value the edit conflicts WITH) — what a client rebases onto.
+        #: Filled by ``apply_ops``'s optimistic-concurrency check; empty for a merge/publish.
+        self.current = dict(current or {})
+
+
+@dataclass
+class ApplyResult:
+    """What one ``apply_ops`` batch wrote."""
+
+    commit_id: Optional[str]
+    #: entity_id → (kind, the value after this batch — ``None`` once deleted) for every entity the
+    #: batch addressed or cascaded, changed or not: what a client refreshes its copies (and their
+    #: optimistic-concurrency tokens) from, so the next edit of the same entity is not a conflict
+    #: with its own last save.
+    written: Dict[str, Tuple[str, Optional[dict]]]
+    #: node entity_id → urn for every node the batch read or wrote (edge endpoints included).
+    urns: Dict[str, str] = field(default_factory=dict)
 
 
 class OntologyViolation(RuntimeError):
@@ -5367,6 +5384,18 @@ class GraphVersioningService:
         :class:`ConcurrencyError`. Under ``strict`` ontology enforcement the written
         entities are validated (the write-through gate, parity with publish/stage).
         """
+        result = await self.apply_ops_detailed(
+            graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
+            containment_edge_types=containment_edge_types, ontology_rules=ontology_rules)
+        return result.commit_id
+
+    async def apply_ops_detailed(
+        self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
+        message: str = "edit", branch_id: Optional[str] = None,
+        containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
+    ) -> ApplyResult:
+        """:meth:`apply_ops`, answering with every addressed entity's value after the batch."""
         return await self._retry_seq(
             f"apply_ops on {graph_id}/{branch_id or 'main'}",
             lambda: self._apply_ops_once(
@@ -5380,7 +5409,7 @@ class GraphVersioningService:
         message: str, branch_id: Optional[str],
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
-    ) -> Optional[str]:
+    ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
@@ -5439,12 +5468,17 @@ class GraphVersioningService:
                     new_vals[eid] = out.merged
                     for cf in out.conflicts:
                         occ_conflicts.append({
-                            "entity_id": eid, "path": list(cf.path), "base": cf.base,
+                            "entity_id": eid, "entity_kind": kind_by_entity.get(eid, "node"),
+                            "path": list(cf.path), "base": cf.base,
                             "ours": cf.ours, "theirs": cf.theirs, "kind": cf.kind})
                 else:
                     new_vals[eid] = self._patch_payload(cur, patch)
             if occ_conflicts:
-                raise MergeConflict(occ_conflicts)
+                # Each conflicting entity's CURRENT value rides along, so the client can rebase the
+                # user's edit onto it without another read.
+                raise MergeConflict(occ_conflicts, current={
+                    c["entity_id"]: (c["entity_kind"], cur_vals.get(c["entity_id"]))
+                    for c in occ_conflicts})
 
             # Cascade a node delete to its containment subtree (ontology-driven) AND every
             # live edge incident to any deleted node (source or target, ANY type) — so no
@@ -5524,9 +5558,12 @@ class GraphVersioningService:
                 for v in new_vals.values():
                     canonicalize_payload_types(v, ontology_rules)
 
+            written = {eid: (kind_by_entity.get(eid, "node"), v) for eid, v in new_vals.items()}
+            urns = {eid: (v.get("urn") or eid) for eid, v in {**cur_vals, **new_vals}.items()
+                    if v is not None and not _is_edge_payload(v)}
             deltas = net_delta({k: cur_vals.get(k) for k in new_vals}, new_vals)
             if not deltas:
-                return None
+                return ApplyResult(None, written, urns)
             for d in deltas:
                 kind_by_entity.setdefault(
                     d.entity_id, "edge" if _is_edge_payload(cur_vals.get(d.entity_id) or {}) else "node")
@@ -5556,7 +5593,7 @@ class GraphVersioningService:
                 ps = await s.get(ProjectionStateORM, graph_id)
                 if ps is not None:
                     ps.target_commit_seq = new_seq
-            return commit.id
+            return ApplyResult(commit.id, written, urns)
 
     async def _bulk_insert_versions(self, s, graph_id, branch_id, commit, node_deltas, edge_deltas, actor) -> None:
         """Chunked multi-row INSERTs into the version tables + a bulk head upsert

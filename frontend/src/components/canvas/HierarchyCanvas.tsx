@@ -43,7 +43,7 @@ import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
 import { BuilderEmptyState } from './create/BuilderEmptyState'
 import { BuildPanel } from './create/buildmode/BuildPanel'
-import { EntityDrawer } from '../panels/EntityDrawer'
+import { EntityDrawer } from '../panels/entity/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
@@ -552,9 +552,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         )}
         {!builderOpen && !buildOpen && (
           <EntityDrawer
-            onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
-            onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
-            onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
+            onTraceUp={trace.traceUpstream}
+            onTraceDown={trace.traceDownstream}
+            onFullTrace={trace.traceFullLineage}
             onFocusNode={expandToNode}
           />
         )}

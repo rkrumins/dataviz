@@ -45,8 +45,31 @@ relationships on the published graph are read-only, and say why.
   one click away from the drawer. Its cards gain an "Open details" button, and their pencil opens the
   drawer in Edit.
 - **Entities and relationships are edited in a draft only.** On the published graph the entity
-  drawer and the Edge Explorer offer no edit controls; the drawer offers "Edit in a draft" instead.
-  The drawer's JSON tab is read-only.
+  drawer and the Edge Explorer offer no edit controls; the drawer offers "Edit in a draft" instead,
+  and on a data source without version control its Edit tab is disabled and says why. The drawer's
+  JSON tab is read-only. A staged edit says it still needs Review & Save, with the way there.
+- **A save answers with what it stored.** `POST /graph/changes` returns `entities`: each entity the
+  save touched as a reader returns it now, with its `version` (`entitiesTruncated` past 500), and the
+  canvas takes it — so editing the same field again is not a conflict with your own last save.
+- **An entity's summary and its history, bounded.** New `GET …/entities/{id}/summary` says who
+  created the entity and who last changed it on the line you are reading (in a draft: main at the
+  draft's branch point, then the draft's own edits), how many revisions each line has, whether main
+  changed it after the draft began, and — `include=value` — its value and token. `…/history` now
+  pages newest first (`limit`, `before`/`nextBefore`, `scope=all|draft|published`, `branchId`), reads
+  only main and the draft you name (403 for a draft you cannot read), and says what each revision
+  changed, property by property. The drawers use these instead of downloading every revision.
+- **The entity and relationship drawers share one frame, and keep their keys to themselves.** Keys
+  typed in a drawer no longer reach the canvas: Backspace in a drawer does not delete the selected
+  entity, and the canvas's letter shortcuts do not fire. Esc leaves a field first, then closes the
+  drawer; ⌘S (Ctrl+S) stages an edit. When the drawer changes to another entity while you are working
+  in it, focus moves to the new title. When it closes, focus goes back to where it came from. An edit
+  in progress shows a stage bar, with Cancel and "Stage changes", on every tab. "Updated" names who
+  made the change.
+- **The drawers stay fast on large canvases.** They read their own entity rather than the whole
+  graph, so a pan, a pulse or a page of children arriving elsewhere no longer re-renders them. The
+  list of places to move an entity is built only when you open it, and is searchable. Reading the
+  relationships between a few known entities binds both ends in FalkorDB, so a relationship on a hub
+  no longer walks every edge the hub has.
 - **An update removes a property only when told to.** `POST /graph/changes`, the draft
   `…/changes` (stage) route and `PATCH /edges/{id}` take `unsetProperties: [name, …]` beside the
   payload. `properties` in an update merges key by key everywhere, including the stage route, which
@@ -55,6 +78,11 @@ relationships on the published graph are read-only, and say why.
 
 ### Fixed
 
+- **An unstaged edit in a drawer could be lost without a word.** Esc, starting a trace, opening the
+  Hierarchy Builder or following a lineage row closed or swapped the drawer and dropped the edit, and
+  a canvas click selected the other entity while the drawer still showed the first. Now anything
+  that would move the drawer waits, selection included, and asks: stage the edit and go on, discard
+  it, or keep editing. Leaving the page asks too.
 - **A stored export's download could be cut short.** It was held to the API's two-minute deadline,
   which ends a response cleanly, so a large file (a view package's, say) could arrive incomplete while
   looking whole, and nginx buffered it to disk. It now runs as long as it takes, as the streamed
@@ -84,6 +112,16 @@ relationships on the published graph are read-only, and say why.
   entity's properties, where the drawer reads them from.
 - **A rename and an edit of the same entity were two changes**, and discarding one put the other's
   stale copy back on the canvas. They are one change now.
+- **Saving the same entity twice conflicted with yourself.** The canvas kept each entity as first
+  read, token included, so the second save merged against a value the draft had moved past.
+- **A conflicting save failed with "Main has moved".** The conflict now names each field someone else
+  changed, with the value it had, theirs and yours; Review & Save lets you keep yours or take theirs,
+  field by field, and saves only what you changed on top of their version. A 409 `merge_conflict`
+  from `/graph/changes` carries `current` (each conflicting entity as it is now) and each conflict's
+  `entity_kind`.
+- **In a draft, an entity's "Updated" could be a change the draft doesn't have** — the newest edit on
+  any branch, including main after the draft began. It is now the last change on the draft's own
+  line, and a note says when main has changed it since.
 - **The Hierarchy Builder lost a new entity's description** — it was filed among the properties,
   where the save strips the name as reserved. It is saved as the entity's description.
 - **A removed property named like one of the platform's own (`id`, `weight`, `confidence`, …) stayed
@@ -109,8 +147,6 @@ same. Exports are kept in the object store for a day: keep it on a mount
 - **A download longer than the load balancer allows one response is cut** (an hour, on the GKE
   manifests), and has to be resumed: the browser's Resume, or `curl -C -`.
 - **Exports aren't compressed**, on the server or on the way: a 50 GB CSV is 50 GB to download.
-- **A relationship's history shows its properties as one row** per revision, as an entity's does,
-  not one row per property.
 - **A change on the main line names whoever published it**, not whoever made it in their draft.
 - **Only a relationship's properties are edited**; its confidence and type are shown, not changed.
 - **A line summarising a trace, or a combined flow drawn between two containers, lists no

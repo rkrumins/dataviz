@@ -326,3 +326,38 @@ describe('stagedChangesToOps — a node update is a patch against the node as re
     expect(ops.map((o) => o.unsetProperties)).toEqual([['owner', 'sla'], ['a']])
   })
 })
+
+describe('stagedChangesToOps — a property the edit removed or renamed', () => {
+  // The backend MERGES a properties patch onto what it holds: a key left out is kept. Removing or
+  // renaming a key in the drawer said "Saved to draft." and the old key came back; a removal has to
+  // be named.
+  it('names a key the entity had and the edit dropped', () => {
+    const [op] = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:p',
+           before: { properties: { owner: 'fin', tier: 'gold' } },
+           after: { properties: { owner: 'fin' } } }),
+    ])
+    expect(op.payload).toEqual({})
+    expect(op.unsetProperties).toEqual(['tier'])
+  })
+
+  it('sends a rename as the new key set and the old one removed', () => {
+    const [op] = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:p',
+           before: { properties: { team: 'ops', id: 7 } },
+           after: { properties: { squad: 'ops', id: 7 } } }),
+    ])
+    expect(op.payload).toEqual({ properties: { squad: 'ops' } })
+    expect(op.unsetProperties).toEqual(['team'])
+  })
+
+  it('removes nothing when nothing was removed', () => {
+    const [op] = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:p',
+           before: { properties: { owner: 'fin' } },
+           after: { properties: { owner: 'ops', tier: 'gold' } } }),
+    ])
+    expect(op.payload).toEqual({ properties: { owner: 'ops', tier: 'gold' } })
+    expect(op.unsetProperties).toBeUndefined()
+  })
+})

@@ -14,14 +14,19 @@ import { useFeaturesStore } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
 import { stagedChangesToOps } from '@/features/versioning/model/stagedChangesToOps'
 
-vi.mock('../useDrawerHistoryScope', () => ({
+vi.mock('../../useDrawerHistoryScope', () => ({
   useDrawerHistoryScope: () => ({ wsId: undefined, graphId: null, mainBranchId: null, branchId: null }),
 }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
-  useResolveGraph: () => ({ data: undefined, isError: false }),
-  useEntityHistory: () => ({ data: undefined, isLoading: false }),
+  useEntitySummary: () => ({ data: undefined, isLoading: false }),
   useProjectionWatermark: () => ({ data: undefined }),
   useBranches: () => ({ data: [] }),
+}))
+/** In a draft: the drawer's own `canEdit` decides. */
+const editingNow = { offered: true, blocked: null }
+vi.mock('@/features/versioning/hooks/useEntityEditing', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/versioning/hooks/useEntityEditing')>()),
+  useEntityEditing: () => editingNow,
 }))
 vi.mock('@/features/versioning/components/EntityHistory', () => ({ EntityHistory: () => null }))
 vi.mock('@/components/panels/LineageNeighbors', () => ({ LineageNeighbors: () => null }))
@@ -44,7 +49,7 @@ beforeEach(() => {
     nodes: [structuredClone(orders)], edges: [],
     _nodeIndex: new Set(['urn:orders']), _edgeIndex: new Set(),
     drawerNodeId: null, drawerEdge: null, drawerHistory: { entries: [], cursor: -1 },
-    selectedNodeIds: [], selectedEdgeIds: [],
+    selectedNodeIds: [], selectedEdgeIds: [], drawerDirty: false, pendingDrawerMove: null,
   } as never)
   useCanvasStore.getState().openNodeDrawer('urn:orders')
   useStagedChangesStore.setState({ changes: [], redoStack: [] })
@@ -69,14 +74,14 @@ describe('EntityDrawer — where editing happens', () => {
   it('is read-only without canEdit, and offers to open a draft instead', async () => {
     const onStartEditing = vi.fn()
     render(<EntityDrawer onStartEditing={onStartEditing} />)
-    expect(screen.queryByRole('button', { name: /^Edit$/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /^Edit$/ })).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /Edit in a draft/ }))
     expect(onStartEditing).toHaveBeenCalledTimes(1)
   })
 
   it('shows the JSON read-only', async () => {
     render(<EntityDrawer canEdit />)
-    await userEvent.click(screen.getByRole('button', { name: /JSON/ }))
+    await userEvent.click(screen.getByRole('tab', { name: /JSON/ }))
     const json = screen.getByLabelText('Entity data as JSON')
     expect(json.tagName).toBe('PRE')
     expect(json.textContent).toContain('"urn:orders"')
@@ -87,10 +92,10 @@ describe('EntityDrawer — an edit in a draft', () => {
   it('a deleted property is removed on save — named in unsetProperties', async () => {
     const user = userEvent.setup()
     render(<EntityDrawer canEdit />)
-    await user.click(screen.getByRole('button', { name: /^Edit/ }))
+    await user.click(screen.getByRole('tab', { name: /^Edit/ }))
     const slaRow = screen.getByText('sla').closest('.group') as HTMLElement
     await user.click(within(slaRow).getByTitle('Delete'))
-    await user.click(screen.getByRole('button', { name: /Stage Changes/ }))
+    await user.click(screen.getByRole('button', { name: /Stage changes/ }))
 
     expect(ops()).toEqual([{
       op: 'update', kind: 'node', id: 'urn:orders', baseVersion: 'v1', payload: {}, unsetProperties: ['sla'],
@@ -99,7 +104,7 @@ describe('EntityDrawer — an edit in a draft', () => {
 
   it('never offers a reserved name the reader mirrored into the bag', async () => {
     render(<EntityDrawer canEdit />)
-    await userEvent.click(screen.getByRole('button', { name: /^Edit/ }))
+    await userEvent.click(screen.getByRole('tab', { name: /^Edit/ }))
     expect(screen.getByText('owner')).toBeInTheDocument()
     expect(screen.queryByText('childCount')).not.toBeInTheDocument()
   })
@@ -107,13 +112,13 @@ describe('EntityDrawer — an edit in a draft', () => {
   it('stores a schema field and the business label as properties', async () => {
     const user = userEvent.setup()
     render(<EntityDrawer canEdit />)
-    await user.click(screen.getByRole('button', { name: /^Edit/ }))
-    const retention = screen.getByText('Retention').parentElement!.querySelector('input')!
+    await user.click(screen.getByRole('tab', { name: /^Edit/ }))
+    const retention = screen.getByLabelText('Retention')
     expect(retention).toHaveValue('90')
     await user.clear(retention)
     await user.type(retention, '30')
-    await user.type(screen.getByPlaceholderText('Business-friendly name...'), 'Customer orders')
-    await user.click(screen.getByRole('button', { name: /Stage Changes/ }))
+    await user.type(screen.getByPlaceholderText('Business-friendly name…'), 'Customer orders')
+    await user.click(screen.getByRole('button', { name: /Stage changes/ }))
 
     const [op] = ops()
     expect(op.payload).toEqual({ properties: { retention: '30', businessLabel: 'Customer orders' } })

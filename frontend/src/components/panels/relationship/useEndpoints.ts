@@ -3,7 +3,9 @@
  * one in the drawer.
  */
 import { useCallback, useMemo, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { nodeIndexOf } from '@/lib/storeIndex'
 import { usePersonaStore } from '@/store/persona'
 import { resolveEntityName } from '@/lib/entityDisplayName'
 import { withTimeout, TimeoutError } from '@/lib/concurrency'
@@ -18,26 +20,27 @@ export interface Endpoint {
 }
 
 /** Names for `ids`, from the canvas store or the surface drawing them (a trace).
- *  Pass a memoised `ids` array. */
+ *  Pass a memoised `ids` array. Re-renders only when one of THESE nodes changes. */
 export function useEndpoints(ids: readonly string[], resolveNode?: (id: string) => LineageNode | null): Map<string, Endpoint> {
-  const nodes = useCanvasStore((s) => s.nodes)
+  const found = useCanvasStore(useShallow((s) => {
+    const index = nodeIndexOf(s.nodes)
+    return ids.map((id) => index.get(id))
+  }))
   const mode = usePersonaStore((s) => s.mode)
   return useMemo(() => {
-    const wanted = new Set(ids)
-    const found = new Map<string, LineageNode>()
-    for (const n of nodes) if (wanted.has(n.id)) found.set(n.id, n)
     const out = new Map<string, Endpoint>()
-    for (const id of wanted) {
-      const node = found.get(id) ?? resolveNode?.(id) ?? undefined
+    ids.forEach((id, i) => {
+      if (out.has(id)) return
+      const node = found[i] ?? resolveNode?.(id) ?? undefined
       out.set(id, {
         id,
         name: node ? resolveEntityName(node.data, mode, id) : id,
         type: node?.data.type as string | undefined,
         known: !!node,
       })
-    }
+    })
     return out
-  }, [nodes, mode, ids, resolveNode])
+  }, [found, mode, ids, resolveNode])
 }
 
 /**
@@ -46,6 +49,9 @@ export function useEndpoints(ids: readonly string[], resolveNode?: (id: string) 
  * inside a collapsed container) is revealed FIRST — opening the drawer on an id
  * the store cannot answer for would leave the rail empty. Mirrors the lineage
  * list's neighbour rows.
+ *
+ * The whole of it is one drawer move: with unsaved edits in the drawer nothing
+ * happens — no reveal, no swap — until the reader decides.
  */
 export function useOpenEndpoint(
   onFocusNode?: (nodeId: string) => void | Promise<unknown>,
@@ -54,7 +60,7 @@ export function useOpenEndpoint(
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [unreachableId, setUnreachableId] = useState<string | null>(null)
 
-  const open = useCallback(async (id: string) => {
+  const run = useCallback(async (id: string) => {
     setUnreachableId(null)
     const s = useCanvasStore.getState()
     const show = () => {
@@ -83,6 +89,10 @@ export function useOpenEndpoint(
       setPendingId(null)
     }
   }, [onFocusNode, resolveNode])
+
+  const open = useCallback((id: string) => {
+    useCanvasStore.getState().requestDrawerMove(() => { void run(id) })
+  }, [run])
 
   return { open, pendingId, unreachableId }
 }
