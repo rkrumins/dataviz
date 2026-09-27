@@ -691,6 +691,10 @@ class DraftOverlayProvider:
         """A complete export, to stream — the base's."""
         return await self._base.deep_search_export_open(session_id, context=context)
 
+    async def deep_search_scan(self, query, *, context, cap):
+        """A job's read of every match — the base's, like :meth:`deep_search_session`."""
+        return await self._base.deep_search_scan(query, context=context, cap=cap)
+
     async def deep_search_ancestor_counts(self, session_id, urns, *, context):
         """Container counts from a search session — the base's, like
         :meth:`deep_search_session`."""

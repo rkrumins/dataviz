@@ -102,6 +102,7 @@ tests/test_search_catalog.py
 tests/test_search_engine.py
 tests/test_search_export.py
 tests/test_search_rules.py
+tests/test_search_scan.py
 tests/test_search_schema_endpoint.py
 tests/test_search_semantics.py
 tests/test_search_values.py

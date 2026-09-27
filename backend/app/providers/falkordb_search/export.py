@@ -238,20 +238,21 @@ class _ExportWork:
 
 
 async def _unit_rows(unit: Unit, ctx: Context, clamps, columns: Sequence[str], run,
-                     timeout_s: float) -> AsyncIterator[List[Any]]:
-    """Every match of one unit: ``[id, propertiesRaw, *columns]``. A walk is
-    read a page at a time, in ID order."""
+                     timeout_s: float, raw: bool = True) -> AsyncIterator[List[Any]]:
+    """Every match of one unit: ``[id, propertiesRaw, *columns]`` — ``None``
+    for ``propertiesRaw`` when not ``raw`` (columns kept natively need no
+    more). A walk is read a page at a time, in ID order."""
     head, params = match_statement(unit, ctx, clamps)
-    project = _projection(columns)
+    project = f"{'n.propertiesRaw' if raw else 'null'}, {_projection(columns)}"
     if unit.kind != "walk":
-        res = await run(f"{head} RETURN ID(n), n.propertiesRaw, {project}", params, timeout_s)
+        res = await run(f"{head} RETURN ID(n), {project}", params, timeout_s)
         for row in res.result_set or []:
             yield list(row)
         return
     after = -1
     while True:
         res = await run(f"{head} WITH n WHERE ID(n) > $_after WITH n ORDER BY ID(n) "
-                        f"LIMIT $_page RETURN ID(n), n.propertiesRaw, {project}",
+                        f"LIMIT $_page RETURN ID(n), {project}",
                         {**params, "_after": after, "_page": _WALK_PAGE}, timeout_s)
         rows = res.result_set or []
         for row in rows:
@@ -264,6 +265,32 @@ async def _unit_rows(unit: Unit, ctx: Context, clamps, columns: Sequence[str], r
 # ---------------------------------------------------------------------------
 # The session
 # ---------------------------------------------------------------------------
+
+async def scan_context(provider, query: SearchQuery, context: SearchRunContext, settings, run, *,
+                       refuse_path: str) -> Tuple[Any, Context]:
+    """The compiled search and the context its units are read in, for
+    reading every match rather than a page — refused, with ``refuse_path``,
+    for a path search (it finds routes, not entities)."""
+    from backend.app.providers.falkordb_search.engine import (
+        _compiler_for,
+        _containment,
+        within_hops,
+    )
+
+    compiler, raw_labels = await _compiler_for(provider, run, context, settings)
+    where = compiler.compile(query.predicate)
+    if compiler.hoisted_path is not None:
+        raise CompileError(refuse_path)
+    hops, hop_params = within_hops(compiler)
+    return compiler, Context(
+        where=where, params={**compiler.params, **hop_params},
+        sort=SortSpec((SortKey("n.urn"),)), containment=_containment(provider),
+        max_depth=int(query.scope.max_depth or 12),
+        visible=(list(query.scope.visible_urns or [])
+                 if query.scope.scope_mode == "visible" else None),
+        within_hops=hops, raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
+    )
+
 
 def _query_id(query: SearchQuery, scope_hash: str, fmt: str, columns: Sequence[str]) -> str:
     from backend.app.providers.falkordb_search.engine import query_identity
@@ -280,13 +307,10 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
     from backend.app.providers.falkordb_search.engine import (
         _GRACE_S,
         _advance,
-        _compiler_for,
-        _containment,
         _find,
         request_deadline,
         session_id as session_id_of,
         unit_budget,
-        within_hops,
     )
     from backend.app.services.storage.object_store import get_object_store
 
@@ -304,19 +328,8 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
             return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
     cols = export_columns(list(columns))
-    compiler, raw_labels = await _compiler_for(provider, run, context, settings)
-    where = compiler.compile(query.predicate)
-    if compiler.hoisted_path is not None:
-        raise CompileError("A path search finds routes, not entities to export.")
-    hops, hop_params = within_hops(compiler)
-    ctx = Context(
-        where=where, params={**compiler.params, **hop_params},
-        sort=SortSpec((SortKey("n.urn"),)), containment=_containment(provider),
-        max_depth=int(query.scope.max_depth or 12),
-        visible=(list(query.scope.visible_urns or [])
-                 if query.scope.scope_mode == "visible" else None),
-        within_hops=hops, raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
-    )
+    compiler, ctx = await scan_context(provider, query, context, settings, run,
+                                       refuse_path="A path search finds routes, not entities to export.")
     query_id = _query_id(query, context.scope_hash, fmt, cols)
     sid = session_id_of(query_id, context.data_version, None)
     session = await _find(store, session_id, query_id, None) or await store.load(sid)
