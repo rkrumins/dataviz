@@ -34,7 +34,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
-from . import config, db
+from . import config, db, property_directive
 from .changeset import Delta, materialize, net_delta, diff_states
 from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
@@ -584,6 +584,8 @@ class GraphVersioningService:
         as earlier *uncommitted* working changes can't be typed here, so those
         edges are skipped — **checkpoint is the authoritative rich gate**.
         """
+        if any(op.get("directive") is not None for op in ops):
+            raise ValueError("a property operation is decided when it is applied — it can't be staged")
         assigned: Dict[str, str] = {}
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
@@ -5348,12 +5350,19 @@ class GraphVersioningService:
         message: str = "edit", branch_id: Optional[str] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        outcome: Optional[dict] = None,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
         graph write becomes a durable, attributed commit without a draft round-trip.
         Each op is ``{op, entity_kind, entity_id, payload}``. Returns the commit id, or
         ``None`` if the ops are a no-op against current state.
+
+        A node ``update`` may carry a property operation's ``directive`` instead of a payload
+        (:mod:`.property_directive`), one op per entity: it is decided on the entity's value in
+        this branch inside the commit, and ``outcome`` (when given) is filled with the entity ids
+        it ``changed``, left ``unchanged``, found ``notInDraft`` (not live in the branch), or
+        skipped because a rename's ``targetExists``.
 
         Cost is **O(ops)**, not O(graph): it resolves only the affected entities' current
         values (``_current_values``), cascades node deletes to their live incident edges
@@ -5370,7 +5379,7 @@ class GraphVersioningService:
             lambda: self._apply_ops_once(
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules),
+                ontology_rules=ontology_rules, outcome=outcome),
         )
 
     async def _apply_ops_once(
@@ -5378,6 +5387,7 @@ class GraphVersioningService:
         message: str, branch_id: Optional[str],
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        outcome: Optional[dict] = None,
     ) -> Optional[str]:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -5404,8 +5414,20 @@ class GraphVersioningService:
             kind_by_entity: Dict[str, str] = {}
             update_ids: set = set()
             base_versions: Dict[str, str] = {}        # entity_id → client's OCC token (content_hash)
+            directives: Dict[str, Mapping] = {}       # entity_id → property operation, decided below
             for op in ops:
                 eid = op["entity_id"]
+                if op.get("directive") is not None:
+                    if op["op"] != "update" or (op.get("entity_kind") or "node") != "node":
+                        raise ValueError("a property operation applies to a node update only")
+                    if eid in directives or eid in new_vals:
+                        raise ValueError(f"a property operation must be the only op on {eid}")
+                    property_directive.check(op["directive"])
+                    directives[eid] = op["directive"]
+                    kind_by_entity[eid] = "node"
+                    continue
+                if eid in directives:
+                    raise ValueError(f"a property operation must be the only op on {eid}")
                 payload = op.get("payload") or {}
                 kind_by_entity[eid] = (op.get("entity_kind")
                                        or ("edge" if _is_edge_payload(payload) else "node"))
@@ -5431,7 +5453,24 @@ class GraphVersioningService:
                     new_vals[eid] = _sanitize_node_properties(new_vals[eid])
 
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
-            cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
+            cur_vals = await self._current_values(s, graph_id, bid, [*new_vals, *directives])
+
+            # Property operations are decided HERE, on each entity's value in this branch now (and
+            # again on a retry, which re-enters with a fresh read) — never on what the caller saw.
+            decided: Dict[str, List[str]] = {"changed": [], "unchanged": [], "notInDraft": [],
+                                             "targetExists": []}
+            for eid, directive in directives.items():
+                cur = cur_vals.get(eid)
+                if cur is None:
+                    decided["notInDraft"].append(eid)
+                    continue
+                res = property_directive.resolve(cur, directive)
+                decided[res.outcome].append(eid)
+                if res.payload is not None:
+                    new_vals[eid] = _sanitize_node_properties(res.payload)
+            if outcome is not None:
+                outcome.clear()
+                outcome.update(decided)
 
             # An `update` is a field-level PATCH onto the entity's current value (a version row stores
             # the FULL payload, composed last-writer-wins per ENTITY), preserving fields the op didn't
