@@ -3843,14 +3843,24 @@ class GraphVersioningService:
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
 
+    async def branch_change_count(self, *, graph_id: str, branch_id: str) -> int:
+        """How many entities a draft has changed (its own heads) — one indexed count, to decide
+        whether it publishes inside a request or as a job."""
+        async with self._session() as s:
+            return await self._change_count(s, graph_id, branch_id)
+
+    @staticmethod
+    async def _change_count(s, graph_id: str, branch_id: str) -> int:
+        return await s.scalar(select(func.count()).select_from(EntityHeadORM).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id)) or 0
+
     async def _count_if_too_large(self, s, graph_id, branch_id, containment_edge_types, viewer):
         """The Changes summary of a draft past ``DIFF_TREE_MAX_CHANGES`` — or ``None`` for one the
         tree can lay out. Classified like :meth:`diff_branch_vs_base` from hashes; the impact
         rollup counts the changed entities by type (the tree's also counts their containers)."""
         branch = await self._get_branch(s, graph_id, branch_id)
         await self._assert_branch_readable(s, branch, viewer)
-        changed = await s.scalar(select(func.count()).select_from(EntityHeadORM).where(
-            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id)) or 0
+        changed = await self._change_count(s, graph_id, branch_id)
         if changed <= config.DIFF_TREE_MAX_CHANGES:
             return None
         heads = await self._head_index(s, graph_id, branch_id)
@@ -4607,7 +4617,9 @@ class GraphVersioningService:
         changed = set(own) | set(resolutions)
         changed |= await self._changed_in_window(s, graph_id, main_id, base_seq, head_seq)
         base = await self._values_at(s, graph_id, main_id, changed, base_seq)
-        theirs = await self._values_at(s, graph_id, main_id, changed, head_seq)
+        # Up to date (always so at publish and merge, whose gates demand it): main's side IS the
+        # base — one copy of every changed payload fewer to hold.
+        theirs = base if head_seq == base_seq else await self._values_at(s, graph_id, main_id, changed, head_seq)
         ours = {eid: base.get(eid) for eid in changed}
         ours.update(own)
 

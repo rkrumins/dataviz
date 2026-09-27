@@ -215,6 +215,10 @@ DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
 # containment tree: the tree is built from every changed payload and their ancestors, in the
 # web process, per request.
 DIFF_TREE_MAX_CHANGES: int = int(os.getenv("GRAPHVER_DIFF_TREE_MAX_CHANGES", "20000"))
+# A draft changing more entities than this publishes (or has its review merged) as a job on the
+# versioning worker, not inside the request: the squash holds every changed payload and hashes
+# them all, which a web pod's memory and event loop can't spare at that size.
+SYNC_PUBLISH_MAX_CHANGES: int = int(os.getenv("GRAPHVER_SYNC_PUBLISH_MAX_CHANGES", "20000"))
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")

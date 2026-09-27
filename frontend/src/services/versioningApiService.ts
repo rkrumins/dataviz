@@ -415,38 +415,57 @@ async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number 
     } catch {
       /* non-JSON error body */
     }
-    const detail = body?.detail
-    if (res.status === 409 && detail?.type === 'merge_conflict') {
-      throw new MergeConflictError(detail.conflicts ?? [])
-    }
-    if (res.status === 422 && detail?.type === 'ontology_violation') {
-      throw new OntologyViolationError(detail.violations ?? [])
-    }
-    if (res.status === 409 && detail?.type === 'not_up_to_date') {
-      throw new NotUpToDateError(detail)
-    }
-    if (res.status === 409 && detail?.type === 'pull_request_exists') {
-      throw new PullRequestExistsError(detail)
-    }
-    if (res.status === 422 && detail?.type === 'graph_name_unavailable') {
-      throw new GraphNameUnavailableError(
-        detail.message ?? 'That graph name is already taken on this connection.',
-        detail.suggestion ?? null,
-      )
-    }
-    if (res.status === 401) throw new Error('Session expired')
-    const msg =
-      typeof detail === 'string'
-        ? detail
-        : detail?.message
-        ? detail.message
-        : detail
-        ? JSON.stringify(detail)
-        : text || res.statusText
-    throw new Error(msg)
+    throw versioningError(res.status, body?.detail, text || res.statusText)
   }
   if (res.status === 204) return undefined as T
   return readJsonLossless<T>(res)
+}
+
+/** A refusal's `detail`: a message, or an object whose `type` names the refusal. */
+type RefusalDetail = string | {
+  type?: string
+  message?: string
+  conflicts?: Array<Record<string, unknown>>
+  violations?: Array<Record<string, unknown>>
+  branchId?: string
+  behindBy?: number
+  prId?: string
+  title?: string | null
+  suggestion?: string | null
+} | null | undefined
+
+/** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
+ *  from the request or from a job the request queued (a large draft's publish). */
+function versioningError(status: number, detail: RefusalDetail, fallback: string): Error {
+  const d = typeof detail === 'object' && detail ? detail : undefined
+  if (status === 409 && d?.type === 'merge_conflict') {
+    return new MergeConflictError(d.conflicts ?? [])
+  }
+  if (status === 422 && d?.type === 'ontology_violation') {
+    return new OntologyViolationError(d.violations ?? [])
+  }
+  if (status === 409 && d?.type === 'not_up_to_date') {
+    return new NotUpToDateError(d)
+  }
+  if (status === 409 && d?.type === 'pull_request_exists') {
+    return new PullRequestExistsError(d as { prId: string })
+  }
+  if (status === 422 && d?.type === 'graph_name_unavailable') {
+    return new GraphNameUnavailableError(
+      d.message ?? 'That graph name is already taken on this connection.',
+      d.suggestion ?? null,
+    )
+  }
+  if (status === 401) return new Error('Session expired')
+  const msg =
+    typeof detail === 'string'
+      ? detail
+      : d?.message
+      ? d.message
+      : d
+      ? JSON.stringify(d)
+      : fallback
+  return new Error(msg)
 }
 
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`
@@ -1025,13 +1044,46 @@ export function mergePreview(wsId: string, graphId: string, branchId: string): P
 }
 
 /** Direct publish of a draft → main (the `:manage` shortcut). */
-export function publishBranch(
+export async function publishBranch(
   wsId: string,
   graphId: string,
   branchId: string,
   data: { message: string; resolutions?: ResolutionMap },
 ): Promise<CommitResponse> {
-  return vfetch<CommitResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/publish`, jsonBody(data))
+  return followPublish(wsId, await vfetch<CommitResponse | QueuedPublish>(
+    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/publish`, jsonBody(data)))
+}
+
+/** A draft too large to publish inside the request is published by a job (202): its id, and the
+ *  graph whose publish jobs to ask about it. */
+interface QueuedPublish {
+  jobId: string
+  graphId: string
+}
+
+interface PublishJob {
+  jobId: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  commitId: string | null
+  /** The refusal a publish inside the request would have given. */
+  error: { status: number; detail: RefusalDetail } | null
+}
+
+/** How often a queued publish is asked about (tests shorten it). */
+export const PUBLISH_JOB_POLL = { ms: 2000 }
+
+/** The commit a publish (or review merge) made — at once, or once the job it queued is done. A
+ *  refused job raises the error the request would have raised. */
+async function followPublish(wsId: string, answer: CommitResponse | QueuedPublish): Promise<CommitResponse> {
+  if (!('jobId' in answer)) return answer
+  for (;;) {
+    const job = await vfetch<PublishJob>(`${base(wsId)}/graphs/${answer.graphId}/publish-jobs/${answer.jobId}`)
+    if (job.status === 'completed' && job.commitId) return { commitId: job.commitId }
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      throw versioningError(job.error?.status ?? 500, job.error?.detail, 'Publishing failed')
+    }
+    await new Promise((resolve) => setTimeout(resolve, PUBLISH_JOB_POLL.ms))
+  }
 }
 
 // ============================================
@@ -1119,12 +1171,13 @@ export function closeMergeRequest(wsId: string, prId: string): Promise<PullReque
   return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/close`, jsonBody({}))
 }
 
-export function mergeMergeRequest(
+export async function mergeMergeRequest(
   wsId: string,
   prId: string,
   data: { message: string; resolutions?: ResolutionMap },
 ): Promise<CommitResponse> {
-  return vfetch<CommitResponse>(`${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data))
+  return followPublish(wsId, await vfetch<CommitResponse | QueuedPublish>(
+    `${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data)))
 }
 
 /** Itemised "Files Changed" for a PR (draft MR or fork PR — the endpoint dispatches
