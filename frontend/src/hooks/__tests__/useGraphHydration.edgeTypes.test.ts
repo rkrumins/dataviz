@@ -7,6 +7,8 @@
  * so those cells turned into stubs on the rows as soon as a view opened, and
  * the heaviest read on open got heavier. Roll-ups for the rows on screen come
  * from /edges/aggregated; hydration asks for containment and lineage only.
+ * A child page asks for its sibling lineage the same way, and keeps no cell
+ * the server sends regardless.
  *
  * And the flows primed for a child page land after the page: if its rows were
  * removed meanwhile (a sort flip refetches them, a collapse prunes them), the
@@ -123,6 +125,50 @@ describe('hydration reads lineage by type', () => {
     const call = mockProvider.getEdgesBetween.mock.calls[0] as unknown as [string[], string[] | undefined]
     expect(call[1]).toBeUndefined()
     expect(useCanvasStore.getState().edges.map(e => e.id)).not.toContain('agg')
+  })
+
+  /** Page two of the anchor, whose sibling lineage carries a flow and a cell. */
+  function servePageTwoWithCell() {
+    mockProvider.getChildrenWithEdges.mockImplementation(async (_u: string, o: { offset?: number }) => {
+      const from = o.offset ?? 0
+      const served = page(from, Math.min(100, 150 - from), 150)
+      if (from !== 100) return served
+      return {
+        ...served,
+        lineageEdges: [
+          { id: 'f-sib', sourceUrn: kid(100), targetUrn: kid(0), edgeType: 'FLOWS_TO' },
+          { id: 'agg-sib', sourceUrn: kid(101), targetUrn: kid(0), edgeType: 'AGGREGATED' },
+        ],
+      }
+    })
+  }
+
+  const pageTwoAsk = () => (mockProvider.getChildrenWithEdges.mock.calls as unknown as Array<[string, { offset?: number; lineageEdgeTypes?: string[] }]>)
+    .find(c => c[1].offset === 100)?.[1]
+
+  it('asks a child page for lineage without AGGREGATED, and keeps no cell it sends anyway', async () => {
+    servePageTwoWithCell()
+    await hydrate()
+    const canvas = renderHook(() => useGraphHydration())
+    await act(async () => { await canvas.result.current.loadChildren(ANCHOR) })
+    expect(pageTwoAsk()?.lineageEdgeTypes).toEqual(['FLOWS_TO'])
+    const ids = useCanvasStore.getState().edges.map(e => e.id)
+    expect(ids).toContain('f-sib')
+    expect(ids).not.toContain('agg-sib')
+  })
+
+  it('asks a child page untyped when AGGREGATED is its only lineage type — and still drops the cell', async () => {
+    // An empty list lets the server substitute the types it resolves, which
+    // can hold AGGREGATED: so the cell is dropped on arrival, not only unasked.
+    schema.lineage = ['AGGREGATED']
+    servePageTwoWithCell()
+    await hydrate()
+    const canvas = renderHook(() => useGraphHydration())
+    await act(async () => { await canvas.result.current.loadChildren(ANCHOR) })
+    const ask = pageTwoAsk()
+    expect(ask).toBeDefined()
+    expect(ask?.lineageEdgeTypes).toBeUndefined()
+    expect(useCanvasStore.getState().edges.map(e => e.id)).not.toContain('agg-sib')
   })
 
   it('drops the flows primed for a page whose rows were removed before they landed', async () => {

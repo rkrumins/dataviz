@@ -241,13 +241,20 @@ export function isHydrationFailure(status: HydrationStatus): status is Hydration
     return status === 'warming' || status === 'slow' || status === 'unavailable' || status === 'error'
 }
 
+/** The view's lineage types less the stored :AGGREGATED cells: the rows on
+ *  screen get their roll-ups from /edges/aggregated, never from a read of
+ *  their flows. */
+function lineageOnly(lineageEdgeTypes: string[]): string[] {
+    return lineageEdgeTypes.filter(t => t.toUpperCase() !== 'AGGREGATED')
+}
+
 /** The types /edges/between is asked for: containment and lineage, never the
  *  stored :AGGREGATED cells (see the reference hydration's edge fetch).
  *  Untyped only while the view has not declared both kinds. */
 function betweenEdgeTypes(containmentEdgeTypes: string[], lineageEdgeTypes: string[]): string[] | undefined {
-    const lineageOnly = lineageEdgeTypes.filter(t => t.toUpperCase() !== 'AGGREGATED')
-    return containmentEdgeTypes.length > 0 && lineageOnly.length > 0
-        ? [...containmentEdgeTypes, ...lineageOnly]
+    const lineage = lineageOnly(lineageEdgeTypes)
+    return containmentEdgeTypes.length > 0 && lineage.length > 0
+        ? [...containmentEdgeTypes, ...lineage]
         : undefined
 }
 
@@ -1425,17 +1432,19 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         }
                         // Lineage out of and into the page as two ANCHORED reads: the
                         // one-query `anyUrns` form has no index-friendly shape and scans
-                        // every lineage edge of the graph for each page.
+                        // every lineage edge of the graph for each page. Flows only,
+                        // never the stored :AGGREGATED cells, as /edges/between.
                         const none = Promise.resolve([] as GraphEdge[])
+                        const lineage = lineageOnly(lineageEdgeTypes)
                         const [incoming, lineageOut, lineageIn, adopted] = pageUrns.length === 0 ? [[], [], [], []] : await Promise.all([
                             containmentEdgeTypes.length > 0
                                 ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: containmentEdgeTypes, limit: pageUrns.length * 4 + 100 }).catch(noteFailure)
                                 : none,
-                            lineageEdgeTypes.length > 0
-                                ? provider.getEdges({ sourceUrns: pageUrns, edgeTypes: lineageEdgeTypes, limit: 200_000 }).catch(noteFailure)
+                            lineage.length > 0
+                                ? provider.getEdges({ sourceUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
                                 : none,
-                            lineageEdgeTypes.length > 0
-                                ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: lineageEdgeTypes, limit: 200_000 }).catch(noteFailure)
+                            lineage.length > 0
+                                ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
                                 : none,
                             orphans.length > 0
                                 ? provider.getEdgesBetween([...pageUrns, ...orphans], containmentEdgeTypes).catch(noteFailure)
@@ -1447,7 +1456,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         const onPage = new Set(pageUrns)
                         const isLoaded = (u: string) => held.has(u) || onPage.has(u)
                         const edges = [...incoming, ...lineageOut, ...lineageIn, ...adopted]
-                            .filter(e => isLoaded(e.sourceUrn) && isLoaded(e.targetUrn))
+                            .filter(e => !isAggregatedEdge(e) && isLoaded(e.sourceUrn) && isLoaded(e.targetUrn))
                         const fresh = page.filter((n, i) => !held.has(n.urn) && pageUrns.indexOf(n.urn) === i)
                         // ONE store update: nodes, edges and the feed's position —
                         // unless another instance of this hook moved the feed on
@@ -1588,6 +1597,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             try {
                 const urn = (parentNode.data.urn as string) || parentId
                 const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
+                const lineage = lineageOnly(lineageEdgeTypes)
                 let added = 0
 
                 // One call makes progress or proves there is none. A page whose
@@ -1606,7 +1616,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Single round-trip: children + containment edges + lineage edges
                     const result = await provider.getChildrenWithEdges(urn, {
                         edgeTypes: fetchTypes,
-                        lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
+                        lineageEdgeTypes: lineage.length > 0 ? lineage : undefined,
                         limit: CHILDREN_PAGE_SIZE,
                         // By POSITION, the next one taken from the server: works on
                         // every provider and every naming scheme (no name-based
@@ -1639,11 +1649,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     // A sibling edge whose far end is not loaded yet is held back —
                     // it comes again with that sibling's own page — so nothing is
-                    // lost.
+                    // lost. A roll-up cell is dropped: asked untyped, the server
+                    // reads the lineage types its ontology resolves, which can
+                    // include :AGGREGATED.
                     const isLoaded = (u: string) => u === parentId || u === urn || held.has(u) || newIds.has(u)
                     const edgesToAdd = [
                         ...result.containmentEdges,
-                        ...result.lineageEdges.filter(e => isLoaded(e.sourceUrn) && isLoaded(e.targetUrn)),
+                        ...result.lineageEdges.filter(e => !isAggregatedEdge(e) && isLoaded(e.sourceUrn) && isLoaded(e.targetUrn)),
                     ].map(e => toCanvasEdge(e))
 
                     pos = pagerAfter(result, offset, direction, childCount, pos.lastUrn)
