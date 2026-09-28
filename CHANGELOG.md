@@ -92,6 +92,23 @@ the identity provider or on the sign-in page, instead of the home page.
 request would fail, until something else noticed. The renewal now signs the tab out itself, as a
 failed request does.
 
+**When the gateway was down, the sign-in page gave no reason.** A renewal that failed only because
+the corporate side did not answer now lands on the sign-in page saying so, and that the page will
+try again — which it does, at once and after a minute — instead of a bare form.
+
+**Gateway sign-in in the browser, with several tabs and on a laptop:**
+
+- **A silent re-sign-in gives up after 45 seconds.** It holds every tab's requests while it runs,
+  and a corporate host that never answered could hold them for over two minutes.
+- **Every tab shows why sign-in is needed**, and none re-runs the call to the corporate host while
+  a refusal is being honoured. Only the tab that tried used to know.
+- **Renewal cannot call the gateway every two seconds.** It renews at half the token's life when
+  that is under two minutes, and schedules by the server's clock rather than the laptop's, so a
+  short token or a clock running fast no longer renews on a loop — each renewal being a call to
+  the corporate gateway. It also catches up after a laptop wakes or the network comes back.
+- **A gateway that reads the corporate cookie on the server signs people in automatically too**,
+  like the other kinds, instead of waiting for the button.
+
 ### Added
 
 **When each person last used the platform, in Admin → Users.** A sortable **Last seen** column, and an

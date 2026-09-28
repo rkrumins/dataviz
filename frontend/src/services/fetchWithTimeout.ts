@@ -205,6 +205,7 @@ async function attemptRefresh(): Promise<{
       signal: abort.signal,
     })
     clearTimeout(timer)
+    adoptServerClock(res)
     if (res.ok) {
       // Before anything reads the rotated cookies: the retried request
       // mirrors ``nx_csrf_<env>`` and the keepalive re-arms from
@@ -366,9 +367,14 @@ async function attemptRefresh(): Promise<{
     }
   } catch {
     // Threw — DNS, offline, connection reset, no answer in time. Says
-    // nothing about the session either.
+    // nothing about the session either. Retrying the same instant goes
+    // into the same outage — a Wi-Fi hop, a laptop waking — so the one
+    // retry waits a jittered second or two first.
     clearTimeout(timer)
-    return { outcome: 'retryable', retryAfterMs: null }
+    return {
+      outcome: 'retryable',
+      retryAfterMs: 1_000 + Math.floor(Math.random() * 1_000),
+    }
   }
 }
 
@@ -411,6 +417,32 @@ function withReturnPath(url: string): string {
  * which is exactly what a single-deployment install writes.
  */
 let environmentId: string | null = null
+
+/**
+ * How far the server's clock is ahead of this machine's, in milliseconds.
+ *
+ * The published access expiry is a server timestamp, and the keepalive
+ * schedules against it. Compared with a laptop clock that runs minutes
+ * fast, every renewal looks due at once and the tab renews every two
+ * seconds — and on a gateway connection each renewal is a call to the
+ * corporate gateway. Learned from the ``Date`` header of auth responses.
+ */
+let serverClockOffsetMs = 0
+
+/** Now, by the server's clock as far as this tab knows it. */
+export function serverNow(): number {
+  return Date.now() + serverClockOffsetMs
+}
+
+/** Learn the server's clock from a response's ``Date`` header. The header
+ *  has one-second resolution and the response spent time in flight, so an
+ *  offset under two seconds is noise and reads as none. */
+export function adoptServerClock(res: Response): void {
+  const date = Date.parse(res.headers?.get?.('Date') ?? '')
+  if (Number.isNaN(date)) return
+  const offset = date - Date.now()
+  serverClockOffsetMs = Math.abs(offset) < 2_000 ? 0 : offset
+}
 
 /** Called by the auth store with whatever ``/auth/me`` reported. */
 export function setAuthEnvironmentId(id: string | null | undefined): void {

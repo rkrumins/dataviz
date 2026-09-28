@@ -107,6 +107,7 @@ let assign: ReturnType<typeof vi.fn>
 beforeEach(() => {
     vi.clearAllMocks()
     window.sessionStorage.clear()
+    window.localStorage.clear()
     lastDenialRef.current = null
     errorRef.current = null
     assign = vi.fn()
@@ -252,7 +253,7 @@ describe('silent sign-in', () => {
     })
 
     it('stays quiet and explains while a silent recovery just failed', async () => {
-        window.sessionStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
             at: Date.now(), reason: 'The sign-in service answered 503.',
         }))
         renderLogin()
@@ -306,6 +307,21 @@ describe('silent sign-in', () => {
             act(() => { window.dispatchEvent(new Event('online')) })
             await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2))
         })
+    })
+
+    it('explains a renewal that failed only on load, and still tries at once', async () => {
+        // The gateway was down when the session needed renewing. Nothing
+        // was learned about the corporate session, so nothing is held back
+        // — but the person landed here, and deserves to know why.
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+            at: Date.now(), reason: 'The sign-in service answered 503.', hold: false,
+        }))
+        runAuthenticateTrigger.mockRejectedValue(new Error('down'))
+        renderLogin()
+        expect(await screen.findByText(/could not be renewed automatically/i))
+            .toBeInTheDocument()
+        expect(screen.getByText(/answered 503.*try again shortly/i)).toBeInTheDocument()
+        await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
     })
 
     it('does not fire when two providers could both claim it', async () => {
@@ -369,7 +385,7 @@ describe('silent sign-in', () => {
         loginContext.mockResolvedValue({
             allowLocalLogin: false, emailFirstLogin: false, providers: [],
         })
-        window.sessionStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
             at: Date.now(), reason: 'Your session there has ended.',
         }))
         renderLogin()
@@ -510,6 +526,81 @@ describe('email-first with a gateway connection', () => {
             /don't recognise that email's domain/i,
         )).toBeInTheDocument()
         expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+})
+
+// ── a gateway that reads the corporate cookie itself ─────────────────
+
+describe('silent sign-in with no browser half', () => {
+    // Server mode: the corporate cookie rides every request to us, so an
+    // empty POST is the whole sign-in. Before, this page never tried it,
+    // and someone whose renewal had failed had to press the button even
+    // once their corporate session was back.
+    const COOKIE_ROW = {
+        id: 'idp_3', slug: 'corp-cookie', displayName: 'Corporate Portal',
+        kind: 'backchannel', priority: 100, config: {},
+    }
+
+    function only(...providers: unknown[]) {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: false, providers,
+        })
+    }
+
+    it('posts for the cookie and lands inside', async () => {
+        only(COOKIE_ROW)
+        renderLogin()
+        await waitFor(() => expect(storeLoginWithBackchannel)
+            .toHaveBeenCalledWith('corp-cookie', {}))
+        await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
+        expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+    })
+
+    it.each(['backchannel_no_session', 'http_404', 'http_503', 'backchannel_unavailable'])(
+        'is silent when the answer is %s — nothing to sign in with, or only load',
+        async (code) => {
+            only(COOKIE_ROW)
+            storeLoginWithBackchannel.mockResolvedValue(false)
+            lastDenialRef.current = { code }
+            renderLogin()
+            await waitFor(() => expect(storeLoginWithBackchannel).toHaveBeenCalled())
+            await new Promise(r => setTimeout(r, 20))
+            expect(screen.queryByText(/did not work/i)).not.toBeInTheDocument()
+            expect(await screen.findByLabelText(/password/i)).toBeInTheDocument()
+        },
+    )
+
+    it('says so when the corporate side refused a session it was shown', async () => {
+        only(COOKIE_ROW)
+        storeLoginWithBackchannel.mockResolvedValue(false)
+        lastDenialRef.current = { code: 'backchannel_idp_rejected:401' }
+        renderLogin()
+        expect(await screen.findByText(
+            /Signing in with your Corporate Portal session did not work/i,
+        )).toBeInTheDocument()
+    })
+
+    it('respects the connection\'s opt-out', async () => {
+        only({ ...COOKIE_ROW, config: { autoSignIn: false } })
+        renderLogin()
+        await new Promise(r => setTimeout(r, 20))
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+
+    it('stays off after someone signed out on purpose', async () => {
+        window.localStorage.setItem('nx_signed_out', String(Date.now()))
+        only(COOKIE_ROW)
+        renderLogin()
+        await new Promise(r => setTimeout(r, 20))
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+
+    it('gives way to a browser-driven connection, as before', async () => {
+        only(GATEWAY, COOKIE_ROW)
+        renderLogin()
+        await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
+        expect(storeLoginWithBackchannel).toHaveBeenCalledTimes(1)
+        expect(storeLoginWithBackchannel).toHaveBeenCalledWith('corp-gateway', {})
     })
 })
 

@@ -18,7 +18,7 @@ import {
 import {
     autoPortalAlreadyTried,
     markAutoPortalTried,
-    readReauthFailure,
+    readReauthNotice,
     REAUTH_COOLDOWN_MS,
 } from '@/services/backchannelReauth'
 import { cn } from '@/lib/utils'
@@ -102,6 +102,14 @@ function ssoName(p: SsoProviderSummary): string {
  *  verbatim — they may well have written "Continue with" themselves. */
 function ssoLabel(p: SsoProviderSummary): string {
     return p.buttonLabel?.trim() || `Continue with ${ssoName(p)}`
+}
+
+/** A back-channel connection with no browser half: the server reads the
+ *  corporate session off the request, so an empty POST is the whole
+ *  sign-in — the same one the silent re-sign-in makes. A row that reads no
+ *  cookie refuses that shape, which the caller treats as "nothing here". */
+function readsAmbientSession(p: SsoProviderSummary): boolean {
+    return p.kind === 'backchannel' && !isGatewayProvider(p)
 }
 
 /** Where signing in lands: ``?next=`` — the page the user was on when
@@ -594,13 +602,17 @@ export function LoginPage() {
     // expired, and the automatic recovery could not renew it. Without a
     // reason this page reads as a random logout.
     const [portalError, setPortalError] = useState<string | null>(() => {
-        const failure = readReauthFailure()
+        const failure = readReauthNotice()
         if (!failure) return null
         // The "what next" half is appended at render time, where the
         // page knows whether there is actually anything below to press.
+        // A failure that was only load or the network holds nothing back:
+        // this page's own automatic attempt runs now, and once more when
+        // its hold lapses — say so rather than implying it is over.
         return (
             'Your corporate sign-in could not be renewed automatically.'
             + (failure.reason ? ` ${failure.reason}` : '')
+            + (failure.hold ? '' : ' This page will try again shortly.')
         )
     })
     // Escape hatch out of the email-first flow. Never shown when local
@@ -657,14 +669,49 @@ export function LoginPage() {
         if (providers === null || autoAttempted.current) return
         if (isAuthenticated || autoPortalAlreadyTried()) return
 
-        const candidates = providers.filter(
-            (p) => (needsBrowserPayload(p) || isGatewayProvider(p))
-                // The operator's opt-out: the connection still works,
-                // but only when somebody presses its button.
-                && p.config?.autoSignIn !== false,
+        // The operator's opt-out: the connection still works, but only
+        // when somebody presses its button.
+        const eligible = (p: SsoProviderSummary) => p.config?.autoSignIn !== false
+        let candidates = providers.filter(
+            (p) => (needsBrowserPayload(p) || isGatewayProvider(p)) && eligible(p),
         )
+        // A gateway that reads the corporate cookie off the request needs
+        // no browser half — only a POST for the cookie to ride on. It is
+        // considered only when nothing browser-driven is, so a deployment
+        // that already signed in through one of those keeps doing so.
+        if (candidates.length === 0) {
+            candidates = providers.filter(
+                (p) => readsAmbientSession(p) && eligible(p),
+            )
+        }
         if (candidates.length !== 1) return
         const candidate = candidates[0]
+
+        if (readsAmbientSession(candidate)) {
+            autoAttempted.current = true
+            markAutoPortalTried()
+            void loginWithBackchannel(candidate.slug, {}).then((ok) => {
+                if (ok) { navigate(afterSignIn, { replace: true }); return }
+                clearError()
+                // No corporate cookie on this browser — a machine off the
+                // domain, someone not signed in to the portal — or a row
+                // that reads none: the ordinary case, and silent. So is a
+                // failure that was only load; the page tries again later.
+                const code = useAuthStore.getState().lastSsoDenial?.code ?? ''
+                if (
+                    code === 'backchannel_no_session'
+                    || code === 'backchannel_unavailable'
+                    || code.startsWith('http_')
+                ) {
+                    return
+                }
+                setPortalError(
+                    `Signing in with your ${candidate.displayName} `
+                    + 'session did not work.',
+                )
+            })
+            return
+        }
 
         if (isGatewayProvider(candidate)) {
             autoAttempted.current = true

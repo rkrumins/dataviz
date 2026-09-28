@@ -432,12 +432,18 @@ def _public_config(snap) -> dict:
 
         # The login page's silent-attempt opt-out. Published only when
         # the operator explicitly turned it off — absence means on, the
-        # original behaviour — and only when the row published a
-        # browser-driven flow at all, so rows the sign-in page cannot
-        # act on stay byte-identical. Like ``authenticate_enabled``, a
-        # blob key with no dataclass mirror: the server never consults
-        # it; only the browser does.
-        if out and settings.get("auto_signin") is False:
+        # original behaviour — and only for a row the sign-in page can
+        # attempt: one with a browser-driven flow, or a server-mode row
+        # reading the corporate session off the request, which the page
+        # attempts with an empty POST. Other rows stay byte-identical.
+        # Like ``authenticate_enabled``, a blob key with no dataclass
+        # mirror: the server never consults it; only the browser does.
+        reads_ambient_session = (
+            str(settings.get("exchange_mode") or "server").strip().lower()
+            == "server"
+            and bool(str(settings.get("token_source_key") or "").strip())
+        )
+        if (out or reads_ambient_session) and settings.get("auto_signin") is False:
             out[_BACKCHANNEL_PUBLIC_FIELDS["auto_signin"]] = False
         return out
 

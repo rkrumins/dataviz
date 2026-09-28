@@ -38,7 +38,9 @@
  *   as <name>" instead. Renewing costs nothing: rotation authenticates
  *   nobody and signing in as someone else replaces the cookies outright.
  */
-import { readAccessExpiryMs, refreshNow, SESSION_REFRESHED_EVENT } from '@/services/fetchWithTimeout'
+import {
+  readAccessExpiryMs, refreshNow, serverNow, SESSION_REFRESHED_EVENT,
+} from '@/services/fetchWithTimeout'
 
 /**
  * How far ahead of expiry to rotate.
@@ -68,6 +70,35 @@ const MIN_DELAY_MS = 2_000
  * published an expiry we can use.
  */
 const REARM_PROBE_MS = 60_000
+
+/** The longest delay ``setTimeout`` honours; past it the timer fires at
+ *  once, which on a clock set far behind would be a renewal loop. */
+const MAX_DELAY_MS = 2_147_483_647
+
+/** The expiry {@link lifetimeMs} was measured against. */
+let sizedExpiryMs: number | null = null
+/** How long the current token had to live when this tab first saw it. */
+let lifetimeMs = 0
+
+/**
+ * How long before expiry to renew: {@link RENEW_BEFORE_MS}, or half the
+ * token's life when that is shorter.
+ *
+ * A token that lives a minute or less left ``exp − 60 s`` in the past the
+ * moment it was issued, so every renewal was due at once and the tab
+ * renewed on the two-second floor, indefinitely — each renewal a liveness
+ * call to the corporate gateway on a gateway connection. Half the life
+ * renews a one-minute token every thirty seconds instead. Measured the
+ * first time each expiry is seen; a tab opened mid-life measures what is
+ * left, which only renews it sooner.
+ */
+function leadMs(expiryMs: number): number {
+  if (expiryMs !== sizedExpiryMs) {
+    sizedExpiryMs = expiryMs
+    lifetimeMs = expiryMs - serverNow()
+  }
+  return Math.min(RENEW_BEFORE_MS, Math.max(0, lifetimeMs / 2))
+}
 
 let timer: ReturnType<typeof setTimeout> | null = null
 let running = false
@@ -136,7 +167,10 @@ function schedule(myEpoch: number, floorMs: number = MIN_DELAY_MS): void {
   const delay =
     expiryMs === null
       ? Math.max(floorMs, REARM_PROBE_MS)
-      : Math.max(floorMs, expiryMs - RENEW_BEFORE_MS - Date.now())
+      : Math.min(
+          MAX_DELAY_MS,
+          Math.max(floorMs, expiryMs - leadMs(expiryMs) - serverNow()),
+        )
 
   timer = setTimeout(() => {
     if (myEpoch !== epoch) return
@@ -145,7 +179,7 @@ function schedule(myEpoch: number, floorMs: number = MIN_DELAY_MS): void {
     // across tabs), in which case there is nothing to do but re-arm
     // against the newer expiry.
     const current = readAccessExpiryMs()
-    if (current !== null && current - RENEW_BEFORE_MS - Date.now() > MIN_DELAY_MS) {
+    if (current !== null && current - leadMs(current) - serverNow() > MIN_DELAY_MS) {
       schedule(myEpoch)
       return
     }
@@ -184,9 +218,19 @@ function onVisibilityChange(): void {
   schedule(epoch)
 }
 
+/** The other ways a tab comes back: the network returning, and a page
+ *  restored from the back-forward cache or woken with the laptop. Neither
+ *  fires ``visibilitychange`` reliably, and a renewal slot may have passed
+ *  while the timers were frozen. */
+function onWake(): void {
+  onVisibilityChange()
+}
+
 function bindListeners(): void {
   if (listenersBound || typeof window === 'undefined') return
   window.addEventListener(SESSION_REFRESHED_EVENT, onSessionRefreshed)
+  window.addEventListener('online', onWake)
+  window.addEventListener('pageshow', onWake)
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', onVisibilityChange)
   }

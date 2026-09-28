@@ -12,7 +12,7 @@
  * forward the ``X-CSRF-Token`` header. The general apiClient does.
  */
 
-import { adoptEnvironmentId, fetchWithTimeout } from './fetchWithTimeout'
+import { adoptEnvironmentId, adoptServerClock, fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const AUTH_API = '/api/v1/auth'
@@ -585,6 +585,9 @@ async function request<T>(url: string, init?: RequestInit & { skipAuthRefresh?: 
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })
+    // ``/auth/me`` among them: the keepalive's first schedule, straight
+    // after bootstrap, reads the server's clock from here.
+    adoptServerClock(res)
     if (!res.ok) {
         const text = await res.text()
         // Use the shared extractor so the structured permission /

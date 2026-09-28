@@ -12,7 +12,7 @@ import {
     enableSessionKeepalive,
     disableSessionKeepalive,
 } from './sessionKeepalive'
-import { SESSION_REFRESHED_EVENT } from '@/services/fetchWithTimeout'
+import { adoptServerClock, SESSION_REFRESHED_EVENT } from '@/services/fetchWithTimeout'
 
 const refreshNow = vi.hoisted(() => vi.fn())
 
@@ -108,6 +108,67 @@ describe('proactive renewal', () => {
         expect(refreshNow.mock.calls.length).toBeLessThanOrEqual(6)
         expect(refreshNow).toHaveBeenCalled()
     })
+})
+
+describe('a cadence that cannot hammer the gateway', () => {
+    // On a gateway connection every renewal is a liveness call to the
+    // corporate gateway. Renewing on the two-second floor was 58 of them
+    // in two minutes in a real-browser run.
+
+    function serverClockAhead(ms: number): void {
+        adoptServerClock(new Response(null, {
+            headers: { Date: new Date(Date.now() + ms).toUTCString() },
+        }))
+    }
+
+    afterEach(() => { serverClockAhead(0) })
+
+    it('renews a one-minute token every half-minute, not every two seconds', async () => {
+        refreshNow.mockImplementation(async () => {
+            setExpiry(60)
+            return 'ok'
+        })
+        setExpiry(60)
+        enableSessionKeepalive()
+
+        await vi.advanceTimersByTimeAsync(25_000)
+        expect(refreshNow).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(95_000)
+        // Two minutes: about four renewals, where the floor made sixty.
+        expect(refreshNow.mock.calls.length).toBeGreaterThanOrEqual(3)
+        expect(refreshNow.mock.calls.length).toBeLessThanOrEqual(5)
+    })
+
+    it('schedules by the server\'s clock when this one runs fast', async () => {
+        // A laptop twenty minutes fast reads a fresh 15-minute token as
+        // already expired, and renewed on the floor for as long as the
+        // tab stayed open.
+        serverClockAhead(-20 * 60 * 1000)
+        document.cookie = `nx_access_exp=${
+            Math.floor((Date.now() - 20 * 60 * 1000) / 1000) + 15 * 60
+        }`
+        enableSessionKeepalive()
+
+        await vi.advanceTimersByTimeAsync(13 * 60 * 1000)
+        expect(refreshNow).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(2 * 60 * 1000)
+        expect(refreshNow).toHaveBeenCalledTimes(1)
+    })
+
+    it.each(['online', 'pageshow'])(
+        're-arms on %s, so a slot that passed while asleep is not missed',
+        async (event) => {
+            setExpiry(15 * 60)
+            enableSessionKeepalive()
+            // The laptop slept through most of the token's life; its
+            // timers did not run.
+            setExpiry(5)
+            window.dispatchEvent(new Event(event))
+
+            await vi.advanceTimersByTimeAsync(3_000)
+            expect(refreshNow).toHaveBeenCalledTimes(1)
+        },
+    )
 })
 
 describe('when there is nothing to schedule against', () => {

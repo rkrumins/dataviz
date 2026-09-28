@@ -49,6 +49,7 @@ import {
     markAutoPortalTried,
     markSignedOutByChoice,
     readReauthFailure,
+    readReauthNotice,
     REAUTH_COOLDOWN_MS,
 } from './backchannelReauth'
 import { BackchannelLoginError, GatewayCallError } from './authService'
@@ -251,7 +252,7 @@ describe('failure, latched', () => {
 
     it('the latch lapses on its own — recovery is suppressed, not disabled', async () => {
         const now = Date.now()
-        window.sessionStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
             at: now - REAUTH_COOLDOWN_MS - 1, reason: 'old news',
         }))
         expect(readReauthFailure()).toBeNull()
@@ -313,6 +314,23 @@ describe('a busy moment is not a verdict', () => {
         // The login page this lands on gets its own automatic attempt.
         expect(readReauthFailure()).toBeNull()
         expect(autoPortalAlreadyTried()).toBe(false)
+        // ...and still says why the person is looking at it.
+        expect(readReauthNotice()).toMatchObject({
+            hold: false, reason: expect.stringMatching(/could not be reached/),
+        })
+    })
+
+    it('an attempt that outruns its deadline gives up, and holds nothing', async () => {
+        // It runs inside the cross-tab refresh lock: every tab's requests
+        // wait on it. A corporate host that never answers must not hold
+        // them for the minutes its calls' own timeouts add up to.
+        runAuthenticateTrigger.mockReturnValue(new Promise(() => {}))
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(readReauthFailure()).toBeNull()
+        expect(readReauthNotice()).toMatchObject({
+            hold: false, reason: expect.stringMatching(/did not answer in time/),
+        })
     })
 
     it('a gateway that timed out behind us is retried too', async () => {
@@ -352,6 +370,7 @@ describe('a busy moment is not a verdict', () => {
         expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
         expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2)
         expect(readReauthFailure()).toBeNull()
+        expect(readReauthNotice()?.reason).toMatch(/503/)
     })
 
     it('a corporate host that answered is a verdict', async () => {
@@ -376,6 +395,29 @@ describe('a busy moment is not a verdict', () => {
         expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
         expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
         expect(readReauthFailure()?.reason).toMatch(/CSP_CONNECT_SRC/)
+    })
+})
+
+describe('one latch for every tab', () => {
+    it('a refusal another tab recorded holds this one, with its reason', async () => {
+        // Every tab lands on the sign-in page when the session ends. Only
+        // one ran the recovery; the rest must not each re-run the browser
+        // half against the corporate host that just refused it.
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+            at: Date.now(), reason: 'The sign-in service answered 401.', hold: true,
+        }))
+
+        expect(await attemptSilentReauth('corp-gateway')).toBe('failed')
+        expect(fetchWithTimeout).not.toHaveBeenCalled()
+        expect(readReauthNotice()?.reason).toMatch(/401/)
+    })
+
+    it('a recovery anywhere clears it everywhere', async () => {
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+            at: Date.now(), reason: 'busy', hold: false,
+        }))
+        expect(await attemptSilentReauth('corp-gateway')).toBe('recovered')
+        expect(window.localStorage.getItem('nx_bc_reauth_failed')).toBeNull()
     })
 })
 

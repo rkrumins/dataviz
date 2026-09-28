@@ -20,11 +20,12 @@
  * flashes.
  *
  * A definitive failure latches for {@link REAUTH_COOLDOWN_MS} (module
- * state AND sessionStorage, so a bounce to /login sees it too): a
- * corporate IdP that is genuinely down must not be hammered once per
- * access lifetime, and the user must land on a visible form with the
+ * state AND localStorage, so a bounce to /login — in any tab — sees it
+ * too): a corporate IdP that is genuinely down must not be hammered once
+ * per access lifetime, and the user must land on a visible form with the
  * reason — not in a loop. A transient one (either call answering 429 /
- * 5xx, or not at all) is retried once and does not latch. Every path
+ * 5xx, or not at all, or the whole attempt outrunning its deadline) is
+ * retried once and does not latch; its reason is still shown. Every path
  * terminates: recovered, or on the sign-in page with an explanation.
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
@@ -45,6 +46,13 @@ export type SilentReauthResult =
  *  both here and on the login page's own silent sign-in. */
 export const REAUTH_COOLDOWN_MS = 60_000
 
+/** The last failed recovery. In localStorage, not sessionStorage: every
+ *  tab that lands on the sign-in page shows the same reason, and none of
+ *  them re-runs the browser half against a corporate host that just said
+ *  no — per tab, only the tab that ran the recovery knew, and a restored
+ *  browser session re-ran it once per tab. Bounded by
+ *  {@link REAUTH_COOLDOWN_MS}, so an entry that outlives a restart is
+ *  ignored. */
 const FAILURE_MARKER = 'nx_bc_reauth_failed'
 
 /** The login page's silent-attempt sentinel. Owned here rather than in
@@ -66,25 +74,45 @@ const SIGNED_OUT_MARKER = 'nx_signed_out'
  *  enough that nobody watching notices. */
 const TRANSIENT_RETRY_MS = 1_000
 
+/** The most one silent re-sign-in may take, retry included. It runs inside
+ *  the cross-tab refresh lock, so every tab's requests wait on it; its own
+ *  calls' timeouts added up to over two minutes. Past this it is a
+ *  failure that says nothing about the corporate session, and the sign-in
+ *  page's automatic attempt takes over. */
+const REAUTH_DEADLINE_MS = 45_000
+
+/** A failed recovery, as the sign-in page explains it. ``hold`` is false
+ *  when nothing was learned about the corporate session — load, the
+ *  network, the deadline — so the reason is shown but no automatic
+ *  attempt is held back by it. */
+export type ReauthFailure = { at: number; reason: string; hold: boolean }
+
 let failedAtInMemory: number | null = null
 
-function readFailureMarker(): { at: number; reason: string } | null {
+function readFailureMarker(): ReauthFailure | null {
     try {
-        const raw = window.sessionStorage.getItem(FAILURE_MARKER)
+        const raw = window.localStorage.getItem(FAILURE_MARKER)
         if (!raw) return null
-        const parsed = JSON.parse(raw) as { at?: unknown; reason?: unknown }
+        const parsed = JSON.parse(raw) as {
+            at?: unknown; reason?: unknown; hold?: unknown
+        }
         if (typeof parsed.at !== 'number') return null
-        return { at: parsed.at, reason: String(parsed.reason ?? '') }
+        return {
+            at: parsed.at,
+            reason: String(parsed.reason ?? ''),
+            hold: parsed.hold !== false,
+        }
     } catch {
         return null
     }
 }
 
-/** The current failure, or null once the cooldown has lapsed. The login
- *  page reads this to show the reason and to hold its silent attempt. */
+/** The failure that holds automatic attempts back, or null once the
+ *  cooldown has lapsed. A failure that was only load or the network
+ *  never holds anything — see {@link readReauthNotice}. */
 export function readReauthFailure(): { at: number; reason: string } | null {
-    const marker = readFailureMarker()
-    if (marker && Date.now() - marker.at < REAUTH_COOLDOWN_MS) return marker
+    const marker = readReauthNotice()
+    if (marker?.hold) return { at: marker.at, reason: marker.reason }
     if (
         failedAtInMemory !== null
         && Date.now() - failedAtInMemory < REAUTH_COOLDOWN_MS
@@ -94,21 +122,30 @@ export function readReauthFailure(): { at: number; reason: string } | null {
     return null
 }
 
+/** Any recent failure, holding or not: what the sign-in page says to
+ *  someone who just landed there from a renewal that did not work. */
+export function readReauthNotice(): ReauthFailure | null {
+    const marker = readFailureMarker()
+    return marker && Date.now() - marker.at < REAUTH_COOLDOWN_MS ? marker : null
+}
+
 export function clearReauthFailure(): void {
     failedAtInMemory = null
     try {
-        window.sessionStorage.removeItem(FAILURE_MARKER)
+        window.localStorage.removeItem(FAILURE_MARKER)
     } catch {
         // storage unavailable — the in-memory latch is already cleared
     }
 }
 
-function markReauthFailure(reason: string): void {
-    failedAtInMemory = Date.now()
+function markReauthFailure(
+    reason: string, { hold = true }: { hold?: boolean } = {},
+): void {
+    const at = Date.now()
+    if (hold) failedAtInMemory = at
     try {
-        window.sessionStorage.setItem(
-            FAILURE_MARKER,
-            JSON.stringify({ at: failedAtInMemory, reason }),
+        window.localStorage.setItem(
+            FAILURE_MARKER, JSON.stringify({ at, reason, hold }),
         )
     } catch {
         // storage unavailable — the in-memory latch still holds this tab
@@ -252,6 +289,29 @@ export async function attemptSilentReauth(
     if (!providerSlug || typeof window === 'undefined') return 'not-applicable'
     if (readReauthFailure() !== null) return 'failed'
 
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<'deadline'>((resolve) => {
+        timer = setTimeout(() => resolve('deadline'), REAUTH_DEADLINE_MS)
+    })
+    try {
+        const result = await Promise.race([
+            runSilentReauth(providerSlug), deadline,
+        ])
+        if (result !== 'deadline') return result
+        // The caller loads the sign-in page next, which abandons whatever
+        // is still in flight and runs its own automatic attempt.
+        markReauthFailure(
+            'The sign-in service did not answer in time.', { hold: false },
+        )
+        return 'failed'
+    } finally {
+        clearTimeout(timer)
+    }
+}
+
+async function runSilentReauth(
+    providerSlug: string,
+): Promise<SilentReauthResult> {
     let provider: SsoProviderSummary | null
     try {
         provider = await resolveProvider(providerSlug)
@@ -347,7 +407,15 @@ export async function attemptSilentReauth(
         // session, so the cooldown is NOT latched: the login page this
         // lands on gets its own automatic attempt, bounded by its own
         // sentinel. Latching would make a 9am rush behind one corporate
-        // egress address cost everyone a click and a minute.
+        // egress address cost everyone a click and a minute. The reason is
+        // still recorded, without the hold, so that page can say why the
+        // person is looking at it.
+        markReauthFailure(
+            lastError instanceof GatewayCallError
+                ? lastError.message
+                : 'The sign-in service could not be reached.',
+            { hold: false },
+        )
         return 'failed'
     }
     markReauthFailure(

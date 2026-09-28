@@ -198,6 +198,10 @@ describe('a refresh that never answers', () => {
 
             const outcome = refreshNow()
             await vi.advanceTimersByTimeAsync(20_000)
+            // No answer at all: the one retry waits a jittered second or
+            // two rather than going straight back into the same outage.
+            expect(f).toHaveBeenCalledTimes(1)
+            await vi.advanceTimersByTimeAsync(2_000)
             expect(f).toHaveBeenCalledTimes(2)
             await vi.advanceTimersByTimeAsync(20_000)
 
