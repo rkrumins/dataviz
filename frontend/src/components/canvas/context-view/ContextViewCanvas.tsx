@@ -4431,8 +4431,11 @@ export function ContextViewCanvas({
   // rather than read as leaving the view. Always on: it is how the canvas
   // tells in-view from outside. Browse only, as the projection below.
   // Drawn rows with no loaded parent are asked too: a row placed in another
-  // column than the closed row above it must not be counted twice.
-  const unparented = useMemo(() => unparentedRows(nodesByLayer, parentMap), [nodesByLayer, parentMap])
+  // column than the closed row above it must not be counted twice. So are
+  // anchors with no loaded parent: a cell to what holds one counts its
+  // column's flows too.
+  const unparented = useMemo(() => unparentedRows(nodesByLayer, parentMap, promotedAnchors),
+    [nodesByLayer, parentMap, promotedAnchors])
   // A selected container's own roll-ups (useContainerRollups) are placed as
   // a holder's are: their far ends get chains, and the projection keeps of
   // each only what the rows it reaches do not carry.

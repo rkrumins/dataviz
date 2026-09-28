@@ -18,8 +18,9 @@
 import { act, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
-import { anchoredPortsEstate, groupAndAnchorEstate } from '@/test/fixtures/traceEstates'
+import { anchoredPortsEstate, groupAndAnchorEstate, nestedAnchorPortsEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
 import { useCanvasStore } from '@/store/canvas'
 import type { AggregatedEdgeRequest, GraphDataProvider } from '@/providers/GraphDataProvider'
@@ -29,8 +30,25 @@ vi.mock('@/hooks/useRevealPartners', async (original) => ({
   REVEAL_PARTNERS_CAP: 1,
 }))
 
+// What the canvas hands the overlay for its stubs: jsdom gives every row the
+// same box, so no stub is ever painted to read.
+const overlay = vi.hoisted(() => ({
+  offCanvas: undefined as ReadonlyMap<string, OffCanvasLineage> | undefined,
+}))
+vi.mock('../LineageFlowOverlay', async (original) => {
+  const real = await original<typeof import('../LineageFlowOverlay')>()
+  return {
+    ...real,
+    LineageFlowOverlay: (props: Parameters<typeof real.LineageFlowOverlay>[0]) => {
+      overlay.offCanvas = props.offCanvasLineage
+      return <real.LineageFlowOverlay {...props} />
+    },
+  }
+})
+
 beforeEach(() => {
   useAuthStore.setState({ permissions: { global: ['system:admin'], ws: {} } } as never)
+  overlay.offCanvas = undefined
 })
 
 /** `kind:dir` of the card's port on each side, or null for no port. */
@@ -242,6 +260,36 @@ describe('selecting a collapsed container', () => {
     await act(async () => { await new Promise(r => setTimeout(r, 1000)) })
     expect(own()).toBe(1)
     expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'lineage:out' })
+  }, 30_000)
+})
+
+describe("selecting a collapsed container when another column's anchor is held by what the view does not draw", () => {
+  // PLAT ⊃ REP, and PLAT is not loaded. A cell to PLAT counts the flows into
+  // Report's rows too: only REP's chain says so.
+  it("counts nothing outside for a cell to what holds that anchor, and asks what holds it", async () => {
+    const estate = nestedAnchorPortsEstate('REP')
+    const unloaded = new Set(['s9', 'far', 'uncounted', 'PLAT'])
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => !unloaded.has(urn)),
+      ancestorChains: true,
+      nodeDegrees: { 'SRC.DB_B': { in: 0, out: 0, rollupIn: 0, rollupOut: 3 } },
+      // One flow, into uncounted (a row of Report past its page), summed at
+      // each level up: into Report, and into PLAT.
+      aggregatedCells: [rollUp('SRC.DB_B', 'uncounted', 1), rollUp('SRC.DB_B', 'REP', 1), rollUp('SRC.DB_B', 'PLAT', 1)],
+    })
+    await waitFor(() => expect(ports('SRC.DB_B').right).not.toBeNull(), { timeout: 8000 })
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_B') })
+
+    // Its own roll-ups were read, and PLAT's place was asked.
+    await waitFor(() => expect(asksOf(h)).toContainEqual([['SRC.DB_B'], []]), { timeout: 8000 })
+    await waitFor(() => expect(h.chainRequests().flat()).toContain('PLAT'), { timeout: 8000 })
+    await h.settle()
+    await act(async () => { await new Promise(r => setTimeout(r, 1500)) })
+    expect(overlay.offCanvas?.get('SRC.DB_B')?.out ?? 0).toBe(0)
+    expect(h.missingConnections()).toBeNull()
+    expect(h.chainRequests().flat()).toContain('REP')
   }, 30_000)
 })
 

@@ -39,10 +39,15 @@ export function renderedAggregationTargets(
  * Another drawn row may still hold one further up (a child placed in another
  * column, its parent's parent drawn elsewhere), and only its chain can say
  * so. The projection needs that to keep the two rows' roll-ups apart.
+ *
+ * An anchor drawn as its column is named the same way when no loaded parent
+ * holds it: a cell to what holds it counts its column's flows too, and only
+ * its chain says the two are one.
  */
 export function unparentedRows(
   nodesByLayer: ReadonlyMap<string, readonly HierarchyNode[]>,
   parentMap: ReadonlyMap<string, string>,
+  promotedAnchors?: ReadonlyMap<string, string>,
 ): string[] {
   const rows: string[] = []
   const stack: HierarchyNode[] = []
@@ -52,5 +57,6 @@ export function unparentedRows(
     if (node.isLogical) for (const member of node.children) stack.push(member)
     else if (!parentMap.has(node.id)) rows.push(node.urn || node.id)
   }
+  promotedAnchors?.forEach((_, anchor) => { if (!parentMap.has(anchor)) rows.push(anchor) })
   return rows
 }

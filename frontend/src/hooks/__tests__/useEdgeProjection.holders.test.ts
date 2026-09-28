@@ -142,6 +142,25 @@ describe('an anchor holding rows not loaded yet', () => {
   })
 })
 
+describe('an anchor held by what the view does not draw', () => {
+  // Top ⊃ A, and Top is not loaded: a cell to Top counts the flows into A's
+  // column too, and only A's own chain says so.
+  it('counts nothing outside for a cell to what holds it, once its chain says so', () => {
+    const res = run({ holders: [cell('R', 'A', 10), cell('R', 'Top', 10)], chains: { Top: [], A: ['Top'] } })
+    expect(res.offCanvasByNode.get('R')!.out).toBe(0)
+    // Without A's chain nothing says Top holds it: all ten lead outside.
+    const blind = run({ holders: [cell('R', 'A', 10), cell('R', 'Top', 10)], chains: { Top: [] } })
+    expect(blind.offCanvasByNode.get('R')!.out).toBe(10)
+  })
+
+  it('works the other way', () => {
+    const res = run({ holders: [cell('A', 'R', 10), cell('Top', 'R', 10)], chains: { Top: [], A: ['Top'] } })
+    expect(res.offCanvasByNode.get('R')!.in).toBe(0)
+    const blind = run({ holders: [cell('A', 'R', 10), cell('Top', 'R', 10)], chains: { Top: [] } })
+    expect(blind.offCanvasByNode.get('R')!.in).toBe(10)
+  })
+})
+
 describe('an open container holding children not loaded yet', () => {
   it('draws a faint line carrying only what its loaded children do not', () => {
     const res = run({

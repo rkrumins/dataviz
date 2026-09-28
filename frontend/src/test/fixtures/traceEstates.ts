@@ -217,6 +217,22 @@ export function anchoredPortsEstate() {
 }
 
 /**
+ * `anchoredPortsEstate` with one column's anchor held by a platform the view
+ * does not draw:
+ *
+ *   PLAT ⊃ under   (one of the anchors: SRC, STG or REP)
+ */
+export function nestedAnchorPortsEstate(under: string) {
+  const base = anchoredPortsEstate()
+  const model: LensWalkModel = {
+    ...base.model,
+    nodes: [...base.model.nodes, wn('PLAT', 'dataPlatform', 1)],
+    containmentEdges: [...base.model.containmentEdges, has('PLAT', under)],
+  }
+  return { model, layers: base.layers, assignments: base.assignments }
+}
+
+/**
  * A container drawn across three columns:
  *
  *   P ⊃ {P.c1, P.C, A}   P in "Left", P.c1 with it

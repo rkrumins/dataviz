@@ -54,8 +54,9 @@ describe('renderedAggregationTargets', () => {
 })
 
 describe('unparentedRows — drawn rows whose containment parent is not loaded', () => {
-  const unparented = (byLayer: Record<string, HierarchyNode[]>, parents: Record<string, string>) =>
-    unparentedRows(new Map(Object.entries(byLayer)), new Map(Object.entries(parents))).sort()
+  const unparented = (byLayer: Record<string, HierarchyNode[]>, parents: Record<string, string>, anchors?: Record<string, string>) =>
+    unparentedRows(new Map(Object.entries(byLayer)), new Map(Object.entries(parents)),
+      anchors && new Map(Object.entries(anchors))).sort()
 
   it("names the columns' top rows (and a group's members) that no loaded parent holds", () => {
     // `split` is placed apart from a parent that is not loaded; `anchored`
@@ -64,5 +65,15 @@ describe('unparentedRows — drawn rows whose containment parent is not loaded',
       { A: [row('top', [row('child')])], B: [row('split'), row('anchored')], C: [group('logical:g', [row('member')])] },
       { child: 'top', anchored: 'ANCHOR' },
     )).toEqual(['member', 'split', 'top'])
+  })
+
+  it('names an anchor whose parent is not loaded, so what holds its column is known', () => {
+    // A is drawn as column L2 and nothing loaded holds it; B sits under P,
+    // which is loaded. Neither is a row, so the walk never reaches them.
+    expect(unparented(
+      { L2: [row('a1'), row('a2')], L3: [row('b1')] },
+      { a1: 'A', a2: 'A', b1: 'B', B: 'P' },
+      { A: 'L2', B: 'L3' },
+    )).toEqual(['A'])
   })
 })

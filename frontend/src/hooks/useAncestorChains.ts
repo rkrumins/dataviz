@@ -16,7 +16,8 @@
  * for are those of the store's lineage edges and of the aggregated roll-ups
  * that are not rendered, not an anchor (drawn as its column) and not a
  * logical group; and the drawn rows whose parent is not loaded, since
- * another drawn row may hold one further up.
+ * another drawn row may hold one further up, and the anchors whose parent
+ * is not loaded, since a cell to what holds one counts its column's flows.
  *
  * Contract: an end missing from the map is PENDING, still being asked, and
  * the projection holds it back rather than flash a stub. One the server
@@ -72,7 +73,8 @@ export function useAncestorChains(
   /** Anchors drawn as their column (useLayerAssignment). */
   promotedAnchors: ReadonlyMap<string, string>,
   aggregatedEdges: AggregatedEnds,
-  /** Drawn rows whose containment parent is not loaded (unparentedRows). */
+  /** Drawn rows and anchors whose containment parent is not loaded
+   *  (unparentedRows). */
   unparented: readonly string[] = NO_ROWS,
 ): ReadonlyMap<string, readonly string[]> | undefined {
   const provider = useGraphProvider()

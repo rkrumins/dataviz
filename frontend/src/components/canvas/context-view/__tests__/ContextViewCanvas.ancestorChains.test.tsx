@@ -23,7 +23,7 @@ const flow = (id: string, source: string, target: string) =>
   ({ id, source, target, type: 'lineage', data: { edgeType: 'TRANSFORMS', relationship: 'TRANSFORMS' } })
 
 describe('the browse canvas asks where the lineage ends it does not draw live', () => {
-  it('with no switch turned on, and never about an anchor, drawn as its column', async () => {
+  it('with no switch turned on, and never about a row it draws', async () => {
     const h = await renderCanvasWithTrace(anchoredEstate(), { focus: 'SRC.orders', ancestorChains: true })
 
     act(() => {
@@ -36,8 +36,9 @@ describe('the browse canvas asks where the lineage ends it does not draw live', 
     await waitFor(() => {
       if (!h.chainRequests().flat().includes('elsewhere.table')) throw new Error('no chain asked for elsewhere.table')
     }, { timeout: 4000 })
+    // DST, drawn as its column, is asked too: not where it is, but what holds
+    // it, since no loaded parent does (unparentedRows).
     const asked = h.chainRequests().flat()
-    expect(asked).not.toContain('DST')
     expect(asked).not.toContain('SRC.orders')
   })
 })
