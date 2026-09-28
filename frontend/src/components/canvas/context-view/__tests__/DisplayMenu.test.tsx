@@ -130,7 +130,9 @@ describe('DisplayMenu', () => {
     const byDirection = within(sides).getByRole('radio', { name: /Incoming left, outgoing right/ })
     const byLines = within(sides).getByRole('radio', { name: /Where lines attach/ })
     expect(byDirection).toHaveAttribute('aria-checked', 'true')
-    expect(byDirection).toHaveTextContent('Each side shows one direction; a line to the same column or to the left plugs into the other edge.')
+    // A line within one column moves only its outgoing end: its incoming
+    // end still plugs into the left edge, where its marker is.
+    expect(byDirection).toHaveTextContent('Each side shows one direction; a line running right to left, or out to a card in the same column, plugs into the other edge.')
     expect(byLines).toHaveTextContent('A marker sits where its lines plug in; lines within a column meet on the left.')
 
     fireEvent.click(byLines)

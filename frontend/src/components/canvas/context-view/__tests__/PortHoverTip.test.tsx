@@ -66,6 +66,17 @@ describe('PortHoverTip', () => {
   it('a solid port still counts its lines', () => {
     render(<Scroller port={{ 'data-lineage-port': 'right', 'data-port': 'here', 'data-dir': 'out', 'data-out': '3' }} />)
     fireEvent.pointerOver(screen.getByTestId('port'))
-    expect(screen.getByRole('tooltip').textContent).toContain('3 lines go out here')
+    expect(screen.getByRole('tooltip').textContent).toContain('3 outgoing lines')
+  })
+
+  // With incoming left and outgoing right, a line to the left or within the
+  // column leaves by the edge across from its marker: the tip names the
+  // direction, never the edge.
+  it('says which way its lines run, not that they meet this edge', () => {
+    render(<Scroller port={{ 'data-lineage-port': 'left', 'data-port': 'here', 'data-dir': 'in', 'data-in': '1' }} />)
+    fireEvent.pointerOver(screen.getByTestId('port'))
+    const tip = screen.getByRole('tooltip').textContent
+    expect(tip).toContain('1 incoming line')
+    expect(tip).not.toMatch(/lines|here/)
   })
 })

@@ -8,8 +8,9 @@
  *    (downstream) on the RIGHT, whatever the columns: a line's outgoing end
  *    is marked on its source's right, its incoming end on its target's left.
  *    Each side says one direction, so a card reads left to right like the
- *    flow. The cost: a line to the same column or to the left plugs into the
- *    edge across from its marker, as on ABCDE's Report cards (below).
+ *    flow. The cost: a line to the left plugs into the edges across from
+ *    its markers, as on ABCDE's Report cards (below), and so does a line's
+ *    outgoing end to its own column (its incoming end meets the left).
  *  - 'lines' — a port sits where the lines plug in. Lines join the sides of
  *    two cards that face each other (lineRoute.ts), so a card's lines to a
  *    column on its right meet its right edge, its lines to a column on its
@@ -273,8 +274,9 @@ export function columnEndLayer(id: string): string | undefined {
  * Lineage into an anchored column that the canvas does not draw — rows past
  * its loaded page, or its anchor, drawn as the column itself (the
  * projection's `columns`). That lineage is IN the view, so the card's port is
- * solid, on the side facing that column: one line per row, column and
- * direction, whose far end is the column (`columnEndLayer`), never a row.
+ * solid, on the side the marker-sides rule gives a line to that column
+ * (buildNodePorts): one line per row, column and direction, whose far end is
+ * the column (`columnEndLayer`), never a row.
  *
  * It weighs what it stands for, so the port's count and glow are the real
  * ones: one line per row it names — what selecting the card draws — or the

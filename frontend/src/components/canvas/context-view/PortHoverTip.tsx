@@ -56,9 +56,12 @@ function describe(tip: Tip): { lead: string; detail: string } {
       detail: 'Incoming (upstream) above, outgoing (downstream) below. Select the entity to draw all of them.',
     }
   }
+  // Which way, never which edge: with incoming left and outgoing right, a
+  // line running right to left, or out to a card in the same column, plugs
+  // into the other edge.
   return tip.view.dir === 'in'
-    ? { lead: `${lines(tip.inCount)} come in here`, detail: 'Upstream — data flows into this entity. Select it to draw all of them.' }
-    : { lead: `${lines(tip.outCount)} go out here`, detail: 'Downstream — data flows out of this entity. Select it to draw all of them.' }
+    ? { lead: `${tip.inCount.toLocaleString()} incoming ${unitNoun(tip.inCount, 'lines')}`, detail: 'Upstream — data flows into this entity. Select it to draw all of them.' }
+    : { lead: `${tip.outCount.toLocaleString()} outgoing ${unitNoun(tip.outCount, 'lines')}`, detail: 'Downstream — data flows out of this entity. Select it to draw all of them.' }
 }
 
 export function PortHoverTip({ scrollerRef }: { scrollerRef: RefObject<HTMLElement | null> }) {

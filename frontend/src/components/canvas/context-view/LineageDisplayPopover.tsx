@@ -78,7 +78,7 @@ const PORT_SIDES_OPTIONS: Array<{ sides: LineagePortSides; label: string; short:
     sides: 'direction',
     label: 'Incoming left, outgoing right',
     short: 'In left · out right',
-    description: 'Each side shows one direction; a line to the same column or to the left plugs into the other edge.',
+    description: 'Each side shows one direction; a line running right to left, or out to a card in the same column, plugs into the other edge.',
   },
   {
     sides: 'lines',
