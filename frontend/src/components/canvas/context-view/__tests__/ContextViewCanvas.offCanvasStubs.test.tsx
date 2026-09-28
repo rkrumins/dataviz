@@ -199,11 +199,26 @@ describe('selecting cards the view opened with', () => {
   }, 30_000)
 
   it('a row whose flows a collapse pruned reads them again when selected', async () => {
-    const h = await openWithFlows([{ sourceUrn: 'SRC.DB_B.t2', targetUrn: 'rpt' }])
+    // rpt's own reads, counted. The wire can draw before them (t2's page reads
+    // its flows too), and a read of rpt's landing after the collapse keeps
+    // the flow — rpt is still loaded — so the collapse waits for them.
+    let asked = 0
+    let landed = 0
+    const h = await openWithFlows([{ sourceUrn: 'SRC.DB_B.t2', targetUrn: 'rpt' }], p => ({
+      ...p,
+      getEdges: async (q: Parameters<GraphDataProvider['getEdges']>[0]) => {
+        const ofRpt = !!(q?.sourceUrns?.includes('rpt') || q?.targetUrns?.includes('rpt'))
+        if (ofRpt) asked++
+        try { return await p.getEdges(q) } finally { if (ofRpt) landed++ }
+      },
+    }) as GraphDataProvider)
     await h.toggle('SRC.DB_B')
     await waitFor(() => expect(h.visibleCardIds()).toContain('SRC.DB_B.t2'), { timeout: 8000 })
     act(() => { useCanvasStore.getState().selectNode('rpt') })
     await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_B.t2', target: 'rpt' }), { timeout: 8000 })
+    await waitFor(() => { expect(asked).toBeGreaterThan(0); expect(landed).toBe(asked) }, { timeout: 8000 })
+    await h.settle()
+    const readsBefore = asked
     act(() => { useCanvasStore.getState().clearSelection() })
     await h.settle()
 
@@ -214,6 +229,7 @@ describe('selecting cards the view opened with', () => {
     act(() => { useCanvasStore.getState().selectNode('rpt') })
 
     await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_B', target: 'rpt' }), { timeout: 8000 })
+    expect(asked).toBeGreaterThan(readsBefore)
   }, 30_000)
 
   it('a row on a first page reads its own flows, and brings in the rows they reach', async () => {
