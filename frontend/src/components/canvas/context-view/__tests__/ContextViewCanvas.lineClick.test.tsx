@@ -144,6 +144,35 @@ for (const mode of ['stubs', 'raw'] as const) {
   })
 }
 
+describe('the SELECTED entity scrolled out of its column', () => {
+  it('its lines to the rows still on screen dock to the rail and each opens its relationship', async () => {
+    usePreferencesStore.setState({ lineageRenderMode: 'stubs', showConnectedTrays: false } as never)
+    const h = await renderCanvasWithTrace(tallColumnEstate(), { focus: 'SRC.c00' })
+    act(() => {
+      useCanvasStore.getState().addEdges([
+        { id: 'o1', source: 'SRC.c70', target: 'SRC.c00', data: { edgeType: 'FLOWS_TO' } },
+        { id: 'o2', source: 'SRC.c70', target: 'SRC.c01', data: { edgeType: 'FLOWS_TO' } },
+      ] as LineageEdge[])
+    })
+    await h.settle()
+    expect(h.visibleCardIds()).not.toContain('SRC.c70')
+    const seen = new Set<string>()
+    for (let i = 0; ; i++) {
+      // Select the entity that is scrolled away, as the canvas does when its row was clicked
+      // before the column scrolled.
+      await act(async () => { useCanvasStore.getState().selectNode('SRC.c70') })
+      await h.settle()
+      expect(lineIds()).toHaveLength(2)
+      expect(hits()).toHaveLength(2)
+      if (i >= 2) break
+      await act(async () => { fireEvent.click(hits()[i]) })
+      await h.settle()
+      seen.add(opened()!)
+    }
+    expect([...seen].sort()).toEqual(['SRC.c70>SRC.c00', 'SRC.c70>SRC.c01'])
+  }, 30000)
+})
+
 describe('hover lines, On Hover density', () => {
   it('outlive the hover only for the crossing: a pointer that never reaches a line lets them go', async () => {
     usePreferencesStore.setState({ lineageRenderMode: 'stubs' })
