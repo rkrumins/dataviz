@@ -263,7 +263,7 @@ describe('selecting a collapsed container', () => {
   }, 30_000)
 })
 
-describe("selecting a collapsed container when another column's anchor is held by what the view does not draw", () => {
+describe("selecting a collapsed container when a column's anchor is held by what the view does not draw", () => {
   // PLAT ⊃ REP, and PLAT is not loaded. A cell to PLAT counts the flows into
   // Report's rows too: only REP's chain says so.
   it("counts nothing outside for a cell to what holds that anchor, and asks what holds it", async () => {
@@ -290,6 +290,32 @@ describe("selecting a collapsed container when another column's anchor is held b
     expect(overlay.offCanvas?.get('SRC.DB_B')?.out ?? 0).toBe(0)
     expect(h.missingConnections()).toBeNull()
     expect(h.chainRequests().flat()).toContain('REP')
+  }, 30_000)
+
+  it('never reads a cell to what holds its own column as leading outside', async () => {
+    // PLAT ⊃ SRC ⊃ SRC.DB_A. The server answers its own roll-ups with one to
+    // PLAT (the harness ignores excludeInternal): the container summarised
+    // against itself.
+    const estate = nestedAnchorPortsEstate('SRC')
+    const unloaded = new Set(['s9', 'far', 'PLAT'])
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => !unloaded.has(urn)),
+      ancestorChains: true,
+      nodeDegrees: { 'SRC.DB_A': { in: 0, out: 0, rollupIn: 0, rollupOut: 5 } },
+      aggregatedCells: [rollUp('SRC.DB_A', 'PLAT', 5)],
+    })
+    await waitFor(() => expect(ports('SRC.DB_A').right).toBe('lineage:out'), { timeout: 8000 })
+    await waitFor(() => expect(h.chainRequests().flat()).toContain('SRC'), { timeout: 8000 })
+    await h.settle()
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+
+    await waitFor(() => expect(asksOf(h)).toContainEqual([['SRC.DB_A'], []]), { timeout: 8000 })
+    await h.settle()
+    await act(async () => { await new Promise(r => setTimeout(r, 1500)) })
+    expect(ports('SRC.DB_A').right).toBe('lineage:out')
+    expect(h.missingConnections()).toBeNull()
   }, 30_000)
 })
 

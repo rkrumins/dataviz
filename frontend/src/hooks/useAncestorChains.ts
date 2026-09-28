@@ -60,6 +60,37 @@ const NO_ROWS: readonly string[] = []
  *  be placed" from a real root: its place is unknown, never outside. */
 export const NO_PLACE_FOUND: readonly string[] = Object.freeze([])
 
+/**
+ * The containment ancestors of one end, nearest first: its loaded parents,
+ * then the fetched chain of the topmost of them; with no loaded parent, its
+ * own chain. Loaded parents stop where the view stopped loading, at a
+ * column's anchor say, while containment goes on above it: a walk that
+ * stopped there read a row's cell to what holds its own anchor as leading
+ * outside. An ancestor met twice ends the walk.
+ */
+export function containmentUpPath(
+  end: string,
+  parents?: ReadonlyMap<string, string>,
+  chains?: ReadonlyMap<string, readonly string[]>,
+): readonly string[] {
+  const path: string[] = []
+  const seen = new Set([end])
+  let top = end
+  for (let p = parents?.get(end); p !== undefined && !seen.has(p); p = parents?.get(p)) {
+    seen.add(p)
+    path.push(p)
+    top = p
+  }
+  const above = chains?.get(top) ?? []
+  if (path.length === 0) return above
+  for (const ancestor of above) {
+    if (seen.has(ancestor)) continue
+    seen.add(ancestor)
+    path.push(ancestor)
+  }
+  return path
+}
+
 type AggregatedEnds = ReadonlyMap<string, {
   aggregated: { sourceUrn: string; targetUrn: string }
   detailedEdges?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>

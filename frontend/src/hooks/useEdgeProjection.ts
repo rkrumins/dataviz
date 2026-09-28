@@ -15,7 +15,7 @@ import { useMemo, useRef } from 'react'
 import type { AggregatedEdgeInfo } from '@/providers/GraphDataProvider'
 import { normalizeEdgeType } from '@/store/schema'
 import type { HierarchyNode } from '@/types/hierarchy'
-import { NO_PLACE_FOUND } from './useAncestorChains'
+import { NO_PLACE_FOUND, containmentUpPath } from './useAncestorChains'
 
 // ============================================
 // Types
@@ -504,26 +504,15 @@ export function useEdgeProjection({
       return nowhere
     }
 
-    // The containment ancestors of one end: its loaded parents, else its
-    // fetched chain. Walked once per URN per pass, as `place` is.
+    // The containment ancestors of one end: its loaded parents, then the
+    // fetched chain of the topmost of them (containmentUpPath). Walked once
+    // per URN per pass, as `place` is.
     const containmentParents = browseBundleParentMap ?? traceBundleParentMap
     const upPaths = new Map<string, readonly string[]>()
     const upPath = (end: string): readonly string[] => {
       let known = upPaths.get(end)
-      if (!known) { known = walkUp(end); upPaths.set(end, known) }
+      if (!known) { known = containmentUpPath(end, containmentParents, ancestorChains); upPaths.set(end, known) }
       return known
-    }
-    const walkUp = (end: string): readonly string[] => {
-      let cursor = containmentParents?.get(end)
-      if (cursor === undefined) return ancestorChains?.get(end) ?? []
-      const path: string[] = []
-      const seen = new Set([end])
-      while (cursor !== undefined && !seen.has(cursor)) {
-        seen.add(cursor)
-        path.push(cursor)
-        cursor = containmentParents!.get(cursor)
-      }
-      return path
     }
 
     // A line between an entity and one of its own ancestors — an anchor and

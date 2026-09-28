@@ -159,6 +159,20 @@ describe('an anchor held by what the view does not draw', () => {
     const blind = run({ holders: [cell('A', 'R', 10), cell('Top', 'R', 10)], chains: { Top: [] } })
     expect(blind.offCanvasByNode.get('R')!.in).toBe(10)
   })
+
+  it("says nothing about a row against what holds its own column: that is the row summarised against itself", () => {
+    // a1's loaded parents stop at A; A's chain goes on to PLAT.
+    const res = run({ holders: [cell('a1', 'PLAT', 6), cell('PLAT', 'a2', 2)], chains: { PLAT: [], A: ['PLAT'] } })
+    expect(res.lines).toEqual([])
+    expect(res.offCanvasByNode.size).toBe(0)
+    expect(res.unresolvedEdgeCount).toBe(0)
+  })
+
+  it('finds the loaded row under it through the anchor, with no cell to the anchor itself', () => {
+    const res = run({ rows: [rowCell('R', 'a1', 3)], holders: [cell('R', 'Top', 3)], chains: { A: ['Top'], Top: [] } })
+    expect(res.lines).toEqual([['R', 'a1', 3, false]])
+    expect(res.offCanvasByNode.get('R')?.out ?? 0).toBe(0)
+  })
 })
 
 describe('an open container holding children not loaded yet', () => {

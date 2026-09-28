@@ -68,7 +68,7 @@ import {
   openedViewMessage, openingViewMessage,
 } from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
-import { useAncestorChains } from '@/hooks/useAncestorChains'
+import { containmentUpPath, useAncestorChains } from '@/hooks/useAncestorChains'
 import { useHolderRollups } from '@/hooks/useHolderRollups'
 import { useContainerRollups } from '@/hooks/useContainerRollups'
 import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
@@ -5336,11 +5336,7 @@ export function ContextViewCanvas({
     }
     const inside = (container: string, far: string) => {
       const { parentMap: parents, ancestorChains: chains } = containmentRef.current
-      const up = (end: string): readonly string[] => {
-        const path: string[] = []
-        for (let p = parents.get(end); p !== undefined && !path.includes(p); p = parents.get(p)) path.push(p)
-        return path.length > 0 ? path : (chains?.get(end) ?? [])
-      }
+      const up = (end: string) => containmentUpPath(end, parents, chains)
       return up(far).includes(container) || up(container).includes(far)
     }
     void fetchContainerRollups(asks, urn => heldClosed(urnToIdMap.get(urn) ?? urn), inside)
