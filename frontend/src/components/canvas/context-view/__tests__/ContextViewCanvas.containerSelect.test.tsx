@@ -408,7 +408,12 @@ describe('selecting a collapsed container on a reader that cannot count', () => 
   }
 
   it('asks its roll-ups both ways, and draws to what they reach', async () => {
-    const h = await onBranch([rollUp('SRC.DB_A', 's9', 2), rollUp('s1', 'SRC.DB_A', 1)])
+    // Both far ends are rows the canvas does not draw — s9 past Staging's
+    // page, t2 inside SRC.DB_B, drawn closed — so no ask of the canvas's own
+    // names them, and nothing is drawn either way until the selection asks.
+    // From a drawn row, the cell could come back with the canvas's ask
+    // among its rows first, and a way already drawn is not asked again.
+    const h = await onBranch([rollUp('SRC.DB_A', 's9', 2), rollUp('SRC.DB_B.t2', 'SRC.DB_A', 1)])
     await h.settle()
 
     act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
@@ -417,7 +422,7 @@ describe('selecting a collapsed container on a reader that cannot count', () => 
       expect(asksOf(h)).toContainEqual([['SRC.DB_A'], []])
       expect(asksOf(h)).toContainEqual([[], ['SRC.DB_A']])
     }, { timeout: 8000 })
-    await waitFor(() => expect(h.wires()).toContainEqual({ source: 's1', target: 'SRC.DB_A' }), { timeout: 8000 })
+    await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_B', target: 'SRC.DB_A' }), { timeout: 8000 })
     await waitFor(() => expect(h.wires()).toContainEqual({ source: 'SRC.DB_A', target: 's9' }), { timeout: 8000 })
   }, 30_000)
 
