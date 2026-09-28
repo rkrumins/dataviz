@@ -5354,10 +5354,10 @@ export function ContextViewCanvas({
   }, [showExternalCue, selectedNodeId, offCanvasByNode])
 
   // ── External lineage PREVIEW (feature-flagged) — the guided
-  // click-through: fetch ONE node's out-of-scope partners on demand
-  // (bounded: two edge queries + one name lookup) and show them in the
-  // Lens, badged. Nothing enters the canvas store — a preview must
-  // never mutate a curated view's scope.
+  // click-through: list ONE node's out-of-scope partners on demand
+  // (bounded: one name lookup) and show them in the Lens, badged.
+  // Nothing enters the canvas store — a preview must never mutate a
+  // curated view's scope.
   const externalLineagePreview = usePreferencesStore((s) => s.externalLineagePreview)
   const [externalPreview, setExternalPreview] = useState<{
     nodeId: string
@@ -5370,24 +5370,24 @@ export function ContextViewCanvas({
     setExternalPreview({ nodeId: urn, loading: true, records: [] })
     openLens(urn)
     try {
-      const types = lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined
-      const [outEdges, inEdges] = await Promise.all([
-        provider.getEdges({ sourceUrns: [urn], edgeTypes: types, limit: 200 }),
-        provider.getEdges({ targetUrns: [urn], edgeTypes: types, limit: 200 }),
-      ])
-      // Outside is where the projection placed a far end, not "not in the
-      // store": a row of an anchored column past its loaded page is not
-      // loaded, and is in the view. A partner with no place yet is not
-      // listed either.
+      // The partners are the far ends the projection placed outside, not
+      // the node's own edges read again: a row of an anchored column past
+      // its loaded page is not loaded, and is in the view; a partner with no
+      // place yet is not listed either; and a closed container's partners
+      // are its rows', which only its roll-ups name.
       const outside = offCanvasByNode.get(urn)
-      const partners = new Map<string, { direction: 'in' | 'out'; edgeType: string }>()
-      for (const e of outEdges) {
-        const p = e.targetUrn
-        if (p && p !== urn && outside?.outPartners.has(p) && !partners.has(p)) partners.set(p, { direction: 'out', edgeType: e.edgeType ?? '' })
-      }
-      for (const e of inEdges) {
-        const p = e.sourceUrn
-        if (p && p !== urn && outside?.inPartners.has(p) && !partners.has(p)) partners.set(p, { direction: 'in', edgeType: e.edgeType ?? '' })
+      const partners = new Map<string, 'in' | 'out'>()
+      outside?.outPartners.forEach(p => partners.set(p, 'out'))
+      outside?.inPartners.forEach(p => { if (!partners.has(p)) partners.set(p, 'in') })
+      // The badge is the type of the node's own flow to a partner, from one
+      // pass over the store; a partner only a roll-up names has none.
+      const edgeTypes = new Map<string, string>()
+      for (const e of useCanvasStore.getState().edges) {
+        const way = e.source === urn ? 'out' : e.target === urn ? 'in' : undefined
+        const p = way === 'out' ? e.target : e.source
+        if (!way || partners.get(p) !== way || edgeTypes.has(p)) continue
+        const type = normalizeEdgeType(e)
+        if (!isContainmentEdge(type) && type !== 'AGGREGATED' && !e.data?.isAggregated) edgeTypes.set(p, type)
       }
       const partnerUrns = [...partners.keys()].slice(0, 100)
       const named = partnerUrns.length > 0
@@ -5400,15 +5400,15 @@ export function ContextViewCanvas({
         records: partnerUrns.map(p => ({
           urn: p,
           label: labelByUrn.get(p) || p.split(':').pop() || p,
-          direction: partners.get(p)!.direction,
-          edgeType: partners.get(p)!.edgeType,
+          direction: partners.get(p)!,
+          edgeType: edgeTypes.get(p) ?? '',
         })),
       })
     } catch {
       // Preview is advisory — fail closed to "no preview", never block the lens.
       setExternalPreview({ nodeId: urn, loading: false, records: [] })
     }
-  }, [selectedNodeId, lineageEdgeTypes, provider, openLens, offCanvasByNode])
+  }, [selectedNodeId, provider, openLens, offCanvasByNode, isContainmentEdge])
 
   // A stub's click. Its lineage leaves the view, so there is nothing to bring
   // in: the Focus Lens on its row shows where it goes — with the external

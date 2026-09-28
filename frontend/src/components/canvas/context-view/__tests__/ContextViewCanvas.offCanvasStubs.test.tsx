@@ -49,6 +49,11 @@ const flow = (source: string, target: string) => ({
   data: { edgeType: 'TRANSFORMS', relationship: 'TRANSFORMS' },
 })
 
+const rollUp = (sourceUrn: string, targetUrn: string) => ({
+  id: `agg-${sourceUrn}-${targetUrn}`, sourceUrn, targetUrn, edgeCount: 1,
+  edgeTypes: ['TRANSFORMS'], confidence: 1, sourceEdgeIds: [],
+})
+
 async function openView() {
   const estate = anchoredPortsEstate()
   const h = await renderCanvasWithTrace(estate, {
@@ -340,5 +345,33 @@ describe('the external preview', () => {
     await waitFor(() => expect(preview.textContent).toContain('1 entity'))
     expect(preview.textContent).toContain('far')
     expect(preview.textContent).not.toContain('s9')
+    // Its own flow from `far` is in the store, badged with its type.
+    expect(preview.textContent).toContain('TRANSFORMS')
+  }, 20_000)
+
+  it("lists the far ends of a closed container's roll-ups", async () => {
+    usePreferencesStore.setState({ externalLineagePreview: true } as never)
+    const estate = anchoredPortsEstate()
+    // SRC.DB_A has no flow of its own: its one roll-up, out to `far`, is its
+    // rows' flow, which only the roll-up names.
+    await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      nodeDegrees: { 'SRC.DB_A': { in: 0, out: 0, rollupIn: 0, rollupOut: 1 } },
+      aggregatedCells: [rollUp('SRC.DB_A', 'far')],
+    })
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+    await waitFor(() => expect(overlay.offCanvas?.get('SRC.DB_A')?.outPartners.has('far')).toBe(true),
+      { timeout: 8000 })
+
+    act(() => { overlay.onOpen!('SRC.DB_A') })
+
+    const heading = await screen.findByText('Outside this view')
+    const preview = heading.closest('div.border-dashed')!
+    await waitFor(() => expect(preview.textContent).toContain('1 entity'))
+    expect(preview.textContent).toContain('far')
+    // Only a roll-up names it: no flow of the card's own to badge.
+    expect(preview.textContent).not.toContain('TRANSFORMS')
   }, 20_000)
 })
