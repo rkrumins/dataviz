@@ -208,7 +208,7 @@ is the one for any create there, plus reading the source:
 |-------|-----------------------|
 | `can_read_view` on the source | **404**, never 403 — refusing with 403 would confirm a private view exists |
 | `workspace:view:create` in the source's workspace | 403 |
-| Creating straight to `enterprise` | The publish ladder above, exactly as `POST /views` (`_enforce_create_gates` is shared by both) |
+| Creating straight to `enterprise` | The publish ladder above, exactly as `POST /views` (`authorize_view_create` is shared by every way a view is made) |
 | Source is a Context View; `reference` is in `allowedViewModes`; `viewSubsetsEnabled` | 422 / 403 / 403 |
 
 The access envelope's `canCreateSubset` is the same rule for the view

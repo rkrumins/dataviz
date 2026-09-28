@@ -17,7 +17,7 @@ const mockFetch = vi.mocked(fetchWithTimeout)
 
 beforeEach(() => {
   mockFetch.mockReset()
-  mockFetch.mockImplementation(async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({ page: 'x'.repeat(64) }) }) as unknown as Response)
+  mockFetch.mockImplementation(async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({ page: 'x'.repeat(64) }), text: async () => JSON.stringify({ page: 'x'.repeat(64) }) }) as unknown as Response)
 })
 
 afterEach(() => {

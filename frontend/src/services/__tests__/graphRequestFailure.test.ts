@@ -14,6 +14,7 @@ import {
   isIdempotentGraphRead,
   isProviderOutageSignal,
   isRetryableGraphFailure,
+  readRetryBudget,
   retryDelayMs,
   toApiStatusError,
 } from '../graphRequestFailure'
@@ -116,6 +117,14 @@ describe('isRetryableGraphFailure / retryDelayMs', () => {
     expect(isRetryableGraphFailure(apiError(403, {}))).toBe(false)
   })
 
+  it('a read that already cost a full deadline gets one more go, anything else the full budget', () => {
+    expect(readRetryBudget(apiError(504, {}))).toBe(1)
+    expect(readRetryBudget(new TypeError('Request timed out after 30s'))).toBe(1)
+    expect(readRetryBudget(apiError(429, {}, { 'Retry-After': '1' }))).toBe(2)
+    expect(readRetryBudget(apiError(502, ''))).toBe(2)
+    expect(readRetryBudget(new TypeError('Failed to fetch'))).toBe(2)
+  })
+
   it('honours Retry-After (capped) and backs off otherwise, always with jitter', () => {
     const hinted = retryDelayMs(apiError(429, {}, { 'Retry-After': '1' }), 0)
     expect(hinted).toBeGreaterThanOrEqual(1_000)
@@ -133,7 +142,7 @@ describe('isIdempotentGraphRead', () => {
   const ws = '/api/v1/ws_1/graph'
   it('every GET, and the POSTs that only query', () => {
     expect(isIdempotentGraphRead('GET', `${ws}/stats?dataSourceId=ds`)).toBe(true)
-    for (const path of ['/nodes/query', '/edges/between', '/nodes/degree', '/nodes/ancestor-chains', '/search/advanced', '/trace/v2', '/trace/closure', '/edges/aggregated', '/assignments/compute']) {
+    for (const path of ['/nodes/query', '/edges/between', '/nodes/degree', '/nodes/ancestor-chains', '/search/advanced', '/search/membership', '/search/counts', '/search/ancestor-counts', '/search/catalog', '/search/exports', '/trace/v2', '/trace/closure', '/edges/aggregated', '/assignments/compute']) {
       expect(isIdempotentGraphRead('POST', `${ws}${path}?dataSourceId=ds&viewId=v`)).toBe(true)
     }
   })

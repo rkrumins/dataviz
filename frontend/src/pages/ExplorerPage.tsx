@@ -12,7 +12,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Compass, Search, LayoutGrid, List, X, TrendingUp, Plus,
+  Compass, Search, LayoutGrid, List, X, TrendingUp, Plus, FileUp,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth'
@@ -39,12 +39,16 @@ import { ExplorerEmptyState } from '@/components/explorer/ExplorerEmptyState'
 import { ExplorerCardSkeleton, ExplorerListRowSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDrawer'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { useViewFileDrop } from '@/features/view-transfer/useViewFileDrop'
+import { ViewFileDropOverlay } from '@/features/view-transfer/ViewFileDropOverlay'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useCopyViewLink } from '@/lib/viewShareLink'
@@ -102,6 +106,14 @@ export function ExplorerPage() {
   const parsed = parseSearchParams(searchParams)
   const currentUser = useAuthStore(s => s.user)
   const { openViewEditor } = useViewEditorModal()
+  // A view from another environment: the wizard's Import journey, from the button or a file
+  // dropped anywhere on the page.
+  const { canImport: importEnabled, canExport: exportEnabled } = useViewPortability()
+  const openImport = useCallback(
+    (file?: File) => openViewEditor(undefined, { journey: 'import', importFile: file }),
+    [openViewEditor],
+  )
+  const { dragging: fileOverPage, dropProps } = useViewFileDrop(openImport, importEnabled)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
   const density = usePreferencesStore(s => s.explorerDensity)
 
@@ -172,6 +184,7 @@ export function ExplorerPage() {
   const openViewDetailsEdit = useCallback((v: View) => { setPreviewEditMode(true); setPreviewView(v) }, [])
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
   const [showBulkDelete, setShowBulkDelete] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   
@@ -531,8 +544,9 @@ export function ExplorerPage() {
   // ─── Render ─────────────────────────────────────────────────────────
 
   return (
-    <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar">
+    <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar" {...dropProps}>
       <style>{STAGGER_STYLE}</style>
+      <ViewFileDropOverlay show={fileOverPage} />
       <PageContainer className="pb-28">
 
         {/* ── Header ──────────────────────────────────────────── */}
@@ -547,6 +561,16 @@ export function ExplorerPage() {
               <p className="text-[11px] text-ink-muted">Discover views across workspaces</p>
             </div>
             <TourLaunchButton tourId="explore-lineage" />
+            {importEnabled && (
+              <button
+                onClick={() => openImport()}
+                className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold border border-glass-border text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                title="Import a view exported from another environment (or drop its file on this page)"
+              >
+                <FileUp className="w-4 h-4" />
+                Import view
+              </button>
+            )}
             <button
               data-tour="explorer-new-view"
               onClick={() => openViewEditor()}
@@ -927,8 +951,16 @@ export function ExplorerPage() {
         selectedCount={selectedIds.size}
         onDelete={canBulkDelete ? handleBulkDelete : undefined}
         onChangeVisibility={handleBulkVisibility}
+        onExport={exportEnabled && parsed.category !== 'deleted'
+          ? () => setExportSelection(Array.from(selectedIds, id => ({
+              id, name: views.find(v => v.id === id)?.name ?? id,
+            })))
+          : undefined}
         onClearSelection={() => setSelectedIds(new Set())}
       />
+      {exportSelection && (
+        <ExportViewDialog views={exportSelection} onClose={() => setExportSelection(null)} />
+      )}
       {shareView && (
         <ShareViewDialog
           viewId={shareView.id}

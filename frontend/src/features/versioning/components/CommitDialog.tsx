@@ -20,20 +20,29 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
-import { usePublishBranch, useOpenMergeRequest, useLivePrForBranch } from '../hooks/useVersioning'
+import { usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges } from '../hooks/useVersioning'
+import { invalidateViewVersions } from '@/hooks/useViewVersions'
+import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
+import { queryClient } from '@/lib/queryClient'
 import { MergeConflictError, NotUpToDateError, PullRequestExistsError } from '@/services/versioningApiService'
 import { ChangeCountChips } from './ChangesPanel'
+import { DraftViewChanges } from './DraftViewChanges'
 import type { ChangeSet } from '../model/changeModel'
 
-interface CommitDialogProps {
+export interface CommitDialogProps {
   workspaceId: string
   graphId: string
   branchId: string
   changeSet: ChangeSet
   onClose: () => void
+  /** For a host that is itself a dialog (an import's success step): called once this dialog has
+   *  taken the person elsewhere (to the review, or to a view on the draft), so the host closes too. */
+  onLeave?: () => void
+  /** Called once the draft is published. */
+  onPublished?: () => void
 }
 
-export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose }: CommitDialogProps) {
+export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished }: CommitDialogProps) {
   const [message, setMessage] = useState('')
   const [description, setDescription] = useState('')
   const [conflicts, setConflicts] = useState<number | null>(null)
@@ -52,7 +61,12 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const openMr = useOpenMergeRequest(workspaceId, graphId)
   const { livePr, pending: prPending } = useLivePrForBranch(workspaceId, graphId, branchId)
   const busy = publish.isPending || openMr.isPending
-  const hasChanges = changeSet.changes.length > 0
+  // A draft can change views too (imports staged in it, layer edits): they go live with it, so a
+  // draft of views alone is still worth publishing.
+  const viewChangesQ = useBranchViewChanges(workspaceId, graphId, branchId)
+  const viewChanges = viewChangesQ.data
+  const viewChangeCount = (viewChanges?.views.length ?? 0) + (viewChanges?.hidden ?? 0)
+  const hasChanges = changeSet.changes.length > 0 || viewChangeCount > 0
 
   // The review that already covers this branch — from the list, or from a lost race.
   const existingPr = livePr ? { prId: livePr.prId, title: livePr.title } : raced
@@ -61,6 +75,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const goToReview = (prId: string) => {
     onClose()
     navigate(`/workspaces/${workspaceId}/reviews?pr=${prId}`)
+    onLeave?.()
   }
 
   const handleError = (e: unknown) => {
@@ -84,8 +99,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       {
         onSuccess: (res) => {
           notify('success', 'Sent for review.')
-          onClose()
-          navigate(`/workspaces/${workspaceId}/reviews?pr=${res.prId}`)
+          goToReview(res.prId)
         },
         onError: handleError,
       },
@@ -105,10 +119,17 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       { branchId, message: message || 'Publish draft' },
       {
         onSuccess: (res) => {
+          // Views the draft changed are live now: whatever showed them before is stale.
+          for (const v of viewChanges?.views ?? []) {
+            void queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, v.viewId] })
+            invalidateViewVersions(queryClient, v.viewId)
+          }
+          if (viewChangeCount) void queryClient.invalidateQueries({ queryKey: ['views'] })
           // The receipt (not a notification) is the confirmation — the bar renders it until dismissed.
           setReceipt({ commitId: res.commitId, graphId, counts: changeSet.counts, via: 'publish' })
           switchToMain()
           onClose()
+          onPublished?.()
         },
         onError: handleError,
       },
@@ -145,13 +166,25 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
         </div>
 
         <div className="px-6 pb-4 space-y-3">
-          {hasChanges ? (
+          {changeSet.changes.length > 0 && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-ink-muted">This draft changes</span>
               <ChangeCountChips changeSet={changeSet} />
             </div>
-          ) : (
-            <p className="text-xs text-ink-muted">No changes detected in this draft yet.</p>
+          )}
+          {viewChanges && viewChangeCount > 0 && (
+            <div className="space-y-1.5">
+              <p className="text-xs text-ink-muted">
+                {changeSet.changes.length > 0 ? 'And views, which go live with it:' : 'This draft changes views, which go live with it:'}
+              </p>
+              <DraftViewChanges changes={viewChanges} branchId={branchId} onNavigate={() => { onClose(); onLeave?.() }}
+                className="max-h-40 overflow-y-auto" />
+            </div>
+          )}
+          {!hasChanges && (
+            <p className="text-xs text-ink-muted">
+              {viewChangesQ.isLoading ? 'Looking for changes in this draft…' : 'No changes detected in this draft yet.'}
+            </p>
           )}
 
           {inReview ? (

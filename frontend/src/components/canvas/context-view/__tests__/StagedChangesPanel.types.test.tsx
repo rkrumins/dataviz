@@ -24,4 +24,13 @@ describe('Review & Save', () => {
     render(<StagedChangesPanel onConfirm={() => {}} />)
     for (const type of ALL) expect(screen.getByText(`summary of ${type}`)).toBeTruthy()
   })
+
+  it('words a change from the current state when the host says it changed (a group moved layer)', () => {
+    const describe = (c: StagedChange) => (c.type === 'assign_layer' ? "Place 'X' in group “Outer” (Layer 3)" : undefined)
+    render(<StagedChangesPanel onConfirm={() => {}} describe={describe} />)
+    expect(screen.getByText("Place 'X' in group “Outer” (Layer 3)")).toBeTruthy()
+    expect(screen.queryByText('summary of assign_layer')).toBeNull()
+    expect(screen.getByText('summary of move_to_layer')).toBeTruthy()   // the rest keep their summary
+  })
 })
+

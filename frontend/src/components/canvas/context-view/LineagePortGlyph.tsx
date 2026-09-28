@@ -12,8 +12,9 @@
  * sized by volume made a column of cards read as a column of different
  * things. Colour alone, no glyph: the hover tip and the legends say what the
  * colours mean. Solid for lines to entities on this canvas, glowing brighter
- * the more they carry; hollow for lineage in the data with none of it on
- * this canvas. Styles: `.nx-lineage-port` in globals.css.
+ * the more they carry, and for lineage no line shows yet; hollow for lineage
+ * the canvas placed outside this view. Styles: `.nx-lineage-port` in
+ * globals.css.
  */
 import type React from 'react'
 import { cn } from '@/lib/utils'

@@ -21,15 +21,13 @@ import { timeAgo } from '@/lib/timeAgo'
 import { useAppNotifications } from '@/components/ui/notifications'
 import type { Branch } from '@/services/versioningApiService'
 import {
-  useBranches, useOpenDraft, useAbandonDraft, useDiffVsMain,
+  useBranches, useOpenDraft, useAbandonDraft,
 } from '../hooks/useVersioning'
-import { fromDiffVsMain } from '../model/changeAdapters'
-import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { BRANCH_VOCAB, draftStatus, ownerName } from '../model/branchVocab'
 import { DraftStatusPill, OwnerAvatar } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
-import { CommitDialog } from './CommitDialog'
+import { PublishDraftDialog } from './PublishDraftDialog'
 import { MOTION } from '@/lib/motion'
 
 type SortKey = 'recent' | 'name'
@@ -257,7 +255,7 @@ export function BranchManager({
       )}
       {publishBranch && (
         <PublishDraftDialog
-          wsId={wsId} graphId={graphId} branch={publishBranch}
+          wsId={wsId} graphId={graphId} branchId={publishBranch.branchId}
           onClose={() => setPublishBranch(null)}
         />
       )}
@@ -380,44 +378,6 @@ function DraftCard({
         )}
       </div>
     </div>
-  )
-}
-
-/** Publish a specific draft: fetches its diff lazily and reuses the standard CommitDialog. */
-function PublishDraftDialog({
-  wsId, graphId, branch, onClose,
-}: {
-  wsId: string
-  graphId: string
-  branch: Branch
-  onClose: () => void
-}) {
-  const diffQ = useDiffVsMain(wsId, graphId, branch.branchId)
-  const changeSet = useMemo(
-    () => (diffQ.data ? fromDiffVsMain(diffQ.data, branch.branchId) : EMPTY_CHANGE_SET),
-    [diffQ.data, branch.branchId],
-  )
-  if (diffQ.isLoading) {
-    return createPortal(
-      <>
-        <Backdrop open={diffQ.isLoading} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
-        <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
-          <div className="pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-xl bg-canvas-elevated border border-glass-border text-sm text-ink-muted">
-            <Loader2 className="w-4 h-4 animate-spin" /> Preparing publish…
-          </div>
-        </div>
-      </>,
-      document.body,
-    )
-  }
-  return (
-    <CommitDialog
-      workspaceId={wsId}
-      graphId={graphId}
-      branchId={branch.branchId}
-      changeSet={changeSet}
-      onClose={onClose}
-    />
   )
 }
 

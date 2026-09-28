@@ -3,9 +3,10 @@
  * with the invalidation fan-out that keeps the BranchSwitcher, diff overlay, and
  * history in sync after a save / publish / merge.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { ResolutionMap, StageOp } from '@/services/versioningApiService'
+import type { ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
@@ -32,8 +33,11 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'diffVsMain', ws, gid, bid] as const,
   commitLog: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'commits', ws, gid, bid ?? 'all'] as const,
-  entityHistory: (ws?: string, gid?: string | null, eid?: string | null) =>
-    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid] as const,
+  // Under 'entity' so one invalidation of an entity's key prefix covers its summary and history.
+  entityHistory: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, scope?: string) =>
+    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'history', bid ?? 'main', scope ?? 'all'] as const,
+  entitySummary: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, withValue?: boolean) =>
+    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'summary', bid ?? 'main', withValue ? 'value' : 'meta'] as const,
   mergeRequests: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'mrs', ws, gid] as const,
   mergeRequest: (ws?: string, prId?: string | null) =>
@@ -46,6 +50,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'prDiffSummary', ws, prId] as const,
   branchDiffSummary: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'branchDiffSummary', ws, gid, bid] as const,
+  branchViewChanges: (ws?: string, gid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'branchViewChanges', ws, gid, bid] as const,
   commitDiffSummary: (ws?: string, gid?: string | null, cid?: string | null) =>
     [...VERSIONING_KEYS.all, 'commitDiffSummary', ws, gid, cid] as const,
   viewPrs: (ws?: string, viewId?: string | null, status?: string | null) =>
@@ -112,6 +118,29 @@ export function useBranchState(wsId?: string, graphId?: string | null, branchId?
   })
 }
 
+/** When main last advanced here (publish / merge / rollback), per graph. Right after that the
+ *  projection has not started yet — the watermark reads idle-and-behind for a moment — and the
+ *  status-gated poll below would stop on exactly that reading and never see it catch up. So for a
+ *  short window after main moves, behind-and-idle keeps polling too. */
+const mainAdvancedAt = new Map<string, number>()
+const CATCH_UP_WINDOW_MS = 60_000
+function expectCatchUp(wsId?: string, graphId?: string | null) {
+  if (wsId && graphId) mainAdvancedAt.set(`${wsId}:${graphId}`, Date.now())
+}
+
+/** How often to re-read the watermark (false = stop): while forced; while catching up or
+ *  rebuilding; and, for a short window after main advanced, while merely behind — until the
+ *  projection has had its chance to start. A recorded failure ends that window early. */
+export function watermarkPollInterval(
+  d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
+): number | false {
+  if (force) return 3_000
+  if (!d || d.fresh !== false) return false
+  const active = d.status === 'projecting' || d.status === 'rebuilding'
+  const justAdvanced = advancedAt !== undefined && now - advancedAt < CATCH_UP_WINDOW_MS
+  return active || (justAdvanced && !d.lastError) ? 3_000 : false
+}
+
 /** Poll a graph's projection freshness; drives the "refreshing…" badge. Polls every 3s ONLY while a
  *  projection is actively catching up (status projecting/rebuilding), then stops. A graph that is
  *  merely behind-and-idle (no FalkorDB worker running) is not polled — otherwise it would poll
@@ -127,12 +156,7 @@ export function useProjectionWatermark(
     queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId),
     queryFn: () => api.getWatermark(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
-    refetchInterval: (q) => {
-      if (force) return 3_000
-      const d = q.state.data
-      const active = d?.status === 'projecting' || d?.status === 'rebuilding'
-      return d && d.fresh === false && active ? 3_000 : false
-    },
+    refetchInterval: (q) => watermarkPollInterval(q.state.data, force, mainAdvancedAt.get(`${wsId}:${graphId}`), Date.now()),
     staleTime: 2_000,
     refetchOnWindowFocus: false,
   })
@@ -152,10 +176,13 @@ export function useBranchFreshness(wsId?: string, graphId?: string | null, branc
   })
 }
 
-export function useDiffVsMain(wsId?: string, graphId?: string | null, branchId?: string | null) {
+export function useDiffVsMain(
+  wsId?: string, graphId?: string | null, branchId?: string | null, { slim = false }: { slim?: boolean } = {},
+) {
+  const key = VERSIONING_KEYS.diffVsMain(wsId, graphId, branchId)
   return useQuery({
-    queryKey: VERSIONING_KEYS.diffVsMain(wsId, graphId, branchId),
-    queryFn: () => api.getDiffVsMain(wsId!, graphId!, branchId!),
+    queryKey: slim ? [...key, 'slim'] : key,
+    queryFn: () => api.getDiffVsMain(wsId!, graphId!, branchId!, { slim }),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
   })
@@ -170,12 +197,45 @@ export function useCommitLog(wsId?: string, graphId?: string | null, branchId?: 
   })
 }
 
-export function useEntityHistory(wsId?: string, graphId?: string | null, entityId?: string | null) {
-  return useQuery({
-    queryKey: VERSIONING_KEYS.entityHistory(wsId, graphId, entityId),
-    queryFn: () => api.getEntityHistory(wsId!, graphId!, entityId!),
-    enabled: !!wsId && !!graphId && !!entityId,
+/** Revisions fetched per page. */
+export const ENTITY_HISTORY_PAGE = 25
+
+/** An entity's revisions, newest first, a page at a time — `main`'s and the viewed draft's own
+ *  (`branchId`), narrowed by `scope`. `enabled: false` until the history is actually shown. */
+export function useEntityHistoryPages(
+  wsId: string | undefined,
+  graphId: string | null | undefined,
+  entityId: string | null | undefined,
+  opts: { branchId?: string | null; scope?: api.HistoryScope; kind?: 'node' | 'edge'; enabled?: boolean } = {},
+) {
+  const { branchId, scope = 'all', kind, enabled = true } = opts
+  return useInfiniteQuery({
+    queryKey: VERSIONING_KEYS.entityHistory(wsId, graphId, entityId, branchId, scope),
+    queryFn: ({ pageParam }) => api.getEntityHistoryPage(wsId!, graphId!, entityId!, {
+      branchId, scope, kind, limit: ENTITY_HISTORY_PAGE, before: pageParam,
+    }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => (last.hasMore ? last.nextBefore ?? null : null),
+    enabled: enabled && !!wsId && !!graphId && !!entityId,
     staleTime: 30_000,
+  })
+}
+
+/** Who created an entity and who last changed it on the line being read, its revision counts
+ *  and (`includeValue`) its current value and token — a few index lookups, never the whole
+ *  history. */
+export function useEntitySummary(
+  wsId: string | undefined,
+  graphId: string | null | undefined,
+  entityId: string | null | undefined,
+  opts: { branchId?: string | null; kind?: 'node' | 'edge'; includeValue?: boolean } = {},
+) {
+  const { branchId, kind, includeValue = false } = opts
+  return useQuery({
+    queryKey: VERSIONING_KEYS.entitySummary(wsId, graphId, entityId, branchId, includeValue),
+    queryFn: () => api.getEntitySummary(wsId!, graphId!, entityId!, { branchId, kind, includeValue }),
+    enabled: !!wsId && !!graphId && !!entityId,
+    staleTime: 15_000,
   })
 }
 
@@ -272,6 +332,17 @@ export function useBranchDiffSummary(
   return useQuery({
     queryKey: VERSIONING_KEYS.branchDiffSummary(wsId, graphId, branchId),
     queryFn: () => api.getBranchDiffSummary(wsId!, graphId!, branchId!, limit),
+    enabled: !!wsId && !!graphId && !!branchId,
+    staleTime: 10_000,
+  })
+}
+
+/** What a draft changes in views: views it creates (imports waiting to go live), imports staged
+ *  for views here, and layer edits. A draft with only these is still worth publishing. */
+export function useBranchViewChanges(wsId?: string, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.branchViewChanges(wsId, graphId, branchId),
+    queryFn: () => api.getBranchViewChanges(wsId!, graphId!, branchId!),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
   })
@@ -520,6 +591,8 @@ export function usePublishBranch(wsId: string, graphId: string) {
       invalidatePrScopes(qc, wsId, graphId)
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show while
       // the FalkorDB cache catches up, and force live graph reads to refetch.
+      expectCatchUp(wsId, graphId)
+      qc.invalidateQueries({ queryKey: SYNC_STATUS_KEY })   // the header's sync chip
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
       bumpMainEpoch()
       // Rollups changed with main. Refetch now, and once more after the post-commit
@@ -543,6 +616,8 @@ function invalidateAfterMainAdvance(
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
   qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'restorePreview'] })
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+  expectCatchUp(wsId, graphId)
+  qc.invalidateQueries({ queryKey: SYNC_STATUS_KEY })   // the header's sync chip
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
   bumpMainEpoch()
   invalidateAggregatedEdges()
@@ -681,6 +756,8 @@ export function useMergeMergeRequest(wsId: string) {
       // no other draft showed as behind for up to five minutes: they looked mergeable and then 409'd.
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show if lagging.
+      expectCatchUp(wsId, v.graphId)
+      qc.invalidateQueries({ queryKey: SYNC_STATUS_KEY })   // the header's sync chip
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, v.graphId) })
       bumpMainEpoch()   // main@head moved
       // Rollups changed with main (see usePublishBranch): refetch now + after the projection nudge.

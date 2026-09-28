@@ -211,10 +211,19 @@ async def test_a_draft_edge_creates_a_hop_the_draft_can_see():
     from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
 
     class _Svc:
+        def __init__(self):
+            self.version = (object(),)     # a fresh draft: nothing the overlay caches is shared
+
+        async def overlay_version(self, *, graph_id, branch_id):
+            return self.version
+
         async def branch_overlay_delta(self, *, graph_id, branch_id):
             return {"edgesUpsert": [
                 {"id": "draft-BF", "sourceUrn": "B.c", "targetUrn": "F.c", "edgeType": "FLOWS"},
             ]}
+
+        async def overlay_payloads(self, *, graph_id, branch_id, entity_ids):
+            return []                      # the draft changes no node
 
     base = _ChainProvider()
     overlay = DraftOverlayProvider(base, svc=_Svc(), graph_id="g", branch_id="br_1")

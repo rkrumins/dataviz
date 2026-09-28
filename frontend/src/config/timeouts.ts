@@ -19,7 +19,9 @@
  *   VITE_TIMEOUT_TOP_LEVEL_MS
  *   VITE_TIMEOUT_AGGREGATED_EDGES_MS
  *   VITE_TIMEOUT_EDGES_BETWEEN_MS
+ *   VITE_TIMEOUT_ANCESTOR_CHAINS_MS
  *   VITE_TIMEOUT_SEARCH_ADVANCED_MS
+ *   VITE_TIMEOUT_VIEW_TRANSFER_MS
  *   VITE_TIMEOUT_PROVIDER_HEALTH_MS
  *   VITE_TIMEOUT_ADMIN_LIST_MS
  *   VITE_TIMEOUT_LINEAGE_FOCUS_MS
@@ -128,12 +130,20 @@ export const TIMEOUTS = {
   // that had already done its work).
   AGGREGATED_EDGES_MS:  readMs('VITE_TIMEOUT_AGGREGATED_EDGES_MS',  60_000, _LONG),
   EDGES_BETWEEN_MS:     readMs('VITE_TIMEOUT_EDGES_BETWEEN_MS',     60_000, _LONG),
+  // POST /nodes/ancestor-chains runs in the 60s graph tier. On the 30s default
+  // the client gave up on walks the server was about to finish, and asked
+  // again; it outlasts the tier so the server's own answer always lands.
+  ANCESTOR_CHAINS_MS:   readMs('VITE_TIMEOUT_ANCESTOR_CHAINS_MS',   75_000, _LONG),
   // POST /canvas/bootstrap — the three calls above, composed server-side and
   // run as two concurrent waves. It cannot be faster than the slowest of
   // them, so it takes the largest of their budgets rather than a sum: the
   // waves overlap, and a budget above the 60s graph HTTP tier would only
   // mean the client outlives the tier that can explain the failure.
   CANVAS_BOOTSTRAP_MS:  readMs('VITE_TIMEOUT_CANVAS_BOOTSTRAP_MS',  60_000, _LONG),
+  // /views/transfer/* — export, inspect, reconcile and import of view files. They run in the
+  // backend's own 120s tier (a large view's identity check is legitimately slow), so the client
+  // outlasts it and nginx's 180s outlasts both: the server's structured error always arrives.
+  VIEW_TRANSFER_MS:     readMs('VITE_TIMEOUT_VIEW_TRANSFER_MS',    150_000, _LONG),
   // /search/advanced. The server's soft deadline is 30s but still
   // returns partial results after it — give the client headroom over
   // that so a search-as-you-type request isn't aborted before the

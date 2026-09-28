@@ -26,7 +26,7 @@ import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { TraceDepthControl } from '../TraceDepthControl'
 import { PropertyManagerButton } from '../../property-manager/PropertyManagerButton'
 import { DisplayMenu } from './DisplayMenu'
-import { ImportExportMenu } from './ImportExportMenu'
+import { ImportExportMenu, type ViewFileActions } from './ImportExportMenu'
 import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
 import { HoverTip } from '@/components/ui/HoverTip'
 
@@ -99,7 +99,13 @@ export interface ComprehensionToolsProps {
   onImport?: () => void
   onExport?: () => void
   isDraft: boolean
+  /** The same menu's "This view" section: export the view, with or without its data, or update it
+   *  from a file. */
+  thisView?: ViewFileActions
 }
+
+/** Trace and the Focus Lens walk the published graph, drafts included (see ContextViewCanvas). */
+const DRAFT_WALK_NOTE = 'Shows the published graph. New items and links in this draft appear once it’s published.'
 
 export function ComprehensionTools({
   showLineageFlow,
@@ -135,6 +141,7 @@ export function ComprehensionTools({
   onImport,
   onExport,
   isDraft,
+  thisView,
   traceHistory = [],
   onResumeTraceHistory,
   onClearTraceHistory,
@@ -266,7 +273,7 @@ export function ComprehensionTools({
           label={lensAllowed
             ? 'Walk this entity’s connections one hop at a time'
             : 'Select a single entity to focus its connections'}
-          detail={lensAllowed ? 'Opens the Lineage Lens over the canvas' : undefined}
+          detail={lensAllowed ? (isDraft ? DRAFT_WALK_NOTE : 'Opens the Lineage Lens over the canvas') : undefined}
         >
         <button
           onClick={lensAllowed ? onOpenLens : undefined}
@@ -340,6 +347,7 @@ export function ComprehensionTools({
                   ? 'Pick up a trace you ran earlier in this view'
                   : 'Select an entity to trace its lineage'
             }
+            detail={canTrace && isDraft ? DRAFT_WALK_NOTE : undefined}
           >
           <button
             data-tour="canvas-trace"
@@ -418,7 +426,7 @@ export function ComprehensionTools({
 
       {/* Import / Export — one dropdown, both modes. Import is disabled with an explainer outside
           Edit mode; Export is always available (published state is a valid, re-importable backup). */}
-      <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} />
+      <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} thisView={thisView} />
     </>
   )
 }

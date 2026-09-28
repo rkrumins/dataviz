@@ -160,6 +160,15 @@ export function isProviderOutageSignal(err: unknown): boolean {
 /** How many extra attempts an idempotent graph read gets. */
 export const MAX_READ_RETRIES = 2
 
+/** The extra attempts THIS failure earns. A read that ran out of time (a 504,
+ *  a client-side timeout) already cost a full deadline, and a retry lands on
+ *  the same store that was too slow: one more go. A shed, a warming provider
+ *  or a gateway hiccup gets the full budget. */
+export function readRetryBudget(err: unknown): number {
+  if (isClientTimeout(err) || (isApiStatusError(err) && err.status === 504)) return 1
+  return MAX_READ_RETRIES
+}
+
 /** Failures worth retrying in place, for an idempotent read: the backend
  *  asked for it (429 / 503 + Retry-After, a warming provider), a request
  *  simply ran out of time (504, client timeout — the backend's stale-fallback
@@ -203,7 +212,10 @@ const READ_ONLY_POST_PATHS = [
   /^\/edges\/query$/,
   /^\/edges\/between$/,
   /^\/edges\/aggregated$/,
-  /^\/search(\/advanced|\/explain)?$/,
+  // membership and the counts only read: a replayed counts request just
+  // picks its sessions up where they have got to. So does an export's:
+  // the same request always continues the same export.
+  /^\/search(\/advanced|\/explain|\/membership|\/counts|\/ancestor-counts|\/catalog|\/exports)?$/,
   /^\/trace(\/v2|\/closure|\/expand|\/expand-batch)?$/,
   /^\/assignments\/compute$/,
 ]

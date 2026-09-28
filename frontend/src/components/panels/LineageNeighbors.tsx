@@ -19,6 +19,7 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
+import { nodeIndexOf } from '@/lib/storeIndex'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import {
   useSchemaStore,
@@ -102,6 +103,16 @@ function lineageSide(
   return raw
 }
 
+/** Run a row's open as one drawer move — now, awaitable (the row's spinner waits on it), or, with
+ *  unsaved edits in the drawer, once the reader lets it go. */
+function asDrawerMove(open: (id: string) => Promise<unknown>) {
+  return (id: string): Promise<void> => {
+    let ran: Promise<void> = Promise.resolve()
+    useCanvasStore.getState().requestDrawerMove(() => { ran = open(id).then(() => undefined) })
+    return ran
+  }
+}
+
 export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPath }: LineageNeighborsProps) {
   const rawEdges = useCanvasStore((s) => s.edges)
   const visibleEdges = useCanvasStore((s) => s.visibleEdges)
@@ -124,10 +135,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
   // cannot answer: no rollup lane, no cells, or a failed read.
   const provider = useGraphProviderIfAvailable()
   const walkCapable = typeof provider?.traceClosure === 'function'
-  const focalChildCount = useMemo(
-    () => nodes.find((n) => n.id === nodeId)?.data?.childCount as number | undefined,
-    [nodes, nodeId],
-  )
+  const focalChildCount = useCanvasStore((s) => nodeIndexOf(s.nodes).get(nodeId)?.data?.childCount as number | undefined)
   const isLeafFocal = focalChildCount === 0
   const coarse = useCoarseLineage(walkCapable && nodeId && !isLeafFocal ? nodeId : null, walkCapable ? provider : null)
   const coarseHasCells = coarse.status === 'done' && !coarse.servedFine
@@ -204,10 +212,12 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
   }
 
   const nodeMap = useMemo(() => {
-    const m = new Map<string, LineageNode>()
-    // Fetched partners first; store nodes win (they carry full canvas data).
-    for (const [id, n] of sourceFetch.supplementalNodes) m.set(id, n)
-    for (const n of nodes) m.set(n.id, n)
+    // The store's shared index (built once per nodes array) — merged over the fetched partners
+    // only when there are any. Store nodes win: they carry full canvas data.
+    const index = nodeIndexOf(nodes)
+    if (sourceFetch.supplementalNodes.size === 0) return index
+    const m = new Map<string, LineageNode>(sourceFetch.supplementalNodes)
+    for (const [id, n] of index) m.set(id, n)
     return m
   }, [nodes, sourceFetch.supplementalNodes])
 
@@ -304,9 +314,9 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
   /** Clicking a partner in the tree: open the canvas down that partner's
    *  own path, however deep, and land the drawer on it. A reveal that stops
    *  short lands on the deepest level it could open — and says so. */
-  const handlePartnerClick = async (urn: string) => {
+  const revealPartner = async (urn: string) => {
     setUnreachable(null)
-    if (!onRevealPath) return handleNeighborClick(urn)
+    if (!onRevealPath) return revealAndOpen(urn)
     const name = walkNameOf(urn)
     try {
       const outcome = await withTimeout(onRevealPath(urn, pathOf(urn)), TIMEOUTS.LINEAGE_FOCUS_MS, 'lineage.revealPath')
@@ -359,7 +369,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
   const directTotal = walkMode ? totalCount : totalCount - rollupTotal
   const showRollupSplit = !walkMode && rollupTotal > 0
 
-  const handleNeighborClick = async (neighborId: string) => {
+  const revealAndOpen = async (neighborId: string) => {
     // THE PARTNER MAY NOT BE ON THE CANVAS. `useLensLineage` fetches partners
     // lens-locally and writes nothing to the canvas store, so a partner inside
     // a container that was never expanded exists here and nowhere else. The
@@ -422,6 +432,11 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
       // and the user can re-click the neighbor row to retry the reveal.
     }
   }
+
+  // A row opens its partner as ONE drawer move: with unsaved edits in the drawer, nothing — no
+  // reveal, no swap — happens until the reader decides.
+  const handleNeighborClick = asDrawerMove(revealAndOpen)
+  const handlePartnerClick = asDrawerMove(revealPartner)
 
   const toggle = (dir: Direction) =>
     setExpanded((prev) => (prev === dir ? null : dir))
@@ -546,7 +561,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
         <div className="flex items-start gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
           <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
           <span className="min-w-0">
-            This view doesn&apos;t hold that entity, so the canvas can&apos;t show it.
+            The canvas couldn&apos;t bring that entity into view.
             Trace or the Focus Lens will still walk to it.
           </span>
           <button
@@ -1136,7 +1151,6 @@ function ExpandedDetail({
   }
 
   const isFilteredEmpty = filtered.length === 0
-  const unloadedCount = filtered.filter((r) => !r.neighborNode).length
 
   return (
     <div className="p-3 space-y-3">
@@ -1275,16 +1289,6 @@ function ExpandedDetail({
               onToggleGroup={handleToggleGroup}
             />
           ))
-        )}
-
-        {unloadedCount > 0 && !isFilteredEmpty && (
-          <div className="flex items-start gap-1.5 text-[11px] text-ink-muted/70 px-2 pt-1.5">
-            <LucideIcons.Info className="w-3 h-3 flex-shrink-0 mt-0.5" />
-            <span>
-              {unloadedCount} neighbor{unloadedCount === 1 ? '' : 's'} not
-              currently rendered on canvas — expand the graph to see details.
-            </span>
-          </div>
         )}
       </div>
 
@@ -1681,16 +1685,12 @@ function NeighborRow({
         <div className="text-[12.5px] text-ink truncate font-medium leading-snug">
           {label}
         </div>
-        {neighborNode ? (
-          showSecondary && (
-            <div className="text-[10px] text-ink-muted truncate font-mono leading-tight">
-              {secondary}
-            </div>
-          )
-        ) : (
-          <div className="text-[10px] text-amber-500/90 flex items-center gap-1 leading-tight">
-            <LucideIcons.AlertCircle className="w-2.5 h-2.5" />
-            Not rendered on canvas
+        {/* A partner the canvas has not drawn reads like any other: it may
+            well be in the view (a row past a column's loaded page), and a
+            click brings it in. */}
+        {showSecondary && (
+          <div className="text-[10px] text-ink-muted truncate font-mono leading-tight">
+            {secondary}
           </div>
         )}
       </div>

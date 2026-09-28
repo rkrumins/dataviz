@@ -4,10 +4,12 @@ import json
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, RootModel
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field, PrivateAttr, RootModel
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,26 +25,40 @@ from backend.app.models.graph import (
     TraceRequest, TraceResult, ExpandRequest,
 )
 from backend.common.models.graph import (
+    EdgesBeneathRequest, EdgesBeneathResult, TraceClosureRequest, TraceClosureResult,
     LineageBridgePathRequest,
     LineageBridgePathResult,
     LineageBridgesRequest,
     LineageBridgesResult,
-    TraceClosureRequest,
-    TraceClosureResult,
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.providers.falkordb_provider import (
     _FAILOVER_RETRY_AFTER_S,
     CursorMismatchError,
 )
-from backend.common.models.search import SearchQuery
+from backend.common.models.search import (
+    SearchAncestorCountsRequest,
+    SearchCatalogRequest,
+    SearchCountsRequest,
+    SearchExportRequest,
+    SearchMembershipRequest,
+    SearchQuery,
+)
+from backend.common.property_patch import (
+    InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
-from backend.common.adapters import ProviderFailingOver
+from backend.app.services.deep_search import (
+    CompileError,
+    SearchRunContext,
+    get_deep_search_settings,
+)
+from backend.common.adapters import ProviderBusy, ProviderFailingOver, ProviderUnavailable
 from backend.app.services.fair_share import get_fair_share
 from backend.app.config import resilience
 from backend.app.services.graph_cache import (
+    _DETERMINISTIC_CUTS,
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CANVAS_BOOTSTRAP,
@@ -96,8 +112,8 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 # feature. Both fail OPEN (a database hiccup must not black out a product area); only the
 # SECURITY flag (signupEnabled, in auth.py) fails closed.
 require_trace = require_feature("traceEnabled")        # POST /trace*
-require_lineage_rollup = require_feature("canvasLineageRollupEnabled")  # POST /nodes/ancestor-chains
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
+require_export = require_feature("graphExportEnabled")  # /search/exports*
 require_view_subsets = require_feature("viewSubsetsEnabled")  # POST /lineage/bridges*
 
 
@@ -1380,7 +1396,11 @@ async def trace_expand_batch(
 
     Partial-success: pair-level failures are swallowed (with a logged warning)
     so the rest of the batch returns; total failure returns 404 with the
-    list of pair-level error messages in the response body. Shape matches
+    list of pair-level error messages in the response body. A shed pair is
+    not a failure: the batch answers 429 + Retry-After, as /trace/expand
+    does, and the client retries it. A pair the provider could not answer
+    right now (a node failing over, a deadline) marks the answer truncated
+    with reason "failed", so it is not cached as complete. Shape matches
     /trace/expand so the frontend's normalizeTraceV2 handles either."""
     import asyncio
     if not request.pairs:
@@ -1390,6 +1410,9 @@ async def trace_expand_batch(
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
     pair_errors: List[str] = []
+    # Of those, the pairs the provider could not answer right now: asked
+    # again, they may answer.
+    unanswered: List[str] = []
 
     async def run_one(p: _TraceExpandPair):
         req = ExpandRequest(
@@ -1401,18 +1424,32 @@ async def trace_expand_batch(
         )
         try:
             return await engine.expand_aggregated_edge(req)
+        except ProviderBusy:
+            # "Ask again in a moment" for the whole batch, not a pair to drop:
+            # the rest would answer 200 as complete and be cached as such.
+            raise
         except Exception as exc:
             # Catch ALL exceptions per pair — provider unavailability, value
             # errors, missing URNs, etc. Surface to the response body so the
             # frontend can render a partial result with the failure list.
             msg = f"{p.source_urn} → {p.target_urn} @ {p.next_level}: {type(exc).__name__}: {exc}"
             pair_errors.append(msg)
+            if isinstance(exc, (ProviderUnavailable, TimeoutError)):
+                unanswered.append(msg)
             logger.warning("trace/expand-batch pair failed: %s", msg, exc_info=False)
             return None
 
     async def compute_batch() -> TraceResult:
-        results = await asyncio.gather(*(run_one(p) for p in request.pairs))
-        return _merge_expand_results(results, request, pair_errors)
+        tasks = [asyncio.ensure_future(run_one(p)) for p in request.pairs]
+        try:
+            results = await asyncio.gather(*tasks)
+        except ProviderBusy:
+            # gather does not stop the pairs still out: stop them, rather than
+            # leave them running against a store that just said it is full.
+            for t in tasks:
+                t.cancel()
+            raise
+        return _merge_expand_results(results, request, pair_errors, short=bool(unanswered))
 
     # Response-cached like the single /trace/expand (this handler used to
     # bypass GraphCache entirely, so every re-expand of the same drilled
@@ -1441,7 +1478,7 @@ async def trace_expand_batch(
     )
 
 
-def _merge_expand_results(results, request, pair_errors) -> TraceResult:
+def _merge_expand_results(results, request, pair_errors, short: bool) -> TraceResult:
     successes = [r for r in results if r is not None]
     if not successes:
         raise HTTPException(
@@ -1480,6 +1517,11 @@ def _merge_expand_results(results, request, pair_errors) -> TraceResult:
             len(successes), len(request.pairs),
         )
 
+    # The response cache keeps an answer by its reason: a cap for the full
+    # TTL, a read that gave up only briefly. So a pair lost for now says
+    # "failed", and otherwise a pair's cut that may do better outranks a cap.
+    cuts = sorted((r.truncation_reason for r in successes if r.truncated),
+                  key=lambda why: why is None or why in _DETERMINISTIC_CUTS)
     return TraceResult(
         nodes=list(nodes_by_id.values()),
         edges=list(edges_by_id.values()),
@@ -1488,7 +1530,8 @@ def _merge_expand_results(results, request, pair_errors) -> TraceResult:
         downstream_urns=downstream_urns,
         focus=focus,
         effective_level=effective_level,
-        truncated=truncated_any,
+        truncated=truncated_any or short,
+        truncation_reason="failed" if short else next(iter(cuts), None),
     )
 
 
@@ -1906,9 +1949,17 @@ async def search_advanced(
         branch_id=branchId,
     )
     try:
-        page, eff_scope = await _bounded_compute(
-            engine, lambda: svc.search(query),
-        )()
+        if get_deep_search_settings().engine == "v2":
+            # The uncapped engine runs many statements per request, so it is
+            # admitted per statement, not once around the whole search.
+            page, eff_scope = await svc.search(query, run_context=SearchRunContext(
+                data_version=await _search_data_version(engine),
+                admit=_statement_admission(engine),
+            ))
+        else:
+            page, eff_scope = await _bounded_compute(
+                engine, lambda: svc.search(query),
+            )()
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
@@ -1918,6 +1969,38 @@ async def search_advanced(
         response.headers["X-Search-Dropped-URNs"] = str(len(eff_scope.dropped_urns))
     response.headers["X-Search-Scope-Hash"] = eff_scope.scope_hash
     return page
+
+
+def _statement_admission(engine: ContextEngine):
+    """``_bounded_compute``'s two slots — this process's and the fleet's —
+    as a context manager held for ONE statement, or None when the engine's
+    provider has no slot key (``_bounded_compute`` degrades the same way)."""
+    key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
+    if key is None:
+        return None
+
+    @asynccontextmanager
+    async def admit():
+        sem = await provider_manager.acquire_provider_slot(*key)
+        try:
+            async with provider_manager.fleet_slot(*key):
+                yield
+        finally:
+            sem.release()
+
+    return admit
+
+
+async def _search_data_version(engine: ContextEngine) -> str:
+    """The graph data a search reads: the published graph's content
+    generation (a draft searches the graph it is a draft of) and the
+    physical graph behind it. Never raises; "" when unknown."""
+    scope = _cache_scope(engine)
+    if scope is None:
+        return ""
+    published = replace(scope, branch_id="")
+    generation = await get_graph_cache().content_generation(published)
+    return f"{generation}.{published.graph_ns}"
 
 
 @router.post("/search/explain")
@@ -2016,6 +2099,277 @@ async def search_discover(
         raise _map_not_implemented(engine, exc) from exc
 
 
+@router.get("/search/values")
+async def search_values(
+    request: Request,
+    viewId: str = Query(..., min_length=1),
+    key: str = Query(..., min_length=1, max_length=128),
+    q: str = Query("", max_length=256,
+                   description="Only values whose text contains this "
+                               "(case-insensitive)."),
+    limit: int = Query(25, ge=1, le=50),
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """The most common values of one property in a view — the value
+    picker's suggestions, counted over every entity of the view's types.
+    ``/search/discover`` reads 200 nodes per type, so on a large graph it
+    showed a property's values by accident ("I only ever see two").
+
+    Bounded to about 1.5 s: ``complete`` says whether every type was read,
+    ``truncated`` whether there were more distinct values than listed. What
+    a user picks is still compared exactly; only the list is bounded.
+
+    The values come from the view's entity TYPES, which for a view scoped
+    to a subtree is wider than the view — so, like ``/search/discover``, a
+    share-link identity is refused (``_guard_capability_scope``).
+    """
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
+    _guard_capability_scope(request)
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    svc = AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=dataSourceId,
+        branch_id=branchId,
+    )
+    try:
+        return await _bounded_compute(
+            engine, lambda: svc.values(view_id=viewId, key=key, q=q, limit=limit),
+        )()
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/membership", response_model_by_alias=True)
+async def search_membership(
+    body: SearchMembershipRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """Which of the entities on screen (at most 1,000 urns) match which
+    rules (at most 32) — what display rules paint, without downloading every
+    entity a rule matches. Only entities inside the view's scope ever match;
+    the scope is resolved here from ``scope.viewId``, like a search's.
+
+    A rule using ``withinHops`` or a path is refused in ``errors``: those
+    describe a route, not an entity.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.membership(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/counts", response_model_by_alias=True)
+async def search_counts(
+    body: SearchCountsRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """How many entities in the view match each rule — exactly, however
+    many. A count over a large view takes more than one request: send the
+    same body again with the returned ``sessions`` (rule id → sessionId)
+    until every count reads ``complete``. Each request runs about
+    ``waitMs``, sharing it among the counts that have got least far.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    from backend.app.services.advanced_search_service import ValidationError
+    try:
+        return await svc.counts(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except ValidationError as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/catalog", response_model_by_alias=True)
+async def search_catalog(
+    body: SearchCatalogRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """Every property the view's entities carry — on how many, stored as
+    which kinds, with which values — read from every entity in the view's
+    scope rather than a sample. A large view takes more than one request:
+    send the same body with the returned ``sessionId`` until ``status`` is
+    ``complete``. A complete catalog is kept, and served for a while after
+    the data changes (``stale`` + ``asOf``); ``refresh`` reads the view
+    again.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.catalog(body, run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.post("/search/exports", response_model_by_alias=True,
+             dependencies=[Depends(require_export)])
+async def search_export(
+    body: SearchExportRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+    user=Depends(get_optional_user),
+):
+    """Every entity in the view matching ``predicate``, written to a CSV or
+    NDJSON file — exactly, however many, each value as stored (a 64-bit
+    integer keeps its digits). A large export takes more than one request:
+    send the same body with the returned ``sessionId`` until ``status`` is
+    ``complete``; that answer carries a ``downloadToken`` for
+    ``GET /search/exports/{sessionId}/download``.
+    """
+    from backend.app.services.advanced_search_service import ValidationError
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.export(body, principal=_principal(user), run_context=SearchRunContext(
+            data_version=await _search_data_version(engine),
+            admit=_statement_admission(engine),
+        ))
+    except (ValidationError, CompileError) as exc:
+        raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+@router.get("/search/exports/{session_id}/download", dependencies=[Depends(require_export)])
+async def search_export_download(
+    session_id: str,
+    token: str = Query(..., max_length=2048),
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    # Function-scoped: given back before the body streams. The file streams from the object
+    # store alone, for as long as it takes, and holds no graph-read connection or admission.
+    _admission: None = Depends(_admit_graph_request, scope="function"),
+    session: AsyncSession = Depends(get_graph_read_db_session, scope="function"),
+    # The session the route's gate read the data source with (the same one, per request).
+    gate: AsyncSession = Depends(get_db_session),
+    user=Depends(get_optional_user),
+):
+    """A complete export, streamed as the file it is — for the person it
+    was exported for, for an hour after (``downloadToken``)."""
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    from backend.app.services.search_downloads import read_download_token
+    from backend.auth_service.core import config as auth_config
+
+    vouched = read_download_token(token, _principal(user),
+                                  [key for _kid, key in auth_config.JWT_VERIFICATION_KEYS])
+    if vouched is None or vouched[0] != session_id:
+        raise HTTPException(status_code=403,
+                            detail="This download link has expired — export the matches again.")
+    if not ws_id:
+        raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
+    engine = await get_context_engine(ws_id=ws_id, dataSourceId=dataSourceId, connectionId=None,
+                                      branchId=branchId, _admission=None, session=session,
+                                      user=user)
+    svc = AdvancedSearchService(engine, session=session, workspace_id=ws_id,
+                                data_source_id=dataSourceId, branch_id=branchId)
+    try:
+        opened = await svc.open_export(session_id, vouched[1])
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+    if opened is None:
+        raise HTTPException(status_code=404,
+                            detail="This export is no longer kept — export the matches again.")
+    # The gate's read is done: give its connection back now, not when the download ends.
+    await gate.commit()
+    answer, body = opened
+    media = "text/csv; charset=utf-8" if answer.format == "csv" else "application/x-ndjson"
+    return StreamingResponse(body, media_type=media, headers={
+        "Content-Disposition": f'attachment; filename="{answer.filename}"',
+        "Cache-Control": "no-store"})
+
+
+def _principal(user) -> str:
+    """Whose request this is, as a download token names them."""
+    return str(getattr(user, "id", "") or "anonymous")
+
+
+@router.post("/search/ancestor-counts", response_model_by_alias=True)
+async def search_ancestor_counts(
+    body: SearchAncestorCountsRequest,
+    request: Request,
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+):
+    """How many of a search's matches each of these containers (at most
+    2,000 urns) holds, below it at any depth — read from the session the
+    search returned (``sessionId``), so any container on screen gets its
+    exact count, not only the fullest ones the ``ancestor`` facet lists.
+    The session must be this view's; ``expired`` when it is gone.
+    """
+    svc = _rule_service(body, request, ws_id, dataSourceId, branchId, engine, session)
+    try:
+        return await svc.ancestor_counts(body)
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+
+
+def _rule_service(body, request: Request, ws_id, data_source_id, branch_id,
+                  engine: ContextEngine, session: AsyncSession):
+    """The search service for a rules request, after the checks a search
+    makes: a workspace, and a share link kept inside its own view."""
+    if not ws_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required (path param ws_id)",
+        )
+    _guard_capability_scope(request, body)
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    return AdvancedSearchService(
+        engine,
+        session=session,
+        workspace_id=ws_id,
+        data_source_id=data_source_id,
+        branch_id=branch_id,
+    )
+
+
 # Process-level cache of the SearchQuery JSON Schema. It's static
 # within a release (Pydantic builds it from class definitions at import
 # time), so compute once and reuse on every request.
@@ -2110,6 +2464,232 @@ async def get_neighborhood_map(
     return result
 
 
+class _SyncRevision(BaseModel):
+    commit_id: str = Field(alias="commitId")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    actor: Optional[str] = None
+    actor_name: Optional[str] = Field(None, alias="actorName")
+    message: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncVersioned(BaseModel):
+    """A managed (versioned) graph: the system of record's head vs what the graph holds."""
+    graph_id: str = Field(alias="graphId")
+    committed: int
+    projected: int
+    fresh: bool
+    status: str
+    last_error: Optional[str] = Field(None, alias="lastError")
+    last_projected_at: Optional[str] = Field(None, alias="lastProjectedAt")
+    progress_done: Optional[int] = Field(None, alias="progressDone")
+    progress_total: Optional[int] = Field(None, alias="progressTotal")
+    committed_revision: Optional[_SyncRevision] = Field(None, alias="committedRevision")
+    projected_revision: Optional[_SyncRevision] = Field(None, alias="projectedRevision")
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncSummaries(BaseModel):
+    """The derived lineage summaries (rollups) and the automation that keeps them current —
+    the same row the Freshness cockpit reads, trimmed to what a viewer needs."""
+    aggregation_status: Optional[str] = Field(None, alias="aggregationStatus")
+    last_built_at: Optional[str] = Field(None, alias="lastBuiltAt")
+    job_id: Optional[str] = Field(None, alias="jobId")
+    job_status: Optional[str] = Field(None, alias="jobStatus")          # pending | running
+    job_progress: Optional[int] = Field(None, alias="jobProgress")      # 0-100
+    job_phase: Optional[str] = Field(None, alias="jobPhase")
+    job_started_at: Optional[str] = Field(None, alias="jobStartedAt")
+    drift_state: Optional[str] = Field(None, alias="driftState")
+    auto_refresh: Optional[bool] = Field(None, alias="autoRefresh")
+    cooldown_until: Optional[str] = Field(None, alias="cooldownUntil")
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
+    # The newest job, whatever its outcome — so a failure is shown WITH its date (a two-month-old
+    # failure must not read as current), and the last success is a real completion time.
+    # An operator hold (fleet / provider / this source, or drift auto-rebuild switched off) —
+    # when set, the automation evaluates but does NOT act, so the UI must not promise it will.
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
+    last_job_status: Optional[str] = Field(None, alias="lastJobStatus")
+    last_job_at: Optional[str] = Field(None, alias="lastJobAt")
+    last_success_at: Optional[str] = Field(None, alias="lastSuccessAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncCounts(BaseModel):
+    """What the graph held the last time the stats service actually read it."""
+    nodes: int
+    edges: int                                   # raw connections (rollups excluded)
+    read_at: Optional[str] = Field(None, alias="readAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class _SyncSource(BaseModel):
+    """An externally hosted graph: when this app last checked it, and last caught up with it."""
+    last_checked_at: Optional[str] = Field(None, alias="lastCheckedAt")
+    last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
+    last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
+    check_interval_secs: Optional[int] = Field(None, alias="checkIntervalSecs")
+    stale_since: Optional[str] = Field(None, alias="staleSince")
+    stale_reason: Optional[str] = Field(None, alias="staleReason")
+    # Computed NOW from the latest counts against the baseline the last refresh adopted — the
+    # stored drift verdict survives skipped evaluations and can be weeks old. None = can't tell
+    # (no baseline yet, or no counts read).
+    changed_since_refresh: Optional[bool] = Field(None, alias="changedSinceRefresh")
+
+    class Config:
+        populate_by_name = True
+
+
+class SyncStatusResponse(BaseModel):
+    kind: str                                   # "versioned" | "external"
+    data_source_id: str = Field(alias="dataSourceId")
+    checked_at: str = Field(alias="checkedAt")
+    versioned: Optional[_SyncVersioned] = None
+    source: Optional[_SyncSource] = None
+    summaries: Optional[_SyncSummaries] = None
+    counts: Optional[_SyncCounts] = None
+
+    class Config:
+        populate_by_name = True
+
+
+@router.get("/sync-status", response_model=SyncStatusResponse, response_model_by_alias=True)
+async def get_sync_status(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="The data source whose sync to report."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Is what this view reads in sync with where it comes from? For a VERSIONED graph: the
+    system of record's published head vs the version the graph holds (with both revisions). For
+    an EXTERNAL graph: when the app last checked the source and last caught up with it. Both: the
+    lineage summaries and the automation keeping them current (queued / running / cooling down).
+
+    Cheap by construction — Postgres rows and the freshness row the cockpit already serves; no
+    FalkorDB or provider call — so the view header can show it to everyone who can open the view."""
+    from backend.app.services.aggregation.models import AggregationJobORM
+    from backend.app.services.aggregation.service import assemble_fleet_freshness
+    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.app.db.repositories.view_repo import resolve_user_ids
+
+    row = None
+    try:
+        fleet = await assemble_fleet_freshness(
+            session, workspace_id=ws_id, data_source_id=dataSourceId, page_size=1)
+        row = fleet.rows[0] if fleet.rows else None
+    except Exception:                                   # pragma: no cover - degrade, never 500
+        logger.warning("sync-status: freshness row unavailable for %s", dataSourceId, exc_info=True)
+
+    # Evidence the stored verdicts can't be trusted to carry: the latest counts actually read from
+    # the graph, the baseline the last refresh adopted, and the newest job's real outcome + time.
+    from sqlalchemy import select as _select
+    from backend.app.db.models import DataSourceStatsORM
+    from backend.app.services.aggregation.fingerprint import raw_fingerprint_from_counts
+    from backend.app.services.aggregation.models import AggregationDataSourceStateORM
+
+    counts = None
+    live_fp = None
+    try:
+        st = (await session.execute(_select(DataSourceStatsORM).where(
+            DataSourceStatsORM.data_source_id == dataSourceId))).scalar_one_or_none()
+        if st is not None:
+            live_fp, _agg, raw_edges = raw_fingerprint_from_counts(
+                json.loads(st.entity_type_counts or "{}"), json.loads(st.edge_type_counts or "{}"))
+            counts = _SyncCounts(nodes=int(st.node_count or 0), edges=int(raw_edges), read_at=st.updated_at)
+    except Exception:                                   # pragma: no cover - degrade, never 500
+        logger.warning("sync-status: stats unreadable for %s", dataSourceId, exc_info=True)
+    state = await session.get(AggregationDataSourceStateORM, dataSourceId)
+    changed = (None if live_fp is None or state is None or not state.raw_fingerprint
+               else live_fp != state.raw_fingerprint)
+    newest = (await session.execute(
+        _select(AggregationJobORM).where(AggregationJobORM.data_source_id == dataSourceId)
+        .order_by(AggregationJobORM.created_at.desc()).limit(1))).scalar_one_or_none()
+    last_success = (await session.execute(
+        _select(AggregationJobORM.completed_at).where(
+            AggregationJobORM.data_source_id == dataSourceId, AggregationJobORM.status == "completed")
+        .order_by(AggregationJobORM.completed_at.desc().nullslast()).limit(1))).scalar_one_or_none()
+
+    summaries = None
+    if row is not None:
+        job = None
+        if row.running_job_id:
+            job = await session.get(AggregationJobORM, row.running_job_id)
+        summaries = _SyncSummaries(
+            aggregation_status=row.aggregation_status,
+            last_built_at=row.last_aggregated_at,
+            job_id=row.running_job_id,
+            job_status=job.status if job else None,
+            job_progress=job.progress if job else None,
+            job_phase=job.current_phase if job else None,
+            job_started_at=job.started_at if job else None,
+            drift_state=row.drift_state,
+            auto_refresh=row.auto_reconcile,
+            cooldown_until=row.cooldown_until,
+            paused_until=row.paused_until,
+            last_failure_reason=getattr(row, "last_failure_reason", None),
+            held_kind=getattr(row, "held_kind", None),
+            held_by=getattr(row, "held_by", None),
+            held_until=getattr(row, "held_until", None),
+            last_job_status=newest.status if newest else None,
+            last_job_at=(newest.completed_at or newest.updated_at or newest.created_at) if newest else None,
+            last_success_at=last_success,
+        )
+
+    svc = GraphVersioningService()
+    graph = await svc.get_graph_by_data_source(dataSourceId)
+    if graph and str(graph.get("workspace_id")) == str(ws_id):
+        wm = await svc.projection_watermark(str(graph["graph_id"]))
+        revs = [r for r in (wm.get("committed_revision"), wm.get("projected_revision")) if r]
+        actors = {r["actor"] for r in revs if r.get("actor")}
+        names = {}
+        if actors:
+            resolved = await resolve_user_ids(session, actors)
+            names = {uid: disp for uid, (disp, _email) in resolved.items() if disp}
+
+        def _rev(r):
+            return None if not r else _SyncRevision(
+                commit_id=r["commit_id"], created_at=r.get("created_at"), actor=r.get("actor"),
+                actor_name=names.get(r.get("actor")), message=r.get("message"))
+        return SyncStatusResponse(
+            kind="versioned", data_source_id=dataSourceId,
+            checked_at=datetime.now(timezone.utc).isoformat(),
+            versioned=_SyncVersioned(
+                graph_id=str(graph["graph_id"]),
+                committed=int(wm["committed"]), projected=int(wm["projected"]),
+                fresh=bool(wm["fresh"]), status=str(wm["status"]),
+                last_error=wm.get("last_error"), last_projected_at=wm.get("last_projected_at"),
+                progress_done=wm.get("progress_done"), progress_total=wm.get("progress_total"),
+                committed_revision=_rev(wm.get("committed_revision")),
+                projected_revision=_rev(wm.get("projected_revision")),
+            ),
+            summaries=summaries, counts=counts,
+        )
+
+    source = None if row is None else _SyncSource(
+        last_checked_at=row.last_checked_at,
+        last_reconciled_at=row.last_reconciled_at,
+        last_reconcile_reason=row.last_reconcile_reason,
+        check_interval_secs=getattr(row, "resolved_probe_interval_secs", None),
+        stale_since=row.stale_since,
+        stale_reason=row.stale_reason,
+        changed_since_refresh=changed,
+    )
+    return SyncStatusResponse(
+        kind="external", data_source_id=dataSourceId,
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        source=source, summaries=summaries, counts=counts,
+    )
+
+
 @router.get("/stats", deprecated=True)
 async def get_graph_stats(
     ws_id: Optional[str] = None,
@@ -2175,7 +2755,11 @@ async def get_node_ancestors(
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    return await engine.get_ancestors(urn, limit=limit, offset=offset)
+    """Slot-bounded like /nodes/ancestor-chains: a burst sheds 429."""
+    async def compute() -> List[GraphNode]:
+        return await engine.get_ancestors(urn, limit=limit, offset=offset)
+
+    return await _bounded_compute(engine, compute)()
 
 
 class AncestorChainsRequest(BaseModel):
@@ -2187,7 +2771,6 @@ class AncestorChainsRequest(BaseModel):
 @router.post(
     "/nodes/ancestor-chains",
     response_model=Dict[str, Dict[str, List[str]]],
-    dependencies=[Depends(require_lineage_rollup)],
 )
 async def get_node_ancestor_chains(
     body: AncestorChainsRequest,
@@ -2333,13 +2916,30 @@ async def get_edges_between(
 
 
 class _DegreesResult(RootModel[Dict[str, Dict[str, int]]]):
-    """RootModel wrapper so GraphCache can serialize /nodes/degree."""
+    """RootModel wrapper so GraphCache can serialize /nodes/degree.
+
+    ``degraded_detail`` is what GraphCache's ``_is_incomplete_result`` reads:
+    an answer that left urns out (a bucket failed: absent = unknown) is kept
+    only for the negative TTL and never becomes the last-known-good, so the
+    canvas's retry can complete it. Not serialized."""
+
+    _unanswered: int = PrivateAttr(default=0)
+
+    @property
+    def degraded_detail(self) -> Optional[str]:
+        return f"{self._unanswered} urns could not be counted" if self._unanswered else None
+
+
+class NodeDegreeQuery(InternalEdgeQuery):
+    """``includeRollups`` adds ``rollupIn`` / ``rollupOut`` to each urn's
+    totals: 1 when it has a roll-up cell in that direction, else 0."""
+    include_rollups: bool = Field(False, alias="includeRollups")
 
 
 @router.post("/nodes/degree", response_model=Dict[str, Dict[str, int]])
 async def get_node_degrees(
     response: Response,
-    query: InternalEdgeQuery = Body(...),
+    query: NodeDegreeQuery = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """TOTAL lineage degree (in/out) per URN over the full graph.
@@ -2355,25 +2955,47 @@ async def get_node_degrees(
     ``nodes_degree``, which is not a registered key, so ``is_enabled``
     answered False and every call bypassed the cache the docstring above
     promised — silently, since a bypass is a legal outcome.
+
+    An answer that left urns out is never cached as THE answer (see
+    ``_DegreesResult``). A draft counts through its base. A reader that
+    cannot count at all (a versioned branch, or a draft on one) is a 501,
+    like /nodes/ancestor-chains.
+
+    ``includeRollups`` opts in to roll-up presence for container markers
+    (see ``NodeDegreeQuery``); a request without it is answered as before.
     """
     async def compute() -> _DegreesResult:
-        return _DegreesResult(await engine.get_node_degrees(query.urns, query.edge_types))
+        result = _DegreesResult(await engine.get_node_degrees(
+            query.urns, query.edge_types, include_rollups=query.include_rollups,
+        ))
+        # An urn whose roll-up flags are absent (its probe failed) is as
+        # unanswered as an absent urn.
+        flags = {"rollupIn", "rollupOut"} if query.include_rollups else set()
+        result._unanswered = sum(
+            1 for u in set(query.urns)
+            if u not in result.root or not flags <= result.root[u].keys()
+        )
+        return result
 
-    scope = _cache_scope(engine)
-    if scope is None:
-        return (await _bounded_compute(engine, compute)()).root
-    result = await get_graph_cache().get_or_compute(
-        scope=scope,
-        endpoint=ENDPOINT_NODES_DEGREE,
-        params={
-            "urns": sorted(query.urns),
-            "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
-        },
-        compute=_bounded_compute(engine, compute),
-        model_cls=_DegreesResult,
-        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
-        expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
-    )
+    try:
+        scope = _cache_scope(engine)
+        if scope is None:
+            return (await _bounded_compute(engine, compute)()).root
+        result = await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_NODES_DEGREE,
+            params={
+                "urns": sorted(query.urns),
+                "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
+                "includeRollups": query.include_rollups,
+            },
+            compute=_bounded_compute(engine, compute),
+            model_cls=_DegreesResult,
+            on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
     return result.root
 
 
@@ -2382,8 +3004,25 @@ async def query_edges(
     query: EdgeQuery = Body(..., embed=True),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Advanced edge query (bulk fetch)."""
-    return await engine.get_edges(query)
+    """Advanced edge query (bulk fetch). Slot-bounded like /edges/between:
+    a burst sheds 429."""
+    async def compute() -> List[GraphEdge]:
+        return await engine.get_edges(query)
+
+    return await _bounded_compute(engine, compute)()
+
+
+@router.post("/edges/beneath", response_model=EdgesBeneathResult, response_model_by_alias=True)
+async def get_edges_beneath(
+    request: EdgesBeneathRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """The real lineage relationships a roll-up stands for: from the source or anything it contains
+    to the target or anything it contains. Not cached; slot-bounded like the other heavy reads."""
+    async def compute() -> EdgesBeneathResult:
+        return await engine.get_edges_beneath(request.source_urn, request.target_urn)
+
+    return await _bounded_compute(engine, compute)()
 
 
 @router.post("/nodes/query", response_model=List[GraphNode], response_model_by_alias=True)
@@ -2853,6 +3492,10 @@ async def get_aggregated_edges(
     Get aggregated edges between containers.
     Returns summarized edge information showing lineage connections
     at a higher granularity level (e.g., between datasets instead of columns).
+
+    Without ``targetUrns`` it answers every edge out of the sources; with an
+    empty ``sourceUrns`` and ``targetUrns`` set, every edge into the targets.
+    ``excludeInternal`` leaves out every cell one of whose ends holds the other.
     """
     await _enforce_fair_share(engine, ENDPOINT_AGGREGATED)
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
@@ -2868,17 +3511,21 @@ async def get_aggregated_edges(
     # input order map to the same cache key — the frontend's chunked
     # fan-out frequently produces equivalent batches in different orders.
     failing_over: dict = {}
+    params = {
+        "sourceUrns": sorted(request.source_urns or []),
+        "targetUrns": sorted(request.target_urns or []) if request.target_urns else None,
+        "granularity": request.granularity,
+        "includeEdgeTypes": sorted(request.include_edge_types or []) if request.include_edge_types else None,
+        "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
+        "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
+    }
+    # Only when set: an ask without it keeps the key its cached answers have.
+    if request.exclude_internal:
+        params["excludeInternal"] = True
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_AGGREGATED,
-        params={
-            "sourceUrns": sorted(request.source_urns or []),
-            "targetUrns": sorted(request.target_urns or []) if request.target_urns else None,
-            "granularity": request.granularity,
-            "includeEdgeTypes": sorted(request.include_edge_types or []) if request.include_edge_types else None,
-            "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
-            "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
-        },
+        params=params,
         compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
@@ -2973,8 +3620,12 @@ async def update_edge(
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Update mutable properties of an existing edge. Edge type is immutable."""
-    result = await engine.update_edge(edge_id, request)
+    """Update mutable properties of an existing edge — a PATCH: ``properties`` sets the
+    named keys, ``unsetProperties`` removes keys, the rest are kept. Edge type is immutable."""
+    try:
+        result = await engine.update_edge(edge_id, request)
+    except InvalidPatch as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
     await _invalidate_cache(engine)
     return result
 
@@ -3054,6 +3705,10 @@ class GraphChangeOp(BaseModel):
     id: Optional[str] = Field(default=None, description="entity id / urn (update/delete, or an explicit create id)")
     ref: Optional[str] = Field(default=None, description="client temp ref → echoed back in `assigned` for creates")
     payload: Optional[dict] = None
+    unset_properties: Optional[List[str]] = Field(
+        default=None, alias="unsetProperties",
+        description="update only: property names to REMOVE. An update merges `payload.properties` "
+        "key by key, so a property left out is kept — this is how one is removed.")
     base_version: Optional[str] = Field(
         default=None, alias="baseVersion",
         description="optimistic-concurrency token: the `version` (content hash) the client read for "
@@ -3072,6 +3727,12 @@ class GraphChangesRequest(BaseModel):
 class GraphChangesResponse(BaseModel):
     commit_id: Optional[str] = Field(default=None, alias="commitId")
     assigned: dict = Field(default_factory=dict)
+    # Every entity the save addressed (or its cascade removed), as a reader returns it now —
+    # `{id: {kind, version, node|edge}}`, `{kind, version: null, deleted: true}` once gone — so
+    # the client refreshes its copies and their tokens without a re-read, and the next edit of
+    # the same entity is not a conflict with its own last save. Capped (`entitiesTruncated`).
+    entities: dict = Field(default_factory=dict)
+    entities_truncated: bool = Field(default=False, alias="entitiesTruncated")
 
     class Config:
         populate_by_name = True
@@ -3103,11 +3764,20 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             assigned.setdefault(eid, eid)
 
     def _ref(x):                               # temp ref → real id; pass real ids / non-strings through
-        return assigned.get(x, x) if isinstance(x, str) else x
+        if not isinstance(x, str):
+            return x
+        x = assigned.get(x, x)
+        # A reader shows an entity with no urn under the stand-in id "gv:<entity id>"; an edit the
+        # client addresses to that id means the entity itself (it used to read as an edit of nothing
+        # — a creation from a partial payload — and fail as "a node needs an entity type").
+        return x[3:] if x.startswith("gv:") else x
 
     ops: List[dict] = []
     for i, o in enumerate(request_ops):
         kind = "edge" if o.kind == "edge" else "node"
+        unset = getattr(o, "unset_properties", None)
+        if unset and o.op != "update":
+            raise InvalidPatch(f"unsetProperties applies to an update, not a {o.op}")
         if o.op == "delete":
             if not o.id:
                 continue
@@ -3126,20 +3796,25 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             }})
         elif o.op == "create":
             eid = create_eid[i]
-            payload = dict(o.payload or {})
+            payload = dict(strip_deletes(o.payload) or {})     # a new entity has nothing to remove
             if kind == "edge":                 # an edge may point at nodes created in THIS same batch
                 for f in endpoint_fields:
                     if f in payload:
                         payload[f] = _ref(payload[f])
             else:                              # node — stamp the (minted-or-given) urn into the payload
+                payload = dict(lift_top_level_node_fields(payload))
                 payload["urn"] = eid
             ops.append({"op": "create", "entity_kind": kind, "entity_id": eid, "payload": payload})
-        else:  # update — forward the RAW partial patch + the OCC base_version; the service does the
+        else:  # update — forward the partial patch + the OCC base_version; the service does the
                # authoritative field-level merge (patch onto current, or a 3-way conflict check).
+               # `unsetProperties` becomes the service's one internal removal form here.
             if not o.id:
                 continue
+            payload = normalize_update(o.payload, unset)
+            if kind == "node":
+                payload = lift_top_level_node_fields(payload)
             ops.append({"op": "update", "entity_kind": kind, "entity_id": _ref(o.id),
-                        "payload": o.payload or {}, "base_version": o.base_version})
+                        "payload": payload, "base_version": o.base_version})
     return ops, assigned
 
 
@@ -3171,13 +3846,17 @@ async def apply_graph_changes(
     graph_id = g["graph_id"]
 
     from backend.app.ontology.urn import make_urn
-    ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+    try:
+        ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+    except InvalidPatch as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
 
     if not ops:
         return {"commitId": None, "assigned": assigned}
 
+    from backend.app.services.versioning.entity_audit import ENTITY_VIEW_CAP, entity_views
     try:
-        commit_id = await svc.apply_ops(
+        result = await svc.apply_ops_detailed(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
             message=request.message or "Canvas edits",
             containment_edge_types=await _resolve_containment_types(engine),
@@ -3186,7 +3865,10 @@ async def apply_graph_changes(
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except MergeConflict as exc:
-        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+        # `current`: each conflicting entity as it is now, for the client to rebase the edit onto.
+        raise HTTPException(status_code=409, detail={
+            "type": "merge_conflict", "conflicts": exc.conflicts,
+            "current": entity_views(exc.current)[0]})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
 
@@ -3201,7 +3883,9 @@ async def apply_graph_changes(
     await get_graph_cache().bump_generation(
         CacheScope(workspace_id=ws_id, data_source_id=dataSourceId, branch_id=branchId)
     )
-    return {"commitId": commit_id, "assigned": assigned}
+    entities, truncated = entity_views(result.written, result.urns, cap=ENTITY_VIEW_CAP)
+    return {"commitId": result.commit_id, "assigned": assigned,
+            "entities": entities, "entitiesTruncated": truncated}
 
 
 class DeleteImpactResponse(BaseModel):

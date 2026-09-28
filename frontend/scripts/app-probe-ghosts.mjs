@@ -1,25 +1,24 @@
 /**
  * Ghost cues, checked in the real app: how the canvas says there is lineage
  * it cannot draw — because the far end is scrolled out of sight (a PORTAL at
- * the viewport's edge, naming where it goes), or because the far end was
- * never loaded (a STUB beside the row, with the count and a way to bring the
- * entities in). See `ghostCues.tsx`.
+ * the viewport's edge, naming where it goes), or because the far end is
+ * outside this view (a STUB beside the row, with the count; a click opens the
+ * Focus Lens on the row). See `ghostCues.ts`.
  *
  * Both depend on layout, which jsdom does not do.
  *
  *   node scripts/app-probe-ghosts.mjs [viewId] [--open <container>]
  *
- * Runs twice: with the defaults (nothing folds, nothing rolls up — the
- * product as it ships), then with `canvasLineageRollupEnabled` switched on
- * for THIS browser only, where lines to unloaded entities roll up and the
- * stubs give way. Requires the dev stack up.
+ * Runs once, with the defaults (nothing folds — the product as it ships).
+ * The chains that place unloaded entities are always asked for, so lines to
+ * them roll up where something drawn holds them. Requires the dev stack up.
  */
-import { connect, login, helpers, overrideFeatures, APP_ORIGIN } from './app-probe.mjs'
+import { connect, login, helpers, APP_ORIGIN } from './app-probe.mjs'
 
 const argv = process.argv.slice(2)
 const openFlag = argv.indexOf('--open')
 const OPEN = openFlag >= 0 ? argv[openFlag + 1] : 'Snowflake'
-const VIEW = argv.filter((a, i) => !a.startsWith('--') && i !== openFlag + 1)[0] ?? 'view_23c1434ce3f3'
+const VIEW = argv.filter((a, i) => !a.startsWith('--') && (openFlag < 0 || i !== openFlag + 1))[0] ?? 'view_23c1434ce3f3'
 
 const results = []
 const check = (name, pass, detail) => {
@@ -42,18 +41,12 @@ const STATE = `return (() => {
     folded: document.querySelectorAll('[data-folded]').length,
     portals: [...document.querySelectorAll('[data-portal]')].map(b => ({ dir: b.getAttribute('data-portal'), text: (b.innerText || '').trim() })),
     stubs,
-    stubTotal: stubs.reduce((n, s) => n + s.count, 0),
     columns: [...document.querySelectorAll('[data-layer-id]')].map(c => {
       const r = c.getBoundingClientRect()
       return { name: (c.querySelector('.sticky')?.innerText || '').split('\\n')[0].trim(), visible: r.right > box.left + 40 && r.left < box.right - 40 }
     }),
   }
 })()`
-
-const storeNodes = `
-  const url = performance.getEntriesByType('resource').map(e => e.name).find(n => /\\/src\\/store\\/canvas\\.ts/.test(n))
-  const m = await import(url)
-  return m.useCanvasStore.getState().nodes.length`
 
 const conn = await connect()
 const { cdp, evalJs, goto, shot, waitForCanvas, close, events } = conn
@@ -80,19 +73,17 @@ try {
   await settle(3500)
   let s = await evalJs(STATE)
   check('nothing folds by default — every layer at full width, the canvas scrolls', s.folded === 0 && s.overflow > 0, `overflow ${s.overflow}px`)
-  check('no roll-up requests while the roll-up is off', chainCalls() === 0, `${chainCalls()} calls`)
+  check('the chains are asked for as it ships', chainCalls() > 0, `${chainCalls()} calls`)
 
   const portal = s.portals[0]
   const hidden = s.columns.filter(c => !c.visible).map(c => c.name)
   check('lineage to a layer out of sight ends at a portal that names it',
     !!portal && hidden.some(name => portal.text.includes(name)), s.portals.map(p => `${p.dir}: ${p.text}`).join(' | '))
-  check('rows with lineage to entities not loaded carry a stub, inside the viewport',
+  check('rows with lineage leaving the view carry a stub, inside the viewport',
     s.stubs.length > 0 && s.stubs.every(x => x.inside && x.count > 0), s.stubs.map(x => `${x.side}:${x.count}`).join(' '))
   await shot('/tmp/app-probe-ghosts-1.png')
 
-  // A portal takes you there. Checked BEFORE a stub brings entities in:
-  // once their containers open, the summary edge behind this portal gives
-  // way to finer ones on rows further down, and the portal rightly goes.
+  // A portal takes you there.
   if (portal) {
     const before = s.scrollLeft
     const target = hidden.find(name => portal.text.includes(name))
@@ -103,40 +94,16 @@ try {
       s.scrollLeft !== before && s.columns.some(c => c.name === target && c.visible), `scrollLeft ${before} → ${s.scrollLeft}`)
   }
 
-  // Back to the start, and a stub brings its entities in: the store grows
-  // and the counts go down.
+  // Back to the start. A stub's lineage leaves the view, so there is nothing
+  // to bring in: its click opens the Focus Lens on its row.
   await evalJs(`document.querySelector('[data-layer-id]').closest('.overflow-auto').scrollTo({ left: 0, behavior: 'auto' }); return true`)
   await settle(1500)
-  s = await evalJs(STATE)
-  const nodesBefore = await evalJs(storeNodes)
-  const totalBefore = s.stubTotal
   await evalJs(`document.querySelector('[data-off-canvas-stub]')?.click(); return true`)
-  // A batch lands over several seconds: wait until the store stops growing.
-  let nodesAfter = nodesBefore
-  for (let quiet = 0, i = 0; quiet < 3 && i < 40; i++) {
-    await settle(700)
-    const n = await evalJs(storeNodes)
-    quiet = n === nodesAfter ? quiet + 1 : 0
-    nodesAfter = n
-  }
-  s = await evalJs(STATE)
-  check('a stub click brings its entities onto the canvas', nodesAfter > nodesBefore, `${nodesBefore} → ${nodesAfter} nodes`)
-  check('...and the stub counts go down as they land', s.stubTotal < totalBefore, `${totalBefore} → ${s.stubTotal}`)
+  await settle(2500)
+  const lens = await evalJs(`return document.querySelector('[role="dialog"][aria-label^="Connections of"]')?.getAttribute('aria-label') ?? null`)
+  check('a stub click opens the Focus Lens on its row', !!lens, lens ?? 'no lens')
 
   await shot('/tmp/app-probe-ghosts-2.png')
-
-  // ── With roll-ups switched on, for this browser only ───────────────────
-  await overrideFeatures(conn, { canvasLineageRollupEnabled: true })
-  events.length = 0
-  await goto(`${APP_ORIGIN}/views/${VIEW}`)
-  await waitForCanvas()
-  await settle(2500)
-  await h.expand(OPEN)
-  await settle(4500)
-  s = await evalJs(STATE)
-  check('with the roll-up on, the chains are asked for', chainCalls() > 0, `${chainCalls()} calls`)
-  check('...and fewer lines are left without a place on the canvas', s.stubTotal < totalBefore, `stub total ${totalBefore} → ${s.stubTotal}`)
-  await shot('/tmp/app-probe-ghosts-3.png')
 } finally {
   close()
 }

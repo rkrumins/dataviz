@@ -21,6 +21,7 @@ import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns, committedCreatedChildUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
+import { isTempUrn } from '@/components/canvas/context-view/assignmentMutations'
 import { CHILDREN_PAGE_SIZE } from '@/config/pagination'
 import { POLLING_INTERVALS, PROVIDER_RETRY_MAX_ATTEMPTS, withJitter } from '@/config/polling'
 import { resetCircuitBreakers } from '@/services/circuitBreaker'
@@ -240,6 +241,28 @@ export function isHydrationFailure(status: HydrationStatus): status is Hydration
     return status === 'warming' || status === 'slow' || status === 'unavailable' || status === 'error'
 }
 
+/** The view's lineage types less the stored :AGGREGATED cells: the rows on
+ *  screen get their roll-ups from /edges/aggregated, never from a read of
+ *  their flows. */
+function lineageOnly(lineageEdgeTypes: string[]): string[] {
+    return lineageEdgeTypes.filter(t => t.toUpperCase() !== 'AGGREGATED')
+}
+
+/** The types /edges/between is asked for: containment and lineage, never the
+ *  stored :AGGREGATED cells (see the reference hydration's edge fetch).
+ *  Untyped only while the view has not declared both kinds. */
+function betweenEdgeTypes(containmentEdgeTypes: string[], lineageEdgeTypes: string[]): string[] | undefined {
+    const lineage = lineageOnly(lineageEdgeTypes)
+    return containmentEdgeTypes.length > 0 && lineage.length > 0
+        ? [...containmentEdgeTypes, ...lineage]
+        : undefined
+}
+
+/** A stored roll-up cell, which an untyped read can still bring. */
+function isAggregatedEdge(e: GraphEdge): boolean {
+    return String(e.edgeType ?? '').toUpperCase() === 'AGGREGATED'
+}
+
 export interface UseGraphHydrationResult {
     /** Load children for a node (empty string = load roots). */
     loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<ChildLoadSummary | undefined>
@@ -278,6 +301,19 @@ export interface UseGraphHydrationResult {
     hydrationStatus: HydrationStatus
     /** Explicit user-triggered retry for a warming/unavailable provider. */
     retryHydration: () => void
+    /** Refetch the edges among the loaded nodes, once (the edge banner's Retry). */
+    retryEdges: () => Promise<void>
+    /** A partial load has used its fast attempts and stopped retrying on its
+     *  own; retryHydration (the pill's Retry) starts it again. */
+    autoRetryStopped: boolean
+}
+
+/** What a partial curated load already has, for a retry of the SAME load:
+ *  the URNs whose batch answered and the nodes they brought. */
+interface HydrationCarry {
+    key: string
+    answered: Set<string>
+    nodes: GraphNode[]
 }
 
 interface UseGraphHydrationOptions {
@@ -431,6 +467,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // while the provider is warming up / down (see the retry effect below).
     const [retryEpoch, setRetryEpoch] = useState(0)
     const retryCountRef = useRef(0)
+    // Set when a partial load has used its fast attempts (see markPartial).
+    const [autoRetryStopped, setAutoRetryStopped] = useState(false)
+    // A partial load's progress (HydrationCarry): its retry asks only for the rest.
+    const carryRef = useRef<HydrationCarry | null>(null)
     // Last (provider, view) key the retry budget was reset for — so a genuinely
     // NEW view starts fresh at 'loading' with a full retry budget, while a retry
     // of the SAME view keeps counting.
@@ -502,6 +542,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             lastInitKeyRef.current = initKey
             retryCountRef.current = 0
         }
+        // Keyed on the other deps too, so only a retry reuses a partial load's
+        // progress: a save or a schema change reloads in full.
+        const carryKey = `${initKey}|${rootTypesKey}|${schemaTypesKey}|${committedDeltaKey}`
+        const carry = !isFreshView && carryRef.current?.key === carryKey ? carryRef.current : null
+        carryRef.current = null
         // Any ACTIVE load — a fresh view OR a re-fetch of the same view (deps
         // churned) — must show 'loading', NOT 'ready'. Otherwise the canvas is
         // cleared (setGraph([],[]) below) while status is still 'ready' from the
@@ -533,17 +578,23 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             setHydrationError(null)
             setHydrationStatus('ready')
             setHydrationPhase('complete')
+            setAutoRetryStopped(false)
         }
 
         // A load that rendered SOME of the view but not all of it: the nodes
         // that arrived stay on screen, the status records why the rest did
-        // not, and the retry loop keeps trying for the remainder. Not 'ready'
+        // not, and the retry loop asks again for the remainder. Not 'ready'
         // — 'ready' means complete — and not the blocking overlay either: the
         // canvas has data, so CanvasRouter shows a pill over it instead.
+        // Past its fast attempts it stops asking on its own: the pill offers
+        // Retry, and re-running the view every minute re-fetched its heaviest
+        // read, /edges/between, forever. Warming is the backend saying "retry
+        // later", so that keeps going.
         const markPartial = (failure: HydrationFailure, cause?: unknown) => {
             setHydrationStatus(failure)
             setHydrationError(hydrationMessage(failure, cause))
             setHydrationPhase('complete')
+            setAutoRetryStopped(failure !== 'warming' && retryCountRef.current >= PROVIDER_RETRY_MAX_ATTEMPTS)
         }
 
         // Clear the canvas ONLY for a genuinely new view. A reload of the SAME
@@ -571,6 +622,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         useCanvasStore.getState().clearEdgeFetchFailures()
         useCanvasStore.getState().setEdgesTruncated(false)
         useCanvasStore.getState().clearNodeFetchFailures()
+        useCanvasStore.getState().setPlacementsNotFound(null)
 
         const controller = new AbortController()
 
@@ -623,6 +675,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Assigned entities inside the batches that failed — what a
                     // partial load is missing, by count, for the pill.
                     let missingEntities = 0
+                    // Their URNs: whether those exist is unknown, so they are never reported
+                    // as placements that point at nothing.
+                    const failedUrns = new Set<string>()
                     const loadNodeBatches = async (queries: NodeQuery[]): Promise<GraphNode[]> => {
                         const settled = await mapWithConcurrency(
                             queries, HYDRATION_CONCURRENCY, q => provider.getNodes(q),
@@ -634,6 +689,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             } else {
                                 batchErrors.push(outcome.reason)
                                 missingEntities += queries[i].urns?.length ?? 0
+                                for (const urn of queries[i].urns ?? []) failedUrns.add(String(urn))
                             }
                         })
                         return loaded
@@ -642,6 +698,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Where each open-scope type feed stands after its first page —
                     // seeded once the graph is set (setGraph clears feeds).
                     const typeFeedSeeds: Array<[string, TypeFeedState]> = []
+                    // This attempt's progress, kept for a retry if it ends partial.
+                    let nextCarry: HydrationCarry | null = null
 
                     if (loadByUrn) {
                         // ── Assignment-driven loading (curated scope) ──
@@ -657,15 +715,26 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         const createdRoots = new Set([...branchCreatedDelta].filter((u) => !createdChildren.has(u)))
                         const urnArray = closedScopeLoadUrns(assignedUrns, createdRoots, isDraft)
                         deltaLoadedCount = urnArray.length - assignedUrns.size
+                        // A retry of a partial load asks only for what has not answered.
+                        const toAsk = carry ? urnArray.filter(u => !carry.answered.has(u)) : urnArray
                         // Batch URNs to avoid overly large queries
-                        for (let i = 0; i < urnArray.length; i += 100) {
-                            urnBatches.push(urnArray.slice(i, i + 100))
+                        for (let i = 0; i < toAsk.length; i += 100) {
+                            urnBatches.push(toAsk.slice(i, i + 100))
                         }
 
-                        allNodes = await loadNodeBatches(
-                            urnBatches.map(batch => ({ urns: batch as any[], limit: batch.length })),
-                        )
+                        allNodes = [
+                            ...(carry?.nodes ?? []),
+                            ...await loadNodeBatches(
+                                urnBatches.map(batch => ({ urns: batch as any[], limit: batch.length })),
+                            ),
+                        ]
                         if (controller.signal.aborted) return
+                        nextCarry = {
+                            key: carryKey,
+                            answered: new Set([...(carry?.answered ?? []), ...toAsk.filter(u => !failedUrns.has(u))]),
+                            // A copy: the anchored columns' pages are pushed onto allNodes below.
+                            nodes: [...allNodes],
+                        }
 
                         // Children are NOT prefetched. Top-level assigned entities
                         // render collapsed; expanding a parent fires the lazy loader
@@ -735,6 +804,18 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             if (controller.signal.aborted) return
                             allNodes = [...allNodes, ...placed]
                         }
+                    }
+
+                    // Placements the graph was asked for and didn't return: a view brought in
+                    // from another environment keeps these, marked not found (the canvas shows
+                    // them; see CanvasStatusChips). Either scope asks for every placement by URN
+                    // that nothing else brought, so what isn't here now was looked for and absent.
+                    if (activeView?.id) {
+                        const returned = new Set(allNodes.map(n => n.urn))
+                        useCanvasStore.getState().setPlacementsNotFound({
+                            viewId: activeView.id,
+                            urns: [...assignedUrns].filter(u => !returned.has(u) && !failedUrns.has(u) && !isTempUrn(u)),
+                        })
                     }
 
                     // ── Anchored columns ──────────────────────────────
@@ -848,9 +929,19 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Fetch edges between all loaded nodes. Pass the backend
                     // hard maximum so the user's assigned set is never
                     // truncated at the 50k default on large graphs.
+                    //
+                    // Containment and lineage only, never the stored :AGGREGATED
+                    // cells: the rows on screen get their roll-ups from
+                    // /edges/aggregated, and a cell here names containers nobody
+                    // drew — an anchored column's own anchor among them, which
+                    // became a stub on that column's rows. Untyped only while the
+                    // view has not declared both kinds, and a cell that arrives
+                    // anyway is dropped below.
                     setHydrationPhase('edges')
                     const allUrns = allNodes.map(n => n.urn)
-                    const allEdges = await provider.getEdgesBetween(allUrns, undefined, 200_000).catch((err: unknown) => {
+                    const allEdges = await provider.getEdgesBetween(
+                        allUrns, betweenEdgeTypes(containmentEdgeTypes, lineageEdgeTypes), 200_000,
+                    ).catch((err: unknown) => {
                         // Nodes still render (graceful), but record the
                         // failure so the canvas can say edges are missing.
                         useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
@@ -869,12 +960,15 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Replace with complete dataset atomically
                     writeGraph(
                         allNodes.map(n => toCanvasNode(n)),
-                        allEdges.map(e => toCanvasEdge(e)),
+                        allEdges
+                            .filter(e => !isAggregatedEdge(e))
+                            .map(e => toCanvasEdge(e)),
                     )
                     seedAnchorPagers()
 
                     console.log(`[useGraphHydration] Reference view: loaded ${allNodes.length} nodes (${assignedUrns.size} assigned, ${deltaLoadedCount} branch-created), ${allEdges.length} edges`)
                     if (partial) {
+                        carryRef.current = nextCarry
                         markPartial(worstHydrationFailure(batchErrors), batchErrors)
                         return
                     }
@@ -1056,6 +1150,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     setHydrationStatus(failure)
                     setHydrationError(hydrationMessage(failure, err))
                     setHydrationPhase('complete')
+                    setAutoRetryStopped(false)
                 }
             }
         }
@@ -1081,9 +1176,30 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const retryHydration = useCallback(() => {
         forceReprobe()                     // close the breaker so this actually hits the network
         retryCountRef.current = 0
+        setAutoRetryStopped(false)
         initializedKeyRef.current = null
         setRetryEpoch(e => e + 1)
     }, [forceReprobe])
+
+    // The edge banner's Retry. The banner reports a failed EDGE read, so this
+    // asks /edges/between once, over what is loaded, with the hydration's
+    // typed request: not a re-run of the view, which re-fetched every node
+    // batch and anchored page as well.
+    const retryEdges = useCallback(async () => {
+        const store = useCanvasStore.getState()
+        const urns = store.nodes.map(n => n.id).filter(id => !id.startsWith('logical:'))
+        store.clearEdgeFetchFailures()
+        if (urns.length < 2) return
+        try {
+            const edges = await provider.getEdgesBetween(
+                urns, betweenEdgeTypes(containmentEdgeTypes, lineageEdgeTypes), 200_000,
+            )
+            useCanvasStore.getState().addGraph([], edges.filter(e => !isAggregatedEdge(e)).map(e => toCanvasEdge(e)))
+            if (edges.length >= 200_000) useCanvasStore.getState().setEdgesTruncated(true)
+        } catch (err) {
+            useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+        }
+    }, [provider, containmentEdgeTypes, lineageEdgeTypes])
 
     // Auto-retry while the provider is warming/slow/unavailable — but SCALE-SAFELY:
     //  • a configurable, deliberately-unhurried interval (POLLING_INTERVALS.
@@ -1100,6 +1216,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     //    (providerRetrySlow, default 60s) — a completed node rotation must
     //    self-heal without a user click or page reload, and a persistently
     //    slow view must not re-run its heavy query every 10s forever;
+    //  • except a PARTIAL load: the canvas has data and a pill with Retry, so
+    //    after its fast attempts it stops (markPartial sets autoRetryStopped).
+    //    Tab focus, a health recovery and Retry start it again;
     //  • PAUSED entirely while the tab is hidden (no background-tab hammering).
     // A retry NEVER clears the status/overlay — only a SUCCESSFUL load
     // (markReady) flips to 'ready', so the overlay can't blink to "Start
@@ -1111,6 +1230,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             retryCountRef.current = 0
             return
         }
+        if (autoRetryStopped) return
         if (typeof document !== 'undefined' && document.hidden) return
         const exhausted = hydrationStatus !== 'warming'
             && retryCountRef.current >= PROVIDER_RETRY_MAX_ATTEMPTS
@@ -1125,7 +1245,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             setRetryEpoch(e => e + 1)          // re-run; status/overlay stay until success
         }, delay)
         return () => clearTimeout(t)
-    }, [enableHydration, hydrationStatus, retryEpoch, forceReprobe])
+    }, [enableHydration, hydrationStatus, retryEpoch, forceReprobe, autoRetryStopped])
 
     // Resume retrying the moment a hidden tab returns to the foreground (the
     // auto-retry above pauses while hidden), so a user coming back to a warming
@@ -1312,17 +1432,19 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         }
                         // Lineage out of and into the page as two ANCHORED reads: the
                         // one-query `anyUrns` form has no index-friendly shape and scans
-                        // every lineage edge of the graph for each page.
+                        // every lineage edge of the graph for each page. Flows only,
+                        // never the stored :AGGREGATED cells, as /edges/between.
                         const none = Promise.resolve([] as GraphEdge[])
+                        const lineage = lineageOnly(lineageEdgeTypes)
                         const [incoming, lineageOut, lineageIn, adopted] = pageUrns.length === 0 ? [[], [], [], []] : await Promise.all([
                             containmentEdgeTypes.length > 0
                                 ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: containmentEdgeTypes, limit: pageUrns.length * 4 + 100 }).catch(noteFailure)
                                 : none,
-                            lineageEdgeTypes.length > 0
-                                ? provider.getEdges({ sourceUrns: pageUrns, edgeTypes: lineageEdgeTypes, limit: 200_000 }).catch(noteFailure)
+                            lineage.length > 0
+                                ? provider.getEdges({ sourceUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
                                 : none,
-                            lineageEdgeTypes.length > 0
-                                ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: lineageEdgeTypes, limit: 200_000 }).catch(noteFailure)
+                            lineage.length > 0
+                                ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
                                 : none,
                             orphans.length > 0
                                 ? provider.getEdgesBetween([...pageUrns, ...orphans], containmentEdgeTypes).catch(noteFailure)
@@ -1334,7 +1456,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         const onPage = new Set(pageUrns)
                         const isLoaded = (u: string) => held.has(u) || onPage.has(u)
                         const edges = [...incoming, ...lineageOut, ...lineageIn, ...adopted]
-                            .filter(e => isLoaded(e.sourceUrn) && isLoaded(e.targetUrn))
+                            .filter(e => !isAggregatedEdge(e) && isLoaded(e.sourceUrn) && isLoaded(e.targetUrn))
                         const fresh = page.filter((n, i) => !held.has(n.urn) && pageUrns.indexOf(n.urn) === i)
                         // ONE store update: nodes, edges and the feed's position —
                         // unless another instance of this hook moved the feed on
@@ -1475,6 +1597,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             try {
                 const urn = (parentNode.data.urn as string) || parentId
                 const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
+                const lineage = lineageOnly(lineageEdgeTypes)
                 let added = 0
 
                 // One call makes progress or proves there is none. A page whose
@@ -1493,7 +1616,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Single round-trip: children + containment edges + lineage edges
                     const result = await provider.getChildrenWithEdges(urn, {
                         edgeTypes: fetchTypes,
-                        lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
+                        lineageEdgeTypes: lineage.length > 0 ? lineage : undefined,
                         limit: CHILDREN_PAGE_SIZE,
                         // By POSITION, the next one taken from the server: works on
                         // every provider and every naming scheme (no name-based
@@ -1526,11 +1649,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     // A sibling edge whose far end is not loaded yet is held back —
                     // it comes again with that sibling's own page — so nothing is
-                    // lost.
+                    // lost. A roll-up cell is dropped: asked untyped, the server
+                    // reads the lineage types its ontology resolves, which can
+                    // include :AGGREGATED.
                     const isLoaded = (u: string) => u === parentId || u === urn || held.has(u) || newIds.has(u)
                     const edgesToAdd = [
                         ...result.containmentEdges,
-                        ...result.lineageEdges.filter(e => isLoaded(e.sourceUrn) && isLoaded(e.targetUrn)),
+                        ...result.lineageEdges.filter(e => !isAggregatedEdge(e) && isLoaded(e.sourceUrn) && isLoaded(e.targetUrn)),
                     ].map(e => toCanvasEdge(e))
 
                     pos = pagerAfter(result, offset, direction, childCount, pos.lastUrn)
@@ -1552,16 +1677,25 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // their wires follow; a failure costs those rows their
                     // flows, not the page.
                     if (nodesToAdd.length > 0) {
+                        const pageIds = new Set(nodesToAdd.map((n) => n.id))
                         void primeLineageFor(
                             provider,
-                            nodesToAdd.map((n) => n.id),
+                            [...pageIds],
                             lineageEdgeTypes,
-                        ).then((extra) => {
+                            containmentEdgeTypes,
+                        ).then(({ edges: extra, partial }) => {
                             // stale(), not only the signal: flows read for a graph
                             // that has since been replaced do not belong in the new one.
-                            if (extra.length > 0 && !stale()) {
-                                useCanvasStore.getState().addGraph([], extra)
-                            }
+                            if (stale()) return
+                            // Nor on rows removed while they were read (a sort flip
+                            // refetches the page, a collapse prunes it): a flow
+                            // keeps only while its end on this page is still held.
+                            const held = useCanvasStore.getState()._nodeIndex
+                            const kept = extra.filter((e) =>
+                                [e.source, e.target].every((end) => !pageIds.has(end) || held.has(end)))
+                            if (kept.length > 0) useCanvasStore.getState().addGraph([], kept)
+                            // Rows whose read came back at its cap: more flows than arrived.
+                            useCanvasStore.getState().markLineagePartial(partial)
                         }).catch((e) => {
                             console.warn('[children] lineage priming failed', e)
                         })
@@ -1647,6 +1781,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         /** Explicit user retry (overlay "Retry" button). Re-arms a fresh round
          *  of bounded auto-retries. */
         retryHydration,
+        retryEdges,
+        autoRetryStopped,
         loadMoreRoots,
         rootsLoaded,
         rootsHaveMore,

@@ -211,6 +211,15 @@ DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
 COMMIT_MAX_RETRIES: int = int(os.getenv("GRAPHVER_COMMIT_MAX_RETRIES", "5"))
 DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
 
+# A draft changing more entities than this has its Changes panel counted, not laid out as a
+# containment tree: the tree is built from every changed payload and their ancestors, in the
+# web process, per request.
+DIFF_TREE_MAX_CHANGES: int = int(os.getenv("GRAPHVER_DIFF_TREE_MAX_CHANGES", "20000"))
+# A draft changing more entities than this publishes (or has its review merged) as a job on the
+# versioning worker, not inside the request: the squash holds every changed payload and hashes
+# them all, which a web pod's memory and event loop can't spare at that size.
+SYNC_PUBLISH_MAX_CHANGES: int = int(os.getenv("GRAPHVER_SYNC_PUBLISH_MAX_CHANGES", "20000"))
+
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")
 
@@ -236,14 +245,19 @@ TRACE_LEASE_TTL_SECS: int = int(os.getenv("GRAPHVER_TRACE_LEASE_TTL_SECS", "120"
 # Import / Export (bulk CRUD) — object store + pipeline tunables               #
 # --------------------------------------------------------------------------- #
 def object_store_backend() -> str:
-    """Which ObjectStore backend serves import/export artifacts: local | s3 | gcs.
+    """Which ObjectStore backend serves import/export artifacts: database | local | s3 | gcs.
 
-    LocalFS in v1 (a mounted volume); S3/GCS are drop-in behind the same Protocol."""
-    return os.getenv("OBJECT_STORE_BACKEND", "local").lower()
+    The management database by default, which every API pod shares: an artifact one pod stored
+    is there whichever pod serves the next request. ``local`` keeps them as files under
+    ``IMPORT_STORE_ROOT``: a directory every API and versioning-worker pod mounts (a shared volume,
+    or an S3/GCS bucket through its FUSE driver), or one pod's own disk for a single-pod stack.
+    S3/GCS are drop-in behind the same Protocol."""
+    return os.getenv("OBJECT_STORE_BACKEND", "database").lower()
 
 
 def import_store_root() -> str:
-    """Filesystem root for the LocalFs object store (a mounted volume in prod).
+    """Filesystem root for the LocalFs object store (``OBJECT_STORE_BACKEND=local``): where the
+    files land, typically a mount every pod shares.
 
     Artifacts live under ``{root}/{workspace}/{data_source}/{graph}/{job}/{name}`` so any file
     is attributable to its workspace/data source/graph/job at a glance."""
@@ -261,6 +275,24 @@ INLINE_IMPORT_MAX: int = int(os.getenv("INLINE_IMPORT_MAX", "5000"))
 IMPORT_MAX_ROWS: int = int(os.getenv("IMPORT_MAX_ROWS", "0"))
 # Retain import/export artifacts + staging rows this many days after a terminal job.
 STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
+# The worker's daily sweep deletes object-store artifacts (uploads, exports, view packages)
+# written more than this many hours ago.
+OBJECT_STORE_TTL_HOURS: float = float(os.getenv("OBJECT_STORE_TTL_HOURS", "24"))
+# A pending/running import or export job silent this long (no ``updated_at`` heartbeat) is
+# reported failed: the process running it went away, and nothing else will ever finish it.
+JOB_STALE_AFTER_SECS: int = int(os.getenv("JOB_STALE_AFTER_SECS", "900"))
+# Where import and export jobs run. On (the default): in the API process that took the request,
+# as a task of its own. Off: API processes only queue them and the versioning worker runs them
+# (import_export/runner.py) — for deployments that run that worker, so a large import or export
+# never shares an API pod's CPU and memory with interactive requests.
+TRANSFER_INPROCESS: bool = os.getenv("GRAPHVER_TRANSFER_INPROCESS", "1").lower() in ("1", "true", "yes")
+# Jobs one versioning-worker process runs at once. An export job also takes one of its pod's export
+# turns (GRAPH_EXPORT_CONCURRENCY, 2), so raise the two together.
+TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
+# How often an idle worker looks for a queued job: about how long a queued job waits for a free one.
+TRANSFER_POLL_SECS: float = float(os.getenv("GRAPHVER_TRANSFER_POLL_SECS", "1"))
+# A queued job no worker has started in this long reads as failed: none may be running.
+TRANSFER_QUEUE_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS", str(6 * 3600)))
 
 
 # --------------------------------------------------------------------------- #

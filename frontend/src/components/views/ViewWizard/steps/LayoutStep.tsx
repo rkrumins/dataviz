@@ -15,7 +15,8 @@ import {
     ChevronRight,
     Wand2,
     Sparkles,
-    Repeat
+    Repeat,
+    Layers
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
@@ -47,6 +48,9 @@ interface LayoutStepProps {
     dataSourceId?: string
     /** Blank model: no data source yet — read entity types from the hydrated schema store. */
     blank?: boolean
+    /** The layers came from an imported file. No Quick Start: a template replaces the layers
+     *  and so unplaces everything the file placed. */
+    imported?: boolean
 }
 
 interface LayerTemplate {
@@ -260,7 +264,7 @@ function TemplateGallery({
 // Component
 // ============================================
 
-export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId, blank }: LayoutStepProps) {
+export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId, blank, imported }: LayoutStepProps) {
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
     // Blank models have no data source to probe; their ontology schema is hydrated
     // into the schema store, so read entity types from there instead.
@@ -292,8 +296,8 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     // Existing-source mode keeps its original semantics: the gallery shows while
     // there are no layers (no choice is REQUIRED — canProceed is unchanged there).
     const [galleryOpen, setGalleryOpen] = useState(false)
-    const showGallery = galleryOpen
-        || (blank ? !formData.layoutTemplateId : formData.layers.length === 0)
+    const showGallery = !imported && (galleryOpen
+        || (blank ? !formData.layoutTemplateId : formData.layers.length === 0))
 
     const handleSwitchTemplate = useCallback(() => {
         if (formData.layers.length > 0 && !window.confirm('Switching templates will replace your current layers. Continue?')) {
@@ -550,7 +554,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                                 </p>
                             </div>
                             <div className="flex items-center gap-2">
-                                {!showGallery && (
+                                {!showGallery && !imported && (
                                     <button
                                         onClick={handleSwitchTemplate}
                                         className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
@@ -573,6 +577,16 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                                 )}
                             </div>
                         </div>
+
+                        {imported && (
+                            <div className="flex items-start gap-3 rounded-xl border border-indigo-200 dark:border-indigo-900 bg-indigo-50/50 dark:bg-indigo-950/20 px-4 py-3">
+                                <Layers className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
+                                <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                                    <span className="font-semibold text-slate-800 dark:text-slate-100">These layers came from the file.</span>{' '}
+                                    Rename, reorder or add layers freely; removing a layer also unplaces what was placed on it.
+                                </p>
+                            </div>
+                        )}
 
                         {/* Quick Start template gallery — shared by both creation flows */}
                         {showGallery && (

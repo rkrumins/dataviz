@@ -25,6 +25,7 @@
 
 import {
     useCallback,
+    useContext,
     useEffect,
     useMemo,
     useRef,
@@ -49,7 +50,7 @@ import { cn, generateId } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { LayerHierarchyPanel, type ActiveTarget, type AnchorMore, type DropPayload, type LayerRootRow } from './LayerHierarchyPanel'
 import { WizardAssignmentTree, type BrowserSnapshot } from '../views/ViewWizard/WizardAssignmentTree'
-import { useWizardEntityIndex, fallbackNameFromUrn } from '../views/ViewWizard/useWizardEntityIndex'
+import { useWizardEntityIndex, fallbackNameFromUrn, WizardEntitySeedContext } from '../views/ViewWizard/useWizardEntityIndex'
 import { suggestLayerMappings, type MagicMapSuggestion } from '../views/ViewWizard/magicMap'
 import {
     deriveRootTypeCandidates,
@@ -83,6 +84,8 @@ import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
+import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
+import { PlacementPathsContext } from './placementPathsContext'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../dialogs/ChildReassignConfirmDialog'
@@ -1090,11 +1093,13 @@ export function LayerStudio({
     // assignments the browser hasn't paged in yet (edit mode).
     const provider = useGraphProvider()
     const [snapshot, setSnapshot] = useState<BrowserSnapshot | null>(null)
+    const entitySeed = useContext(WizardEntitySeedContext)
     const entityIndex = useWizardEntityIndex({
         provider,
         containmentEdgeTypes,
         assignments: formData.assignments ?? {},
         snapshot,
+        seed: entitySeed,
     })
     const nameOf = useCallback(
         (urn: string) => entityIndex.resolve(urn)?.name ?? fallbackNameFromUrn(urn),
@@ -1222,7 +1227,18 @@ export function LayerStudio({
     }, [handleUndo, handleRedo])
 
     // ── Logical nodes ───────────────────────────────────────────────────────────
-    const logicalNodes = useLogicalNodes(layers, handleUpdateLayers)
+    // Group edits go through the wizard's single history (and the canvas's own group operations).
+    // Where every explicitly assigned entity sits in the data — shown on its row as "Placed · Part of
+    // …", exactly as the canvas shows a placed entity (one batched lookup, shared with the canvas).
+    const assignedUrns = useMemo(() => Object.keys(assignments), [assignments])
+    const placementPaths = usePlacementAncestry(assignedUrns)
+
+    const logicalNodes = useLogicalNodes(
+        layout,
+        commitLayout,
+        { canUndo, canRedo, undo: handleUndo, redo: handleRedo },
+        (next) => updateFormData({ layers: next.layers, assignments: next.assignments }),
+    )
 
     // ── Active drop target ──────────────────────────────────────────────────────
     const [activeTarget, setActiveTarget] = useState<ActiveTarget | null>(() =>
@@ -1912,7 +1928,8 @@ export function LayerStudio({
                     }}
                 >
                     {/* Left: Layer hierarchy */}
-                    <LayerHierarchyPanel
+<PlacementPathsContext.Provider value={placementPaths}>
+                                        <LayerHierarchyPanel
                         layers={layers}
                         assignments={assignments}
                         rootsByLayer={rootsByLayer}
@@ -1938,6 +1955,7 @@ export function LayerStudio({
                         isResizing={isResizing}
                         className="min-h-0"
                     />
+                    </PlacementPathsContext.Provider>
 
                     {/* Center: Entity browser */}
                     <div className="min-h-0 flex flex-col">

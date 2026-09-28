@@ -26,7 +26,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
 import { useAppliedTheme } from '@/hooks/useAppliedTheme'
 import { useApplyLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
-import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
+import { ViewEditorContext, useViewEditorModal, type ViewEditorOpenOptions } from './viewEditorContext'
 import { NotificationStack } from '@/components/ui/notifications'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
 import { useFeature } from '@/store/features'
@@ -57,9 +57,9 @@ export function AppLayout() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [viewEditorOpen, setViewEditorOpen] = useState(false)
   const [editingViewId, setEditingViewId] = useState<string | undefined>()
-  const [initialScope, setInitialScope] = useState<{ workspaceId?: string; dataSourceId?: string }>({})
+  const [initialScope, setInitialScope] = useState<ViewEditorOpenOptions>({})
 
-  const openViewEditor = (viewId?: string, options?: { workspaceId?: string; dataSourceId?: string }) => {
+  const openViewEditor = (viewId?: string, options?: ViewEditorOpenOptions) => {
     setEditingViewId(viewId)
     setInitialScope(options ?? {})
     setViewEditorOpen(true)
@@ -179,6 +179,9 @@ export function AppLayout() {
           onComplete={() => closeViewEditor()}
           initialWorkspaceId={initialScope.workspaceId}
           initialDataSourceId={initialScope.dataSourceId}
+          journey={initialScope.journey}
+          importFile={initialScope.importFile}
+          importIntoViewId={initialScope.importIntoViewId}
         />
 
         <HelpPanel />

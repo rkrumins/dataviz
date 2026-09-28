@@ -194,6 +194,22 @@ async def test_timeout_before_response_started_emits_504():
     assert "timed out" in body_text.lower()
 
 
+async def test_a_timeout_before_the_response_names_its_path_in_the_log(caplog):
+    """The most common 504 on view open left no line on the server at all,
+    so nothing said which request the tier had cut short."""
+    path = "/api/v1/ws/graph/edges/between"
+    mw = _TimeoutMiddleware(_slow_before_start_app(delay=2.0))
+    with caplog.at_level("WARNING", logger="backend.app.main"):
+        await mw(_http_scope(path), _Receiver(), _Sink())
+
+    lines = [
+        r.getMessage() for r in caplog.records
+        if r.levelname == "WARNING" and "timed out before a response" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    assert "GET" in lines[0] and path in lines[0]
+
+
 async def test_timeout_after_response_started_emits_closing_chunk():
     """T-2 (stream-corruption case): the bug we are actually fixing.
 
@@ -302,6 +318,33 @@ async def test_sse_path_bypasses_timeout():
 
     assert completed.is_set(), "SSE stream was cut off by the timeout middleware"
     assert sink.terminal_chunks == 1
+
+
+async def test_streamed_export_bypasses_timeout():
+    """A streamed export, or a stored export's download, runs as long as the file takes: a
+    deadline would cut it short, and the clean closing chunk would make the truncated file look
+    complete."""
+
+    async def slow_download(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await asyncio.sleep(0.5)  # > 0.2s default timeout
+        await send({"type": "http.response.body", "body": b"rows\n", "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    mw = _TimeoutMiddleware(slow_download)
+    sink = _Sink()
+    await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/exports/stream"), _Receiver(), sink)
+    assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    await mw(_http_scope("/api/v1/ws_1/graph/export/stream"), _Receiver(), sink := _Sink())
+    assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1/download"), _Receiver(), sink := _Sink())
+    assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    # Only those routes: the export job's status is an ordinary request.
+    assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/stream/extra")
+    assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1")
 
 
 async def test_non_http_scope_passes_through():

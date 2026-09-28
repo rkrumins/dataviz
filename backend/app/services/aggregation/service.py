@@ -4300,6 +4300,7 @@ async def assemble_fleet_freshness(
     stale_only: bool = False,
     page: int = 1,
     page_size: int = 50,
+    data_source_id: Optional[str] = None,
 ) -> FreshnessFleetResponse:
     """Fleet freshness: ONE SQL pass (workspace_data_sources ⋈ providers,
     filtered + paged) then ONE Redis pipeline for the cache signals, plus
@@ -4340,6 +4341,9 @@ async def assemble_fleet_freshness(
         base = base.where(WorkspaceDataSourceORM.workspace_id == workspace_id)
     if provider_id:
         base = base.where(WorkspaceDataSourceORM.provider_id == provider_id)
+    # One source's row (the view header's sync chip): same row, none of the fleet summary.
+    if data_source_id:
+        base = base.where(WorkspaceDataSourceORM.id == data_source_id)
     if stale_ids is not None:
         base = base.where(WorkspaceDataSourceORM.id.in_(stale_ids))
 
@@ -4413,6 +4417,8 @@ async def assemble_fleet_freshness(
         ))
         for ds in ds_list
     ]
+    if data_source_id:
+        return FreshnessFleetResponse(rows=rows, total=total)
     summary, provider_summaries = await _assemble_fleet_summary(
         session,
         workspace_id=workspace_id,

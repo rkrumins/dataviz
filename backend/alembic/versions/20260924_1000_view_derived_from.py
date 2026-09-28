@@ -24,7 +24,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "20260924_1000_view_derived_from"
-down_revision: Union[str, None] = "20260920_1200_view_entity_scope"
+down_revision: Union[str, None] = "20260928_1000_jobs_publish"
 branch_labels = None
 depends_on = None
 

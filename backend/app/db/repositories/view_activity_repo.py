@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import ViewActivityLogORM, ViewORM
+from backend.app.db.models import ViewActivityLogORM, ViewORM, view_is_live
 from backend.app.db.repositories import outbox_event_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 
@@ -38,6 +38,9 @@ ACTIONS = frozenset({
     # Break-glass transparency: an admin opened a private view they
     # neither created nor were shared on.
     "admin_viewed",
+    # Moving a view between environments, and the history of its design.
+    # An export is recorded because it is the door a view's contents leave by.
+    "imported", "exported", "version_saved", "version_restored",
 })
 
 
@@ -213,7 +216,7 @@ async def get_recent_activity(
     query = (
         select(ViewActivityLogORM, ViewORM)
         .join(ViewORM, ViewORM.id == ViewActivityLogORM.view_id)
-        .where(ViewORM.deleted_at.is_(None))
+        .where(view_is_live())
         .order_by(ViewActivityLogORM.created_at.desc())
         .limit(limit)
     )

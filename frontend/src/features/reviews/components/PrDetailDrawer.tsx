@@ -13,7 +13,7 @@ import { motion } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
   GitPullRequestArrow, Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
-  Undo2, ShieldAlert,
+  Undo2, ShieldAlert, LayoutTemplate,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -25,7 +25,9 @@ import {
 import {
   useMergeRequest, usePullRequestDiff, usePullLatestDraft, useCommitLog,
   useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
+  useBranchViewChanges,
 } from '../../versioning/hooks/useVersioning'
+import { DraftViewChanges } from '../../versioning/components/DraftViewChanges'
 import { fromPrDiff } from '../../versioning/model/changeAdapters'
 import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
 import { CommitRow } from '../../versioning/components/CommitRow'
@@ -83,6 +85,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const isDraftPr = !!pr && isDraftMr(pr)
   const commitsQ = useCommitLog(wsId, isDraftPr ? pr!.graphId : null, pr?.sourceBranchId ?? null)
   const commits = (commitsQ.data?.commits ?? []) as Array<Record<string, unknown>>
+  // Views the draft creates or changes go live when it merges: reviewers see them beside the data.
+  const viewChangesQ = useBranchViewChanges(wsId, isDraftPr ? pr!.graphId : null, pr?.sourceBranchId ?? null)
+  const viewChanges = viewChangesQ.data
+  const viewChangeCount = (viewChanges?.views.length ?? 0) + (viewChanges?.hidden ?? 0)
   const [expandedCommit, setExpandedCommit] = useState<string | null>(null)
   const toggleCommit = (id: string) => setExpandedCommit((p) => (p === id ? null : id))
 
@@ -407,6 +413,13 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                 <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2.5 text-[12px] text-amber-700 dark:text-amber-400">
                   The target has moved — this PR has conflicts. Resolve them when you merge.
                 </div>
+              )}
+
+              {viewChanges && viewChangeCount > 0 && pr.sourceBranchId && (
+                <Section icon={LayoutTemplate} title={`Views (${viewChangeCount})`}
+                  right={<span className="text-[10px] normal-case font-normal">go live when this merges</span>}>
+                  <DraftViewChanges changes={viewChanges} branchId={pr.sourceBranchId} onNavigate={onClose} />
+                </Section>
               )}
 
               <Section icon={FileDiff} title="Files changed" right={changeSet ? <ChangeCountChips changeSet={changeSet} /> : undefined}>

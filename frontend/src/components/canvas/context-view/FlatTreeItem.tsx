@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import type { PlacedOut, PlacementInfo } from './placement'
+import { PlacedTag } from '@/components/ui/PlacedTag'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
@@ -15,7 +16,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
-import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { formatUnitCount, unitMeaning } from './connections/connectionUnits'
 import { portView, type NodePorts } from './lineagePorts'
 import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
@@ -93,9 +94,16 @@ interface FlatTreeItemProps {
   portStrengthLeft?: number
   portStrengthRight?: number
   /** Lineage in/out over the WHOLE graph (`/nodes/degree`); undefined = not
-   *  known. Shows a hollow port for lineage with nothing on this canvas. */
+   *  known. Shows a solid port for lineage no line on this canvas shows. */
   lineageTotals?: { in: number; out: number }
-  /** Out-of-view lineage cue (curated views) — sky dashed marks. */
+  /** Counting `lineageTotals` failed and is being retried: with nothing
+   *  else to say it has lineage, the card's ports say it is unknown. */
+  lineageUnknown?: boolean
+  /** Flows the canvas placed OUTSIDE this view, by direction: a hollow port
+   *  while none of that direction is in it. */
+  lineageOutside?: { in: number; out: number }
+  /** Out-of-view lineage cue (curated views) — dashed marks in the
+   *  lineage direction colours. */
   externalIn?: number
   externalOut?: number
 }
@@ -151,6 +159,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   portStrengthLeft = 0,
   portStrengthRight = 0,
   lineageTotals,
+  lineageUnknown = false,
+  lineageOutside,
   externalIn = 0,
   externalOut = 0,
 }: FlatTreeItemProps) {
@@ -281,8 +291,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
   const personaMode = usePersonaMode()
   const displayName = resolveEntityName(node.data, personaMode, node.name)
-  const leftPort = portView('left', ports, lineageTotals)
-  const rightPort = portView('right', ports, lineageTotals)
+  const leftPort = portView('left', ports, lineageTotals, lineageUnknown, lineageOutside)
+  const rightPort = portView('right', ports, lineageTotals, lineageUnknown, lineageOutside)
   const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
@@ -340,6 +350,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       e.dataTransfer.effectAllowed = 'move'
       if (isGroupDraggable) {
         e.dataTransfer.setData('text/x-group-id', node.id.replace(/^logical:/, ''))
+        e.dataTransfer.setData('text/x-group-layer', groupActions!.layerId)
       } else {
         e.dataTransfer.setData('text/x-entity-id', node.id)
         e.dataTransfer.setData('text/x-entity-name', node.name)
@@ -423,7 +434,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           e.stopPropagation()
           setDropHover(false)
           const target = node.id.replace(/^logical:/, '')
-          if (draggedGroup !== target) groupActions.move(draggedGroup, target)
+          const from = e.dataTransfer.getData('text/x-group-layer') || groupActions.layerId
+          if (draggedGroup !== target) groupActions.receive(draggedGroup, from, target)
           return
         }
         const draggedId = e.dataTransfer.getData('text/x-entity-id')
@@ -464,10 +476,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         "hover:bg-gradient-to-r hover:to-transparent",
         "hover:from-accent-lineage/[0.07] dark:hover:from-accent-lineage/[0.13]",
         // Selected state with accent glow
-        isSelected && !isBulkSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        isSelected && !isBulkSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgb(var(--nx-accent-lineage-rgb)_/_0.3)]",
         // One of several: the row has to be findable while scanning a column,
         // so the ring is a full 2px in the accent rather than a 30% hairline.
-        isBulkSelected && "bg-gradient-to-r from-accent-lineage/25 via-accent-lineage/[0.12] to-transparent shadow-[inset_0_0_0_2px_rgba(var(--accent-lineage-rgb),0.7)]",
+        isBulkSelected && "bg-gradient-to-r from-accent-lineage/25 via-accent-lineage/[0.12] to-transparent shadow-[inset_0_0_0_2px_rgb(var(--nx-accent-lineage-rgb)_/_0.7)]",
         // Search result highlight — direct match (advanced search or quick search)
         isSearchResult && !isSelected && cn(
             "bg-gradient-to-r from-amber-500/15 to-transparent",
@@ -560,9 +572,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             dropIndicator === 'before' ? '-top-[3px]' : '-bottom-[3px]',
           )}
         >
-          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgba(var(--accent-lineage-rgb),0.9)] flex-shrink-0" />
-          <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgba(var(--accent-lineage-rgb),0.7)]" />
-          <span className="flex items-center gap-0.5 rounded-full bg-accent-lineage pl-1 pr-1.5 py-0.5 text-[9px] font-semibold text-white shadow-[0_1px_6px_rgba(var(--accent-lineage-rgb),0.6)] max-w-[150px] flex-shrink-0">
+          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgb(var(--nx-accent-lineage-rgb)_/_0.9)] flex-shrink-0" />
+          <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgb(var(--nx-accent-lineage-rgb)_/_0.7)]" />
+          <span className="flex items-center gap-0.5 rounded-full bg-accent-lineage pl-1 pr-1.5 py-0.5 text-[9px] font-semibold text-white shadow-[0_1px_6px_rgb(var(--nx-accent-lineage-rgb)_/_0.6)] max-w-[150px] flex-shrink-0">
             {dropIndicator === 'before'
               ? <LucideIcons.ArrowUpToLine className="w-2.5 h-2.5 flex-shrink-0" />
               : <LucideIcons.ArrowDownToLine className="w-2.5 h-2.5 flex-shrink-0" />}
@@ -957,7 +969,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // Selection speaks in the accent, not in the entity's type colour:
           // a rail tinted per type reads as decoration, and a column of them
           // cannot be scanned for "what did I pick?".
-          style={{ backgroundColor: isSelected ? 'rgb(var(--accent-lineage-rgb))' : nodeColor }}
+          style={{ backgroundColor: isSelected ? 'rgb(var(--nx-accent-lineage-rgb))' : nodeColor }}
           initial={false}
           animate={{
             width: isBulkSelected ? 4 : 3,
@@ -973,32 +985,34 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           lines, the card's height, in the lineage direction colours —
           incoming, outgoing, or split when a side carries both
           (lineagePorts.ts). Solid: lines to entities on this canvas, glowing
-          brighter the more they carry. Hollow: lineage in the data, none of
-          it on this canvas. No rail: no lineage that way. ── */}
+          brighter the more they carry — or, on the conventional side,
+          lineage no line shows yet. Hollow: lineage the canvas placed
+          outside this view. Grey: its lineage could not be counted. No
+          rail: no lineage that way. ── */}
       {leftPort && (
         <LineagePortGlyph
           side="left" view={leftPort} strength={portStrengthLeft}
-          counts={leftPort.kind === 'here' ? ports?.left : lineageTotals}
+          counts={leftPort.kind === 'here' ? ports?.left : lineageOutside}
         />
       )}
       {rightPort && (
         <LineagePortGlyph
           side="right" view={rightPort} strength={portStrengthRight}
-          counts={rightPort.kind === 'here' ? ports?.right : lineageTotals}
+          counts={rightPort.kind === 'here' ? ports?.right : lineageOutside}
         />
       )}
       {externalIn > 0 && (
         <div
           className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
-          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
+          style={{ borderColor: 'rgb(var(--nx-lineage-in-rgb))', opacity: 0.55 }}
+          title={`${formatUnitCount(externalIn, 'flows')} ${externalIn === 1 ? 'arrives' : 'arrive'} from entities outside this view — ${unitMeaning('flows')}`}
         />
       )}
       {externalOut > 0 && (
         <div
           className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
-          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
+          style={{ borderColor: 'rgb(var(--nx-lineage-out-rgb))', opacity: 0.55 }}
+          title={`${formatUnitCount(externalOut, 'flows')} ${externalOut === 1 ? 'leads' : 'lead'} to entities outside this view — ${unitMeaning('flows')}`}
         />
       )}
     </div>
@@ -1037,10 +1051,7 @@ function PlacementPath({ placement, entityName, onReveal, onReturn }: {
         aria-label={explain}
         className="flex items-center gap-1.5 min-w-0 text-left rounded-md -mx-0.5 px-0.5 hover:bg-violet-500/[0.06] focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors"
       >
-        <span className="inline-flex items-center gap-1 flex-shrink-0 px-1.5 py-px rounded-md border border-violet-400/30 bg-violet-500/10 text-violet-600 dark:text-violet-300 text-[9.5px] font-semibold tracking-wide">
-          <LucideIcons.LayoutGrid className="w-2.5 h-2.5" aria-hidden />
-          Placed
-        </span>
+        <PlacedTag />
         <span className="text-[10.5px] text-ink-muted truncate">
           Part of <span className="text-ink font-medium">{lead}{shown.join(' › ')}</span>
           <span className="text-ink-muted/70"> · in {placement.parentLayerName}</span>
@@ -1063,16 +1074,27 @@ function PlacementPath({ placement, entityName, onReveal, onReturn }: {
 
 /** What a group row can do — bound to its layer by the column. */
 export interface GroupActions {
+  layerId: string
   layerName: string
   /** Every group in the layer, with its path — the targets the pickers offer. */
   groups: Array<{ id: string; name: string; path: string }>
+  /** Is `name` already used by a group directly inside `parentId` (null = the layer's top level),
+   *  other than `exceptId`? Two groups side by side can't share a name. */
+  nameTaken: (name: string, parentId: string | null, exceptId?: string) => boolean
+  /** The group a group sits in (null = the layer's top level). */
+  parentOf: (groupId: string) => string | null
   /** A group's own subtree (it can't move into any of these). */
   subtreeOf: (groupId: string) => string[]
   create: (name: string, parentGroupId?: string) => void
   rename: (groupId: string, name: string) => void
   remove: (groupId: string, name: string) => void
   place: (entityId: string, groupId: string, groupName: string) => void
-  move: (groupId: string, newParentId: string | null) => void
+  /** Move one of THIS layer's groups — within it, or to another layer (`toLayerId`). */
+  move: (groupId: string, newParentId: string | null, toLayerId?: string) => void
+  /** Take a group dropped here from any layer: to the top of this layer, or into one of its groups. */
+  receive: (groupId: string, fromLayerId: string, newParentId: string | null) => void
+  /** The other layers a group can move to, with their groups. */
+  otherLayers: Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
   moveContents: (fromId: string, toId: string) => void
   ungroup: (groupId: string, name: string) => void
 }
@@ -1086,7 +1108,12 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
   const [mode, setMode] = useState<'idle' | 'rename' | 'inside' | 'confirm' | 'move' | 'contents'>('idle')
   const [draft, setDraft] = useState('')
   const stop = (e: React.SyntheticEvent) => e.stopPropagation()
-  const commit = () => {
+  // A name already used beside it is refused by the operation itself; say so while typing.
+  const taken = draft.trim() !== '' && (mode === 'inside'
+    ? actions.nameTaken(draft, groupId)
+    : mode === 'rename' && actions.nameTaken(draft, actions.parentOf(groupId), groupId))
+  const commit = (fromBlur = false) => {
+    if (taken) { if (fromBlur) setMode('idle'); return }
     if (mode === 'rename') actions.rename(groupId, draft)
     if (mode === 'inside' && draft.trim()) actions.create(draft, groupId)
     setMode('idle')
@@ -1094,23 +1121,34 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
   const iconBtn = 'p-0.5 rounded-md text-violet-500/70 hover:text-violet-600 hover:bg-violet-500/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-violet-400 transition-colors'
   if (mode === 'rename' || mode === 'inside') {
     return (
-      <input
-        autoFocus
-        value={draft}
-        placeholder={mode === 'inside' ? `Group inside ${name}` : 'Group name'}
-        aria-label={mode === 'inside' ? `Name a new group inside ${name}` : `Rename group ${name}`}
-        onChange={(e) => setDraft(e.target.value)}
-        onClick={stop}
-        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commit(); if (e.key === 'Escape') setMode('idle') }}
-        onBlur={commit}
-        className="mt-1 w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none placeholder:text-ink-muted"
-      />
+      <span className="mt-1 flex flex-col gap-0.5" onClick={stop}>
+        <input
+          autoFocus
+          value={draft}
+          placeholder={mode === 'inside' ? `Group inside ${name}` : 'Group name'}
+          aria-label={mode === 'inside' ? `Name a new group inside ${name}` : `Rename group ${name}`}
+          aria-invalid={taken || undefined}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') commit(); if (e.key === 'Escape') setMode('idle') }}
+          onBlur={() => commit(true)}
+          className={cn(
+            'w-full px-2 py-0.5 rounded-md bg-canvas-overlay border text-[11.5px] text-ink outline-none placeholder:text-ink-muted',
+            taken ? 'border-red-400' : 'border-violet-400/60',
+          )}
+        />
+        {taken && (
+          <span role="alert" className="text-[10.5px] text-red-500">
+            There's already a group called “{draft.trim()}” {mode === 'inside' ? `in ${name}` : 'beside it'}.
+          </span>
+        )}
+      </span>
     )
   }
   if (mode === 'move' || mode === 'contents') {
     const own = new Set(actions.subtreeOf(groupId))
     const targets = actions.groups.filter((g) => (mode === 'move' ? !own.has(g.id) : g.id !== groupId && !own.has(g.id)))
-    const TOP = '__top__'
+    // A choice is where the group goes: a layer, and a group in it (none = the layer's top level).
+    const dest = (layerId: string, parent: string | null) => JSON.stringify([layerId, parent])
     return (
       <select
         autoFocus
@@ -1121,15 +1159,29 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
         onBlur={() => setMode('idle')}
         onChange={(e) => {
           const v = e.target.value
-          if (mode === 'move') actions.move(groupId, v === TOP ? null : v)
-          else if (v) actions.moveContents(groupId, v)
+          if (mode === 'move' && v) {
+            const [layerId, parent] = JSON.parse(v) as [string, string | null]
+            actions.move(groupId, parent, layerId)
+          } else if (v) actions.moveContents(groupId, v)
           setMode('idle')
         }}
         className="mt-1 w-full px-2 py-0.5 rounded-md bg-canvas-overlay border border-violet-400/60 text-[11.5px] text-ink outline-none"
       >
         <option value="" disabled>{mode === 'move' ? `Move “${name}” into…` : `Move everything in “${name}” into…`}</option>
-        {mode === 'move' && <option value={TOP}>Top level of {actions.layerName}</option>}
-        {targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
+        {mode === 'move' ? (
+          <>
+            <optgroup label={`In ${actions.layerName}`}>
+              <option value={dest(actions.layerId, null)}>Top level of {actions.layerName}</option>
+              {targets.map((g) => <option key={g.id} value={dest(actions.layerId, g.id)}>{g.path}</option>)}
+            </optgroup>
+            {actions.otherLayers.map((l) => (
+              <optgroup key={l.layerId} label={`To ${l.layerName}`}>
+                <option value={dest(l.layerId, null)}>Top level of {l.layerName}</option>
+                {l.groups.map((g) => <option key={g.id} value={dest(l.layerId, g.id)}>{l.layerName} › {g.path}</option>)}
+              </optgroup>
+            ))}
+          </>
+        ) : targets.map((g) => <option key={g.id} value={g.id}>{g.path}</option>)}
       </select>
     )
   }
@@ -1154,7 +1206,7 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
         onClick={(e) => { stop(e); setDraft(name); setMode('rename') }}>
         <LucideIcons.Pencil className="w-3 h-3" aria-hidden />
       </button>
-      <button type="button" className={iconBtn} title={`Move group ${name} into another group`} aria-label={`Move group ${name}`}
+      <button type="button" className={iconBtn} title={`Move group ${name} into another group or layer`} aria-label={`Move group ${name}`}
         onClick={(e) => { stop(e); setMode('move') }}>
         <LucideIcons.FolderInput className="w-3 h-3" aria-hidden />
       </button>

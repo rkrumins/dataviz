@@ -23,6 +23,10 @@ vi.mock('../../hooks/useVersioning', () => ({
   useRebuildProjection: () => ({ mutate: rebuildMutate, isPending: false }),
 }))
 
+// The header chip's sync reading (lineage-summaries automation). Undefined by default: no row.
+let syncDoc: unknown
+vi.mock('@/features/sync-status/useSyncStatus', () => ({ useSyncStatus: () => ({ data: syncDoc }) }))
+
 import { DataHealthTab } from '../DataHealthTab'
 
 const baseReport = (over: Partial<DriftReport> = {}): DriftReport => ({
@@ -36,6 +40,7 @@ const baseReport = (over: Partial<DriftReport> = {}): DriftReport => ({
 const renderTab = () => render(<DataHealthTab wsId="ws1" graphId="g1" />)
 
 beforeEach(() => {
+  syncDoc = undefined
   notify.mockReset()
   reconcileMutate.mockReset()
   rebuildMutate.mockReset()
@@ -50,11 +55,27 @@ beforeEach(() => {
 })
 
 describe('DataHealthTab', () => {
-  it('shows the in-sync hero and both version numbers for a fresh watermark', () => {
+  it('shows the in-sync hero, saved in the system of record and in sync in the graph', () => {
     watermark = { committed: 12, projected: 12, fresh: true, status: 'idle' }
     renderTab()
     expect(screen.getByText('Everything is in sync')).toBeInTheDocument()
-    expect(screen.getAllByText('#12')).toHaveLength(2)
+    expect(screen.getByText('Saved · published version #12')).toBeInTheDocument()
+    expect(screen.getByText('In sync · version #12')).toBeInTheDocument()
+  })
+
+  it('says how far the graph is behind the system of record, and when it is catching up or failed', () => {
+    watermark = { committed: 15, projected: 12, fresh: false, status: 'idle' }
+    const { unmount } = renderTab()
+    expect(screen.getByText('Saved · published version #15')).toBeInTheDocument()
+    expect(screen.getByText('3 versions behind')).toBeInTheDocument()
+    unmount()
+    watermark = { committed: 13, projected: 12, fresh: false, status: 'projecting' }
+    const second = renderTab()
+    expect(screen.getByText('Catching up · 1 version behind')).toBeInTheDocument()
+    second.unmount()
+    watermark = { committed: 13, projected: 12, fresh: false, status: 'idle', lastError: 'boom' }
+    renderTab()
+    expect(screen.getByText('Out of sync · 1 version behind')).toBeInTheDocument()
   })
 
   it('surfaces a recorded failure as "Attention needed" with the reason behind a disclosure', () => {
@@ -175,6 +196,21 @@ describe('DataHealthTab', () => {
     expect(screen.getByText(/lineage summaries between containers need rebuilding/)).toBeInTheDocument()
     fireEvent.click(screen.getAllByRole('button', { name: 'Rebuild fast read layer' })[0])
     expect(screen.getByRole('heading', { name: 'Rebuild fast read layer' })).toBeInTheDocument()
+  })
+
+  it('says the summaries are being rebuilt automatically — and offers nothing to press — when a rebuild is queued', () => {
+    syncDoc = {
+      kind: 'versioned', dataSourceId: 'ds', checkedAt: '',
+      versioned: { graphId: 'g1', committed: 12, projected: 12, fresh: true, status: 'idle' },
+      summaries: { aggregationStatus: 'ready', driftState: 'managed', jobId: 'agg_1', jobStatus: 'pending' },
+    }
+    reconcileResolve = { ok: true, report: baseReport({
+      rollups: { status: 'untrusted', aggregated: 2692, stubs: 0 } }) }
+    renderTab()
+    expect(screen.getByText('Queued · starts shortly')).toBeInTheDocument()          // the hero's third row
+    fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
+    expect(screen.getByText(/being brought up to date automatically/)).toBeInTheDocument()
+    expect(screen.queryByText(/need rebuilding/)).toBeNull()
   })
 
   it('stays quiet about healthy summaries', () => {

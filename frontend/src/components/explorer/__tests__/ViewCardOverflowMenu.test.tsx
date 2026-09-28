@@ -10,15 +10,19 @@
  * confirmation names the new audience, the settled value is handed back
  * to whoever owns the list, and the one tier that cannot be set from a
  * menu routes to the dialog that explains it instead of firing a 403.
+ *
+ * Also: Versions, Export and Update from file are a preview behind one admin switch.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const notify = vi.fn()
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/services/viewApiService', () => ({ updateViewVisibility: vi.fn() }))
 vi.mock('@/components/views/ViewActivityDrawer', () => ({ ViewActivityDrawer: () => null }))
 vi.mock('@/store/branding', () => ({ useBrand: () => ({ appName: 'TestBrand' }) }))
+vi.mock('@/features/view-versions/ViewVersionsDrawer', () => ({ ViewVersionsDrawer: () => null }))
+vi.mock('@/features/view-transfer/ExportViewDialog', () => ({ ExportViewDialog: () => null }))
 
 const gate = {
     canPublish: true,
@@ -30,6 +34,8 @@ const gate = {
 vi.mock('@/hooks/usePublishGate', () => ({ usePublishGate: () => gate }))
 
 import { updateViewVisibility } from '@/services/viewApiService'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
+import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { ViewCardOverflowMenu } from '../ViewCardOverflowMenu'
 
 const mockSetVisibility = vi.mocked(updateViewVisibility)
@@ -130,5 +136,40 @@ describe('when the deployment has withdrawn the tier', () => {
         })
         renderMenu()
         expect(screen.queryByText('Enterprise')).toBeNull()
+    })
+})
+
+describe('versions, export and import: a preview behind one admin switch', () => {
+    function openMenu() {
+        const openViewEditor = vi.fn()
+        render(
+            <ViewEditorContext.Provider value={{ openViewEditor, closeViewEditor: vi.fn() }}>
+                <ViewCardOverflowMenu
+                    viewId="view_1" viewName="Quarterly lineage" visibility="private" workspaceId="ws_1"
+                    onDelete={vi.fn()} onShare={vi.fn()} onEditLayout={vi.fn()}
+                />
+            </ViewEditorContext.Provider>,
+        )
+        fireEvent.click(screen.getByRole('button'))
+    }
+    const set = (values: Record<string, unknown>) =>
+        useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, ...values } })
+    afterEach(() => set({}))
+
+    it('offers none of them while the preview is off, whatever the direction switches say', () => {
+        set({ viewPortabilityEnabled: false, viewExportEnabled: true, viewImportEnabled: true })
+        openMenu()
+        expect(screen.getByText('Activity')).toBeTruthy()
+        expect(screen.queryByText('Versions')).toBeNull()
+        expect(screen.queryByText('Export…')).toBeNull()
+        expect(screen.queryByText('Update from file…')).toBeNull()
+    })
+
+    it('offers them with the preview on, each direction following its own switch', () => {
+        set({ viewPortabilityEnabled: true, viewExportEnabled: false, viewImportEnabled: true })
+        openMenu()
+        expect(screen.getByText('Versions')).toBeTruthy()
+        expect(screen.queryByText('Export…')).toBeNull()
+        expect(screen.getByText('Update from file…')).toBeTruthy()
     })
 })

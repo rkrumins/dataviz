@@ -110,6 +110,14 @@ export interface GraphEdge {
     version?: string
 }
 
+/** The relationships beneath a roll-up (`getEdgesBeneath`). */
+export interface EdgesBeneath {
+    edges: GraphEdge[]
+    total: number
+    /** A bound was hit: these are not all of them. */
+    truncated: boolean
+}
+
 // ============================================
 // Introspection Types
 // ============================================
@@ -263,6 +271,9 @@ export interface AggregatedEdgeRequest {
     includeEdgeTypes?: string[]
     lineageEdgeTypes?: string[]
     containmentEdgeTypes?: string[]
+    /** Asked with one side open: leave out every cell one of whose ends
+     *  holds the other — the named entity summarised against itself. */
+    excludeInternal?: boolean
 }
 
 /** One canvas open, asked for in one request. See `canvasBootstrap`. */
@@ -323,6 +334,14 @@ export interface AggregatedEdgeResult {
      * nothing was lost — narrowing that completed is a complete answer.
      */
     degradedDetail?: AggregatedDegradedDetail | null
+    /**
+     * Why a truncated answer is short: null for a cap, which the same read
+     * cuts the same way ("truncated", "max_nodes" say so too); the kind of
+     * loss for a read that gave up and may do better next time
+     * ("queue_full", "pool_full", "timeout", "query_memory", "failed").
+     * Absent from a server that predates it.
+     */
+    truncationReason?: string | null
 }
 
 export interface AggregatedDegradedDetail {
@@ -457,6 +476,21 @@ export interface NodeQuery {
 /** One page of a node query. `nextOffset` is where the next page starts, in the
  *  PROVIDER's order — a draft overlay adds and drops rows around the page it
  *  read, so counting the rows returned would skip or repeat rows. */
+/**
+ * One entity's lineage total (`getNodeDegrees`). `in`/`out` count its own
+ * flows. `rollupIn`/`rollupOut`, when asked for, say whether it holds a
+ * roll-up cell in that direction (1) or not (0): presence, not a count, so a
+ * collapsed container can say it has lineage below it. The server leaves
+ * them out when its roll-up check failed; useExternalDegrees reads such an
+ * answer as partial and asks again.
+ */
+export interface NodeDegree {
+    in: number
+    out: number
+    rollupIn?: number
+    rollupOut?: number
+}
+
 export interface NodePage {
     nodes: GraphNode[]
     hasMore: boolean
@@ -873,10 +907,13 @@ export interface GraphDataProvider {
     /**
      * TOTAL lineage degree (in/out) per URN over the full graph —
      * optional capability. Absent URNs in the result are UNKNOWN, never
-     * zero. The canvas derives "lineage outside this view" as
-     * total − internal(loaded).
+     * zero. The canvas reads whether an entity has lineage from it.
+     * `includeRollups` asks, besides, whether each holds roll-up cells
+     * (see NodeDegree).
      */
-    getNodeDegrees?(urns: URN[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>>
+    getNodeDegrees?(
+        urns: URN[], edgeTypes?: string[], options?: { includeRollups?: boolean },
+    ): Promise<Record<string, NodeDegree>>
 
     /**
      * Containment chains for many URNs — optional capability. Each chain is
@@ -905,6 +942,13 @@ export interface GraphDataProvider {
      * Server-side filtered — only returns internal edges between loaded nodes.
      */
     getEdgesBetween(urns: URN[], edgeTypes?: string[], limit?: number): Promise<GraphEdge[]>
+
+    /**
+     * The real (not rolled-up) lineage relationships a roll-up between two entities stands for:
+     * from the source or anything it contains to the target or anything it contains. Bounded —
+     * `truncated` says a bound was hit.
+     */
+    getEdgesBeneath?(sourceUrn: URN, targetUrn: URN): Promise<EdgesBeneath>
 
     // ==========================================
     // Containment Hierarchy (CONTAINS relationships)

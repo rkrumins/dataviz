@@ -1,6 +1,8 @@
 import asyncio
+import gc
 import logging
 import os
+import re
 import socket
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -9,6 +11,7 @@ from fastapi import FastAPI
 from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
@@ -1623,6 +1626,16 @@ async def lifespan(_app: FastAPI):
             name="idp-health",
         )
 
+    # Everything startup built lives as long as the process: take it out of
+    # the garbage collector's reach. A full collection otherwise walks this
+    # whole heap (~300k objects, 140-180ms on the event loop), and a request
+    # that allocates freely (a streamed export, a large graph read) set one
+    # off about once a second, stalling every other request on the worker.
+    # Frozen, the same collections take a few ms. Collect first, so nothing
+    # already garbage is kept.
+    gc.collect()
+    gc.freeze()
+
     # P1.10 — flip the readiness gate. From this point on, the
     # TimeoutMiddleware accepts non-liveness requests; before this, it
     # returns 503 + Retry-After: 5. Setting this AFTER all sync init
@@ -2357,6 +2370,21 @@ class _TrustedHostMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+def _route_candidates(path: str) -> list[str]:
+    """``path``, and ``path`` with its workspace segment collapsed. Workspace-scoped routes are
+    mounted under /api/v{1,2}/{ws_id}/..., so the literal prefixes the middlewares below match
+    on (``/api/v1/versioning/``, ``/api/v1/graph/``) can still find them."""
+    candidates = [path]
+    for api_prefix in ("/api/v1/", "/api/v2/"):
+        if path.startswith(api_prefix):
+            tail = path[len(api_prefix):]
+            sep = tail.find("/")
+            if sep > 0:
+                candidates.append(api_prefix.rstrip("/") + tail[sep:])
+            break
+    return candidates
+
+
 class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """Refuse a request body larger than the cap, before parsing it.
 
@@ -2380,10 +2408,18 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """
 
     #: Routes that legitimately take large payloads (bulk import, graph
-    #: save). Everything else gets the ordinary cap.
+    #: save, a view file or package and the designs checked and imported
+    #: from it). Everything else gets the ordinary cap; these routes still
+    #: hold a body to their own, smaller limits (a view file is 64 MB).
+    #: Matched with the workspace segment collapsed too, so the bulk
+    #: import at /api/v1/{ws_id}/versioning/graphs/{gid}/imports counts.
     _LARGE_BODY_PREFIXES = (
         "/api/v1/import",
         "/api/v1/versioning",
+        "/api/v1/views/transfer/inspect",
+        "/api/v1/views/transfer/reconcile",
+        "/api/v1/views/transfer/import",
+        "/api/v1/views/transfer/packages/inspect",
     )
 
     def __init__(self, app, *, default_bytes: int, large_bytes: int):
@@ -2393,7 +2429,9 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
 
     def _cap_for(self, path: str) -> int:
         if path.endswith("/graph/save") or any(
-            path.startswith(p) for p in self._LARGE_BODY_PREFIXES
+            candidate.startswith(p)
+            for candidate in _route_candidates(path)
+            for p in self._LARGE_BODY_PREFIXES
         ):
             return self._large
         return self._default
@@ -2478,6 +2516,18 @@ class _TimeoutMiddleware:
     # the contract is explicit registration, not endswith heuristics.
     _SSE_PATH_SUFFIXES: tuple[str, ...] = ("/events",)
     _SSE_EXACT_PATHS: frozenset[str] = frozenset()
+    # Downloads streamed while they are produced (a whole data source can be gigabytes), and a
+    # stored export's download (up to 50 GB, at the client's pace). A deadline would cut one
+    # short, and T-2 would end it cleanly, so a truncated file would look complete. They pace
+    # themselves: bounded per process, and each page is a short query or a read of the file.
+    _STREAM_PATHS: tuple[re.Pattern, ...] = (
+        re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/exports/stream$"),
+        re.compile(r"^/api/v1/[^/]+/graph/export/stream$"),
+        re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/exports/[^/]+/download$"),
+        # A search export's file, streamed from the object store: it holds nothing else while
+        # it streams (graph.search_export_download).
+        re.compile(r"^/api/v1/[^/]+/graph/search/exports/[^/]+/download$"),
+    )
 
     def __init__(self, app):
         self.app = app
@@ -2511,21 +2561,15 @@ class _TimeoutMiddleware:
             # Keep below nginx's proxy_read_timeout (180s) so the proxy
             # never wins the race against this tier.
             ("/api/v1/versioning/",   float(os.getenv("HTTP_TIMEOUT_VERSIONING_SECS", "120"))),
+            # Moving views between environments: checking every entity a large view places
+            # against the target graph legitimately outlasts the 30s default. Below nginx's
+            # proxy_read_timeout (180s) for the same reason as versioning.
+            ("/api/v1/views/transfer/", float(os.getenv("HTTP_TIMEOUT_VIEW_TRANSFER_SECS", "120"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 
     def _resolve_timeout(self, path: str) -> float:
-        # Workspace-scoped routes are mounted under
-        # /api/v{1,2}/{ws_id}/graph/... — collapse the dynamic segment
-        # so the literal-prefix tiers above can still match.
-        candidates = [path]
-        for api_prefix in ("/api/v1/", "/api/v2/"):
-            if path.startswith(api_prefix):
-                tail = path[len(api_prefix):]
-                sep = tail.find("/")
-                if sep > 0:
-                    candidates.append(api_prefix.rstrip("/") + tail[sep:])
-                break
+        candidates = _route_candidates(path)
         for pattern, timeout in self._tiers:
             for candidate in candidates:
                 if candidate.startswith(pattern):
@@ -2538,7 +2582,7 @@ class _TimeoutMiddleware:
         for suffix in self._SSE_PATH_SUFFIXES:
             if path.endswith(suffix):
                 return True
-        return False
+        return any(p.match(path) for p in self._STREAM_PATHS)
 
     # P1.10 — paths that are ALWAYS allowed through, even when the app
     # has not flipped its readiness gate. Liveness probes must answer
@@ -2630,6 +2674,11 @@ class _TimeoutMiddleware:
                 # it as "this request was too slow, retry" — a per-request
                 # signal — rather than as evidence the graph provider is
                 # down (reachability is reported by the 503 handlers).
+                logger.warning(
+                    "Request timed out before a response: %s %s (tier=%.0fs); "
+                    "the handler was cancelled and nothing was served",
+                    scope.get("method", "-"), path, timeout,
+                )
                 response = JSONResponse(
                     {
                         "detail": {
@@ -2716,7 +2765,11 @@ app.add_middleware(
     # without it ``parseRetryAfterMs`` reads null on every cross-origin
     # answer and the client falls back to its own backoff — losing the
     # server's pacing hint on exactly the 429/503/504 that carry one.
-    expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After"],
+    #
+    # The view-file export (``/views/transfer/export``) names its download and proves its
+    # content in headers: the filename, and the hashes the Export dialog shows.
+    expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After", "Content-Disposition",
+                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was
@@ -2729,6 +2782,9 @@ app.add_middleware(
     GZipMiddleware,
     minimum_size=1024,
     compresslevel=int(os.getenv("GZIP_COMPRESSLEVEL", "1")),
+    # A stored export's file downloads as it is: compressing it would drop its size, and a
+    # compressed download can't be resumed where it stopped.
+    exclude_content_types=DEFAULT_EXCLUDED_CONTENT_TYPES + ("application/octet-stream",),
 )
 
 # Structured JSON access log + X-Process-Time header

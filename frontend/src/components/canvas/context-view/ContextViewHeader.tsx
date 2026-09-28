@@ -34,6 +34,7 @@ import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { BranchSwitcher } from '@/features/versioning/components/BranchSwitcher'
 import { HeaderSearch } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
+import type { ViewFileActions } from './header/ImportExportMenu'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
 import { EditorActions } from './header/EditorActions'
 import { SubsetHeaderActions, type SubsetModeProps } from '@/features/view-subset/components/SubsetHeaderActions'
@@ -127,6 +128,8 @@ export interface ContextViewHeaderProps {
   onImport?: () => void
   /** Exports the graph to a downloadable file. */
   onExport?: () => void
+  /** Moves this view between environments (the Import / Export menu's "This view"). */
+  thisView?: ViewFileActions
 
   // Undo / Redo
   canUndo?: boolean
@@ -191,6 +194,7 @@ export function ContextViewHeader({
   onOpenStagedChanges,
   onImport,
   onExport,
+  thisView,
   canUndo = false,
   canRedo = false,
   onUndo,
@@ -250,6 +254,7 @@ export function ContextViewHeader({
     onImport,
     onExport,
     isDraft,
+    thisView,
   }
 
   return (

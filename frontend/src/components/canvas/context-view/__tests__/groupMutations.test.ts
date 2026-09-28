@@ -82,3 +82,83 @@ describe('managing groups: nest, move contents, ungroup', () => {
     expect(reassignGroupMembers(layout, ['a'], 'b').assignments.x).toEqual({ layerId: 'L3', logicalNodeId: 'b' })
   })
 })
+
+import { moveGroupToLayer } from '../layerMutations'
+
+describe('moving a group to another layer', () => {
+  // L1: Outer › Inner, with x in Outer and y in Inner; z is in L1 but in no group.
+  const start = () => ({
+    layers: addGroup(addGroup(layers(), 'L1', g('outer', 'Outer')), 'L1', g('inner', 'Inner'), 'outer'),
+    assignments: {
+      x: { layerId: 'L1', logicalNodeId: 'outer', orderKey: 'a0' },
+      y: { layerId: 'L1', logicalNodeId: 'inner' },
+      z: { layerId: 'L1' },
+    },
+  }) as never as import('@/utils/referenceLayout').NormalizedReferenceLayout
+
+  it('moves a nested group to the top of another layer; its members follow, the rest stay', () => {
+    const out = moveGroupToLayer(start(), 'L1', 'inner', 'L3', null)
+    expect(listGroups(out.layers, 'L1').map((x) => x.path)).toEqual(['Outer'])
+    expect(listGroups(out.layers, 'L3').map((x) => x.path)).toEqual(['Inner'])
+    expect(out.assignments.y).toEqual({ layerId: 'L3', logicalNodeId: 'inner' })
+    expect(out.assignments.x).toEqual({ layerId: 'L1', logicalNodeId: 'outer', orderKey: 'a0' })
+    expect(out.assignments.z).toEqual({ layerId: 'L1' })
+  })
+
+  it('carries the whole subtree and every member in it, into a group in the other layer', () => {
+    let out = { ...start(), layers: addGroup(start().layers, 'L3', g('dest', 'Dest')) }
+    out = moveGroupToLayer(out, 'L1', 'outer', 'L3', 'dest')
+    expect(listGroups(out.layers, 'L1')).toEqual([])
+    expect(listGroups(out.layers, 'L3').map((x) => x.path)).toEqual(['Dest', 'Dest › Outer', 'Dest › Outer › Inner'])
+    expect(out.assignments.x).toEqual({ layerId: 'L3', logicalNodeId: 'outer' })   // old column's order dropped
+    expect(out.assignments.y).toEqual({ layerId: 'L3', logicalNodeId: 'inner' })
+  })
+
+  it('does nothing for an unknown group, layer or destination group', () => {
+    const s = start()
+    expect(moveGroupToLayer(s, 'L1', 'nope', 'L3', null)).toBe(s)
+    expect(moveGroupToLayer(s, 'L1', 'inner', 'nope', null)).toBe(s)
+    expect(moveGroupToLayer(s, 'L1', 'inner', 'L3', 'nope')).toBe(s)
+  })
+
+  it('within one layer it is a plain move (still refusing a move into itself)', () => {
+    const s = start()
+    expect(moveGroupToLayer(s, 'L1', 'outer', 'L1', 'inner')).toBe(s)
+    expect(listGroups(moveGroupToLayer(s, 'L1', 'inner', 'L1', null).layers, 'L1').map((x) => x.path)).toEqual(['Outer', 'Inner'])
+  })
+})
+
+import { groupNameClash } from '../layerMutations'
+
+describe('two groups side by side never share a name', () => {
+  // L3: A (› A1), B ; L1: B
+  const base = () => addGroup(addGroup(addGroup(addGroup(layers(), 'L3', g('a', 'A')), 'L3', g('a1', 'A1'), 'a'), 'L3', g('b', 'B')), 'L1', g('b1', 'B'))
+  const paths = (ls: ViewLayerConfig[], layer = 'L3') => listGroups(ls, layer).map((x) => x.path)
+
+  it('refuses to create or rename into a name taken beside it (case and spaces ignored)', () => {
+    const ls = base()
+    expect(addGroup(ls, 'L3', g('dup', ' b '))).toBe(ls)
+    expect(renameGroup(ls, 'L3', 'b', 'a')).toBe(ls)
+    expect(groupNameClash(ls, 'L3', null, ['A '])).toBe('A ')
+    // Under a different parent the same name is fine — its path tells it apart.
+    expect(paths(addGroup(ls, 'L3', g('b2', 'B'), 'a'))).toEqual(['A', 'A › A1', 'A › B', 'B'])
+    // Renaming a group to its own name (or its own name in another case) is not a clash.
+    expect(renameGroup(ls, 'L3', 'b', 'b')).not.toBe(ls)
+  })
+
+  it('refuses a move, across layers or within one, that would put two same-named groups together', () => {
+    const ls = base()
+    const layout = { layers: ls, assignments: {} } as never as import('@/utils/referenceLayout').NormalizedReferenceLayout
+    expect(moveGroupToLayer(layout, 'L1', 'b1', 'L3', null)).toBe(layout)       // L3 already has a B at the top
+    const withTwin = addGroup(ls, 'L3', g('a1x', 'A1'))
+    expect(moveGroup(withTwin, 'L3', 'a1x', 'a')).toBe(withTwin)              // A already holds an A1
+    expect(paths(withTwin)).toContain('A1')                                  // and nothing was lost
+  })
+
+  it('refuses an ungroup or a move-everything that would lift a group beside its namesake', () => {
+    const ls = addGroup(base(), 'L3', g('a1top', 'A1'))                      // top level: A, B, A1 ; A › A1
+    expect(ungroup(ls, 'L3', 'a')).toBe(ls)
+    const twin = addGroup(ls, 'L3', g('bb', 'A1'), 'b')
+    expect(moveGroupContents(twin, 'L3', 'a', 'b')).toBe(twin)
+  })
+})

@@ -29,7 +29,7 @@ import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDraw
 import {
     Eye, Search, Plus, Compass, LayoutGrid, List as ListIcon,
     Lock, Users, Globe, AlertTriangle, UserRound, Clock, X, History, ChevronDown,
-    Check, Loader2,
+    Check, Loader2, FileUp,
 } from 'lucide-react'
 import { WorkspaceActivityFeed } from '@/components/views/WorkspaceActivityFeed'
 import { cn } from '@/lib/utils'
@@ -59,6 +59,8 @@ import { useViewUsage } from '@/hooks/useContentInsights'
 import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
 import { ExplorerCardSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
@@ -177,6 +179,8 @@ export default function WorkspaceViewsSection({
 
     // ─── Selection + management handlers ─────────────────────────────
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+    const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
+    const { canExport: exportEnabled, canImport: importEnabled } = useViewPortability()
     const [shareView, setShareView] = useState<{ id: string; name: string; visibility: string } | null>(null)
     const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number } | null>(null)
     const [showBulkDelete, setShowBulkDelete] = useState(false)
@@ -601,6 +605,15 @@ export default function WorkspaceViewsSection({
                     >
                         <Compass className="w-4 h-4" /> Browse in Explorer
                     </Link>
+                    {importEnabled && (
+                        <button
+                            onClick={() => openViewEditor(undefined, { journey: 'import' })}
+                            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-glass-border text-ink-muted hover:text-ink hover:border-indigo-500/30 text-sm font-medium transition-colors"
+                            title="Import a view exported from another environment"
+                        >
+                            <FileUp className="w-4 h-4" /> Import view
+                        </button>
+                    )}
                     <button
                         onClick={() => openViewEditor()}
                         className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors"
@@ -744,8 +757,16 @@ export default function WorkspaceViewsSection({
                 selectedCount={selectedIds.size}
                 onDelete={canBulkDelete ? () => setShowBulkDelete(true) : undefined}
                 onChangeVisibility={handleBulkVisibility}
+                onExport={exportEnabled
+                    ? () => setExportSelection(Array.from(selectedIds, id => ({
+                        id, name: views.find(v => v.id === id)?.name ?? id,
+                    })))
+                    : undefined}
                 onClearSelection={() => setSelectedIds(new Set())}
             />
+            {exportSelection && (
+                <ExportViewDialog views={exportSelection} onClose={() => setExportSelection(null)} />
+            )}
 
             {/* ── Detail drawer (view + edit details), reused from Explorer ── */}
             <ExplorerPreviewDrawer

@@ -12,9 +12,8 @@
  *    attempt?". A slow PUT that rejects AFTER a later one succeeded put its stale payload back and
  *    raised an error over work that had in fact saved — and retrying it reverted the newer edit.
  *
- * Driven through display rules, the one durable layout gesture reachable without a pointer: the
- * Property Manager writes `useReferenceModelStore` and the canvas's persist effect arms exactly the
- * same debounced save as a layer create, a rename or an entity moved between columns.
+ * Driven through a column rename on a draft, which arms exactly the same debounced save as a layer
+ * create or an entity moved between columns.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
@@ -31,10 +30,9 @@ import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
-import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useSchemaStore } from '@/store/schema'
 import { useNotificationStore } from '@/components/ui/notifications'
-import type { DisplayRuleConfig, ViewLayerConfig } from '@/types/schema'
+import type { ViewLayerConfig } from '@/types/schema'
 
 /** Longer than the canvas's 1500ms autosave debounce. */
 const PAST_THE_DEBOUNCE = 1800
@@ -43,10 +41,6 @@ const messages = () => useNotificationStore.getState().notifications.map(n => `$
 const retryButton = () => screen.queryByRole('button', { name: /sync issue/i })
 const activeLayers = (): ViewLayerConfig[] =>
   (useSchemaStore.getState().getActiveView()?.layout?.referenceLayout?.layers ?? []) as ViewLayerConfig[]
-
-const rule = (id: string): DisplayRuleConfig => ({
-  id, name: id, color: '#ff0000', predicate: null, enabled: true, createdAt: '2026-08-30T00:00:00Z',
-})
 
 /** A promise this test settles by hand, so two saves can be in flight at once. */
 function deferred<T>() {
@@ -62,7 +56,7 @@ const BRANCH_B = 'harness-branch-2'
 /** A layer that exists ONLY in branch B's layout — the proof B's layout was applied. */
 const B_ONLY: ViewLayerConfig = { id: 'B-ONLY', name: 'Branch B only', entityTypes: [], order: 9, color: '#00ff88' }
 
-async function openCanvas(estate: ReturnType<typeof cfoEstate>, draft = false) {
+async function openCanvas(estate: ReturnType<typeof cfoEstate>) {
   useAuthStore.setState({ permissions: { global: ['system:admin'], ws: {} } } as never)
   useNotificationStore.setState({ notifications: [], history: [] } as never)
   const base = { layers: estate.layers, assignments: estate.assignments }
@@ -76,12 +70,19 @@ async function openCanvas(estate: ReturnType<typeof cfoEstate>, draft = false) {
       content: { entityScope: 'curated' },
     },
   }))
-  return renderCanvasWithTrace(estate, { focus: 'cfo', draft })
+  // A draft (branch A), where the columns can be renamed.
+  return renderCanvasWithTrace(estate, { focus: 'cfo', draft: true })
 }
 
-/** Make a durable layout edit — the canvas arms its debounced save on it. */
-function editLayout(id: string) {
-  act(() => { useReferenceModelStore.getState().setDisplayRules([rule(id)]) })
+/** Make a durable layout edit — rename the first column; the canvas arms its debounced save on it. */
+function editLayout(name: string) {
+  act(() => { fireEvent.click(screen.getAllByTitle('Rename layer')[0]) })
+  const input = document.activeElement as HTMLInputElement
+  expect(input.tagName).toBe('INPUT')
+  act(() => {
+    fireEvent.change(input, { target: { value: name } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+  })
 }
 
 const pastTheDebounce = async () => {
@@ -136,7 +137,7 @@ describe('the canvas\'s single pending layout-save slot', () => {
 
   it('loads the new branch\'s layout even while a save that failed on the OLD branch is pending', async () => {
     updateViewLayoutMock.mockRejectedValue(new Error('layout PUT rejected'))
-    const h = await openCanvas(cfoEstate(), true)
+    const h = await openCanvas(cfoEstate())
 
     editLayout('r1')
     await pastTheDebounce()

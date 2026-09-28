@@ -29,7 +29,7 @@ import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/ty
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './FlatTreeItem'
 import type { PlacedOut, PlacementInfo } from './placement'
-import { groupSubtreeIds, listGroups } from './layerMutations'
+import { groupNameClash, groupSubtreeIds, listGroups, parentGroupOf } from './layerMutations'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
@@ -135,7 +135,10 @@ interface LayerColumnProps {
   onRenameGroup?: (layerId: string, groupId: string, name: string) => void
   onDeleteGroup?: (layerId: string, groupId: string, groupName: string) => void
   onPlaceInGroup?: (entityId: string, layerId: string, groupId: string, groupName: string) => void
-  onMoveGroup?: (layerId: string, groupId: string, newParentId: string | null) => void
+  /** Move a group (with everything in it) from one layer to a layer — the same one or another. */
+  onMoveGroup?: (fromLayerId: string, groupId: string, toLayerId: string, newParentId: string | null) => void
+  /** Every layer's groups — where a group on this column can move to. */
+  groupDestinations?: Array<{ layerId: string; layerName: string; groups: Array<{ id: string; name: string; path: string }> }>
   onMoveGroupContents?: (layerId: string, fromId: string, toId: string) => void
   onUngroup?: (layerId: string, groupId: string, groupName: string) => void
   onDeleteLayer?: (layerId: string) => void
@@ -180,11 +183,16 @@ interface LayerColumnProps {
    *  drives the density gutter AND the per-row ambient hairlines. */
   lineageCounts?: Map<string, { in: number; out: number }>
   /** Per-node out-of-view lineage counts (curated views) — sky cue. */
-  externalCue?: Map<string, { in: number; out: number }>
+  externalCue?: ReadonlyMap<string, { in: number; out: number }>
   /** Lineage in/out per entity over the whole graph (`/nodes/degree`) —
    *  absent = not known. Lets a card's port say "lineage exists" even when
    *  none of it leads to anything on this canvas. */
   lineageTotals?: ReadonlyMap<string, { in: number; out: number }>
+  /** Entities whose total could not be counted (being asked again). */
+  lineageUnknown?: ReadonlySet<string>
+  /** Per row: flows the canvas placed outside this view (useEdgeProjection's
+   *  offCanvasByNode) — what makes a port hollow. */
+  lineageOutside?: ReadonlyMap<string, { in: number; out: number }>
   /** Where each card's lines plug in, by side and direction (lineagePorts.ts). */
   lineagePorts?: ReadonlyMap<string, NodePorts>
   /** Render the per-row ambient in/out hairlines (follows the lineage-
@@ -301,7 +309,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   isTracing = false,
   highlightedNodes,
   isHighlightActive = false,
-  onAnimationComplete: _onAnimationComplete,
+  onAnimationComplete,
   onLoadMore,
   onRevealSearchHit,
   loadingNodes,
@@ -322,6 +330,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onDeleteGroup,
   onPlaceInGroup,
   onMoveGroup,
+  groupDestinations,
   onMoveGroupContents,
   onUngroup,
   onDeleteLayer,
@@ -343,6 +352,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   lineageCounts,
   externalCue,
   lineageTotals,
+  lineageUnknown,
+  lineageOutside,
   lineagePorts,
   showLineageIndicators = false,
   showDensityGutter = false,
@@ -419,22 +430,28 @@ export const LayerColumn = React.memo(function LayerColumn({
   // Group rows' actions, bound to this layer (stable, so rows keep their memo).
   const groupActions = useMemo<GroupActions | undefined>(() =>
     onCreateGroup && onRenameGroup && onDeleteGroup && onPlaceInGroup && onMoveGroup && onMoveGroupContents && onUngroup ? {
+      layerId: layer.id,
       layerName: layer.name,
       groups: listGroups([layer], layer.id),
+      nameTaken: (name, parentId, exceptId) => !!groupNameClash([layer], layer.id, parentId, [name], exceptId ? [exceptId] : []),
+      parentOf: (groupId) => parentGroupOf([layer], layer.id, groupId) ?? null,
+      otherLayers: (groupDestinations ?? []).filter((d) => d.layerId !== layer.id),
       subtreeOf: (groupId) => groupSubtreeIds([layer], layer.id, groupId),
       create: (name, parentGroupId) => onCreateGroup(layer.id, name, parentGroupId),
       rename: (groupId, name) => onRenameGroup(layer.id, groupId, name),
       remove: (groupId, name) => onDeleteGroup(layer.id, groupId, name),
       place: (entityId, groupId, groupName) => onPlaceInGroup(entityId, layer.id, groupId, groupName),
-      move: (groupId, newParentId) => onMoveGroup(layer.id, groupId, newParentId),
+      move: (groupId, newParentId, toLayerId) => onMoveGroup(layer.id, groupId, toLayerId ?? layer.id, newParentId),
+      receive: (groupId, fromLayerId, newParentId) => onMoveGroup(fromLayerId, groupId, layer.id, newParentId),
       moveContents: (fromId, toId) => onMoveGroupContents(layer.id, fromId, toId),
       ungroup: (groupId, name) => onUngroup(layer.id, groupId, name),
     } : undefined,
-  [layer, onCreateGroup, onRenameGroup, onDeleteGroup, onPlaceInGroup, onMoveGroup, onMoveGroupContents, onUngroup])
+  [layer, groupDestinations, onCreateGroup, onRenameGroup, onDeleteGroup, onPlaceInGroup, onMoveGroup, onMoveGroupContents, onUngroup])
   const [draftGroupName, setDraftGroupName] = useState('')
+  const headerNameTaken = draftGroupName.trim() !== '' && !!groupNameClash([layer], layer.id, null, [draftGroupName])
   const [draftName, setDraftName] = useState(layer.name)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
-  const [dragKind, setDragKind] = useState<'entity' | 'layer' | null>(null)
+  const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // ── Drag auto-scroll (rAF-driven) ──────────────────────────────────────────
@@ -1330,6 +1347,11 @@ export const LayerColumn = React.memo(function LayerColumn({
     setRailFocusSeen(railFocusId)
     setOpenRail(null)
   }
+  // A tray and its hint are different places for the focused entity's lines
+  // to dock, so opening one or switching trays draws those lines again.
+  useEffect(() => {
+    onAnimationComplete?.()
+  }, [openRail, showConnectedTrays, onAnimationComplete])
 
   // ── End-reached sentinel (roots auto-paging) ─────────────────────────
   // Fires when the user scrolls this column to its true end. Guards, in
@@ -1365,9 +1387,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   const lineageLogMax = useMemo(() => {
     if (!showLineageIndicators || !lineagePorts || lineagePorts.size === 0) return 0
     let maxCount = 0
-    for (const p of lineagePorts.values()) maxCount = Math.max(maxCount, sideVolume(p, 'left'), sideVolume(p, 'right'))
+    for (const item of flatTree) {
+      const p = lineagePorts.get(item.node.id)
+      maxCount = Math.max(maxCount, sideVolume(p, 'left'), sideVolume(p, 'right'))
+    }
     return Math.log2(1 + Math.max(1, maxCount))
-  }, [showLineageIndicators, lineagePorts])
+  }, [showLineageIndicators, lineagePorts, flatTree])
 
   // Where does flow mass live across the WHOLE column (not just the
   // viewport)? Bucket the flat tree by index; each bucket sums the in+out
@@ -1647,13 +1672,14 @@ export const LayerColumn = React.memo(function LayerColumn({
           const types = e.dataTransfer.types
           const isLayer = types.includes('text/x-layer-id')
           const isEntity = types.includes('text/x-entity-id')
+          const isGroup = types.includes('text/x-group-id')
           // Only accept a drag this column can actually handle (getData is unreadable in dragover, so
           // gate on the presence of the typed key + the matching handler).
-          if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer)) {
+          if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer) || (isGroup && groupActions)) {
             e.preventDefault()
             e.dataTransfer.dropEffect = 'move'
             setIsDragOver(true)
-            setDragKind(isLayer ? 'layer' : 'entity')
+            setDragKind(isLayer ? 'layer' : isGroup ? 'group' : 'entity')
           }
         }}
         onDragLeave={(e) => {
@@ -1665,6 +1691,11 @@ export const LayerColumn = React.memo(function LayerColumn({
           setDragKind(null)
           const layerId = e.dataTransfer.getData('text/x-layer-id')
           if (layerId && onReorderLayer) { onReorderLayer(layerId, layer.id); return }
+          const groupId = e.dataTransfer.getData('text/x-group-id')
+          if (groupId && groupActions) {
+            groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
+            return
+          }
           const entityId = e.dataTransfer.getData('text/x-entity-id')
           if (entityId && onAssignToLayer) onAssignToLayer(entityId, layer.id)
         }}
@@ -1684,7 +1715,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   arrow carry it. */}
               {!isCollapsed && (
                 <span className="text-xs font-medium" style={{ color: layer.color }}>
-                  {dragKind === 'layer' ? 'Drop to reorder here' : `Move to ${layer.name}`}
+                  {dragKind === 'layer' ? 'Drop to reorder here' : dragKind === 'group' ? `Move group to ${layer.name}` : `Move to ${layer.name}`}
                 </span>
               )}
             </div>
@@ -1818,15 +1849,21 @@ export const LayerColumn = React.memo(function LayerColumn({
                   value={draftGroupName}
                   placeholder="New group name"
                   aria-label={`Name the new group in ${layer.name}`}
+                  aria-invalid={headerNameTaken || undefined}
+                  title={headerNameTaken ? `There's already a group called “${draftGroupName.trim()}” in ${layer.name}` : undefined}
                   onChange={(e) => setDraftGroupName(e.target.value)}
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => {
                     e.stopPropagation()
-                    if (e.key === 'Enter') { onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }
+                    // A taken name is refused with a notice saying why; the field stays open to fix it.
+                    if (e.key === 'Enter') { onCreateGroup(layer.id, draftGroupName); if (!headerNameTaken) setIsNamingGroup(false) }
                     if (e.key === 'Escape') setIsNamingGroup(false)
                   }}
-                  onBlur={() => { if (draftGroupName.trim()) onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }}
-                  className="flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border border-violet-400/60 text-sm font-semibold text-ink outline-none placeholder:text-ink-muted placeholder:font-normal"
+                  onBlur={() => { if (draftGroupName.trim() && !headerNameTaken) onCreateGroup(layer.id, draftGroupName); setIsNamingGroup(false) }}
+                  className={cn(
+                    "flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border text-sm font-semibold text-ink outline-none placeholder:text-ink-muted placeholder:font-normal",
+                    headerNameTaken ? "border-red-400" : "border-violet-400/60",
+                  )}
                 />
               ) : isRenaming && onRenameLayer ? (
                 <input
@@ -2355,13 +2392,33 @@ export const LayerColumn = React.memo(function LayerColumn({
               // the rAF loop below applies smooth, distance-proportional
               // scrolling and self-terminates ~200ms after events stop
               // (drop, cancel, or the pointer leaving the column).
-              // Deliberately does NOT preventDefault — drop acceptance stays
-              // with the row targets.
-              if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+              // Deliberately does NOT preventDefault for entities — drop
+              // acceptance stays with the row targets. A GROUP is taken
+              // anywhere in the column (rows that aren't groups don't take it):
+              // it moves to the top of this layer, lit up in the header.
+              const isGroup = e.dataTransfer.types.includes('text/x-group-id') && !!groupActions
+              if (isGroup) {
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                if (!isDragOver) setIsDragOver(true)
+                if (dragKind !== 'group') setDragKind('group')
+              }
+              if (!e.dataTransfer.types.includes('text/x-entity-id') && !isGroup) return
               dragPointerRef.current = { y: e.clientY, t: performance.now() }
               if (dragScrollRafRef.current == null) {
                 dragScrollRafRef.current = requestAnimationFrame(dragScrollStep)
               }
+            }}
+            onDragLeave={(e) => {
+              if (dragKind === 'group' && !e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null) }
+            }}
+            onDrop={(e) => {
+              const groupId = e.dataTransfer.getData('text/x-group-id')
+              if (!groupId || !groupActions) return
+              e.preventDefault()
+              setIsDragOver(false)
+              setDragKind(null)
+              groupActions.receive(groupId, e.dataTransfer.getData('text/x-group-layer') || layer.id, null)
             }}
             onContextMenu={(e) => {
               // Right-click on EMPTY layer space → create-in-this-layer menu.
@@ -2742,6 +2799,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                         portStrengthLeft={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'left')) / lineageLogMax : 0}
                         portStrengthRight={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'right')) / lineageLogMax : 0}
                         lineageTotals={showLineageIndicators ? lineageTotals?.get(node.id) : undefined}
+                        lineageUnknown={showLineageIndicators && (lineageUnknown?.has(node.id) ?? false)}
+                        lineageOutside={showLineageIndicators ? lineageOutside?.get(node.id) : undefined}
                         externalIn={showLineageIndicators ? (externalCue?.get(node.id)?.in ?? 0) : 0}
                         externalOut={showLineageIndicators ? (externalCue?.get(node.id)?.out ?? 0) : 0}
                       />

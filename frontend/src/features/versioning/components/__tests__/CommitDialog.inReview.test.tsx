@@ -18,6 +18,7 @@ vi.mock('../../hooks/useVersioning', () => ({
   usePublishBranch: () => ({ mutate: publishMutate, isPending: false }),
   useOpenMergeRequest: () => ({ mutate: openMrMutate, isPending: false }),
   useLivePrForBranch: () => ({ livePr, pending: false }),
+  useBranchViewChanges: () => ({ data: undefined, isLoading: false }),
 }))
 vi.mock('@/store/auth', () => ({ usePermission: () => true }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))

@@ -49,8 +49,7 @@ const MODES: Record<ScopeMode, ModeMeta> = {
     view: {
         label: 'All nodes in this view',
         sub: 'Includes descendants of every top-level node in this '
-            + 'view, even ones you haven’t expanded yet — the default. '
-            + 'Up to 256 top-level containers per query.',
+            + 'view, even ones you haven’t expanded yet — the default.',
         icon: LayersIcon,
         tone: 'text-accent-lineage',
         badge: 'recommended',

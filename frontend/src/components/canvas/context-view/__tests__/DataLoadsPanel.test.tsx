@@ -26,28 +26,28 @@ import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { DataLoadsPanel } from '../DataLoadsPanel'
 import { useNotificationStore, type NotificationHistoryEntry } from '@/components/ui/notifications'
-import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService'
+import { aggregationService, type ProjectionHealthResponse } from '@/services/aggregationService'
 
 vi.mock('@/services/aggregationService', () => ({
-  aggregationService: { getReadiness: vi.fn() },
+  aggregationService: { getReadiness: vi.fn(), getProjectionHealth: vi.fn() },
 }))
-const readiness = vi.mocked(aggregationService.getReadiness)
+const health = vi.mocked(aggregationService.getProjectionHealth)
 
 /**
- * The only field on the readiness reading this panel is allowed to believe.
- * `isReady` stays TRUE while a source's connections trail behind — that is the
- * whole reason a finished load and a load that is not queryable yet looked
- * identical here.
+ * The only field this panel is allowed to believe. It comes from the
+ * projection-health route, a TTL-cached control-plane read. `/readiness`
+ * carries the same field but reads the graph store to answer, and this poll
+ * runs while the store is already struggling.
  */
-const reading = (projectorCurrent: boolean | null) =>
-  ({ isReady: true, projectorCurrent } as unknown as DataSourceReadinessResponse)
+const reading = (projectorCurrent: boolean | null): ProjectionHealthResponse =>
+  ({ dataSourceId: 'ds-1', projectorCurrent })
 
 const HOUR = 60 * 60 * 1000
 
 beforeEach(() => {
   useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
-  readiness.mockReset()
-  readiness.mockResolvedValue(reading(null))
+  health.mockReset()
+  health.mockResolvedValue(reading(null))
 })
 afterEach(cleanup)
 
@@ -314,8 +314,9 @@ describe('DataLoadsPanel', () => {
  * missing anyway. In the log those two loads looked identical — same green
  * tick, same time — which is the silence this panel exists to end.
  *
- * The reading comes from the readiness endpoint's `projectorCurrent`. NOT
- * `isReady`: that reports the load job alone and stays true under a wedge.
+ * The reading comes from the projection-health route's `projectorCurrent`.
+ * NOT readiness's `isReady`: that reports the load job alone and stays true
+ * under a wedge.
  * `false` is the only affirmative "not yet" — null is UNKNOWN (an unversioned
  * source, an unreadable store) and must never be rendered as either answer.
  *
@@ -326,7 +327,7 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
   const noteText = /connections still catching up/i
 
   it('marks the load on its own row, and says so from the collapsed header', async () => {
-    readiness.mockResolvedValue(reading(false))
+    health.mockResolvedValue(reading(false))
     seed([
       { type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - 2 * HOUR },
       { type: 'success', message: 'Snowflake · 3 more datasets', createdAt: Date.now() - HOUR },
@@ -357,11 +358,11 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
   })
 
   it('says nothing at all when the connections are up to date', async () => {
-    readiness.mockResolvedValue(reading(true))
+    health.mockResolvedValue(reading(true))
     seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - HOUR }])
     render(<DataLoadsPanel dataSourceId="ds-1" />)
 
-    await waitFor(() => expect(readiness).toHaveBeenCalledWith('ds-1'))
+    await waitFor(() => expect(health).toHaveBeenCalledWith('ds-1'))
     await act(async () => {})
 
     expect(screen.queryByText('Catching up')).toBeNull()
@@ -373,11 +374,11 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
   it('an UNKNOWN reading marks nothing — and never claims the load is up to date either', async () => {
     // null: not a versioned source, or the store could not be read. Unknown is
     // not healthy; the one thing it may not do is invent an answer.
-    readiness.mockResolvedValue(reading(null))
+    health.mockResolvedValue(reading(null))
     seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - HOUR }])
     const { container } = render(<DataLoadsPanel dataSourceId="ds-1" />)
 
-    await waitFor(() => expect(readiness).toHaveBeenCalledWith('ds-1'))
+    await waitFor(() => expect(health).toHaveBeenCalledWith('ds-1'))
     await act(async () => {})
 
     fireEvent.click(header())
@@ -390,8 +391,8 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
     vi.useFakeTimers()
     try {
       const t0 = Date.now()
-      readiness.mockResolvedValueOnce(reading(true))   // first reading: current at t0
-      readiness.mockResolvedValue(reading(false))      // and behind ever after
+      health.mockResolvedValueOnce(reading(true))   // first reading: current at t0
+      health.mockResolvedValue(reading(false))      // and behind ever after
       const early = { type: 'success' as const, message: 'Snowflake · 5 datasets', createdAt: t0 - 60_000 }
       seed([early])
       render(<DataLoadsPanel dataSourceId="ds-1" />)
@@ -433,8 +434,8 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
     vi.useFakeTimers()
     try {
       const t0 = Date.now()
-      readiness.mockResolvedValueOnce(reading(true))   // known-good at t0…
-      readiness.mockResolvedValue(reading(false))      // …behind ever after
+      health.mockResolvedValueOnce(reading(true))   // known-good at t0…
+      health.mockResolvedValue(reading(false))      // …behind ever after
       const early = { type: 'success' as const, message: 'Snowflake · 5 datasets', createdAt: t0 - 60_000 }
       seed([early])
       render(<StrictMode><DataLoadsPanel dataSourceId="ds-1" /></StrictMode>)
@@ -448,7 +449,7 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
 
       // The re-subscribe really did happen — otherwise this test would be
       // asserting the ordinary single-mount path all over again.
-      expect(readiness.mock.calls.length).toBeGreaterThan(1)
+      expect(health.mock.calls.length).toBeGreaterThan(1)
 
       fireEvent.click(header())
       const list = rows()
@@ -464,8 +465,8 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
   it('clears the mark by itself the moment the connections catch up', async () => {
     vi.useFakeTimers()
     try {
-      readiness.mockResolvedValueOnce(reading(false))
-      readiness.mockResolvedValue(reading(true))
+      health.mockResolvedValueOnce(reading(false))
+      health.mockResolvedValue(reading(true))
       seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - 60_000 }])
       render(<DataLoadsPanel dataSourceId="ds-1" />)
       await act(async () => {})
@@ -491,28 +492,28 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
     // cached only 5s server-side, so most of those reached graphver.
     vi.useFakeTimers()
     try {
-      readiness.mockResolvedValue(reading(true))
+      health.mockResolvedValue(reading(true))
       seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() }])
       render(<DataLoadsPanel dataSourceId="ds-1" />)
       await act(async () => {})
-      expect(readiness).toHaveBeenCalledTimes(1)          // the baseline reading
+      expect(health).toHaveBeenCalledTimes(1)          // the baseline reading
 
       await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
-      expect(readiness).toHaveBeenCalledTimes(2)          // first repeat at the base cadence
+      expect(health).toHaveBeenCalledTimes(2)          // first repeat at the base cadence
 
       // Unchanged and healthy: the next one is NOT due at 20s.
       await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
-      expect(readiness).toHaveBeenCalledTimes(2)
+      expect(health).toHaveBeenCalledTimes(2)
       await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
-      expect(readiness).toHaveBeenCalledTimes(3)          // it was due at 40s
+      expect(health).toHaveBeenCalledTimes(3)          // it was due at 40s
 
       // The verdict moves. The cadence must snap straight back to base, or the
       // panel would take up to two minutes to notice the source recovering.
-      readiness.mockResolvedValue(reading(false))
+      health.mockResolvedValue(reading(false))
       await act(async () => { await vi.advanceTimersByTimeAsync(80_000) })
-      expect(readiness).toHaveBeenCalledTimes(4)
+      expect(health).toHaveBeenCalledTimes(4)
       await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
-      expect(readiness).toHaveBeenCalledTimes(5)
+      expect(health).toHaveBeenCalledTimes(5)
     } finally {
       vi.useRealTimers()
     }
@@ -524,26 +525,33 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
     // or a bad delay reaches setTimeout as 0ms and it becomes a tight loop.
     vi.useFakeTimers()
     try {
-      readiness.mockRejectedValue(new Error('down'))
+      health.mockRejectedValue(new Error('down'))
       seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() }])
       render(<DataLoadsPanel dataSourceId="ds-1" />)
       await act(async () => {})
       await act(async () => { await vi.advanceTimersByTimeAsync(200_000) })
-      expect(readiness).toHaveBeenCalledTimes(3)
+      expect(health).toHaveBeenCalledTimes(3)
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('asks the projection-health route, never the readiness one that reads the store', async () => {
+    seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() }])
+    render(<DataLoadsPanel dataSourceId="ds-1" />)
+    await waitFor(() => expect(health).toHaveBeenCalledWith('ds-1'))
+    expect(aggregationService.getReadiness).not.toHaveBeenCalled()
   })
 
   it('never asks when the open view has no data source of its own', async () => {
     seed([{ type: 'success', message: 'View saved', createdAt: Date.now() }])
     render(<DataLoadsPanel />)
     await act(async () => {})
-    expect(readiness).not.toHaveBeenCalled()
+    expect(health).not.toHaveBeenCalled()
   })
 
   it('says it in plain language — no internals reach this panel', async () => {
-    readiness.mockResolvedValue(reading(false))
+    health.mockResolvedValue(reading(false))
     seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - HOUR }])
     const { container } = render(<DataLoadsPanel dataSourceId="ds-1" />)
     await screen.findByText('Catching up')

@@ -115,6 +115,8 @@ export type ComputedEdge = {
   edgeOpacity: number
   isGhost: boolean
   isBundled: boolean
+  /** It carries a roll-up — a summary the aggregation job computed. */
+  isAggregated?: boolean
   edgeCount: number
   /** SVG `stroke-dasharray` for this edge — see `edgeDash.ts`. */
   dashArray: string
@@ -136,12 +138,6 @@ export type ComputedEdge = {
    * via `nodeLayerIndexMap`.
    */
   isReverseFlow?: boolean
-  /**
-   * True when the projection meta-bundled this edge from many fine-grained
-   * leaf-pair edges up to a containment-parent pair (browse-mode rollup).
-   * Drives the badge label "+N pairs" instead of "+N edges".
-   */
-  isBrowseBundle?: boolean
   /**
    * True when the projection collapsed an A→B and a B→A bundle into a
    * single record. Renderer should draw a dual-arrowhead path

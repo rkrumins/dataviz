@@ -18,6 +18,7 @@ import signal
 from . import config, db, models
 from .messaging import close_broker_redis
 from .bootstrap_worker import BootstrapRunner
+from .import_export.runner import TransferRunner
 from .purge_worker import PurgeRunner, Reaper
 from .projection import FalkorProjector, make_falkor_graph_factory
 from .service import GraphVersioningService
@@ -58,6 +59,14 @@ def _get_agg_service():
     return _AGG_SERVICE
 
 
+def _import_export_service():
+    """The API's own import/export service, with its view-scope, ontology and layout hooks, so a
+    queued job runs here exactly as it would have in the API process that queued it."""
+    from backend.app.api.v1.endpoints.versioning import get_import_export_service
+
+    return get_import_export_service()
+
+
 async def _amain() -> None:
     await models.create_schema_and_partitions()
     # target_resolver self-heals the projection target (the data source's real graph the canvas reads)
@@ -96,6 +105,9 @@ async def _amain() -> None:
         bootstrap=BootstrapRunner(graph_factory, consumer=os.getenv("HOSTNAME", "boot-1")),
         purge=PurgeRunner(graph_factory, consumer=os.getenv("HOSTNAME", "purge-1")),
         reaper=Reaper(),
+        # Import and export jobs the API queued (GRAPHVER_TRANSFER_INPROCESS off): run here, off
+        # the web tier, GRAPHVER_TRANSFER_SLOTS at a time.
+        transfers=TransferRunner(_import_export_service),
     )
 
     loop = asyncio.get_running_loop()

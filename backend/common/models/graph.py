@@ -234,6 +234,27 @@ class ExpandRequest(BaseModel):
         populate_by_name = True
 
 
+class EdgesBeneathRequest(BaseModel):
+    """Two entities, each with everything it contains: the lineage relationships between them."""
+    source_urn: str = Field(alias="sourceUrn")
+    target_urn: str = Field(alias="targetUrn")
+
+    class Config:
+        populate_by_name = True
+
+
+class EdgesBeneathResult(BaseModel):
+    """The real (not rolled-up) lineage relationships from the source, or anything inside it, to the
+    target, or anything inside it. ``truncated``: a side's contents or the edge list hit a cap, so
+    this is not all of them."""
+    edges: List[GraphEdge]
+    total: int
+    truncated: bool = False
+
+    class Config:
+        populate_by_name = True
+
+
 # V2 alias — distinguishes the skeleton-first expand contract from the
 # legacy ExpandRequest. Same shape today; kept as a distinct symbol so the
 # API and engine signatures advertise V2 semantics.
@@ -800,6 +821,10 @@ class AggregatedEdgeRequest(BaseModel):
     include_edge_types: Optional[List[str]] = Field(None, alias="includeEdgeTypes")  # open strings
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
+    # Leave out every cell one of whose ends holds the other: a container's
+    # roll-ups with its own descendants and ancestors (see
+    # ContextEngine.get_aggregated_edges).
+    exclude_internal: bool = Field(False, alias="excludeInternal")
 
     class Config:
         populate_by_name = True
@@ -907,8 +932,13 @@ class CreateEdgeRequest(BaseModel):
 
 
 class UpdateEdgeRequest(BaseModel):
-    """Update mutable properties of an existing edge. edge_type is immutable."""
+    """Update mutable properties of an existing edge. edge_type is immutable.
+
+    A PATCH: ``properties`` sets the named keys and keeps the rest;
+    ``unsetProperties`` names the keys to remove.
+    """
     properties: Dict[str, Any] = Field(default_factory=dict)
+    unset_properties: List[str] = Field(default_factory=list, alias="unsetProperties")
 
     class Config:
         populate_by_name = True

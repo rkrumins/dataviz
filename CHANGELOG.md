@@ -61,9 +61,9 @@ drops both.
 `LINEAGE_BRIDGES_MAX_NODES` (20,000, hard ceiling `LINEAGE_BRIDGES_MAX_NODES_HARD` 50,000),
 `LINEAGE_BRIDGES_SEED_CAP` (50,000) and `LINEAGE_BRIDGES_HUB_DEGREE` (5,000). The cache:
 `GRAPH_CACHE_LINEAGE_BRIDGES_TTL_S` (3,600; any graph write invalidates it sooner), with
-`GRAPH_CACHE_ENABLED_LINEAGE_BRIDGES` / `_PATH` to switch it off. Fair share:
-`FAIR_SHARE_LINEAGE_BRIDGES_RATE` / `_BURST` (2 / 6) and `FAIR_SHARE_LINEAGE_BRIDGE_PATH_RATE` /
-`_BURST` (5 / 10).
+`GRAPH_CACHE_ENABLED_LINEAGE_BRIDGES` / `GRAPH_CACHE_ENABLED_LINEAGE_BRIDGE_PATH` to switch it
+off. Fair share: `FAIR_SHARE_LINEAGE_BRIDGES_RATE` / `_BURST` (2 / 6) and
+`FAIR_SHARE_LINEAGE_BRIDGE_PATH_RATE` / `_BURST` (5 / 10).
 
 ### Known limitations
 
@@ -83,8 +83,481 @@ drops both.
   table or dataset grain.
 - Neo4j, Spanner, drafts and versioned branches use the generic walk over `get_edges`, which
   is slower than FalkorDB's. DataHub answers 501, and the canvas draws direct lines only.
-- On a draft over FalkorDB, `get_edges` drops a failed label bucket with a warning instead of
-  raising, so a hop through that bucket can be missed without being flagged.
+
+---
+
+## [Unreleased] — Exports up to 50 GB, with downloads that resume
+
+### Added
+
+**Exports of up to 50 GB, prepared on the server, with downloads that resume.** The Export dialog no
+longer streams a data source with version control from the web server while it downloads. The
+versioning workers write the file, the dialog shows its place in the queue and then how far it has
+got, and the browser downloads it once it's ready, with its size known. A download that breaks off
+picks up where it stopped: the download answers `Range` and `If-Range`, which is what a browser's
+Resume and `curl -C -` send. Close the dialog while the file is being prepared and it opens on that
+export again; the file is kept for a day. A data source without version control still streams its
+live graph as before.
+
+**Clicking a relationship opens its details, the way clicking an entity does.** A line on the canvas
+opens the relationship drawer. It shows the relationship's type and what it means, the two entities
+it joins, its confidence, its properties, and who created and last changed it and when, with its
+full revision history. Either end is one click away, on the same Back and Forward trail as the
+entity drawer, so a walk can go from an entity to a relationship and on to the next entity. In a
+draft, a lineage relationship's properties can be edited (staged with the rest of the canvas's
+changes and saved in Review & Save) and the relationship deleted. A line that stands for several
+relationships (a bundle, or one rolled up from children) opens as a connection that lists them at
+the entities they really join, and each opens on the same trail. Combined flows, hierarchy links and
+relationships on the published graph are read-only, and say why.
+
+### Changed
+
+- **The relationship drawer tells relationships from roll-ups.** Opening a line lists its
+  relationships first, and says why the line joins those two cards when its relationships are
+  between entities inside them. Roll-ups (the summaries the aggregation job computes, read-only) are
+  listed apart, with what they are. When a line holds both, "All · Relationships · Roll-ups" narrows
+  the list to either, with counts. The canvas draws what it did before. Hovering a line says whether
+  it is a roll-up or how many relationships it stands for.
+- **A roll-up lists the relationships it stands for.** Open a roll-up line (REPORTING → Executive
+  Board Dashboard, "Stands for 14 flows") and the drawer lists the real relationships between
+  everything inside the two cards, at any depth, by name — each opens like any other, and can be
+  changed in a draft. They are read from the data source (a draft sees its own), up to 1,000;
+  when there may be more it says so. New: `POST /graph/edges/beneath` (`{sourceUrn, targetUrn}` →
+  `{edges, total, truncated}`).
+- **One export can be 50 GB** (`GRAPH_EXPORT_MAX_BYTES`, was 20 GiB).
+- **A running export says how far it has got.** Its job's `summary` holds the records read or written
+  so far, the passes (a spreadsheet reads everything once for its columns, then writes it), and the
+  bytes, until the finished summary replaces it; a finished one says whether its file is still
+  `kept`. `POST …/exports` takes a `filename` for the download.
+- **A stored export downloads uncompressed**, so that the browser knows its size and can resume it.
+- **A click on a line opens the relationship drawer instead of the Edge Explorer.** The Explorer is
+  one click away from the drawer. Its cards gain an "Open details" button, and their pencil opens the
+  drawer in Edit.
+- **Entities and relationships are edited in a draft only.** On the published graph the entity
+  drawer and the Edge Explorer offer no edit controls; the drawer offers "Edit in a draft" instead,
+  and on a data source without version control its Edit tab is disabled and says why. The drawer's
+  JSON tab is read-only. A staged edit says it still needs Review & Save, with the way there.
+- **A save answers with what it stored.** `POST /graph/changes` returns `entities`: each entity the
+  save touched as a reader returns it now, with its `version` (`entitiesTruncated` past 500), and the
+  canvas takes it — so editing the same field again is not a conflict with your own last save.
+- **An entity's summary and its history, bounded.** New `GET …/entities/{id}/summary` says who
+  created the entity and who last changed it on the line you are reading (in a draft: main at the
+  draft's branch point, then the draft's own edits), how many revisions each line has, whether main
+  changed it after the draft began, and — `include=value` — its value and token. `…/history` now
+  pages newest first (`limit`, `before`/`nextBefore`, `scope=all|draft|published`, `branchId`), reads
+  only main and the draft you name (403 for a draft you cannot read), and says what each revision
+  changed, property by property. The drawers use these instead of downloading every revision.
+- **The entity and relationship drawers share one frame, and keep their keys to themselves.** Keys
+  typed in a drawer no longer reach the canvas: Backspace in a drawer does not delete the selected
+  entity, and the canvas's letter shortcuts do not fire. Esc leaves a field first, then closes the
+  drawer; ⌘S (Ctrl+S) stages an edit. When the drawer changes to another entity while you are working
+  in it, focus moves to the new title. When it closes, focus goes back to where it came from. An edit
+  in progress shows a stage bar, with Cancel and "Stage changes", on every tab. "Updated" names who
+  made the change.
+- **Both drawers end on the same two cards: Updated and Synced.** The cards fill the footer row
+  (Synced no longer floats in the middle of it). Updated says when, and who (with their avatar), and
+  marks a draft's own change. Its tooltip has the exact time, when and by whom the entity was
+  created, and its revision counts. A change made on the published graph after your draft began is
+  called out above the cards. The relationship drawer's Provenance section is gone; the cards and
+  their tooltips say the same. Its Details say what the relationship means (in plain words, even
+  when its type has no description of its own) and name each end and its type first, with the
+  identifiers as a detail you can copy. An entity that isn't loaded on the canvas (the real end of a
+  relationship inside a collapsed card) is named by the data source, not shown as its id.
+- **The drawers stay fast on large canvases.** They read their own entity rather than the whole
+  graph, so a pan, a pulse or a page of children arriving elsewhere no longer re-renders them. The
+  list of places to move an entity is built only when you open it, and is searchable. Reading the
+  relationships between a few known entities binds both ends in FalkorDB, so a relationship on a hub
+  no longer walks every edge the hub has.
+- **An update removes a property only when told to.** `POST /graph/changes`, the draft
+  `…/changes` (stage) route and `PATCH /edges/{id}` take `unsetProperties: [name, …]` beside the
+  payload. `properties` in an update merges key by key everywhere, including the stage route, which
+  used to replace the whole bag. Naming a property both in `properties` and in `unsetProperties`, or
+  `unsetProperties` on anything but an update, is a 422 (`invalid_patch`).
+
+### Fixed
+
+- **Some of a selected entity's lines could not be clicked.** A line to a partner scrolled out of
+  the same column runs to its "Connected" tray entry or "↓ N connected" pill. It was drawn but
+  took no clicks, and on the pill it ran diagonally across the rows. It now opens the relationship
+  drawer like any other line, and it leaves through the column's gutter to reach the pill instead
+  of crossing the rows. In "On Hover" density, a hovered entity's lines vanished as soon as the
+  pointer left the entity to reach one. They now stay while the pointer crosses over, and for as
+  long as it rests on a line.
+- **The line you clicked disappeared while you read about it.** In the default "On Hover" density a
+  line is drawn only for the selected entity, and clicking the line took the selection, so the line
+  vanished as its drawer opened. Now the line a drawer is open on stays drawn, whatever the density,
+  and glows, and the board scrolls just enough to keep both ends clear of the drawer. Nothing else
+  dims: every other line and card stays in view. The Graph canvas shows it as selected. The card
+  that appears when you hover over a line names both ends and their types (it could show ids) and
+  gives each relationship type its readable name.
+- **An unstaged edit in a drawer could be lost without a word.** Esc, starting a trace, opening the
+  Hierarchy Builder or following a lineage row closed or swapped the drawer and dropped the edit, and
+  a canvas click selected the other entity while the drawer still showed the first. Now anything
+  that would move the drawer waits, selection included, and asks: stage the edit and go on, discard
+  it, or keep editing. Leaving the page asks too.
+- **A stored export's download could be cut short.** It was held to the API's two-minute deadline,
+  which ends a response cleanly, so a large file (a view package's, say) could arrive incomplete while
+  looking whole, and nginx buffered it to disk. It now runs as long as it takes, as the streamed
+  export does.
+- **Anyone who could read a workspace could download its export jobs.** Listing a graph's exports,
+  reading one and downloading it checked only workspace access, so another user's export of their
+  private draft, or of a view you can't read, was yours to download. Each now checks again what
+  creating the export checked: an export you may not read is a 404, and missing from the list.
+- The download of an export whose file was swept now says so (404) instead of failing once started.
+- **Editing an edge's properties in the Edge Explorer crashed** before anything was staged, and
+  would have saved the canvas's own fields (`version`, `label`) as if they were properties. Edge
+  properties are now edited in the relationship drawer and saved as the properties the edit changed,
+  added or removed — so removing a property now removes it.
+- **History for an entity or relationship whose id holds a `/` returned 404.** The versioning routes
+  now keep an encoded `/` inside the id, as the graph routes already did — which covers a
+  relationship id made from two URNs with paths.
+- **Deleting an entity's property never persisted.** The save said "Saved" and the property came
+  back on reload: the drawer sent the whole property bag, and an update keeps every property it
+  doesn't mention. An edit now saves only what changed, and names each removed property. Around it,
+  every other write path removes a property the same way: two edits of one entity in one save no
+  longer lose the first one's removal; the stage-and-commit path no longer wipes the properties an
+  edit doesn't mention; a new entity never stores the removal marker; and `PATCH /edges/{id}` no longer
+  replaces a relationship's whole property bag with the few it names.
+- **Edits made on the published graph were dropped while Save reported success.** Save there now
+  keeps them, says they need a draft, and offers to open one.
+- **An entity's schema fields and business label were never saved.** Both are now stored as the
+  entity's properties, where the drawer reads them from.
+- **A rename and an edit of the same entity were two changes**, and discarding one put the other's
+  stale copy back on the canvas. They are one change now.
+- **Saving the same entity twice conflicted with yourself.** The canvas kept each entity as first
+  read, token included, so the second save merged against a value the draft had moved past.
+- **A conflicting save failed with "Main has moved".** The conflict now names each field someone else
+  changed, with the value it had, theirs and yours; Review & Save lets you keep yours or take theirs,
+  field by field, and saves only what you changed on top of their version. A 409 `merge_conflict`
+  from `/graph/changes` carries `current` (each conflicting entity as it is now) and each conflict's
+  `entity_kind`.
+- **In a draft, an entity's "Updated" could be a change the draft doesn't have** — the newest edit on
+  any branch, including main after the draft began. It is now the last change on the draft's own
+  line, and a note says when main has changed it since.
+- **The Hierarchy Builder lost a new entity's description** — it was filed among the properties,
+  where the save strips the name as reserved. It is saved as the entity's description.
+- **A removed property named like one of the platform's own (`id`, `weight`, `confidence`, …) stayed
+  on the live graph** — still shown, still matching search filters. The projection now removes any
+  property except the node's own reserved fields and its identity property.
+
+### Upgrading
+
+No migration. To clear properties the projection left behind on the live graph before this release,
+run `python backend/scripts/heal_native_leftovers.py` (a dry run, which lists what it would remove)
+and then with `--apply`; it removes only a property the entity's published version no longer has.
+A client that removed a property through the stage route by leaving it out of `properties` must now
+name it in `unsetProperties`. The pod nginx's streamed-export location now also covers `…/exports/{job}/download`
+(no buffering, an hour between reads): an nginx config of your own in front of the API needs the
+same. Exports are kept in the object store for a day: keep it on a mount
+(`OBJECT_STORE_BACKEND=local`) rather than in the database for exports of many gigabytes.
+
+### Known limitations
+
+- **Preparing a 50 GB export takes hours.** One export runs on one worker, at about 10 MB a second as
+  NDJSON and 3.5 as CSV, which reads everything twice. Nothing splits an export across workers yet,
+  or cancels one being prepared: "Export something else" leaves it to finish, and its file is swept.
+- **A download longer than the load balancer allows one response is cut** (an hour, on the GKE
+  manifests), and has to be resumed: the browser's Resume, or `curl -C -`.
+- **Exports aren't compressed**, on the server or on the way: a 50 GB CSV is 50 GB to download.
+- **A change on the main line names whoever published it**, not whoever made it in their draft.
+- **Only a relationship's properties are edited**; its confidence and type are shown, not changed.
+- **A line summarising a trace, or a combined flow drawn between two containers, lists no
+  relationships** — it says what it stands for. Expand either end to see them.
+
+---
+
+## [Unreleased] — Imports up to 10 GB
+
+### Added
+
+**Imports of up to 10 GB, uploaded in parts that resume.** A CSV, TSV or NDJSON file can now be
+10 GB (a JSON or Excel file, which is read whole, stays at 100 MB). The Import dialog sends the file
+in 16 MB parts, three at a time, retries a part that failed, and shows how much is up. If the upload
+stops (a dropped connection, a closed tab), choosing the same file again sends only what the server
+doesn't hold yet. A file too large for its format is refused before any of it is sent. Scripts can
+use the same routes (`…/imports/uploads`), or still send a file of up to 100 MB as one request.
+
+### Changed
+
+**Imports use a fraction of the memory, and run three to four times faster.** The importer held the
+data source's whole graph in memory (about 4.4 KB per entity) and every row of the file. It now
+works a window of 50,000 rows at a time, looking up only what the window names: 200,000 rows into a
+200,000-node graph peaked at 490 MB instead of 1.4 GB, and memory no longer grows with the graph.
+Rows, resolutions and entity versions are written in bulk rather than one statement each: that
+import took 2 to 3 minutes instead of 8½. Every commit writes its entity heads in bulk too, so
+large publishes, merges and reverts gain as well.
+
+### Fixed
+
+**An import's staged rows are cleared.** Every row of every import stayed in the database forever:
+the retention setting was never used. The versioning worker now deletes the rows of imports finished
+more than `IMPORT_STAGING_GC_DAYS` (7) ago.
+
+### Upgrading
+
+One migration, `20260927_1000_import_indexes`: an index on `node_versions (graph_id,
+qualified_name)` and one on `import_rows (job_id, matched_entity_id)`. It builds them with a plain
+`CREATE INDEX`, which holds writes to the table until it is done: on a large installation, run it in
+a quiet hour. New settings, both optional: `IMPORT_MAX_BYTES` (10 GiB) and
+`IMPORT_WHOLE_FILE_MAX_BYTES` (100 MB). The parts are kept in the object store: for multi-GB files,
+keep that on a mount (`OBJECT_STORE_BACKEND=local`) rather than in the database.
+
+### Known limitations
+
+- **A 10 GB import takes hours.** It writes about 1,500 to 2,500 rows a second, and a 10 GB NDJSON
+  file holds around 40 million rows. It runs on the worker, not in the web servers. The dialog shows
+  the upload's progress and the job's place in the queue, but not yet the import's own progress.
+- **An interrupted import starts over**, and an upload has a day to finish before its parts are
+  swept.
+- **A large import's staged rows take about the file's size again in Postgres** until they are swept.
+
+---
+
+## [Unreleased] — Imports and exports off the web servers
+
+### Changed
+
+**Imports and exports run on the versioning worker, not the web servers.** An import or export job
+ran inside the web server that took the request, sharing its CPU and memory with every other
+request. The web server now only queues the job, in Postgres, and the versioning worker runs it:
+two at a time per worker process (`GRAPHVER_TRANSFER_SLOTS`), oldest first, each job taken by one
+worker only. A job waiting its turn says so, with how many are ahead of it, in the canvas's Import
+dialog, a view package's export and a view package's data import. The compose and Kubernetes
+manifests run this way (`GRAPHVER_TRANSFER_INPROCESS=0`). Without a versioning worker (a single
+process, the Helm chart), jobs run in the web server as before.
+
+**Import and export files can live on a mount.** `OBJECT_STORE_BACKEND=local` keeps them as files
+under `IMPORT_STORE_ROOT`, and that can now be any directory every server mounts: a shared volume,
+or an S3 or GCS bucket through its FUSE driver (Mountpoint for Amazon S3, Cloud Storage FUSE). That
+keeps multi-GB files out of the database. A file is written once, front to back, and a write that
+fails now deletes what it wrote instead of leaving half a file.
+
+### Upgrading
+
+Nothing to migrate. The compose and Kubernetes manifests set `GRAPHVER_TRANSFER_INPROCESS=0` on the
+web tier, so imports and exports start only while their versioning worker runs. On stop the worker
+gives running jobs 40 s to finish, within its 60 s grace (compose now sets `stop_grace_period`).
+New settings, all optional: `GRAPHVER_TRANSFER_INPROCESS` (on unless set), `GRAPHVER_TRANSFER_SLOTS`
+(2 per worker process; an export job also takes one of its pod's `GRAPH_EXPORT_CONCURRENCY` turns,
+so raise the two together), `GRAPHVER_TRANSFER_POLL_SECS` (1) and
+`GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours; a job no worker starts in that time reads as
+failed).
+
+To keep import and export files on a mount, set `OBJECT_STORE_BACKEND=local` and `IMPORT_STORE_ROOT`
+to its path on the web servers and the versioning worker alike. Mountpoint for Amazon S3 needs
+`--allow-delete` and `--allow-overwrite`. Files already in the database store aren't moved, so jobs
+in flight when you switch need starting again.
+
+### Known limitations
+
+- **An interrupted job starts over.** A worker that stops mid-job (a deploy, a crash) takes the job
+  with it: the job reads as failed, and running it again redoes it from the start.
+
+---
+
+## [Unreleased] — Views that travel between environments, and remember their versions
+
+### Added
+
+**A view can move to another environment.** Export any view, or any version of it, to a
+`.view.json` file, and import it wherever the same data source is onboarded: the View wizard has a
+new **Import a view** journey, the Explorer and each workspace's Views manager have **Import view**,
+and a file dropped anywhere on the Explorer opens it. The import suggests where the view belongs,
+measured on a sample of its own entities ("49 of 50 found here"), then looks up every entity the
+view places and shows the match percentage. Anything not found is kept and marked, and goes live
+if the entity appears later; you can also drop it, remap it to another entity, or map a missing
+type to one that exists. Then the usual wizard steps let you change anything before it writes.
+On the canvas, a chip counts the placements not found here and lists them with their layers.
+
+**Importing a view that is already here updates it.** Each view carries an identity that crosses
+environments and the hashes of its whole history. So a newer file of the same view becomes its next
+version, and the import says how the two stand: the file is newer, the view here has moved on, or
+both changed. **Replace** takes the file's design; **Merge** keeps what changed here, and the file
+wins where both changed the same thing. A file can also create a new view, import as a separate
+copy, or overwrite another view you can edit (its design is saved as a version first).
+
+**Round trips lose nothing, and prove it.** The server writes a view's design (everything but its
+ids, owners and label) in one canonical form and hashes it. The file carries that hash, and the
+import re-reads what it stored and says whether it is exactly what was sent. When this environment
+had to change something, such as custom node order where node sorting is off, the import says what
+and why. Export, import, export and import again gives byte-identical designs. Name, description,
+icon and tags travel beside the design, so renaming never breaks the view's identity, and settings
+this release doesn't know are carried through untouched.
+
+**Views have versions.** Every view keeps numbered, immutable versions of its design: v1, v2, …
+Saving in the wizard, importing, restoring, a draft going live and exporting unsaved changes each
+keep one, and **Save version** keeps one with a note. The view header's **Versions** opens the
+history: compare any two versions (or one with the current design), restore one (the current
+design is saved first, and sharing is left alone), or export it. An imported version shows how
+much of its file matched. Canvas autosaves show as "unsaved changes since vN" rather than a
+version each. A view that predates this gets its first version the first time it is needed.
+Anyone who can read a view can export it; someone who can't edit it exports its latest version
+as it stands, and nothing is written for them.
+
+**A file of several views imports in one go.** Export several views from the Explorer's (or Views
+manager's) selection bar. On import, map each source to a data source, check every view at once,
+and review them in one table: create, update, copy, overwrite a view picked here, or skip; name;
+visibility. A type missing where the views land is mapped once for every view from that source.
+Each view then imports as its own request under one batch, so one failure doesn't stop the rest,
+and **Retry failed** is safe to press.
+
+**An import can wait in a draft.** On a data source under version control, a new view or an update
+can go into a draft and go live when the draft is published or its review request merges. This is
+the default where you can open drafts. Until then a new view is private and appears in no list,
+count or search. The draft's Changes tab, its review request and the publish dialog show its
+views, and a draft that changes only views can now be published. **Submit for review** is offered
+as soon as the import finishes; a file's views each wait in their own draft, and are submitted
+together, one review each.
+
+**A view can travel with its data.** **View + data** in the export dialog packages the view with
+its data source's own export (the view's entities or the whole source, published or from your
+draft) as a `.view-package.zip`. Importing one brings the data into a new draft of the target
+(adding and updating only, never deleting), checks the view against that draft so the entities the
+data brought count as found, and puts the view in the same draft, so the two go live together.
+If the data import fails, **Try again** runs it again into the same draft.
+
+**Wherever a view is, so are these actions.** The view header has **Versions** and **Export**. A
+view's card menu in the Explorer has **Export…**, **Versions** and **Update from file…**. The
+canvas's **Import / Export** menu has a new **This view** section: export the view, export it with
+its data, or update it from a file.
+
+**All of this is a preview, off until an admin turns it on**: Admin → Features → **View versions,
+import and export** (`viewPortabilityEnabled`). While it is off, none of the actions above appear
+and the server refuses their requests. Versions are recorded all the same, so turning it on shows
+each view's whole history. Two more switches, **Export views** (`viewExportEnabled`) and **Import
+views** (`viewImportEnabled`), are on by default and decide which directions are allowed once the
+preview is on. Exporting a view with its data also needs **Export graph data**; importing one needs
+version control.
+
+The formats, rules and API are in `docs/features/view-portability.md`. The file format's JSON
+Schema is `docs/features/view-bundle.v1.schema.json`, rendered from the importer's own model.
+
+**Graph data exports stream, at any size.** The export dialog first asks what the export will
+hold, then the browser downloads the file while the server writes it: the first byte arrives at
+once and nothing is built or stored first. The server reads the graph a page at a time from one
+pinned commit, so memory stays flat whatever the size, and any pod can serve the download. A
+3-million-node, 3-million-edge graph exported as 4.5 GB of NDJSON in under six minutes, with the
+server at about 200 MB throughout. An export keeps about one CPU core busy while it runs, so each
+server (a pod, across all of its worker processes) streams two at a time
+(`GRAPH_EXPORT_CONCURRENCY`). Another waits for a turn, for up to 15 minutes, then gets 429 with
+`Retry-After`; an export job waits its turn the same way. An export that would hold nothing says
+why instead of downloading an empty file, and one too large for Excel's 1,048,575 rows per sheet
+offers CSV before anything downloads.
+
+**A data source without version control can be exported**, in View mode as in Edit mode: a cold
+copy of its live graph, in any of the five formats. Its rows carry URNs, so importing it into a
+data source with version control matches them there. The same is true while version control is
+still being set up for a data source.
+
+### Fixed
+
+**Some exports downloaded empty files.** A view-scoped export only matched a view's placements by
+URN, so a view on a version-controlled source (whose placements can be keyed `gv:<entity id>`)
+exported nothing. The export job also ran inside its request, which the 120-second timeout ended,
+and wrote to disk local to one pod, so its download could come from a pod that didn't have it.
+Exports now stream (above), match every placement key the canvas writes, and never download an
+empty file.
+
+**Every format re-imports what it exported.** A list property written to CSV, TSV or Excel came
+back as the text `['a', 'b']`; it is now written as JSON and read back as the list. A CSV cell
+holding a line break (a description, say) split its row in two. A JSON array was taken for NDJSON
+when its first line was valid JSON on its own. Parsing a large NDJSON or JSON file took time that
+grew with the square of its size; it is now linear. Exporting then importing each format into the
+same data source now reports every row unchanged.
+
+**Import and export jobs outlive their request, and never read "running" once stopped.** They ran
+as the request's background tasks, which the request's timeout cancelled after 120 seconds, and a
+cancelled job read "running" forever. They now run as tasks of their own, a running job reports
+in every 15 seconds, and one silent for 15 minutes (`JOB_STALE_AFTER_SECS`) — its server restarted —
+reads as failed: "The job stopped before it finished … Start it again."
+
+**Import and export files are kept where every server can read them.** Uploads and export artifacts
+were written to disk local to one pod, so a download or an import could land on a pod that didn't
+have the file. They now live in the database, in 1 MB chunks, swept after a day
+(`OBJECT_STORE_TTL_HOURS`). A download whose file was already swept is a 404, not a broken file.
+
+**Large uploads reach their routes.** The 100 MB body cap for uploads only matched paths no upload
+route used, so a bulk import, a view package, or a view file over 8 MB was refused at 8 MB. Those
+routes, and checking and importing a view file's designs, now take up to 100 MB; everything else
+keeps 8 MB.
+
+**Imports larger than 100 MB are refused before they upload**, with how to split them, instead of
+an opaque error from the proxy. An import the server cancelled no longer shows as finished.
+
+**The projector's node fingerprint showed as a property.** Every node projected from version
+control carried `gvHash`, the projector's own bookkeeping, among its user properties in the canvas
+and in exports. It is now reserved like the projector's other fields.
+
+**A request that allocated a lot stalled every other request on its worker.** Each full garbage
+collection walked the whole heap the server builds at startup (about 300,000 objects, 140–180 ms
+on the event loop), and a large export set one off about once a second. That heap is now frozen
+once startup finishes, and those collections take a few milliseconds.
+
+**Saving a view from the wizard deleted its display rules**, and anything else its reference
+layout carried beyond layers and placements, because the layout write replaced the reference
+layout wholesale. The wizard now carries them through, as the canvas already did.
+
+**Publishing a draft dropped layout fields the layout merge didn't know about.** Any
+`referenceLayout` field beyond layers, placements, display rules and default sort was lost when a
+draft's layout went live. Such fields are now merged three ways like the rest.
+
+### Security
+
+**Views waiting in a draft stay private until it goes live.** Every query that lists, counts or
+facets views now goes through one live-view filter, and a structural test fails the build if a
+new query of the views table skips it. That includes the analytics, popularity, search-facet and
+workspace-count paths. Such a view can't have its visibility changed, or be put up for
+publication, until its draft goes live.
+
+**An uploaded file is untrusted input, and is treated as such.** View files are capped at 64 MB,
+200 views, 250,000 placements and 64 levels of nesting. Packages are capped at 100 MB, and their
+data at 2 GB decompressed however the archive describes itself. Every part is checked against the
+package's checksums, and a part changed after export is reported. An upload is kept for 24 hours,
+for the person who uploaded it only. Imports pass the same gates as building a view.
+
+### Upgrading
+
+Three migrations, all additive: `20260923_1000_view_versions` adds `views.portable_id` (stamped on
+existing views in batches) and the `view_versions` table, and widens the view-activity actions.
+`20260925_1000_view_draft_stage` adds `views.draft_branch_id` and the staged-import columns on
+`view_layout_overlays`. `20260926_1000_object_store` adds the two tables that hold import and
+export files (`object_store_objects`, `object_store_chunks`). Existing views get no versions up
+front; each gets its first the first time it is needed.
+
+Nothing changes for users on upgrade: the feature is a preview and ships off. To try it, turn on
+Admin → Features → **View versions, import and export**.
+
+The transfer routes run under a new 120-second timeout tier (`HTTP_TIMEOUT_VIEW_TRANSFER_SECS`),
+below nginx's 180 s. Package uploads wait in the object store under `transfer-uploads/` and the
+versioning worker prunes them after a day. nginx's `client_max_body_size` (100 MB) already matches
+the package limit.
+
+Import and export files now live in the database: `OBJECT_STORE_BACKEND=database` is the new
+default (`local` keeps the old per-pod directory, for a single-instance setup), and the versioning
+worker's daily pass sweeps files older than `OBJECT_STORE_TTL_HOURS` (24).
+
+Streamed exports need their proxies to let a long download run. The frontend's nginx has a new
+location for the two export stream routes (`proxy_buffering off`, `proxy_read_timeout 3600s`);
+every other API route keeps its 180 s. The GKE BackendConfigs' `timeoutSec` goes from 180 to 3600
+(frontend and viz-service), and the Helm ingress's `proxy-read-timeout` from 180 to 3600: the app's
+own tiers still end every other request first. The export stream routes are exempt from the
+request timeout, like server-sent events. New settings, all optional: `GRAPH_EXPORT_CONCURRENCY`
+(2 per pod, shared by its worker processes through lock files in the temp directory; size it to
+the CPU cores a pod can spare), `GRAPH_EXPORT_SLOT_WAIT_SECS` (900), `GRAPH_EXPORT_MAX_BYTES`
+(20 GiB, the most one export may stream), `GRAPH_EXPORT_PLAN_BUDGET_SECS` (20, how long a plan
+counts before answering without exact counts) and `GRAPH_EXPORT_PAGE_SIZE` (2,000 rows per read).
+
+### Known limitations
+
+- **Entity identifiers are not rewritten between environments.** A view matches where the
+  environments use the same URNs; anything else shows as not found and can be remapped by hand.
+- **Files are not signed.** The hashes prove a file wasn't changed after export, not who exported it.
+- **A package brings its data with one of its views**, because a draft belongs to one view. Import
+  the package's other views afterwards with **View only**.
+- **An import is one file of at most 100 MB.** An export has no such limit, so a large one is
+  imported back in parts.
+- **A live export isn't a snapshot.** A data source without version control has no commit to pin,
+  so a change made while its export downloads may or may not be in the file.
 
 ---
 

@@ -87,10 +87,11 @@ class _LabelAwareFakeGraph:
             return SimpleNamespace(result_set=[])
         if cypher.startswith("CREATE (r:_PropReserve)") or cypher.startswith("MATCH (r:_PropReserve)"):
             return SimpleNamespace(result_set=[])
-        if cypher.endswith("RETURN u, keys(n)"):                      # removed-property read
+        if "RETURN u, keys(n)" in cypher:                             # removed-property read
             label = cypher.split("MATCH (n:", 1)[1].split(" {urn:", 1)[0]
             return SimpleNamespace(result_set=[
-                [u, list(self.nodes[(label, u)])] for u in params["urns"] if (label, u) in self.nodes])
+                [u, list(self.nodes[(label, u)]), None, None]
+                for u in params["urns"] if (label, u) in self.nodes])
         if " SET n:" in cypher and " REMOVE n:" in cypher:            # retype in place
             old = cypher.split("MATCH (n:", 1)[1].split(" {urn:", 1)[0]
             new = cypher.split(" SET n:", 1)[1].split(" REMOVE", 1)[0]

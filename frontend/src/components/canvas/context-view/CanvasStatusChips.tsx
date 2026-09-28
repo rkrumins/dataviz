@@ -5,8 +5,9 @@
  * explains why in its tooltip, and offers an action where one exists.
  *
  * Chips (each hidden when its count is zero):
- *  - "N flows not on canvas" — projected edges whose endpoints resolve to
- *    no rendered entity (unloaded or unassigned).
+ *  - "N flows outside this view" — flows from a drawn row whose other end
+ *    is outside the view. Only a curated view has an outside: a view open
+ *    to its whole data source counts none (useEdgeProjection).
  *  - "N entities not in any layer" — loaded nodes that matched no layer;
  *    popover lists them with click-through to the entity drawer.
  *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
@@ -14,27 +15,30 @@
  *  - "N virtual hops" — on a view that stitches lineage through the
  *    entities it leaves out (a subset view): stitching, done (a list of
  *    the hops), incomplete, or failed. See VirtualHopsChip.
+ *  - "N placements not found here" — entities placed in the view that this
+ *    graph doesn't hold (typically a view brought in from another
+ *    environment); popover lists them and says what to do.
  *
  * Adaptive's "strongest N of M lines" is not here: it is the lineage guide at
  * the end of the layer strip (LineageGuide).
  *
- * Every relationship counted here is a FLOW: every one of these numbers
+ * Every relationship counted here is a FLOW (the placements chip counts
+ * placements, not relationships): every one of these numbers
  * comes from `useEdgeProjection`, which drops containment edges in all
  * three of its sections, or from `useExternalDegrees`, which asks the
  * server for lineage types only. Nothing structural can reach a chip.
  *
  * Every count here names its unit too; the words come from
  * `connections/connectionUnits.ts` so no two chips can drift apart. The one
- * exception is the unresolved chip: its number is mixed-granularity (one
- * per collapsed rollup in section A, one per raw edge in B and C), so it
- * names the kind and deliberately claims no unit.
+ * exception is the unresolved chip, which counts underlying flows (a
+ * roll-up weighs every flow it stands for) and says so in its own words.
  *
  * Visual language matches the column overflow chips: rounded-full glass,
  * backdrop blur, soft border, quiet colors.
  */
 import { useState } from 'react'
 import * as PopoverPrimitive from '@radix-ui/react-popover'
-import { Unlink, Layers, ListPlus, Focus } from 'lucide-react'
+import { Unlink, Layers, ListPlus, Focus, SearchX } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
@@ -46,6 +50,13 @@ const CHIP_CLASS =
   'border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink-muted bg-canvas-elevated/80'
 
 const UNASSIGNED_LIST_CAP = 50
+
+/** A placement in the view whose entity this graph doesn't hold. */
+export interface NotFoundPlacement {
+  urn: string
+  label: string
+  layerName?: string
+}
 
 export interface UnassignedEntity {
   id: string
@@ -71,8 +82,10 @@ export function CanvasStatusChips({
   selectedExternal,
   onPreviewExternal,
   virtualHops,
+  notFoundPlacements = [],
 }: {
-  /** Projected edges hidden because an endpoint resolves to nothing on canvas. */
+  /** Flows from a drawn row whose other end is outside the view: none in a
+   *  view open to its whole data source (useEdgeProjection). */
   unresolvedEdgeCount: number
   /** Loaded nodes that render in no layer. */
   unassignedEntities: UnassignedEntity[]
@@ -105,8 +118,11 @@ export function CanvasStatusChips({
   onPreviewExternal?: () => void
   /** The board's virtual hops, on a view that stitches them. */
   virtualHops?: VirtualHopsSummary
+  /** Placements the load asked the graph for and didn't get: kept in the view, marked not found. */
+  notFoundPlacements?: NotFoundPlacement[]
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
+  const [notFoundOpen, setNotFoundOpen] = useState(false)
 
   const showUnresolved = unresolvedEdgeCount > 0
   const showUnassigned = unassignedEntities.length > 0
@@ -115,8 +131,9 @@ export function CanvasStatusChips({
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
   const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
   const showHops = virtualHopsChipVisible(virtualHops)
+  const showNotFound = notFoundPlacements.length > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showRoots && !showExternal && !showHops) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showRoots && !showExternal && !showHops && !showNotFound) return null
 
   return (
     // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
@@ -215,7 +232,7 @@ export function CanvasStatusChips({
             <div>
               <p className="font-semibold mb-1">Large flow fan</p>
               <p className="text-ink-muted">
-                This entity touches {focusTotal!.toLocaleString()}{' '}
+                The selection touches {focusTotal!.toLocaleString()}{' '}
                 {unitNoun(focusTotal!, 'lines')} — showing the{' '}
                 {focusShown!.toLocaleString()} strongest on canvas. The Lens lists every
                 one, grouped and searchable.
@@ -251,31 +268,21 @@ export function CanvasStatusChips({
             <div>
               <p className="font-semibold mb-1">
                 {unresolvedEdgeCount.toLocaleString()} flow{unresolvedEdgeCount === 1 ? '' : 's'}{' '}
-                {viewScope === 'curated' ? 'lead outside this view' : 'not shown'}
+                lead outside this view
               </p>
-              {viewScope === 'curated' ? (
-                <p className="text-ink-muted">
-                  This view is a curated subset of the data source — these links
-                  reference entities that aren&apos;t part of the view&apos;s
-                  assignments. That&apos;s expected; add those entities to the
-                  view to see the flows.
-                </p>
-              ) : (
-                <p className="text-ink-muted">
-                  These edges reference entities that aren&apos;t loaded on the canvas
-                  or aren&apos;t assigned to any layer. Load or assign those entities
-                  to see the flows.
-                </p>
-              )}
+              <p className="text-ink-muted">
+                This view is a curated subset of the data source — these links
+                reference entities that aren&apos;t part of the view&apos;s
+                assignments. That&apos;s expected; add those entities to the
+                view to see the flows.
+              </p>
             </div>
           }
         >
           <div className={CHIP_CLASS}>
-            <Unlink className={cn('w-3 h-3', viewScope === 'curated' ? 'text-sky-400/80' : 'text-amber-500/80')} />
+            <Unlink className="w-3 h-3 text-sky-400/80" />
             <span className="tabular-nums">{unresolvedEdgeCount.toLocaleString()}</span>
-            <span className="text-ink-muted/70">
-              {viewScope === 'curated' ? 'flows outside this view' : 'flows not on canvas'}
-            </span>
+            <span className="text-ink-muted/70">flows outside this view</span>
           </div>
         </InfoTooltip>
       )}
@@ -319,6 +326,46 @@ export function CanvasStatusChips({
               {unassignedEntities.length > UNASSIGNED_LIST_CAP && (
                 <p className="px-1.5 pt-1.5 text-[10px] text-ink-muted/60">
                   +{unassignedEntities.length - UNASSIGNED_LIST_CAP} more
+                </p>
+              )}
+            </PopoverPrimitive.Content>
+          </PopoverPrimitive.Portal>
+        </PopoverPrimitive.Root>
+      )}
+
+      {showNotFound && (
+        <PopoverPrimitive.Root open={notFoundOpen} onOpenChange={setNotFoundOpen}>
+          <PopoverPrimitive.Trigger asChild>
+            <button type="button" className={`${CHIP_CLASS} cursor-pointer hover:scale-105 active:scale-95 transition-transform`}>
+              <SearchX className="w-3 h-3 text-amber-500" />
+              {/* The space is for screen readers: the flex gap separates them on screen. */}
+              <span className="tabular-nums">{notFoundPlacements.length.toLocaleString()}</span>{' '}
+              <span>{notFoundPlacements.length === 1 ? 'placement' : 'placements'} not found here</span>
+            </button>
+          </PopoverPrimitive.Trigger>
+          <PopoverPrimitive.Portal>
+            <PopoverPrimitive.Content
+              side="top"
+              align="start"
+              sideOffset={6}
+              className="z-[9999] w-80 rounded-lg border border-glass-border bg-canvas-elevated shadow-xl shadow-black/40 p-2"
+            >
+              <p className="px-1.5 text-[11.5px] font-semibold text-ink">Placed in this view, but not in this graph</p>
+              <p className="px-1.5 pt-0.5 pb-2 text-[11px] text-ink-muted leading-relaxed">
+                Usually a view brought in from another environment. They’re kept, and appear as soon as the entity
+                arrives here. To remove them, edit the view and see Assignments.
+              </p>
+              <div className="max-h-64 overflow-y-auto custom-scrollbar">
+                {notFoundPlacements.slice(0, UNASSIGNED_LIST_CAP).map(p => (
+                  <div key={p.urn} className="px-1.5 py-1 flex items-center gap-2 min-w-0" title={p.urn}>
+                    <span className="truncate text-[11.5px] text-ink">{p.label}</span>
+                    {p.layerName && <span className="ml-auto flex-shrink-0 text-[10px] text-ink-muted">{p.layerName}</span>}
+                  </div>
+                ))}
+              </div>
+              {notFoundPlacements.length > UNASSIGNED_LIST_CAP && (
+                <p className="px-1.5 pt-1.5 text-[10px] text-ink-muted">
+                  +{(notFoundPlacements.length - UNASSIGNED_LIST_CAP).toLocaleString()} more
                 </p>
               )}
             </PopoverPrimitive.Content>

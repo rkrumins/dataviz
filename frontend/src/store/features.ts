@@ -40,6 +40,9 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     nodeSortingEnabled: true,             // kill switch — sort UI; saved orders always render
     traceEnabled: true,
     graphExportEnabled: true,
+    viewPortabilityEnabled: false,        // experimental preview — ships OFF
+    viewExportEnabled: true,
+    viewImportEnabled: true,
     blankModelsEnabled: true,
     allowedViewModes: ['graph', 'hierarchy', 'reference', 'layered-lineage'],
     viewSubsetsEnabled: true,
@@ -75,7 +78,6 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     inviteLinksEnabled: true,
     toursEnabled: false,                  // experimental preview — ships OFF
     canvasLayerFoldEnabled: false,        // experimental preview — ships OFF
-    canvasLineageRollupEnabled: false,    // experimental preview — ships OFF
 }
 
 /** Last served values, cached so a returning visitor's first paint reflects the

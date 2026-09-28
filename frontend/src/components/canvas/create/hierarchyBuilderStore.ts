@@ -15,6 +15,7 @@
  */
 import { create } from 'zustand'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
+import { useCanvasStore } from '@/store/canvas'
 
 export type BuilderMode = 'outline' | 'paste' | 'grid'
 
@@ -78,7 +79,9 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
   batchUrns: [],
   sessionAddedCount: 0,
 
-  open: (opts) => {
+  // The builder takes the right rail from the drawer — a drawer move, held while the drawer has
+  // edits not staged yet.
+  open: (opts) => useCanvasStore.getState().requestDrawerMove(() => {
     void ensureDraftOpen()
     set((s) => ({
       isOpen: true,
@@ -91,7 +94,7 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
       batchId: s.batchId + 1,
       batchUrns: [],
     }))
-  },
+  }),
 
   openBuild: (opts) => get().open({ ...opts, surface: 'build' }),
 

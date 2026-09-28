@@ -23,6 +23,8 @@ import { cn } from '@/lib/utils'
 import { useSearchStore } from '@/store/searchStore'
 import type { GroupPredicate, Predicate } from '@/types/search'
 
+import type { ValueSuggester } from '../builder/useDiscovery'
+
 import { AddRowButton } from './builder-atoms/AddRowButton'
 import { OperatorPill } from './builder-atoms/OperatorPill'
 import { RowCard } from './builder-atoms/RowCard'
@@ -57,7 +59,8 @@ export interface NestedGroupCardProps {
     onWrap?: (op: OpTone) => void
     /** Duplicate this whole group in the parent. */
     onDuplicate?: () => void
-    onOpenAdvanced: () => void
+    /** Omitted where there is no Advanced drawer (the rule editor). */
+    onOpenAdvanced?: () => void
     onSubmit?: () => void
     disabled?: boolean
     discovery: {
@@ -65,6 +68,7 @@ export interface NestedGroupCardProps {
         keysByEntityType: Record<string, string[]>
         tagValues: string[]
         getValueSamples: (key: string) => unknown[]
+        suggestValues?: ValueSuggester
     }
     knownEntityTypes: string[]
     activeEntityTypes: string[]
@@ -97,13 +101,13 @@ const NestedGroupCardImpl: FC<NestedGroupCardProps> = ({
                 <span className="text-[11.5px] text-ink-muted">
                     Deeply nested group — keep editing in Advanced
                 </span>
-                <button
+                {onOpenAdvanced && <button
                     type="button"
                     onClick={onOpenAdvanced}
                     className="text-[11px] text-accent-lineage hover:text-accent-lineage/80 transition-colors"
                 >
                     Open Advanced →
-                </button>
+                </button>}
             </div>
         )
     }

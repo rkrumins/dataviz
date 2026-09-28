@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from backend.common.interfaces.provider import resolve_identities_by_query
+from backend.common.property_patch import apply_patch
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
     GraphEdge, GraphNode, GraphSchemaStats, NodePage, NodeQuery, TagSummary, TopLevelNodesResult,
@@ -29,11 +31,12 @@ from backend.common.models.graph import (
 )
 
 
-#: Bounds on the derived-rollup containment descent (see
-#: ``get_aggregated_edges_between``). A branch is draft-scale, so these are a
-#: runaway guard, not a paging scheme — when either bites, the answer is
-#: reported ``truncated``/``stale`` rather than quietly returned short.
-_DERIVE_HOP_BOUND = 16
+#: Bound on the derived-rollup containment descent (see
+#: ``get_aggregated_edges_between``). A branch is draft-scale, so this is a
+#: runaway guard, not a paging scheme — when it bites, the answer is
+#: reported ``truncated``/``stale`` rather than quietly returned short. The
+#: descent has no hop bound: a deep but narrow tree is small, and the scope
+#: set already stops a containment cycle.
 _DERIVE_SCOPE_CAP = 20_000
 
 #: Surfaced verbatim as the 501 body, so it is product copy: what
@@ -98,6 +101,14 @@ class VersionedBranchProvider:
             containment_edge_types=self._containment_types,
             include_child_count=getattr(query, "include_child_count", True))
         return [GraphNode(**d) for d in rows]
+
+    async def resolve_identities(self, urns: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Which ``urns`` exist on this branch, and as what: the three states of
+        ``GraphDataProvider.resolve_identities`` (found / absent / left out when its lookup
+        failed), from bounded ``get_nodes`` reads. This class doesn't inherit that default, and
+        without it every view checked against a version-controlled data source came back
+        "couldn't be checked"."""
+        return await resolve_identities_by_query(self, urns)
 
     async def get_nodes_page(self, query: NodeQuery) -> NodePage:
         # Same probe as the interface default (this class doesn't inherit it):
@@ -394,20 +405,26 @@ class VersionedBranchProvider:
         child, plus the coarse container cell the canvas stamps ``isDelegated`` so it does
         not double-draw over them.
 
-        Bounded, and honest about it: the descent stops at ``_DERIVE_HOP_BOUND`` hops and
-        ``_DERIVE_SCOPE_CAP`` nodes — and a single edge read stops at that same cap — and
-        each of the three says ``truncated``/``stale`` with the bound that bit as the
-        reason, never a short answer that reads as a complete one, which was the whole
-        defect."""
+        Bounded, and honest about it: the descent stops at ``_DERIVE_SCOPE_CAP`` nodes —
+        and a single edge read stops at that same cap — and either says
+        ``truncated``/``stale`` with the bound that bit as the reason, never a short
+        answer that reads as a complete one, which was the whole defect.
+
+        One side may be left open, as on the FalkorDB reader: no targets asks for
+        every flow out of the sources, no sources for every flow into the targets
+        (selecting a collapsed container asks both). No targets used to mean "the
+        sources themselves", which answered a selected container nothing and marked
+        it complete. The open side is not descended: its far end is named as the
+        flow's own end, and the canvas places it through its chain."""
         from backend.common.providers.pair_rules import ancestor_closure, cube_pairs
 
         srcs = [u for u in (source_urns or []) if u]
-        tgts = [u for u in (target_urns or []) if u] if target_urns else list(srcs)
+        tgts = [u for u in (target_urns or []) if u]
         # AGGREGATED is the derived layer itself: publishing a draft can commit
         # materialised rollups into the version log, and replaying those as raw
         # lineage would count every flow twice.
         ltypes = [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
-        if not srcs or not tgts or not ltypes:
+        if not (srcs or tgts) or not ltypes:
             return AggregatedEdgeResult(aggregatedEdges=[], totalSourceEdges=0)
         ctypes = [t for t in (containment_edges or []) if t]
 
@@ -416,13 +433,14 @@ class VersionedBranchProvider:
         # it is the `truncated`/`stale` flags AND the reason on the wire.
         bound: Optional[str] = None
 
-        async def _out_edges(urns: List[str], types: List[str]) -> List[GraphEdge]:
+        async def _edges(urns: List[str], types: List[str], *, into: bool = False) -> List[GraphEdge]:
             nonlocal bound
             out: List[GraphEdge] = []
             for i in range(0, len(urns), chunk):
+                part = urns[i:i + chunk]
                 rows = await self.get_edges(EdgeQuery(
-                    source_urns=urns[i:i + chunk], edge_types=types,
-                    limit=_DERIVE_SCOPE_CAP))
+                    **({"target_urns": part} if into else {"source_urns": part}),
+                    edge_types=types, limit=_DERIVE_SCOPE_CAP))
                 # A chunk that comes back AT the limit dropped edges we will
                 # never see, so everything built on it is short.
                 if len(rows) >= _DERIVE_SCOPE_CAP:
@@ -435,11 +453,9 @@ class VersionedBranchProvider:
         parents: Dict[str, List[str]] = {}
         scope = set(srcs) | set(tgts)
         frontier = list(scope)
-        for _ in range(_DERIVE_HOP_BOUND if ctypes else 0):
-            if not frontier or bound:
-                break
+        while ctypes and frontier and not bound:
             nxt: List[str] = []
-            for e in await _out_edges(frontier, ctypes):
+            for e in await _edges(frontier, ctypes):
                 # Containment is a DAG — a node can have several parents, and the
                 # closure below dedupes on that set.
                 ps = parents.setdefault(e.target_urn, [])
@@ -453,18 +469,14 @@ class VersionedBranchProvider:
                 scope.add(e.target_urn)
                 nxt.append(e.target_urn)
             frontier = nxt
-        # A live frontier means the chain runs deeper than the hop bound: the
-        # lineage under it never entered `scope` and the answer is short. This
-        # was the silent half — falling out of the loop said nothing at all.
-        if ctypes and frontier:
-            bound = bound or "derive_hop_bound"
 
         # ── Roll the raw lineage inside that scope up to the requested pairs.
         asked_src, asked_tgt = set(srcs), set(tgts)
         memo: Dict[str, Dict[str, int]] = {}
         cells: Dict[Any, List[Any]] = {}
-        for e in await _out_edges(sorted(scope), ltypes):
-            if e.target_urn not in scope:
+        # With no sources named, the flows are the ones INTO the scope.
+        for e in await _edges(sorted(scope), ltypes, into=not srcs):
+            if tgts and e.target_urn not in scope:
                 continue
             for a, b in cube_pairs(
                 ancestor_closure(parents, e.source_urn, memo),
@@ -475,7 +487,7 @@ class VersionedBranchProvider:
                 # flow reaches the canvas through no other call.
                 include_leaf_mirror=True, s=e.source_urn, t=e.target_urn,
             ):
-                if a not in asked_src or b not in asked_tgt:
+                if (srcs and a not in asked_src) or (tgts and b not in asked_tgt):
                     continue
                 cell = cells.setdefault((a, b), [0, set()])
                 cell[0] += 1
@@ -522,6 +534,10 @@ class VersionedBranchProvider:
 
     async def deep_search_discover(self, *, sample_per_label: int = 200):
         """Schema discovery — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
+        """Value suggestions — same gap as :meth:`deep_search`."""
         raise NotImplementedError(_NO_DEEP_SEARCH)
 
     # ---- stats: counts + schema summaries over the composed branch state - #
@@ -631,9 +647,10 @@ class VersionedBranchProvider:
             graph_id=self._gid, entity_id=edge_id, branch_id=self._branch)
         if cur is None:
             return None
-        payload = {**cur, "properties": {**(cur.get("properties") or {}), **(properties or {})}}
+        patch = {"properties": dict(properties or {})}   # a removal is PROP_DELETE
         await self._commit([{"op": "update", "entity_kind": "edge", "entity_id": edge_id,
-                             "payload": payload}], f"update edge {edge_id}")
+                             "payload": patch}], f"update edge {edge_id}")
+        payload = apply_patch(cur, patch)
         return GraphEdge(
             id=edge_id,
             sourceUrn=payload.get("sourceEntityId") or payload.get("source_entity_id") or "",

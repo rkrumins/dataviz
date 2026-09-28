@@ -403,4 +403,37 @@ describe('loadChildren — lossless paging', () => {
       expect(hasFar()).toBe(false)
     })
   })
+
+  describe('a page whose lineage read comes back at its cap', () => {
+    beforeEach(() => {
+      // n0 is a hub: the outgoing read of its batch is cut at the cap.
+      Object.assign(mockProvider, {
+        getEdges: vi.fn(async (q: { sourceUrns?: string[]; limit: number }) =>
+          q.sourceUrns?.includes(kid(0))
+            ? Array.from({ length: q.limit }, (_, i) => ({ id: `h${i}`, sourceUrn: kid(0), targetUrn: `urn:far:${i}`, edgeType: 'FLOWS_TO' }))
+            : []),
+      })
+      mockProvider.getChildrenWithEdges.mockImplementation(serve() as never)
+      useCanvasStore.setState({ lineagePartial: { in: new Set(), out: new Set() } })
+    })
+    afterEach(() => { delete (mockProvider as { getEdges?: unknown }).getEdges })
+
+    it("marks that batch's rows partial that way, and no others", async () => {
+      const { result } = renderHook(() => useGraphHydration())
+      await act(async () => { await result.current.loadChildren(PARENT) })
+      await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+      const { lineagePartial } = useCanvasStore.getState()
+      expect([...lineagePartial.out].sort()).toEqual(Array.from({ length: 25 }, (_, i) => kid(i)))
+      expect(lineagePartial.in.size).toBe(0)
+    })
+
+    it('a new graph forgets it', async () => {
+      const { result } = renderHook(() => useGraphHydration())
+      await act(async () => { await result.current.loadChildren(PARENT) })
+      await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+      expect(useCanvasStore.getState().lineagePartial.out.size).toBe(25)
+      act(() => { useCanvasStore.getState().setGraph([], []) })
+      expect(useCanvasStore.getState().lineagePartial.out.size).toBe(0)
+    })
+  })
 })

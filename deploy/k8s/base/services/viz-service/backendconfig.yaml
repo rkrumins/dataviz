@@ -12,11 +12,10 @@ spec:
     type: HTTP
     requestPath: /api/v1/health/ready
     port: 8000
-  # Margin over the backend's slowest ASGI tier (versioning, 120s) so the
-  # app's own JSON 504 always wins the race, never an opaque load-balancer
-  # 504. The base ingress routes everything through the frontend (whose
-  # BackendConfig already carries 180); this keeps a direct-to-API route
-  # from reintroducing the tie.
-  timeoutSec: 180
+  # The load balancer's limit on a whole response. An hour, so a streamed
+  # export can finish (see the frontend's BackendConfig, which the base
+  # ingress routes everything through); the app's own tiers (120s at most)
+  # still end every other request first, with its JSON 504.
+  timeoutSec: 3600
   connectionDraining:
     drainingTimeoutSec: 30

@@ -269,6 +269,15 @@ async def test_graph_export_off_refuses_the_job_AND_the_download(test_client: As
         "gating the job but not the download leaves the file collectable — the door is still open"
     )
 
+    # The streamed export, and the live export of a source without version control: the same door.
+    for path in ("/api/v1/ws_x/versioning/graphs/g_x/exports/plan",
+                 "/api/v1/ws_x/versioning/graphs/g_x/exports/stream",
+                 "/api/v1/ws_x/graph/export/plan?dataSourceId=ds_x",
+                 "/api/v1/ws_x/graph/export/stream?dataSourceId=ds_x"):
+        resp = await test_client.get(path)
+        assert resp.status_code == 403, (path, resp.text)
+        assert resp.json()["detail"]["feature"] == "graphExportEnabled"
+
 
 async def test_blank_models_off_refuses_lineage_with_no_source_behind_it(test_client: AsyncClient):
     """The provenance switch.
