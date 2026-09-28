@@ -4,7 +4,7 @@
  * fire their callbacks, the Lineage-appearance section renders muted/inert
  * when Lineage is off, and Reset fires onReset.
  */
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { DisplayMenu } from '../header/DisplayMenu'
 import { usePreferencesStore } from '@/store/preferences'
@@ -119,5 +119,38 @@ describe('DisplayMenu', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Display' }))
 
     expect(screen.getByText('A trace draws every line it walks, whatever this is set to.')).toBeInTheDocument()
+  })
+
+  it('Marker sides: incoming left, outgoing right by default; a choice is stored', () => {
+    usePreferencesStore.setState({ lineagePortSides: 'direction' })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const sides = screen.getByRole('radiogroup', { name: 'Marker sides' })
+    const byDirection = within(sides).getByRole('radio', { name: /Incoming left, outgoing right/ })
+    const byLines = within(sides).getByRole('radio', { name: /Where lines attach/ })
+    expect(byDirection).toHaveAttribute('aria-checked', 'true')
+    expect(byDirection).toHaveTextContent('Each side shows one direction; a line to the same column or to the left plugs into the other edge.')
+    expect(byLines).toHaveTextContent('A marker sits where its lines plug in; lines within a column meet on the left.')
+
+    fireEvent.click(byLines)
+    expect(usePreferencesStore.getState().lineagePortSides).toBe('lines')
+    expect(byLines).toHaveAttribute('aria-checked', 'true')
+    expect(byDirection).toHaveAttribute('aria-checked', 'false')
+    // A Lineage setting, like the rest of that section: the Canvas section's
+    // Reset neither offers itself for it nor puts it back.
+    expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument()
+    usePreferencesStore.setState({ lineagePortSides: 'direction' })
+  })
+
+  it('Marker sides are inert while Lineage is off', () => {
+    usePreferencesStore.setState({ lineagePortSides: 'direction' })
+    render(<DisplayMenu {...baseProps()} lineageEnabled={false} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const byLines = within(screen.getByRole('radiogroup', { name: 'Marker sides' })).getByRole('radio', { name: /Where lines attach/ })
+    expect(byLines).toBeDisabled()
+    fireEvent.click(byLines)
+    expect(usePreferencesStore.getState().lineagePortSides).toBe('direction')
   })
 })

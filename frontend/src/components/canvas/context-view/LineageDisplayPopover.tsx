@@ -16,6 +16,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
+  ArrowLeftRight,
   ChevronDown,
   Eye,
   Layers,
@@ -29,7 +30,7 @@ import {
 import { useReducedMotionConfig } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { CollapsibleSection } from './DisplaySettingsPopover'
-import { usePreferencesStore, type LineageMotion, type LineageRenderMode } from '@/store/preferences'
+import { usePreferencesStore, type LineageMotion, type LineagePortSides, type LineageRenderMode } from '@/store/preferences'
 import { LINEAGE_DIRECTION_PRESETS, resolveLineageDirectionColors } from '@/lib/lineageDirectionColors'
 import { PortLegend } from './LineageGuide'
 
@@ -38,6 +39,8 @@ interface LineageDisplayPopoverProps {
   onSetLineageRenderMode: (mode: LineageRenderMode) => void
   showEdgeDirection: boolean
   onToggleEdgeDirection: () => void
+  lineagePortSides: LineagePortSides
+  onSetLineagePortSides: (sides: LineagePortSides) => void
 }
 
 interface DensityOption {
@@ -68,6 +71,23 @@ const DENSITY_OPTIONS: DensityOption[] = [
   },
 ]
 
+/** Which side of a card marks its incoming and outgoing lineage
+ *  (lineagePorts.ts). */
+const PORT_SIDES_OPTIONS: Array<{ sides: LineagePortSides; label: string; short: string; description: string }> = [
+  {
+    sides: 'direction',
+    label: 'Incoming left, outgoing right',
+    short: 'In left · out right',
+    description: 'Each side shows one direction; a line to the same column or to the left plugs into the other edge.',
+  },
+  {
+    sides: 'lines',
+    label: 'Where lines attach',
+    short: 'Where lines attach',
+    description: 'A marker sits where its lines plug in; lines within a column meet on the left.',
+  },
+]
+
 const MODE_SHORT_LABEL: Record<LineageRenderMode, string> = {
   stubs: 'Stubs',
   auto: 'Auto',
@@ -81,6 +101,8 @@ export function LineageDisplayPopover({
   onSetLineageRenderMode,
   showEdgeDirection,
   onToggleEdgeDirection,
+  lineagePortSides,
+  onSetLineagePortSides,
 }: LineageDisplayPopoverProps) {
   const [open, setOpen] = useState(false)
   const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null)
@@ -200,6 +222,8 @@ export function LineageDisplayPopover({
                 onSetLineageRenderMode={onSetLineageRenderMode}
                 showEdgeDirection={showEdgeDirection}
                 onToggleEdgeDirection={onToggleEdgeDirection}
+                lineagePortSides={lineagePortSides}
+                onSetLineagePortSides={onSetLineagePortSides}
               />
             </motion.div>
           )}
@@ -215,6 +239,8 @@ interface LineageDisplaySectionsProps {
   onSetLineageRenderMode: (mode: LineageRenderMode) => void
   showEdgeDirection: boolean
   onToggleEdgeDirection: () => void
+  lineagePortSides: LineagePortSides
+  onSetLineagePortSides: (sides: LineagePortSides) => void
   /** When true, every control renders inert (native `disabled`) and muted —
    *  used by the header's DisplayMenu when Lineage is off. */
   disabled?: boolean
@@ -230,6 +256,8 @@ export function LineageDisplaySections({
   onSetLineageRenderMode,
   showEdgeDirection,
   onToggleEdgeDirection,
+  lineagePortSides,
+  onSetLineagePortSides,
   disabled = false,
 }: LineageDisplaySectionsProps) {
   return (
@@ -362,6 +390,72 @@ export function LineageDisplaySections({
             </div>
           </div>
         </button>
+      </CollapsibleSection>
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      {/* Marker sides — which side of each card marks its incoming and
+          outgoing lineage (lineagePorts.ts). A trace follows it too. */}
+      <CollapsibleSection
+        id="marker-sides"
+        icon={ArrowLeftRight}
+        title="Marker sides"
+        summary={PORT_SIDES_OPTIONS.find(o => o.sides === lineagePortSides)?.short ?? 'In left · out right'}
+      >
+        <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+          Which side of each card marks its incoming and outgoing lineage.
+          <span className="block mt-0.5">The lines are drawn the same either way.</span>
+        </p>
+        <div
+          role="radiogroup"
+          aria-label="Marker sides"
+          className="flex flex-col gap-1"
+        >
+          {PORT_SIDES_OPTIONS.map(opt => {
+            const active = lineagePortSides === opt.sides
+            return (
+              <button
+                key={opt.sides}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                disabled={disabled}
+                onClick={() => onSetLineagePortSides(opt.sides)}
+                className={cn(
+                  'flex items-start gap-2.5 px-2.5 py-2 rounded-lg border text-left transition-colors',
+                  disabled && 'cursor-not-allowed',
+                  active
+                    ? 'bg-accent-lineage/15 border-accent-lineage/40 shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
+                    : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+                )}
+              >
+                <div
+                  className={cn(
+                    'mt-0.5 w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-colors',
+                    active ? 'border-accent-lineage' : 'border-ink-muted/40',
+                  )}
+                >
+                  {active && (
+                    <div className="w-1.5 h-1.5 rounded-full bg-accent-lineage" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div
+                    className={cn(
+                      'text-[12px] font-medium leading-tight',
+                      active ? 'text-accent-lineage' : 'text-ink',
+                    )}
+                  >
+                    {opt.label}
+                  </div>
+                  <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+                    {opt.description}
+                  </div>
+                </div>
+              </button>
+            )
+          })}
+        </div>
       </CollapsibleSection>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />

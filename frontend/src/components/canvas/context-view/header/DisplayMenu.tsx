@@ -119,6 +119,8 @@ export function DisplayMenu({
 
   const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
   const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
+  const lineagePortSides = usePreferencesStore((s) => s.lineagePortSides) ?? 'direction'
+  const setLineagePortSides = usePreferencesStore((s) => s.setLineagePortSides)
   const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons, showMemoryUsage })
 
   return (
@@ -235,6 +237,8 @@ export function DisplayMenu({
                 onSetLineageRenderMode={onSetLineageRenderMode}
                 showEdgeDirection={showEdgeDirection}
                 onToggleEdgeDirection={onToggleEdgeDirection}
+                lineagePortSides={lineagePortSides}
+                onSetLineagePortSides={setLineagePortSides}
                 disabled={!lineageEnabled}
               />
               </div>
