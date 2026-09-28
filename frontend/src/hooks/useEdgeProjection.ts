@@ -13,7 +13,6 @@
 
 import { useMemo, useRef } from 'react'
 import { normalizeEdgeType } from '@/store/schema'
-import { NON_DRAWABLE_EDGE_TYPES } from '@/services/ontologyPreflightService'
 import type { HierarchyNode } from '@/types/hierarchy'
 
 // ============================================
@@ -96,13 +95,6 @@ export interface UseEdgeProjectionOptions {
    * hidden types disappears and a mixed bundle keeps a reduced edgeCount.
    */
   hiddenEdgeTypes?: ReadonlySet<string>
-  /**
-   * Leave out roll-ups — the summaries the aggregation job computes — so every
-   * line is a relationship the reader can open and change. Applied per MEMBER in
-   * Finalize, like `hiddenEdgeTypes`: a bundle of roll-ups alone disappears (and
-   * is counted in `hiddenRollupLineCount`), a mixed one keeps its relationships.
-   */
-  hideRollups?: boolean
   /**
    * Containment chains (parent first, root last) for lineage endpoints the
    * canvas never loaded — useAncestorChains. An endpoint that resolves to
@@ -247,9 +239,8 @@ export function useEdgeProjection({
   browseBundleFanInThreshold = 1,
   nodeLayerIndexMap,
   hiddenEdgeTypes,
-  hideRollups = false,
   ancestorChains,
-}: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number, hiddenRollupLineCount: number, offCanvasByNode: ReadonlyMap<string, OffCanvasLineage> } {
+}: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number, offCanvasByNode: ReadonlyMap<string, OffCanvasLineage> } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
   // user-facing count itself is returned from the projection memo (no ref —
@@ -732,28 +723,20 @@ export function useEdgeProjection({
       return arr
     }
 
-    // A roll-up by its type — the drawer's rule (drawerEdgeTarget), so what is
-    // hidden here is exactly what the drawer would call a roll-up.
-    const isRollup = (e: { data?: { edgeType?: string; relationship?: string }; originalType?: string }): boolean =>
-      NON_DRAWABLE_EDGE_TYPES.has((e.data?.edgeType || e.data?.relationship || e.originalType || '').toUpperCase())
-
     // Finalize: bundle groups into projected edges (without delegation — applied in separate memo)
     const projected: any[] = []
-    let rollupOnlyHidden = 0
     edgeGroups.forEach((groupEdges, key) => {
-      // Hidden types and roll-ups are applied per MEMBER, not per group:
-      // grouping stayed identical above so meta-bundling and the bidirectional
-      // collapse behave exactly as before, and only the finalized bundle changes.
-      const shown = hideRollups ? groupEdges.filter(e => !isRollup(e)) : groupEdges
-      if (shown.length === 0) { rollupOnlyHidden++; return }
+      // Hidden types are applied per MEMBER, not per group: grouping stayed
+      // identical above so meta-bundling and the bidirectional collapse behave
+      // exactly as before, and only the finalized bundle changes.
       const members = hiddenEdgeTypes && hiddenEdgeTypes.size > 0
-        ? shown.filter((e: any) => {
+        ? groupEdges.filter((e: any) => {
             const ts = memberTypes(e)
             // A member with no type at all is never hidden — we cannot filter
             // on something the data does not say.
             return ts.length === 0 || ts.some(t => !hiddenEdgeTypes.has(t.toUpperCase()))
           })
-        : shown
+        : groupEdges
       if (members.length === 0) return
 
       const distinctTypes = new Set<string>()
@@ -889,9 +872,9 @@ export function useEdgeProjection({
     })
 
     const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
-    if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, rollupOnlyHidden, offCanvas: offCanvasResult }
-    return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, rollupOnlyHidden, offCanvas: offCanvasResult }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap, hiddenEdgeTypes, hideRollups, ancestorChains])
+    if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
+    return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains])
 
   const projectedEdges = projection.edges
 
@@ -971,7 +954,6 @@ export function useEdgeProjection({
     visibleLineageEdges: visibleLineageEdgesWithDelegation,
     unresolvedEdgeCount: projection.unresolvedCount,
     hiddenInsideCollapsedCount: projection.hiddenInsideCount,
-    hiddenRollupLineCount: projection.rollupOnlyHidden ?? 0,
     // Legacy alias — same value; kept for existing consumers.
     unresolvedAggregatedCount: projection.unresolvedCount,
     offCanvasByNode: projection.offCanvas,

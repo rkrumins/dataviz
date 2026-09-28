@@ -35,16 +35,12 @@ relationships on the published graph are read-only, and say why.
 
 ### Changed
 
-- **The canvas draws relationships only, unless you ask for roll-ups too.** By default every line on
-  the Context View is a relationship you can open and, in a draft, change. It is drawn between the
-  cards that hold its two ends. Roll-ups (the summaries the aggregation job computes) are left out,
-  and the end of the layer strip says so, with how many lines were only roll-ups and a "Show
-  roll-ups" switch. The Lineage button's new menu makes the same choice, and it is remembered.
-  Opening a line says why it joins those two cards when its relationships are between entities
-  inside them. It lists the relationships first. Roll-ups, when shown, are listed apart, with what
-  they are and a way back to relationships only. A trace is unchanged: it already prefers
-  relationships and summarises only what they leave out. Hovering a line says whether it is a roll-up
-  or how many relationships it stands for.
+- **The relationship drawer tells relationships from roll-ups.** Opening a line lists its
+  relationships first, and says why the line joins those two cards when its relationships are
+  between entities inside them. Roll-ups (the summaries the aggregation job computes, read-only) are
+  listed apart, with what they are. When a line holds both, "All · Relationships · Roll-ups" narrows
+  the list to either, with counts. The canvas draws what it did before. Hovering a line says whether
+  it is a roll-up or how many relationships it stands for.
 - **One export can be 50 GB** (`GRAPH_EXPORT_MAX_BYTES`, was 20 GiB).
 - **A running export says how far it has got.** Its job's `summary` holds the records read or written
   so far, the passes (a spreadsheet reads everything once for its columns, then writes it), and the

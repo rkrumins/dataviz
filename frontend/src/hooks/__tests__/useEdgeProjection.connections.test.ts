@@ -80,7 +80,6 @@ function run(opts: {
   parentMap?: Map<string, string>
   browseBundleEnabled?: boolean
   hiddenEdgeTypes?: ReadonlySet<string>
-  hideRollups?: boolean
 }) {
   const flat: HierarchyNode[] = []
   const stack = [...opts.roots]
@@ -107,7 +106,6 @@ function run(opts: {
       browseBundleEnabled: opts.browseBundleEnabled,
       browseBundleParentMap: opts.parentMap,
       hiddenEdgeTypes: opts.hiddenEdgeTypes,
-      hideRollups: opts.hideRollups,
     }),
   )
   return result.current
@@ -373,13 +371,12 @@ describe('useEdgeProjection — a bundle carries the weight it summarises', () =
  * the raw members it summarises land in the same group, its weight is taken
  * with `max`, the rule `collapseRecords` already states.
  */
-/** A materialized `:AGGREGATED` graph edge, as `toCanvasEdge` maps it. */
-const materialized = (id: string, source: string, target: string, sourceEdgeCount: number) => ({
-  id, source, target,
-  data: { edgeType: 'AGGREGATED', isAggregated: true, sourceEdgeCount },
-})
-
 describe('useEdgeProjection — both shapes of a roll-up carry their weight', () => {
+  /** A materialized `:AGGREGATED` graph edge, as `toCanvasEdge` maps it. */
+  const materialized = (id: string, source: string, target: string, sourceEdgeCount: number) => ({
+    id, source, target,
+    data: { edgeType: 'AGGREGATED', isAggregated: true, sourceEdgeCount },
+  })
 
   it('a materialized AGGREGATED store edge weighs its sourceEdgeCount, not 1', () => {
     const res = run({
@@ -504,57 +501,5 @@ describe('useEdgeProjection — a line knows which relationships it stands for',
       hiddenEdgeTypes: new Set(['PRODUCES']),
     })
     expect(members(bundles(res)[0]).map(m => m.id)).toEqual(['e1'])
-  })
-})
-
-/**
- * Relationships only: every line a relationship the reader can open and change.
- * Roll-ups leave per MEMBER, like a hidden type — a line of roll-ups alone goes
- * (and is counted, so the canvas can say so), a mixed line keeps its
- * relationships at their own weight.
- */
-describe('useEdgeProjection — relationships only (hideRollups)', () => {
-  it('a line of roll-ups alone is left out, and counted', () => {
-    const res = run({
-      roots: [hNode('a'), hNode('b'), hNode('c')],
-      edges: [edge('e1', 'b', 'c')],
-      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]),
-      hideRollups: true,
-    })
-    expect(bundles(res).map(b => `${b.source}->${b.target}`)).toEqual(['b->c'])
-    expect(res.hiddenRollupLineCount).toBe(1)
-  })
-
-  it('a mixed line keeps its relationships at their own weight, and is no longer a roll-up', () => {
-    const res = run({
-      roots: [hNode('a'), hNode('b')],
-      edges: [edge('e1', 'a', 'b', 'PRODUCES')],
-      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b', ['PRODUCES'])]),
-      hideRollups: true,
-    })
-    expect(bundles(res)).toHaveLength(1)
-    expect(bundles(res)[0].edgeCount).toBe(1)
-    expect(bundles(res)[0].isAggregated).toBe(false)
-    expect(bundles(res)[0].isGhost).toBe(false)
-    expect(res.hiddenRollupLineCount).toBe(0)
-  })
-
-  it('a materialized AGGREGATED store edge is a roll-up too', () => {
-    const res = run({ roots: [hNode('a'), hNode('b')], edges: [materialized('m1', 'a', 'b', 4300)], hideRollups: true })
-    expect(bundles(res)).toHaveLength(0)
-    expect(res.hiddenRollupLineCount).toBe(1)
-  })
-
-  it('a relationship lifted to its collapsed card stays — it is a relationship, drawn where its end can be seen', () => {
-    const c1 = hNode('c1')
-    c1.depth = 1
-    const res = run({ roots: [hNode('p', [c1]), hNode('b')], edges: [edge('e1', 'c1', 'b')], hideRollups: true })
-    expect(bundles(res).map(b => `${b.source}->${b.target}`)).toEqual(['p->b'])
-  })
-
-  it('left off, roll-ups are drawn as before', () => {
-    const res = run({ roots: [hNode('a'), hNode('b')], aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]) })
-    expect(bundles(res)).toHaveLength(1)
-    expect(res.hiddenRollupLineCount).toBe(0)
   })
 })

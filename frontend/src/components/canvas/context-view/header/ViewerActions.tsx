@@ -28,7 +28,6 @@ import { PropertyManagerButton } from '../../property-manager/PropertyManagerBut
 import { DisplayMenu } from './DisplayMenu'
 import { ImportExportMenu, type ViewFileActions } from './ImportExportMenu'
 import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
-import { LineKindMenu } from './LineKindMenu'
 import { HoverTip } from '@/components/ui/HoverTip'
 
 export interface ComprehensionToolsProps {
@@ -152,8 +151,6 @@ export function ComprehensionTools({
   const { notify } = useAppNotifications()
   const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
   const traceLauncherRef = useRef<HTMLDivElement>(null)
-  const [lineKindOpen, setLineKindOpen] = useState(false)
-  const lineKindRef = useRef<HTMLButtonElement>(null)
   const hasTraceHistory = traceHistory.length > 0 && !!onResumeTraceHistory
   // The Lens focuses ONE entity by construction; Trace can take a whole
   // selection. Defaults to canTrace so a caller that never sets it is unchanged.
@@ -179,9 +176,7 @@ export function ComprehensionTools({
     <>
       {/* Lineage Flow Toggle — single stable label. State is conveyed
           through the colored dot + active gradient. Trace state lives
-          on its own button below; this label no longer encodes it. Its
-          chevron chooses WHICH lines: relationships only, or roll-ups too. */}
-      <div className="flex items-stretch">
+          on its own button below; this label no longer encodes it. */}
       <HoverTip
         className="inline-flex"
         label={showLineageFlow
@@ -193,7 +188,7 @@ export function ComprehensionTools({
         data-tour="canvas-lineage-toggle"
         onClick={onToggleLineageFlow}
         className={cn(
-          "flex items-center gap-2 px-4 py-2 rounded-l-xl border-r-0 text-sm font-medium transition-all duration-300",
+          "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
           showLineageFlow
             ? "bg-gradient-to-r from-accent-lineage/15 to-accent-lineage/[0.08] text-accent-lineage shadow-sm shadow-accent-lineage/10 border border-accent-lineage/35 dark:from-accent-lineage/20 dark:to-accent-lineage/10 dark:shadow-lg dark:shadow-accent-lineage/20 dark:border-accent-lineage/30"
             : "bg-black/[0.04] border border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08] dark:hover:bg-white/[0.08]"
@@ -209,26 +204,6 @@ export function ComprehensionTools({
         )} />
       </button>
       </HoverTip>
-      <HoverTip className="inline-flex" label="Which lines to draw" detail="Relationships only, or roll-ups too">
-      <button
-        ref={lineKindRef}
-        type="button"
-        aria-label="Which lines to draw"
-        aria-haspopup="menu"
-        aria-expanded={lineKindOpen}
-        onClick={() => setLineKindOpen(v => !v)}
-        className={cn(
-          "flex items-center px-1.5 rounded-r-xl text-sm transition-all duration-300",
-          showLineageFlow
-            ? "bg-gradient-to-r from-accent-lineage/[0.08] to-accent-lineage/[0.08] text-accent-lineage border border-l-accent-lineage/20 border-accent-lineage/35 dark:from-accent-lineage/10 dark:to-accent-lineage/10 dark:border-accent-lineage/30"
-            : "bg-black/[0.04] border border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08] dark:hover:bg-white/[0.08]"
-        )}
-      >
-        <LucideIcons.ChevronDown className={cn('w-3.5 h-3.5 transition-transform', lineKindOpen && 'rotate-180')} />
-      </button>
-      </HoverTip>
-      {lineKindOpen && <LineKindMenu onClose={() => setLineKindOpen(false)} triggerRef={lineKindRef} />}
-      </div>
 
       {/* Display menu — consolidates canvas display settings (zoom,
           density, type-badge, subtle lines) and lineage appearance

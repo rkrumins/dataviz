@@ -136,15 +136,6 @@ interface PreferencesState {
   lineageBundleFanIn: number
   setLineageBundleFanIn: (n: number) => void
   /**
-   * Draw roll-ups — the summaries the aggregation job computes between cards —
-   * beside the relationships themselves. Off by default: every line is then a
-   * relationship the reader can open and change, drawn between the cards that
-   * hold its ends. A new key, so no migration: a stored state without it takes
-   * the default.
-   */
-  showLineageRollups: boolean
-  setShowLineageRollups: (on: boolean) => void
-  /**
    * Show the "N connections not on canvas" indicators. Views are subsets
    * of a Data Source — a curated view legitimately excludes upstream /
    * downstream partners, so the missing-link alerts are informative for
@@ -396,8 +387,6 @@ export const usePreferencesStore = create<PreferencesState>()(
       setAutoStubThreshold: (autoStubThreshold) => set({ autoStubThreshold }),
       lineageBundleFanIn: 1,
       setLineageBundleFanIn: (lineageBundleFanIn) => set({ lineageBundleFanIn }),
-      showLineageRollups: false,
-      setShowLineageRollups: (showLineageRollups) => set({ showLineageRollups }),
       showMissingConnectionIndicators: true,
       toggleMissingConnectionIndicators: () =>
         set((state) => ({ showMissingConnectionIndicators: !state.showMissingConnectionIndicators })),

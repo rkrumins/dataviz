@@ -251,7 +251,6 @@ import { bySignificance } from './lineDensity'
 import { buildNodePorts } from './lineagePorts'
 import { PortHoverTip } from './PortHoverTip'
 import { LineageGuide } from './LineageGuide'
-import { RollupsChip } from './RollupsChip'
 import { zoomScalesPercentages } from '@/lib/cssZoom'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
@@ -431,8 +430,6 @@ export function ContextViewCanvas({
   const setLineageRenderMode = usePreferencesStore((s) => s.setLineageRenderMode)
   const autoStubThreshold = usePreferencesStore((s) => s.autoStubThreshold)
   const lineageBundleFanIn = usePreferencesStore((s) => s.lineageBundleFanIn)
-  const showLineageRollups = usePreferencesStore((s) => s.showLineageRollups)
-  const setShowLineageRollups = usePreferencesStore((s) => s.setShowLineageRollups)
 
   // Canvas display settings — driven by the header's DisplaySettingsPopover.
   // `?? default` guards users whose persisted preferences predate these
@@ -4339,7 +4336,7 @@ export function ContextViewCanvas({
   // trades detail for coverage). Browse only, as the projection below.
   const lineageRollup = useFeature('canvasLineageRollupEnabled')
   const ancestorChains = useAncestorChains(lineageRollup && showLineageFlow && !overlay.active, isContainmentEdge)
-  const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode, hiddenRollupLineCount } = useEdgeProjection({
+  const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
     nodesByLayer: renderByLayer, expandedNodes,
@@ -4360,10 +4357,6 @@ export function ContextViewCanvas({
     // and the trace's own hidden set is ephemeral, so browse's persisted
     // set has no say there.
     hiddenEdgeTypes: overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes,
-    // Relationships only, unless the reader asked for roll-ups too: every line
-    // is then one they can open and change. Browse only — a trace draws its own
-    // wires, preferring relationships and summarising only what they leave out.
-    hideRollups: !showLineageRollups,
     // Chains already fetched stay cached, so switching the flag off must
     // also stop them being USED.
     ancestorChains: lineageRollup ? ancestorChains : undefined,
@@ -6058,22 +6051,16 @@ export function ContextViewCanvas({
               enabled: foldLayersEnabled,
               onToggle: () => setFoldLayersEnabled(!foldLayersEnabled),
             } : undefined}
-            // Which lines are drawn — relationships only, or roll-ups too — and
             // Adaptive drawing a subset: what is drawn, the most-connected
             // entities, and the way to all of them — in the canvas's own bar.
-            trailing={showLineageFlow ? (
-              <>
-                <RollupsChip showRollups={showLineageRollups} hiddenCount={hiddenRollupLineCount} onChange={setShowLineageRollups} />
-                {edgePresentation.ambientTotal > edgePresentation.ambientShown && edgePresentation.ambientShown > 0 && (
-                  <LineageGuide
-                    shown={edgePresentation.ambientShown}
-                    total={edgePresentation.ambientTotal}
-                    hubs={lineageHubs}
-                    onFocusHub={focusHub}
-                    onShowAll={() => setLineageRenderMode('raw')}
-                  />
-                )}
-              </>
+            trailing={edgePresentation.ambientTotal > edgePresentation.ambientShown && edgePresentation.ambientShown > 0 ? (
+              <LineageGuide
+                shown={edgePresentation.ambientShown}
+                total={edgePresentation.ambientTotal}
+                hubs={lineageHubs}
+                onFocusHub={focusHub}
+                onShowAll={() => setLineageRenderMode('raw')}
+              />
             ) : undefined}
           />
         )}

@@ -13,7 +13,6 @@ import type { GraphEdge } from '@/providers/GraphDataProvider'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
-import { usePreferencesStore } from '@/store/preferences'
 
 const h = vi.hoisted(() => ({
   record: undefined as GraphEdge | undefined,
@@ -270,9 +269,8 @@ describe('RelationshipDrawer — a connection', () => {
     expect(screen.getByText(/join entities inside Orders and Revenue/)).toBeInTheDocument()
   })
 
-  it('lists roll-ups apart from the relationships, says what they are, and offers relationships only', async () => {
+  it('lists roll-ups apart from the relationships, says what they are, and narrows to either kind', async () => {
     const user = userEvent.setup()
-    usePreferencesStore.setState({ showLineageRollups: true })
     setup({
       ...connection,
       types: ['FLOWS_TO', 'AGGREGATED'],
@@ -282,12 +280,26 @@ describe('RelationshipDrawer — a connection', () => {
       ],
     })
     render(<RelationshipDrawer />)
+    const relationships = () => screen.queryByRole('list', { name: /Relationships this line stands for/ })
+    const rollups = () => screen.queryByRole('list', { name: /Roll-ups this line stands for/ })
     expect(screen.getByText(/Stands for/)).toHaveTextContent('1 relationship · 1 roll-up')
-    expect(within(screen.getByRole('list', { name: /Relationships this line stands for/ })).getAllByRole('button')).toHaveLength(1)
-    expect(within(screen.getByRole('list', { name: /Roll-ups this line stands for/ })).getAllByRole('button')).toHaveLength(1)
+    expect(within(relationships()!).getAllByRole('button')).toHaveLength(1)
+    expect(within(rollups()!).getAllByRole('button')).toHaveLength(1)
     expect(screen.getByText(/Summaries the aggregation job computes/)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Relationships only' }))
-    expect(usePreferencesStore.getState().showLineageRollups).toBe(false)
+
+    await user.click(screen.getByRole('radio', { name: /^Relationships/ }))
+    expect(relationships()).toBeInTheDocument()
+    expect(rollups()).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('radio', { name: /^Roll-ups/ }))
+    expect(relationships()).not.toBeInTheDocument()
+    expect(rollups()).toBeInTheDocument()
+  })
+
+  it('offers no filter when a line holds only one kind', () => {
+    setup(connection)
+    render(<RelationshipDrawer />)
+    expect(screen.queryByRole('radiogroup', { name: 'Show' })).not.toBeInTheDocument()
   })
 
   it('a summary line explains how to see what it summarises', () => {
