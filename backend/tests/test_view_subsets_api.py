@@ -120,6 +120,16 @@ async def test_a_subset_is_one_write_of_a_curated_context_view(test_client: Asyn
     assert json.loads(rows[0].changes)["derivedFrom"] == source_id
 
 
+@pytest.mark.usefixtures("view_portability_enabled")
+async def test_a_subset_starts_its_history_at_version_one(test_client: AsyncClient, db_session):
+    source_id = await _seed(db_session)
+    created = (await test_client.post(f"/api/v1/views/{source_id}/subsets", json=_body())).json()
+    history = (await test_client.get(f"/api/v1/views/{created['id']}/versions")).json()
+    assert [(v["version"], v["source"]) for v in history["items"]] == [(1, "create")]
+    assert history["items"][0]["stats"]["assignments"] == 2
+    assert history["workingCopy"]["dirty"] is False
+
+
 async def test_the_single_read_names_its_source(test_client: AsyncClient, db_session):
     source_id = await _seed(db_session)
     created = (await test_client.post(f"/api/v1/views/{source_id}/subsets", json=_body())).json()

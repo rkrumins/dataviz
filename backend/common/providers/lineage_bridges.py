@@ -187,8 +187,10 @@ class RegionSeeds:
 class BridgeCallbacks(Protocol):
     """Provider-supplied reads. Every call is bounded by the ``timeout`` it is
     handed; the walker owns the request deadline. Raise ``ProviderUnavailable``
-    only when the provider as a whole is gone — any other failure is reported
-    in the return value (``failed``, ``None``) so the walk can cut honestly."""
+    when the provider as a whole is gone, and ``ProviderBusy`` when a read was
+    shed (the caller answers 429, never a smaller walk) — any other failure is
+    reported in the return value (``failed``, ``None``) so the walk can cut
+    honestly."""
 
     #: False when ``degrees`` cannot answer; the walker then reads in chunks
     #: and detects overflow by the limit instead of by the degree sum.

@@ -242,6 +242,21 @@ async def test_a_draft_edge_creates_a_hop_the_draft_can_see():
     assert [(l.source, l.target, l.hops) for l in on_draft.links] == [("A", "F", 2)]   # A.c→B.c→F.c
 
 
+async def test_a_shed_read_on_the_generic_walk_is_ask_again():
+    """A shed arrives through the breaker proxy as ProviderBusy. The walk lets
+    it through (the route answers 429), never a 200 with every member cut."""
+    from backend.common.adapters import ProviderBusy
+
+    class _Shedding(_ChainProvider):
+        async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
+            raise ProviderBusy("p", "the query queue is full", 1)
+
+    with pytest.raises(ProviderBusy):
+        await ContextEngine(provider=_Shedding()).lineage_bridges(
+            LineageBridgesRequest(members=[{"urn": "A"}, {"urn": "C"}]),
+        )
+
+
 def test_both_endpoints_are_cached_like_the_other_walks():
     from backend.app.services import graph_cache
 

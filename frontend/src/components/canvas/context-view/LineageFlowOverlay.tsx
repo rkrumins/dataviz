@@ -2126,11 +2126,15 @@ export function LineageFlowOverlay({
               )}
               {edge.edgeCount > 1 && (
                 // A roll-up stands for flows it summarises; otherwise the line
-                // is that many relationships drawn as one.
+                // is that many relationships drawn as one. A virtual hop holds
+                // no relationship: it counts the connections it joins, as its
+                // popover does.
                 <span className="text-[10px] text-white/50 tabular-nums">
-                  {edge.isAggregated
-                    ? `roll-up of ${edge.edgeCount.toLocaleString()}`
-                    : `${edge.edgeCount.toLocaleString()} relationships`}
+                  {isBridgeLine
+                    ? `${edge.edgeCount.toLocaleString()} connections`
+                    : edge.isAggregated
+                      ? `roll-up of ${edge.edgeCount.toLocaleString()}`
+                      : `${edge.edgeCount.toLocaleString()} relationships`}
                 </span>
               )}
               {edge.isBidirectional && (

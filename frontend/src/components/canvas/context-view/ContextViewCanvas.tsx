@@ -5672,6 +5672,9 @@ export function ContextViewCanvas({
       const drawn = { in: new Map<string, number>(), out: new Map<string, number>() }
       const add = (way: 'in' | 'out', id: string, n: number) => drawn[way].set(id, (drawn[way].get(id) ?? 0) + n)
       for (const e of drawableLineageEdges) {
+        // A virtual hop is no flow of either card: it must not stand in for
+        // the roll-ups this asks for.
+        if (isBridgeLineId(e.id)) continue
         const n = Number(e.edgeCount) || 1
         add('out', e.source, n)
         add('in', e.target, n)

@@ -12,9 +12,13 @@ from __future__ import annotations
 import asyncio
 from typing import Dict, List, Optional, Set, Tuple
 
+import pytest
+from redis.exceptions import ResponseError
+
 from backend.app.providers import falkordb_bridges as fb
 from backend.app.providers.falkordb_bridges import FalkorBridgeCallbacks
 from backend.app.providers.falkordb_provider import FalkorDBProvider
+from backend.common.adapters import ProviderBusy
 from backend.common.models.graph import GraphNode
 from backend.common.providers.lineage_bridges import run_bridge_path, run_lineage_bridges
 
@@ -150,13 +154,77 @@ def test_region_seeds_own_the_columns_through_one_label_qualified_query():
     assert params["roots"] == ["A", "C"]
 
 
-def test_the_deepest_member_owns_and_a_non_inheriting_one_blocks():
+def _blocking_graph() -> _Graph:
     g = _Graph().node("D", "Domain").node("T", "Table", parent="D").node("U", "Table", parent="D")
     g.node("T.c", "Column", parent="T").node("U.c", "Column", parent="U").node("X", "Job")
-    g.flow("T.c", "X").flow("X", "U.c")
+    return g.flow("T.c", "X").flow("X", "U.c")
+
+
+def test_the_deepest_member_owns_and_a_non_inheriting_one_blocks():
+    g = _blocking_graph()
     seeds = _run(_callbacks(g).region_seeds({"D": True, "T": True, "U": False}, cap=100, timeout=5))
     # T.c sits under D and T: T is deeper. U.c sits under D and U: U blocks.
     assert seeds.owner == {"T.c": "T"}
+
+
+def test_a_member_chain_left_unanswered_is_a_failure_not_a_root():
+    """The chain read leaves out a URN it could not answer (a root is []). Read
+    as a root, U would stop blocking and U.c would be D's: a T ⇢ D hop that
+    is not there, reported complete."""
+    g = _blocking_graph()
+    cb = _callbacks(g)
+
+    async def chains(urns):
+        return {u: g.chain(u) for u in urns if u != "U"}
+    cb._p._compute_and_store_ancestors_bulk = chains
+    members = {"D": True, "T": True, "U": False}
+    seeds = _run(cb.region_seeds(members, cap=100, timeout=5))
+    assert seeds.failed and not seeds.complete
+    assert "U.c" not in seeds.owner
+
+    result = _run(run_lineage_bridges(
+        cb, members=members, origins=None, direction="downstream",
+        max_hops=10, max_nodes=1000, deadline=float("inf"),
+    ))
+    assert ("T", "D") not in [(l.source, l.target) for l in result.links]
+    assert result.truncated and result.incomplete
+
+
+def test_a_member_the_graph_does_not_hold_leaves_the_seeds_whole():
+    """A stale member has no node, so no chain row either: it holds nothing,
+    and it must not fail every walk of its view."""
+    g = _chain_graph()
+    cb = _callbacks(g)
+
+    async def chains(urns):
+        return {u: g.chain(u) for u in urns if u in g.label}
+    cb._p._compute_and_store_ancestors_bulk = chains
+    seeds = _run(cb.region_seeds({"A": True, "C": True, "GONE": True}, cap=100, timeout=5))
+    assert seeds.complete and not seeds.failed
+    assert seeds.owner == {"A.c": "A", "C.c": "C"}
+
+
+QUEUE_FULL = ResponseError("Max pending queries exceeded")
+
+
+@pytest.mark.parametrize("read", ["labels", "chains", "region"])
+@pytest.mark.parametrize("shed", [QUEUE_FULL, ProviderBusy("falkordb", "every query slot stayed busy", 1)])
+def test_a_shed_read_is_ask_again_not_a_walk_with_every_member_cut(read, shed):
+    g = _chain_graph()
+    cb = _callbacks(g)
+
+    async def refuse(*args, **kwargs):
+        raise shed
+    setattr(cb._p, {
+        "labels": "_resolve_urn_labels_bulk",
+        "chains": "_compute_and_store_ancestors_bulk",
+        "region": "_ro_query",
+    }[read], refuse)
+    with pytest.raises(ProviderBusy):
+        _run(run_lineage_bridges(
+            cb, members={"A": True, "C": True}, origins=None, direction="downstream",
+            max_hops=10, max_nodes=1000, deadline=float("inf"),
+        ))
 
 
 def test_a_non_inheriting_member_with_nothing_above_it_is_not_enumerated():

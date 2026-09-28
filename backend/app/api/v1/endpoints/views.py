@@ -811,6 +811,12 @@ async def create_subset_view(
         ),
         ontology_digest=digest, user_id=_user_id(user), derived_from_view_id=source.id,
     )
+    # The subset as made is its first version, as a view the wizard builds is.
+    from backend.app.db.repositories import view_version_repo
+    await view_version_repo.checkpoint(
+        session, await _load_view_orm(session, view.id), source="create",
+        actor=_user_id(user), message="Made as a subset of another view",
+    )
     # On the NEW view's timeline only: a line on the source's would tell its
     # audience that a (possibly private) subset of it exists.
     await view_activity_repo.record_view_activity(

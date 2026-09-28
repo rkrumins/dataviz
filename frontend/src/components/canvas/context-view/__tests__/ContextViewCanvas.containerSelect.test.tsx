@@ -407,6 +407,23 @@ describe('selecting a collapsed container on a reader that cannot count', () => 
     })
   }
 
+  it('asks its roll-ups with a virtual hop drawn from it: a hop is no flow of its own', async () => {
+    const estate = anchoredPortsEstate()
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      aggregatedCells: [rollUp('SRC.DB_A', 's9', 2)],
+      bridges: { connectivity: { mode: 'bridged', maxHops: 10 }, links: [{ source: 'SRC.DB_A', target: 's1', hops: 3 }] },
+    })
+    await waitFor(() => expect(h.bridgeRequests().length).toBeGreaterThan(0), { timeout: 8000 })
+    await h.settle()
+
+    act(() => { useCanvasStore.getState().selectNode('SRC.DB_A') })
+
+    await waitFor(() => expect(asksOf(h)).toContainEqual([['SRC.DB_A'], []]), { timeout: 8000 })
+  }, 30_000)
+
   it('asks its roll-ups both ways, and draws to what they reach', async () => {
     // Both far ends are rows the canvas does not draw — s9 past Staging's
     // page, t2 inside SRC.DB_B, drawn closed — so no ask of the canvas's own

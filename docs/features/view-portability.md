@@ -324,7 +324,7 @@ A version is created at meaningful moments, not on every autosave:
 | Source | When |
 |---|---|
 | `baseline` | The first time a view's versions are needed (a view that predates versions). |
-| `create`, `wizard` | Saving in the View wizard: one save, one version, in the same transaction as the layout write. |
+| `create`, `wizard` | Saving in the View wizard: one save, one version, in the same transaction as the layout write. Making a subset records its first version as `create`, in the same transaction as the new view. |
 | `import` | Every import, with its provenance and match report. |
 | `restore` | Restoring an earlier version (the working copy is saved first if it has unsaved changes). |
 | `promote` | A draft's changes to the view going live. |

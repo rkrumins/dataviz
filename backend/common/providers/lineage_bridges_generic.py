@@ -30,6 +30,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+from backend.common.adapters import ProviderUnavailable
 from backend.common.models.graph import EdgeQuery, GraphNode, NodeQuery
 from backend.common.providers.lineage_bridges import ExpandPage, Hop, RegionSeeds
 
@@ -73,6 +74,8 @@ class GenericBridgeCallbacks:
                     edges = await asyncio.wait_for(self._p.get_edges(EdgeQuery(
                         sourceUrns=list(chunk), edgeTypes=self._ctypes, limit=limit,
                     )), timeout=timeout)
+                except ProviderUnavailable:
+                    raise   # a shed or an open breaker is 429 / 503, not a cut
                 except Exception as exc:
                     logger.warning("lineage_bridges (generic): containment read failed: %s", exc)
                     return RegionSeeds(owner=owner, complete=False, failed=True)
@@ -105,6 +108,8 @@ class GenericBridgeCallbacks:
         )
         try:
             edges = await asyncio.wait_for(self._p.get_edges(query), timeout=timeout)
+        except ProviderUnavailable:
+            raise   # a shed or an open breaker is 429 / 503, not a cut
         except Exception as exc:
             logger.warning("lineage_bridges (generic): lineage read failed: %s", exc)
             return ExpandPage(failed=set(urns))
@@ -127,6 +132,8 @@ class GenericBridgeCallbacks:
             return None
         try:
             return await asyncio.wait_for(fn(list(urns)), timeout=timeout)
+        except ProviderUnavailable:
+            raise   # a shed or an open breaker is 429 / 503, not a cut
         except Exception as exc:
             logger.warning("lineage_bridges (generic): ancestor chains failed: %s", exc)
             return None

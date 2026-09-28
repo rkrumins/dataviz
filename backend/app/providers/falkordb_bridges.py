@@ -40,6 +40,25 @@ logger = logging.getLogger(__name__)
 REGION_PAGE_ROWS = 5000
 
 
+def _raise_if_shed(exc: BaseException, provider: "FalkorDBProvider", what: str) -> None:
+    """A load shed is "ask again in a moment" — 429 + Retry-After — never a
+    smaller answer. These reads run below the breaker proxy, where a shed is
+    still the store's raw reply, and the walker turns any other error into a
+    cut, so a shed leaves here as ``ProviderBusy``; anything already a
+    ``ProviderUnavailable`` (busy, loading, failing over) leaves as it is."""
+    from backend.common.adapters import ProviderBusy, ProviderUnavailable
+    from .falkordb_provider import _is_load_shed
+
+    if isinstance(exc, ProviderUnavailable):
+        raise exc
+    if _is_load_shed(exc):
+        raise ProviderBusy(
+            provider_name=provider._graph_name,
+            reason=f"lineage bridges: the {what} read was shed",
+            retry_after_seconds=1,
+        ) from exc
+
+
 class FalkorBridgeCallbacks:
     supports_degrees = True
 
@@ -63,7 +82,11 @@ class FalkorBridgeCallbacks:
         roots = sorted(members)
         if not roots or not self._ltypes:
             return RegionSeeds()
-        labels: Dict[str, Optional[str]] = await self._p._resolve_urn_labels_bulk(roots)
+        try:
+            labels: Dict[str, Optional[str]] = await self._p._resolve_urn_labels_bulk(roots)
+        except Exception as exc:
+            _raise_if_shed(exc, self._p, "member label")
+            raise
 
         # 1. The members' own nodes that carry lineage — never capped.
         anchors = [(u, labels.get(u) or "") for u in roots]
@@ -84,7 +107,16 @@ class FalkorBridgeCallbacks:
                 self._p._compute_and_store_ancestors_bulk(roots), timeout=timeout,
             )
         except Exception as exc:
+            _raise_if_shed(exc, self._p, "member chain")
             logger.warning("lineage_bridges: member chains failed: %s", exc)
+            return RegionSeeds(owner=owner, labels=seed_labels, complete=False, failed=True)
+        # A chain the read could not answer is ABSENT, never a root ([]). Read
+        # as a root, an unanswered member would neither block what sits under
+        # it nor rank below the member above it. A member with no label is not
+        # in the graph at all: it holds nothing, so reading it as a root is
+        # right, and it must not fail every walk of the view for good.
+        if any(m not in chains and labels.get(m) for m in roots):
+            logger.warning("lineage_bridges: some member chains went unanswered")
             return RegionSeeds(owner=owner, labels=seed_labels, complete=False, failed=True)
         depth = {m: sum(1 for a in chains.get(m) or [] if a in members) for m in roots}
 
@@ -164,6 +196,7 @@ class FalkorBridgeCallbacks:
                         cypher, params=params, timeout=max(0.6, timeout), op="bridges.region",
                     )
                 except Exception as exc:
+                    _raise_if_shed(exc, self._p, "region")
                     logger.warning("lineage_bridges: region enumeration failed: %s", exc)
                     return pairs, False, True
                 rows = [r for r in (result.result_set or []) if r and r[1]]
@@ -235,6 +268,7 @@ class FalkorBridgeCallbacks:
                 self._p._compute_and_store_ancestors_bulk(list(urns)), timeout=timeout,
             )
         except Exception as exc:
+            _raise_if_shed(exc, self._p, "ancestor chain")
             logger.warning("lineage_bridges: ancestor chains failed: %s", exc)
             return None
 
