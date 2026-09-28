@@ -18,7 +18,7 @@ import { connect, login, helpers, APP_ORIGIN } from './app-probe.mjs'
 const argv = process.argv.slice(2)
 const openFlag = argv.indexOf('--open')
 const OPEN = openFlag >= 0 ? argv[openFlag + 1] : 'Snowflake'
-const VIEW = argv.filter((a, i) => !a.startsWith('--') && i !== openFlag + 1)[0] ?? 'view_23c1434ce3f3'
+const VIEW = argv.filter((a, i) => !a.startsWith('--') && (openFlag < 0 || i !== openFlag + 1))[0] ?? 'view_23c1434ce3f3'
 
 const results = []
 const check = (name, pass, detail) => {
