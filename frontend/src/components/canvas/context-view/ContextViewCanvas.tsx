@@ -1298,6 +1298,11 @@ export function ContextViewCanvas({
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
+  // What the reader last saw open, for the chevron's handler to decide
+  // expand-or-collapse from (see toggleNode). Assigned after commit:
+  // a click only ever lands on a committed row.
+  const expandedNodesRef = useRef(expandedNodes)
+  useEffect(() => { expandedNodesRef.current = expandedNodes }, [expandedNodes])
 
   // Per-view expanded state: save/restore on view switch to prevent stale data
   const expandedByViewRef = useRef<Map<string, Set<string>>>(new Map())
@@ -4180,10 +4185,14 @@ export function ContextViewCanvas({
     // clears pendingLoadRef).
     if (pendingLoadRef.current.has(nodeId)) return
 
-    // Determine action from committed state via updater function — avoids stale closure read.
-    let wasExpanded = false
+    // Decide from what the reader clicked on: the committed expansion. Not
+    // from inside the updater — React runs an updater at once only when
+    // nothing else is queued for this component, so on a busy canvas (a
+    // store write, a page landing) it waited for the next render, this read
+    // "was collapsed", and a collapse ran the expand path: the row closed but
+    // nothing it drew was pruned, and its load in flight was not cancelled.
+    const wasExpanded = expandedNodesRef.current.has(nodeId)
     setExpandedNodes((prev) => {
-      wasExpanded = prev.has(nodeId)
       const next = new Set(prev)
       if (wasExpanded) next.delete(nodeId)
       else next.add(nodeId)
