@@ -1119,6 +1119,34 @@ async def test_query_edges(graph_client):
     assert isinstance(resp.json(), list)
 
 
+# ── POST /edges/beneath ───────────────────────────────────────────────
+
+async def test_edges_beneath_lists_the_real_relationships(graph_client, monkeypatch):
+    """POST /edges/beneath answers {edges, total, truncated}, edges by their wire names."""
+    client, engine = graph_client
+
+    class _Ontology:
+        lineage_edge_types = ["TRANSFORMS", "AGGREGATED"]
+        containment_edge_types = ["CONTAINS"]
+
+    async def _resolve():
+        return _Ontology()
+
+    monkeypatch.setattr(engine, "_resolve_ontology", _resolve)
+    src, tgt = list(engine.provider._nodes)[:2]
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/edges/beneath",
+        json={"sourceUrn": src, "targetUrn": tgt},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1 and body["truncated"] is False
+    assert body["edges"][0]["sourceUrn"] == src
+    assert body["edges"][0]["targetUrn"] == tgt
+    assert body["edges"][0]["edgeType"] == "TRANSFORMS"
+
+
 # ── GET /nodes/top-level (materialized-payload intercept) ─────────────
 #
 # `graph_client`'s mock engine has no workspace/data-source scope, so

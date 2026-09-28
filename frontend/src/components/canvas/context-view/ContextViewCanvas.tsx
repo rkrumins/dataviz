@@ -83,7 +83,7 @@ import { renderedAggregationTargets, unparentedRows } from './aggregationTargets
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/entity/EntityDrawer'
 import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
-import { targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
+import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
@@ -137,7 +137,7 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
-import { shiftToClear } from './drawerClearance'
+import { keepClearOfDrawer, shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
   EMPTY_LENS_HISTORY,
@@ -4566,6 +4566,20 @@ export function ContextViewCanvas({
       }))
   }, [overlay.active, overlay.view, browseVisibleLineageEdges, traceHiddenTypes, traceLaneIndex])
 
+  // The line the relationship drawer is open on, as it is drawn now. While the drawer is open it
+  // stays drawn (whatever the density mode), glowing, and clear of the drawer — the reader sees
+  // what they are reading about. Nothing else dims for it: the rest of the lineage stays in view.
+  const openLine = useMemo(
+    () => (drawerEdge ? lineForTarget(drawerEdge, visibleLineageEdges) : null),
+    [drawerEdge, visibleLineageEdges],
+  )
+  const openLineEnds = openLine ? `${openLine.source}\n${openLine.target}` : null
+  useEffect(() => {
+    const container = horizontalScrollRef.current
+    if (!openLineEnds || !container) return
+    return keepClearOfDrawer(container, openLineEnds.split('\n'))
+  }, [openLineEnds])
+
   // Publish the projected lineage edge set to the canvas store so panels
   // outside the canvas (EntityDrawer's Lineage section) can mirror exactly
   // what the user sees. THIS IS A LEGAL WRITE DURING A TRACE: `visibleEdges`
@@ -4666,7 +4680,12 @@ export function ContextViewCanvas({
       focusTotal: focusAll.length,
     }
   }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeIds, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
-  const effectiveLineageEdges = edgePresentation.edges
+  // The open line is drawn whatever the mode would otherwise show.
+  const effectiveLineageEdges = useMemo(() => (
+    openLine && !edgePresentation.edges.some(e => e.id === openLine.id)
+      ? [...edgePresentation.edges, openLine]
+      : edgePresentation.edges
+  ), [edgePresentation.edges, openLine])
 
   // ── Fold distant layers (useLayerFold, layerFold.ts) ────────────────────
   // The layer each RENDERED row lives in: the browse map, or in trace mode
@@ -6523,7 +6542,7 @@ export function ContextViewCanvas({
               edges={effectiveLineageEdges}
               expandedNodes={expandedForRender}
               onEdgeClick={handleEdgeClick}
-              openLineId={drawerEdge ? (drawerEdge.kind === 'connection' ? drawerEdge.id : drawerEdge.lineId ?? null) : null}
+              openLineId={openLine?.id ?? null}
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={overlay.active}
               traceResult={overlay.active ? nativeTraceResult : trace.result}

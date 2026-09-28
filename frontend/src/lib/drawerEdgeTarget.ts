@@ -113,3 +113,20 @@ export function targetFromLine(
   // A summary wire or a roll-up line: what it summarises, without a list.
   return { ...connection, summaryOnly: true, members: [] }
 }
+
+/**
+ * The drawn line a drawer target stands on NOW — the inverse of `targetFromLine`, for keeping that
+ * line lit while the drawer is open. A line's id does not outlive the next expand, drill or filter,
+ * so: the line by id; else the line that carries the relationship (or any of the connection's);
+ * else the line joining the same two ends. Null when none is drawn.
+ */
+export function lineForTarget<L extends DrawnLine>(target: DrawerEdgeTarget, lines: readonly L[]): L | null {
+  const lineId = target.kind === 'connection' ? target.id : target.lineId
+  const byId = lineId ? lines.find((l) => l.id === lineId) : undefined
+  if (byId) return byId
+  const ids = new Set(target.kind === 'connection' ? target.members.map((m) => m.id) : [target.id])
+  const carrying = lines.find((l) => l.data?.members?.some((m) => !!m.id && ids.has(m.id)))
+  if (carrying) return carrying
+  return lines.find((l) => (l.source === target.source && l.target === target.target)
+    || (!!l.isBidirectional && l.source === target.target && l.target === target.source)) ?? null
+}

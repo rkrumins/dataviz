@@ -18,6 +18,7 @@ import {
 } from '@/store/schema'
 import { allowedChildTypeIds, deriveContainmentEdges, setHasId } from '@/services/ontologyPreflightService'
 import { childrenOf, containmentIndexOf, nodeIndexOf } from '@/lib/storeIndex'
+import { useEndpoints } from '../relationship/useEndpoints'
 
 export function useContainmentParent(nodeId: string) {
   const containmentTypes = useContainmentEdgeTypes()
@@ -30,7 +31,10 @@ export function useContainmentParent(nodeId: string) {
   const childType = (node?.data.type as string) ?? ''
   const parentType = (parentNode?.data.type as string) ?? ''
   const currentEdgeType = parentEdge ? normalizeEdgeType(parentEdge) : ''
-  const parentName = (parentNode?.data.label as string) || parentEdge?.source
+  // Named as the canvas names it — or, when the parent itself is not loaded, by the data source.
+  const parentId = parentEdge?.source
+  const parentIds = useMemo(() => (parentId ? [parentId] : []), [parentId])
+  const parentName = useEndpoints(parentIds).get(parentId ?? '')?.name
 
   // Relationship types the ontology allows for the CURRENT parent → child pair.
   const relTypeOptions = useMemo(

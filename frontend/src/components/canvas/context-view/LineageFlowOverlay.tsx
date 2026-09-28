@@ -9,6 +9,9 @@ import { bySignificance, lineDash, nextRenderTier, type RenderTier } from './lin
 import { delegatedLineState, hoverSpotlight, type Spotlight } from './hoverSpotlight'
 import type { LineMotion } from './lineMotion'
 import { LineMotionLayer } from './LineMotionLayer'
+import { useSchemaStore } from '@/store/schema'
+import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
+import { formatUrnLabel } from '@/lib/urnLabels'
 
 /**
  * Keep the previous viewport object when neither number moved.
@@ -203,7 +206,7 @@ export function LineageFlowOverlay({
   // real rendered element, so this is measured geometry (unlike the
   // removed pass-through layer, which drew to estimates).
   const [proxyEdges, setProxyEdges] = useState<Array<{
-    id: string; source: string; target: string; pathD: string; color: string
+    id: string; lineId: string; source: string; target: string; pathD: string; color: string
   }>>([])
   // Ghost lines — from a row to the PORTAL chip at the viewport edge for its
   // partners scrolled out of sight sideways. One per row and side, level with
@@ -225,6 +228,9 @@ export function LineageFlowOverlay({
   const selectedFocusRef = useRef<string | null>(null)
   const dwellFocusRef = useRef<string | null>(null)
   const railTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastHoveredRef = useRef<string | null>(null)
+  const lingerHoverRef = useRef<string | null>(null)
+  const lingerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const railFingerprintRef = useRef('')
   const dockedProxyIdsRef = useRef<Set<string>>(new Set())
   // Column periphery emission gate (see the summary block in updateFlow).
@@ -363,7 +369,7 @@ export function LineageFlowOverlay({
     if (!containerRef.current) return
     // Read from the DOM, where the rows write it — never canvas state, so a
     // hover costs this pass and not a canvas re-render (hoverSpotlight.ts).
-    const hovered = document.documentElement.dataset.hoveredNode ?? null
+    const hovered = document.documentElement.dataset.hoveredNode ?? lingerHoverRef.current
 
     const containerRect = containerRef.current.getBoundingClientRect()
     // Find scroll parent once
@@ -494,7 +500,7 @@ export function LineageFlowOverlay({
     const focusId = focusNodeIdRef.current
     const focusDomId = focusId ? `layer-node-${focusId}` : null
     const proxyCandidates = new Map<string, AnchorProxyCandidate>()
-    const proxyEdgesNext: Array<{ id: string; source: string; target: string; pathD: string; color: string }> = []
+    const proxyEdgesNext: Array<{ id: string; lineId: string; source: string; target: string; pathD: string; color: string }> = []
     const owningLayerCache = new Map<string, string | null>()
     const findOwningLayer = (nodeId: string): string | null => {
       if (!geometryRegistry) return null
@@ -520,6 +526,8 @@ export function LineageFlowOverlay({
       if (fromTgt) for (const e of fromTgt) candidateEdges.add(e)
     })
     for (const e of hoverLinesFor(hovered)) candidateEdges.add(e)
+    const pinned = hoveredEdgeId ? poolById?.get(hoveredEdgeId) : undefined
+    if (pinned) candidateEdges.add(pinned)
     // A Flows-panel row lights its lines even where On Hover draws none:
     // they come from the pool, capped like a hover.
     if (isHighlightActive && highlightedEdges && poolById) {
@@ -639,7 +647,7 @@ export function LineageFlowOverlay({
 
           if (edge.isGhost) edgeOpacity = Math.min(0.7, edgeOpacity)
 
-          const delegation = delegatedLineState(edge, hovered)
+          const delegation = edge.id === hoveredEdgeId ? 'full' : delegatedLineState(edge, hovered)
           if (delegation === 'hidden') return
           if (delegation === 'faint') {
             edgeOpacity = 0.15
@@ -653,6 +661,7 @@ export function LineageFlowOverlay({
             minY, maxY, pathD, color, dynamicStrokeWidth, edgeOpacity,
             isGhost: edge.isGhost || false,
             isBundled: edge.isBundled || false,
+            isAggregated: edge.isAggregated || false,
             edgeCount: edge.edgeCount || 0,
             dashArray,
             sx, sy, tx, ty,
@@ -764,7 +773,7 @@ export function LineageFlowOverlay({
               const chipCx = (cRect.left + cRect.right) / 2 - containerRect.left
               const focusCx = (vRect.left + vRect.right) / 2 - containerRect.left
               let pathD: string
-              if (Math.abs(chipCx - focusCx) < 40) {
+              if (cRect.left < vRect.right && cRect.right > vRect.left) {
                 // Same column — bow out through the left lane.
                 const px = vRect.left - containerRect.left - 8
                 const ex2 = cRect.left - containerRect.left - 4
@@ -781,6 +790,7 @@ export function LineageFlowOverlay({
               }
               proxyEdgesNext.push({
                 id: `proxy-edge-${edge.source}-${edge.target}`,
+                lineId: edge.id,
                 source: sourceId, target: targetId, pathD, color,
               })
               return // the docked edge replaces the stub/badge for this connection
@@ -1442,6 +1452,16 @@ export function LineageFlowOverlay({
     const onHover = () => {
       applySpotlight()
       const hovered = document.documentElement.dataset.hoveredNode ?? null
+      if (lingerTimerRef.current) clearTimeout(lingerTimerRef.current)
+      lingerHoverRef.current = hovered === null ? lastHoveredRef.current : null
+      lastHoveredRef.current = hovered
+      if (lingerHoverRef.current) {
+        lingerTimerRef.current = setTimeout(() => {
+          lingerTimerRef.current = null
+          lingerHoverRef.current = null
+          scheduleUpdate()
+        }, 400)
+      }
       // The rail follows a hovered entity only once the pointer DWELLS (a
       // drive-by must not flash chips), and when the hover ends it LINGERS
       // long enough for the pointer to travel to a chip — a rail that
@@ -1467,6 +1487,7 @@ export function LineageFlowOverlay({
     return () => {
       observer.disconnect()
       if (railTimerRef.current) clearTimeout(railTimerRef.current)
+      if (lingerTimerRef.current) clearTimeout(lingerTimerRef.current)
     }
   }, [applySpotlight, scheduleUpdate])
 
@@ -1480,6 +1501,12 @@ export function LineageFlowOverlay({
   // viewport. Memoized: this ran on EVERY render of the overlay, re-walking the
   // full edge list each time — and with the two guards above the common render is
   // now one where neither `computedEdges` nor `viewport` moved at all.
+  // The hover card names each end as its card does — name and type — never by its id.
+  const nodeById = useMemo(
+    () => new Map<string, { name?: string; typeId?: string }>(nodes.map((n: { id: string; name?: string; typeId?: string }) => [n.id, n])),
+    [nodes],
+  )
+
   const visibleEdges = useMemo(() => computedEdges.filter(edge => {
     if (edge.maxY < viewport.scrollTop - VIEWPORT_MARGIN) return false
     if (edge.minY > viewport.scrollTop + viewport.clientHeight + VIEWPORT_MARGIN) return false
@@ -1585,6 +1612,7 @@ export function LineageFlowOverlay({
     setHoveredEdgeId(null)
     setHoverMousePos(null)
   }, [])
+  const dockedHits = useMemo(() => proxyEdges.map(pe => ({ id: pe.lineId, pathD: pe.pathD })), [proxyEdges])
   const handleHitClick = useCallback((edgeId: string, e: React.MouseEvent) => {
     e.stopPropagation()
     onEdgeClick(edgeId)
@@ -2016,22 +2044,34 @@ export function LineageFlowOverlay({
       const edge = computedEdges.find(e => e.id === hoveredEdgeId)
       if (!edge) return null
       // Resolve source/target node display names via DOM — the elementCache
-      // already has the rendered node refs.
-      const sourceEl = document.getElementById(`layer-node-${edge.source}`)
-      const targetEl = document.getElementById(`layer-node-${edge.target}`)
-      // A line into a folded layer ends on a fold anchor, which carries the
-      // row's name as `data-label` (LayerColumn) instead of the row's text.
-      const sourceName = sourceEl?.querySelector('.line-clamp-2')?.textContent?.trim()
-        || sourceEl?.getAttribute('data-label') || edge.source
-      const targetName = targetEl?.querySelector('.line-clamp-2')?.textContent?.trim()
-        || targetEl?.getAttribute('data-label') || edge.target
-      const typeLabel = edge.types.length > 0 ? edge.types.join(' · ') : 'RELATIONSHIP'
+      // already has the rendered node refs. A line into a folded layer ends on
+      // a fold anchor, which carries the row's name as `data-label`
+      // (LayerColumn) instead of the row's text. Past both, the name the
+      // canvas holds for it; an id is the last resort, and then only its tail.
+      const nameOf = (id: string) => {
+        const el = document.getElementById(`layer-node-${id}`)
+        return el?.querySelector('.line-clamp-2')?.textContent?.trim()
+          || el?.getAttribute('data-label') || nodeById.get(id)?.name || formatUrnLabel(id, 40)
+      }
+      const typeOf = (id: string) => {
+        const typeId = nodeById.get(id)?.typeId
+        if (!typeId) return undefined
+        const types = useSchemaStore.getState().schema?.entityTypes ?? []
+        return (types.find(t => t.id === typeId) ?? types.find(t => t.id.toLowerCase() === typeId.toLowerCase()))?.name || typeId
+      }
+      const sourceName = nameOf(edge.source)
+      const targetName = nameOf(edge.target)
+      const sourceType = typeOf(edge.source)
+      const targetType = typeOf(edge.target)
+      const typeLabel = edge.types.length > 0
+        ? edge.types.map(t => edgeTypeCopy(t)?.label ?? relationshipLabel(t)).join(' · ')
+        : 'Relationship'
       const confPct = edge.confidence > 0 ? Math.round(edge.confidence * 100) : null
 
       // Position above-right of the cursor; flip below if near top, left if near right edge.
       const margin = 18
       const panelW = 280
-      const panelH = 140
+      const panelH = 156
       let left = hoverMousePos.x + margin
       let top = hoverMousePos.y - panelH - margin
       if (left + panelW > window.innerWidth - 8) left = hoverMousePos.x - panelW - margin
@@ -2061,8 +2101,12 @@ export function LineageFlowOverlay({
                 {typeLabel}
               </span>
               {edge.edgeCount > 1 && (
+                // A roll-up stands for flows it summarises; otherwise the line
+                // is that many relationships drawn as one.
                 <span className="text-[10px] text-white/50 tabular-nums">
-                  ×{edge.edgeCount.toLocaleString()} bundled
+                  {edge.isAggregated
+                    ? `roll-up of ${edge.edgeCount.toLocaleString()}`
+                    : `${edge.edgeCount.toLocaleString()} relationships`}
                 </span>
               )}
               {edge.isBidirectional && (
@@ -2081,6 +2125,7 @@ export function LineageFlowOverlay({
               <div className="flex-1 min-w-0">
                 <p className="text-[9px] font-semibold uppercase tracking-wider text-white/40 mb-0.5">From</p>
                 <p className="text-white/90 truncate font-medium" title={sourceName}>{sourceName}</p>
+                {sourceType && <p className="text-[10px] text-white/45 truncate">{sourceType}</p>}
               </div>
               <svg width="22" height="14" viewBox="0 0 22 14" className="flex-shrink-0">
                 <defs>
@@ -2093,6 +2138,7 @@ export function LineageFlowOverlay({
               <div className="flex-1 min-w-0">
                 <p className="text-[9px] font-semibold uppercase tracking-wider text-white/40 mb-0.5">To</p>
                 <p className="text-white/90 truncate font-medium" title={targetName}>{targetName}</p>
+                {targetType && <p className="text-[10px] text-white/45 truncate">{targetType}</p>}
               </div>
             </div>
 
@@ -2133,7 +2179,7 @@ export function LineageFlowOverlay({
      */}
     {visibleEdges.length <= HIT_DENSITY_LIMIT ? (
       <HitLayer
-        edges={visibleEdges}
+        edges={dockedHits.length === 0 ? visibleEdges : [...visibleEdges, ...dockedHits]}
         onEnter={handleHitEnter}
         onMove={handleHitMove}
         onLeave={handleHitLeave}
@@ -2143,6 +2189,7 @@ export function LineageFlowOverlay({
     ) : (
       <FocusHitLayer
         visibleEdges={visibleEdges}
+        docked={dockedHits}
         hoveredEdgeId={hoveredEdgeId}
         highlightedEdges={highlightedEdges}
         isHighlightActive={isHighlightActive}
@@ -2317,7 +2364,7 @@ type HitLayerHandlers = {
 }
 
 function HitLayer({ edges, onEnter, onMove, onLeave, onClickEdge, onDoubleClickEdge }: {
-  edges: ComputedEdge[]
+  edges: ReadonlyArray<Pick<ComputedEdge, 'id' | 'pathD'>>
 } & HitLayerHandlers) {
   return (
     <div className="absolute inset-0 pointer-events-none z-20">
@@ -2366,8 +2413,9 @@ function useLingering(value: string | null, ms: number): string | null {
  *  incident to the hovered node, the selection-highlighted set, or the
  *  currently hovered edge get hit paths. Mounts useHoveredNodeId in this
  *  child so its rAF-driven re-renders never touch the main overlay. */
-function FocusHitLayer({ visibleEdges, hoveredEdgeId, highlightedEdges, isHighlightActive, ...handlers }: {
+function FocusHitLayer({ visibleEdges, docked, hoveredEdgeId, highlightedEdges, isHighlightActive, ...handlers }: {
   visibleEdges: ComputedEdge[]
+  docked: ReadonlyArray<Pick<ComputedEdge, 'id' | 'pathD'>>
   hoveredEdgeId: string | null
   highlightedEdges?: Set<string>
   isHighlightActive?: boolean
@@ -2379,6 +2427,6 @@ function FocusHitLayer({ visibleEdges, hoveredEdgeId, highlightedEdges, isHighli
     (isHighlightActive && highlightedEdges?.has(e.id)) ||
     e.id === hoveredEdgeId
   ), [visibleEdges, effectiveNode, isHighlightActive, highlightedEdges, hoveredEdgeId])
-  if (focus.length === 0) return null
-  return <HitLayer edges={focus} {...handlers} />
+  if (focus.length === 0 && docked.length === 0) return null
+  return <HitLayer edges={docked.length === 0 ? focus : [...focus, ...docked]} {...handlers} />
 }

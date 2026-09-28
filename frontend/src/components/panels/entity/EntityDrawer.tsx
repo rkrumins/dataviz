@@ -21,7 +21,7 @@ import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { useFeature } from '@/store/features'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
-import { useEntitySummary, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
@@ -102,7 +102,6 @@ function OpenEntityDrawer({
     unsavedCreate ? undefined : ((data.urn as string | undefined) ?? node.id),
     { branchId: draftId, kind: 'node', includeValue: true },
   )
-  const watermark = useProjectionWatermark(scope.wsId, scope.graphId)
 
   // ── The edit ──
   const session = useEntityEditSession(node, summaryQ.data?.value)
@@ -233,7 +232,9 @@ function OpenEntityDrawer({
             onStage={stage}
             summary={summaryQ.data}
             summaryLoading={summaryQ.isLoading}
-            watermark={watermark.data}
+            wsId={scope.wsId}
+            graphId={scope.graphId}
+            inDraft={!!draftId}
             externalUrl={externalUrl}
           />
         </Tabs>
