@@ -2025,11 +2025,16 @@ export function LineageFlowOverlay({
     {hoveredEdgeId && hoverMousePos && (() => {
       const edge = computedEdges.find(e => e.id === hoveredEdgeId)
       if (!edge) return null
-      // Each end by the name and type its card shows. A line into a folded
-      // layer ends on a fold anchor, which carries the row's name as
-      // `data-label` (LayerColumn); an id is the last resort, and then only its tail.
-      const nameOf = (id: string) => nodeById.get(id)?.name
-        || document.getElementById(`layer-node-${id}`)?.getAttribute('data-label') || formatUrnLabel(id, 40)
+      // Resolve source/target node display names via DOM — the elementCache
+      // already has the rendered node refs. A line into a folded layer ends on
+      // a fold anchor, which carries the row's name as `data-label`
+      // (LayerColumn) instead of the row's text. Past both, the name the
+      // canvas holds for it; an id is the last resort, and then only its tail.
+      const nameOf = (id: string) => {
+        const el = document.getElementById(`layer-node-${id}`)
+        return el?.querySelector('.line-clamp-2')?.textContent?.trim()
+          || el?.getAttribute('data-label') || nodeById.get(id)?.name || formatUrnLabel(id, 40)
+      }
       const typeOf = (id: string) => {
         const typeId = nodeById.get(id)?.typeId
         if (!typeId) return undefined

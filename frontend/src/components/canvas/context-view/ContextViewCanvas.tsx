@@ -137,7 +137,7 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
-import { keepClearOfDrawer } from './drawerClearance'
+import { keepClearOfDrawer, shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
   EMPTY_LENS_HISTORY,
@@ -3657,7 +3657,27 @@ export function ContextViewCanvas({
   useEffect(() => {
     const container = horizontalScrollRef.current
     if (!drawerNodeId || !container) return
-    return keepClearOfDrawer(container, [drawerNodeId])
+    let frame = 0
+    let width = -1
+    let still = 0
+    let frames = 0
+    const whenSettled = () => {
+      const now = container.clientWidth
+      still = now === width ? still + 1 : 0
+      width = now
+      frames += 1
+      // Three identical frames means the width has stopped moving — which is
+      // true immediately when the drawer merely swapped entities and never
+      // resized. The frame cap keeps a window being dragged from holding
+      // this open indefinitely.
+      if (still < 3 && frames < 60) { frame = requestAnimationFrame(whenSettled); return }
+      const row = document.getElementById(`layer-node-${drawerNodeId}`)
+      if (!row) return                       // off-window: the reveal paths own that
+      const shift = shiftToClear(row.getBoundingClientRect(), container.getBoundingClientRect())
+      if (shift !== 0) container.scrollLeft += shift
+    }
+    frame = requestAnimationFrame(whenSettled)
+    return () => cancelAnimationFrame(frame)
   }, [drawerNodeId])
 
   // F9 — REVEAL WHILE TRACING opens the OVERLAY's chain. The browse reveal
@@ -4631,7 +4651,7 @@ export function ContextViewCanvas({
   // noise; the Lineage Lens enumerates the full fan properly and the chip
   // points there. A HOVERED entity's lines follow the same rule, drawn by
   // the overlay from `hoverPool` so a hover never re-renders the canvas.
-  const basePresentation = useMemo(() => {
+  const edgePresentation = useMemo(() => {
     if (!isStubsMode) {
       return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
     }
@@ -4661,12 +4681,11 @@ export function ContextViewCanvas({
     }
   }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeIds, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
   // The open line is drawn whatever the mode would otherwise show.
-  const edgePresentation = useMemo(() => (
-    openLine && !basePresentation.edges.some(e => e.id === openLine.id)
-      ? { ...basePresentation, edges: [...basePresentation.edges, openLine] }
-      : basePresentation
-  ), [basePresentation, openLine])
-  const effectiveLineageEdges = edgePresentation.edges
+  const effectiveLineageEdges = useMemo(() => (
+    openLine && !edgePresentation.edges.some(e => e.id === openLine.id)
+      ? [...edgePresentation.edges, openLine]
+      : edgePresentation.edges
+  ), [edgePresentation.edges, openLine])
 
   // ── Fold distant layers (useLayerFold, layerFold.ts) ────────────────────
   // The layer each RENDERED row lives in: the browse map, or in trace mode
