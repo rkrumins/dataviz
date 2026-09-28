@@ -156,7 +156,7 @@ describe('lineage that stays inside what the card stands for', () => {
     })
     act(() => { useCanvasStore.getState().addGraph([], [flow('g.a', 'g.b')] as never) })
     await waitFor(() => {
-      expect(ports('g.a')).toEqual({ left: 'here:out', right: null })
+      expect(ports('g.a')).toEqual({ left: null, right: 'here:out' })
     }, { timeout: 8000 })
 
     await h.toggle('logical:grp')
@@ -175,7 +175,7 @@ describe('lineage that stays inside what the card stands for', () => {
       flows: [{ sourceUrn: 'P.C', targetUrn: 'R' }],
     })
     await waitFor(() => {
-      expect(ports('P.C')).toEqual({ left: 'here:out', right: null })
+      expect(ports('P.C')).toEqual({ left: null, right: 'here:out' })
       expect(ports('R')).toEqual({ left: 'here:in', right: null })
       expect(ports('P')).toEqual({ left: null, right: 'lineage:out' })
     }, { timeout: 8000 })

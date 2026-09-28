@@ -1,18 +1,33 @@
 /**
  * What an entity card says about its lineage on each side — its PORTS.
  *
- * A port sits where the lines plug in. Lines join the sides of two cards that
- * face each other (lineRoute.ts), so a card's lines to a column on its right
- * meet its right edge and its lines to a column on its left meet its left
- * edge — whichever way the data flows. The port says which way: incoming
- * (upstream) and outgoing (downstream) carry the trace's own colours, and a
- * side carrying both shows both. A card with no lineage has no port, so
- * absence reads as absence.
+ * Which side marks what is the reader's setting (Display › Marker sides,
+ * `lineagePortSides`), one of two rules:
  *
- * Ports used to be keyed to direction alone — left for incoming, right for
- * outgoing — while a right-to-left line leaves its card by the LEFT edge:
- * the Report cards on ABCDE had every line plugged into a bare left edge
- * and their only port on the right, and read as "lineage with no marker".
+ *  - 'direction', the default — incoming (upstream) on the LEFT, outgoing
+ *    (downstream) on the RIGHT, whatever the columns: a line's outgoing end
+ *    is marked on its source's right, its incoming end on its target's left.
+ *    Each side says one direction, so a card reads left to right like the
+ *    flow. The cost: a line to the same column or to the left plugs into the
+ *    edge across from its marker, as on ABCDE's Report cards (below).
+ *  - 'lines' — a port sits where the lines plug in. Lines join the sides of
+ *    two cards that face each other (lineRoute.ts), so a card's lines to a
+ *    column on its right meet its right edge, its lines to a column on its
+ *    left meet its left edge, and lines within one column meet on the left —
+ *    whichever way the data flows. One side can carry both directions.
+ *
+ * Either way the port says which way: incoming and outgoing carry the
+ * trace's own colours, and a side carrying both shows both. A card with no
+ * lineage has no port, so absence reads as absence. The lines themselves are
+ * routed the same under both rules.
+ *
+ * Ports were keyed to direction alone once before, and were moved to where
+ * the lines plug in because a right-to-left line leaves its card by the LEFT
+ * edge: the Report cards on ABCDE had every line plugged into a bare left
+ * edge and their only port on the right, and read as "lineage with no
+ * marker". On 2026-09-28 the user chose direction back as the default — one
+ * direction to a side, as Trace showed it — and kept the attachment rule as
+ * the setting's other choice, for views like ABCDE.
  *
  * Lineage with no line on this canvas has no side to plug into, so it takes
  * the conventional one — incoming left, outgoing right — SOLID: the card has
@@ -41,6 +56,7 @@
  */
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import type { NodeDegree } from '@/providers/GraphDataProvider'
+import type { LineagePortSides } from '@/store/preferences'
 
 export type PortSide = 'left' | 'right'
 
@@ -74,15 +90,18 @@ export interface PortView {
 }
 
 /**
- * Which side of each card its lines meet. `layerOf` places an entity's
- * column in the canvas's left-to-right order; two ends in one column meet on
- * the left, where the same-column lane runs. An end whose column is not known
- * takes the convention — out on the right, in on the left.
+ * Which side of each card marks its lines, by the rule `sides` names (see
+ * above). For 'lines', `layerOf` places an entity's column in the canvas's
+ * left-to-right order; two ends in one column meet on the left, where the
+ * same-column lane runs. An end whose column is not known takes the
+ * convention — out on the right, in on the left — which is the whole of
+ * 'direction'.
  */
 export function buildNodePorts(
   /** `weight`: the lines one stands for (unloadedColumnLines); 1 if absent. */
   lines: Iterable<{ source: string; target: string; isBidirectional?: boolean; isDelegated?: boolean; isHeld?: boolean; weight?: number }>,
   layerOf: (id: string) => number | undefined,
+  sides: LineagePortSides,
 ): Map<string, NodePorts> {
   const ports = new Map<string, NodePorts>()
   const at = (id: string): NodePorts => {
@@ -106,6 +125,17 @@ export function buildNodePorts(
       if (isBidirectional) {
         at(source).delegated.in++
         at(target).delegated.out++
+      }
+      continue
+    }
+    if (sides === 'direction') {
+      at(source).right.out += weight
+      at(target).left.in += weight
+      // A two-way bundle flows back too: in on the source's left, out on the
+      // target's right.
+      if (isBidirectional) {
+        at(source).left.in += weight
+        at(target).right.out += weight
       }
       continue
     }

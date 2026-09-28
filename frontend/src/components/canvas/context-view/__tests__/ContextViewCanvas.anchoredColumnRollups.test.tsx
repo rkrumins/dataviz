@@ -40,7 +40,7 @@ vi.mock('../LineageFlowOverlay', async (original) => {
 
 beforeEach(() => {
   useAuthStore.setState({ permissions: { global: ['system:admin'], ws: {} } } as never)
-  usePreferencesStore.setState({ showMissingConnectionIndicators: true, externalLineagePreview: false } as never)
+  usePreferencesStore.setState({ showMissingConnectionIndicators: true, externalLineagePreview: false, lineagePortSides: 'direction' } as never)
   overlay.offCanvas = undefined
 })
 
@@ -155,11 +155,11 @@ describe('a Snowflake column whose store holds its own roll-up cells', () => {
   it('opens with no row of the column said to reach outside the view', async () => {
     await openView()
 
-    // Every partner is in the column to the left or in the row's own column,
-    // whose lines run on the left: one port there, both ways, drawn.
+    // Every partner is in the column to the left or in the row's own column:
+    // incoming on the left, outgoing on the right, both drawn.
     await waitFor(() => {
-      expect(ports('int_clean_orders_t2')).toEqual({ left: 'here:both', right: null })
-      expect(ports('int_clean_order_items_t2')).toEqual({ left: 'here:both', right: null })
+      expect(ports('int_clean_orders_t2')).toEqual({ left: 'here:in', right: 'here:out' })
+      expect(ports('int_clean_order_items_t2')).toEqual({ left: 'here:in', right: 'here:out' })
       expect(ports('GOLD')).toEqual({ left: 'here:in', right: null })
     }, { timeout: 8000 })
 

@@ -6,9 +6,52 @@ import { buildNodePorts, columnEndLayer, partialLines, portTotals, portView, sid
 const layer: Record<string, number> = { src: 0, wh: 3, rep: 4, rep2: 4 }
 const layerOf = (id: string) => layer[id]
 
-describe('buildNodePorts — a port sits where the lines plug in', () => {
+describe("buildNodePorts — incoming left, outgoing right ('direction', the default)", () => {
   it('a line to a column on the right leaves by the right edge and arrives on the left', () => {
-    const ports = buildNodePorts([{ source: 'src', target: 'wh' }], layerOf)
+    const ports = buildNodePorts([{ source: 'src', target: 'wh' }], layerOf, 'direction')
+    expect(ports.get('src')!.right).toEqual({ in: 0, out: 1 })
+    expect(ports.get('wh')!.left).toEqual({ in: 1, out: 0 })
+  })
+
+  it('a right-to-left line still marks its source on the right and its target on the left', () => {
+    // The line itself leaves by the left edge (lineRoute); the marker says
+    // which way the data runs, not where the line plugs in.
+    const ports = buildNodePorts([{ source: 'rep', target: 'src' }], layerOf, 'direction')
+    expect(ports.get('rep')!.right).toEqual({ in: 0, out: 1 })
+    expect(ports.get('rep')!.left).toEqual({ in: 0, out: 0 })
+    expect(ports.get('src')!.left).toEqual({ in: 1, out: 0 })
+    expect(ports.get('src')!.right).toEqual({ in: 0, out: 0 })
+  })
+
+  it('two cards in one column: out on the right, in on the left', () => {
+    const ports = buildNodePorts([{ source: 'rep', target: 'rep2' }], layerOf, 'direction')
+    expect(ports.get('rep')!.right).toEqual({ in: 0, out: 1 })
+    expect(ports.get('rep')!.left).toEqual({ in: 0, out: 0 })
+    expect(ports.get('rep2')!.left).toEqual({ in: 1, out: 0 })
+    expect(ports.get('rep2')!.right).toEqual({ in: 0, out: 0 })
+  })
+
+  it('a two-way bundle files each direction on its own side of both cards', () => {
+    const ports = buildNodePorts([{ source: 'src', target: 'wh', isBidirectional: true }], layerOf, 'direction')
+    expect(ports.get('src')!).toMatchObject({ left: { in: 1, out: 0 }, right: { in: 0, out: 1 } })
+    expect(ports.get('wh')!).toMatchObject({ left: { in: 1, out: 0 }, right: { in: 0, out: 1 } })
+  })
+
+  it('weighs a line by what it stands for, and leaves held and delegated lines alone', () => {
+    const ports = buildNodePorts([
+      { source: 'rep', target: 'column:WH', weight: 4 },
+      { source: 'src', target: 'wh', isDelegated: true },
+      { source: 'wh', target: 'unplaced:', isHeld: true },
+    ], layerOf, 'direction')
+    expect(ports.get('rep')!.right).toEqual({ in: 0, out: 4 })
+    expect(ports.get('src')!).toMatchObject({ left: { in: 0, out: 0 }, right: { in: 0, out: 0 }, delegated: { in: 0, out: 1 } })
+    expect(ports.get('wh')!).toMatchObject({ left: { in: 0, out: 0 }, right: { in: 0, out: 0 }, held: { in: 0, out: 1 } })
+  })
+})
+
+describe("buildNodePorts — where lines attach ('lines'): a port sits where the lines plug in", () => {
+  it('a line to a column on the right leaves by the right edge and arrives on the left', () => {
+    const ports = buildNodePorts([{ source: 'src', target: 'wh' }], layerOf, 'lines')
     expect(ports.get('src')!.right).toEqual({ in: 0, out: 1 })
     expect(ports.get('wh')!.left).toEqual({ in: 1, out: 0 })
   })
@@ -16,27 +59,27 @@ describe('buildNodePorts — a port sits where the lines plug in', () => {
   it('a right-to-left line leaves by the LEFT edge — the Report cards on ABCDE', () => {
     // Every Report line ran back to Source / Warehouse; the old ports put
     // the marker on the right while every line met the bare left edge.
-    const ports = buildNodePorts([{ source: 'rep', target: 'src' }], layerOf)
+    const ports = buildNodePorts([{ source: 'rep', target: 'src' }], layerOf, 'lines')
     expect(ports.get('rep')!.left).toEqual({ in: 0, out: 1 })
     expect(ports.get('rep')!.right).toEqual({ in: 0, out: 0 })
     expect(ports.get('src')!.right).toEqual({ in: 1, out: 0 })
   })
 
   it('two cards in one column meet on the left, where their lane runs', () => {
-    const ports = buildNodePorts([{ source: 'rep', target: 'rep2' }], layerOf)
+    const ports = buildNodePorts([{ source: 'rep', target: 'rep2' }], layerOf, 'lines')
     expect(ports.get('rep')!.left.out).toBe(1)
     expect(ports.get('rep2')!.left.in).toBe(1)
   })
 
   it('an end in no known column takes the convention: out right, in left', () => {
-    const ports = buildNodePorts([{ source: 'src', target: 'ghost' }], layerOf)
+    const ports = buildNodePorts([{ source: 'src', target: 'ghost' }], layerOf, 'lines')
     expect(ports.get('src')!.right.out).toBe(1)
     expect(ports.get('ghost')!.left.in).toBe(1)
   })
 
   it('a two-way bundle carries both directions on the side facing its partner', () => {
     // Drawn once, oriented by id (src < wh), but data flows both ways.
-    const ports = buildNodePorts([{ source: 'src', target: 'wh', isBidirectional: true }], layerOf)
+    const ports = buildNodePorts([{ source: 'src', target: 'wh', isBidirectional: true }], layerOf, 'lines')
     expect(ports.get('src')!.right).toEqual({ in: 1, out: 1 })
     expect(ports.get('wh')!.left).toEqual({ in: 1, out: 1 })
     expect(portView('right', ports.get('src'), undefined)).toEqual({ kind: 'here', dir: 'both' })
@@ -44,7 +87,7 @@ describe('buildNodePorts — a port sits where the lines plug in', () => {
   })
 
   it('a line that stands aside for finer ones makes no port', () => {
-    const ports = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf)
+    const ports = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf, 'lines')
     expect(ports.get('src')!.right).toEqual({ in: 0, out: 0 })
     expect(ports.get('wh')!.left).toEqual({ in: 0, out: 0 })
     expect(portView('right', ports.get('src'), undefined)).toBeNull()
@@ -56,7 +99,7 @@ describe('portView — what each side shows', () => {
     const ports = buildNodePorts([
       { source: 'src', target: 'wh' },
       { source: 'rep', target: 'src' },
-    ], layerOf)
+    ], layerOf, 'lines')
     expect(portView('right', ports.get('src'), undefined)).toEqual({ kind: 'here', dir: 'both' })
     expect(portView('left', ports.get('src'), undefined)).toBeNull()
   })
@@ -94,7 +137,7 @@ describe('portView — what each side shows', () => {
   })
 
   it('no marker for a direction the canvas already shows', () => {
-    const ports = buildNodePorts([{ source: 'rep', target: 'src' }], layerOf)
+    const ports = buildNodePorts([{ source: 'rep', target: 'src' }], layerOf, 'lines')
     // `src` has incoming on its right; neither its total in nor its flows
     // placed outside add an incoming port on the left as well.
     expect(portView('left', ports.get('src'), { in: 40, out: 0 })).toBeNull()
@@ -102,7 +145,7 @@ describe('portView — what each side shows', () => {
   })
 
   it('a line that stands aside says the lineage is in view: never hollow, and no marker of its own', () => {
-    const ports = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf)
+    const ports = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf, 'lines')
     expect(portView('right', ports.get('src'), { in: 0, out: 0 }, false, { in: 0, out: 2 })).toEqual({ kind: 'lineage', dir: 'out' })
     expect(portView('right', ports.get('src'), { in: 0, out: 0 })).toBeNull()
     expect(portView('left', ports.get('wh'), { in: 0, out: 0 })).toBeNull()
@@ -121,10 +164,10 @@ describe('portView — a card whose lineage could not be counted', () => {
   })
 
   it('never when a line of its own already says it has lineage', () => {
-    const ports = buildNodePorts([{ source: 'src', target: 'wh' }], layerOf)
+    const ports = buildNodePorts([{ source: 'src', target: 'wh' }], layerOf, 'lines')
     expect(portView('left', ports.get('src'), undefined, true)).toBeNull()
     expect(portView('right', ports.get('src'), undefined, true)).toEqual({ kind: 'here', dir: 'out' })
-    const standing = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf)
+    const standing = buildNodePorts([{ source: 'src', target: 'wh', isDelegated: true }], layerOf, 'lines')
     expect(portView('left', standing.get('src'), undefined, true)).toBeNull()
   })
 
@@ -133,7 +176,7 @@ describe('portView — a card whose lineage could not be counted', () => {
     expect(portView('right', undefined, undefined, true, { in: 2, out: 0 })).toBeNull()
     const held = buildNodePorts(unplacedLines(new Map([['rep', {
       in: 0, out: 0, inPartners: new Set<string>(), outPartners: new Set<string>(), columns: new Map(), unplaced: { in: 0, out: 1 },
-    }]])), () => undefined)
+    }]])), () => undefined, 'lines')
     expect(portView('right', held.get('rep'), undefined, true)).toEqual({ kind: 'lineage', dir: 'out' })
     expect(portView('left', held.get('rep'), undefined, true)).toBeNull()
   })
@@ -163,7 +206,7 @@ describe('unloadedColumnLines — lineage into rows an anchored column has not d
 
   it('a row whose only lineage leads to rows Warehouse has not loaded is solid on the side facing it', () => {
     const lines = unloadedColumnLines(new Map([['rep', undrawn({ WH: flows(0, 4) })]]))
-    const ports = buildNodePorts(lines, layerOfAny)
+    const ports = buildNodePorts(lines, layerOfAny, 'lines')
     expect(ports.get('rep')!.left).toEqual({ in: 0, out: 4 })
     expect(portView('left', ports.get('rep'), { in: 0, out: 4 })).toEqual({ kind: 'here', dir: 'out' })
     // Not hollow on the conventional side: that would say "only outside".
@@ -176,7 +219,7 @@ describe('unloadedColumnLines — lineage into rows an anchored column has not d
       ['src', undrawn({ WH: flows(5, 0) })],
     ]))
     expect(lines).toHaveLength(4)
-    const ports = buildNodePorts(lines, layerOfAny)
+    const ports = buildNodePorts(lines, layerOfAny, 'lines')
     // Naming no row (an anchor's rest), each counts its flows.
     expect(ports.get('rep')!.left).toEqual({ in: 2, out: 8 })
     expect(ports.get('src')!.right).toEqual({ in: 5, out: 0 })
@@ -186,7 +229,7 @@ describe('unloadedColumnLines — lineage into rows an anchored column has not d
     const toRows: ColumnFlows = { in: 0, out: 9, inPartners: new Set(), outPartners: new Set(['w1', 'w2', 'w3']), unnamed: { in: 0, out: 0 } }
     const lines = unloadedColumnLines(new Map([['rep', undrawn({ WH: toRows })]]))
     expect(lines).toHaveLength(1)
-    const ports = buildNodePorts([...lines, { source: 'rep', target: 'src' }], layerOfAny)
+    const ports = buildNodePorts([...lines, { source: 'rep', target: 'src' }], layerOfAny, 'lines')
     // Three rows of Warehouse not drawn, and one line drawn to Source.
     expect(ports.get('rep')!.left).toEqual({ in: 0, out: 4 })
     expect(sideVolume(ports.get('rep'), 'left')).toBe(4)
@@ -211,7 +254,7 @@ describe('unplacedLines — lineage whose far end is not placed yet is solid, ne
   const layerOfRow = (id: string) => (id === 'rep' ? 4 : undefined)
 
   it('says the card has lineage that way, on the conventional side, with no line of its own', () => {
-    const ports = buildNodePorts(unplacedLines(new Map([['rep', held(0, 2)]])), layerOfRow)
+    const ports = buildNodePorts(unplacedLines(new Map([['rep', held(0, 2)]])), layerOfRow, 'lines')
     expect(ports.get('rep')!.right).toEqual({ in: 0, out: 0 })
     expect(portView('right', ports.get('rep'), { in: 0, out: 2 }, false, { in: 0, out: 1 })).toEqual({ kind: 'lineage', dir: 'out' })
     // With no total at all (a draft cannot count).
@@ -220,7 +263,7 @@ describe('unplacedLines — lineage whose far end is not placed yet is solid, ne
   })
 
   it('leaves the other direction to say what it knows', () => {
-    const ports = buildNodePorts(unplacedLines(new Map([['rep', held(0, 2)]])), layerOfRow)
+    const ports = buildNodePorts(unplacedLines(new Map([['rep', held(0, 2)]])), layerOfRow, 'lines')
     expect(portView('left', ports.get('rep'), { in: 1, out: 2 }, false, { in: 1, out: 0 })).toEqual({ kind: 'beyond', dir: 'in' })
   })
 
@@ -243,7 +286,7 @@ describe('portView — a container whose lineage sits below it', () => {
   })
 
   it('never when some of it is on the canvas', () => {
-    const ports = buildNodePorts([{ source: 'src', target: 'wh' }], layerOf)
+    const ports = buildNodePorts([{ source: 'src', target: 'wh' }], layerOf, 'lines')
     expect(portView('right', ports.get('src'), { in: 0, out: 0, rollupIn: 0, rollupOut: 1 })).toEqual({ kind: 'here', dir: 'out' })
   })
 })
@@ -330,7 +373,7 @@ describe('partialLines — a row whose lineage was read only in part is solid th
   const layerOfRow = (id: string) => (id === 'rep' ? 4 : undefined)
 
   it('says the card has lineage that way, draws no line, and leaves the other alone', () => {
-    const ports = buildNodePorts(partialLines({ in: new Set(), out: new Set(['rep']) }), layerOfRow)
+    const ports = buildNodePorts(partialLines({ in: new Set(), out: new Set(['rep']) }), layerOfRow, 'lines')
     expect(ports.get('rep')!.right).toEqual({ in: 0, out: 0 })
     expect(portView('right', ports.get('rep'), { in: 1, out: 3 }, false, { in: 1, out: 1 })).toEqual({ kind: 'lineage', dir: 'out' })
     expect(portView('left', ports.get('rep'), { in: 1, out: 3 }, false, { in: 1, out: 1 })).toEqual({ kind: 'beyond', dir: 'in' })

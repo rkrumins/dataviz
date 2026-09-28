@@ -4972,16 +4972,22 @@ export function ContextViewCanvas({
   // reflect the entity's true lineage volume regardless of which edges
   // happen to be materialized for the current hover.
   // Where each card's lines plug in, by side and direction — its lineage
-  // ports (lineagePorts.ts). Sides follow the columns' left-to-right order,
-  // exactly as lineRoute.ts attaches the lines themselves. Lineage into an
-  // anchored column's rows that are not drawn is in the view too: it plugs
-  // in on the side facing that column (unloadedColumnLines). Lineage whose
-  // far end has no known place yet (unplacedLines), or read only in part
-  // (partialLines: a row's flows, or a selected container's roll-ups, or a
-  // closed container's not read yet), is held: solid on the conventional
-  // side, never hollow. Browse only, as the stubs are — a trace's wires are
-  // its own.
+  // ports (lineagePorts.ts). Which side marks what is the reader's setting
+  // (lineagePortSides): incoming left and outgoing right, the default, or
+  // where the lines attach — the columns' left-to-right order, exactly as
+  // lineRoute.ts attaches the lines themselves. Lineage into an anchored
+  // column's rows that are not drawn is in the view too: it plugs in as a
+  // line to that column (unloadedColumnLines). Lineage whose far end has no
+  // known place yet (unplacedLines), or read only in part (partialLines: a
+  // row's flows, or a selected container's roll-ups, or a closed
+  // container's not read yet), is held: solid on the conventional side,
+  // never hollow. Browse only, as the stubs are — a trace's wires are its
+  // own, and so are its columns: its lanes (traceLaneIndex). The browse
+  // layers hold none of the cards a walk brought in; read against them,
+  // every trace wire took incoming left, outgoing right, whatever the
+  // setting.
   const lineagePartial = useCanvasStore((s) => s.lineagePartial)
+  const lineagePortSides = usePreferencesStore((s) => s.lineagePortSides) ?? 'direction'
   const nodePorts = useMemo(() => {
     const layerOrdinal = new Map(sortedLayers.map((l, i) => [l.id, i]))
     // A closed group's member holds it on the group's row.
@@ -5000,10 +5006,12 @@ export function ContextViewCanvas({
         : [...visibleLineageEdges, ...unloadedColumnLines(offCanvasByNode), ...unplacedLines(offCanvasByNode),
           ...partialLines(lineagePartial), ...partialLines({ in: heldOn(containerPartial.in), out: heldOn(containerPartial.out) }),
           ...partialLines({ in: heldOn(unread.in), out: heldOn(unread.out) })],
-      (id) => nodeLayerIndexMap.get(id) ?? layerOrdinal.get(columnEndLayer(id) ?? ''),
+      overlay.active ? (id) => traceLaneIndex.get(id)
+        : (id) => nodeLayerIndexMap.get(id) ?? layerOrdinal.get(columnEndLayer(id) ?? ''),
+      lineagePortSides,
     )
   }, [visibleLineageEdges, overlay.active, offCanvasByNode, lineagePartial, containerPartial, containerRead, lineagePortTotals,
-    closedGroupOf, nodeLayerIndexMap, sortedLayers])
+    closedGroupOf, nodeLayerIndexMap, sortedLayers, lineagePortSides, traceLaneIndex])
 
   const nodeStubCounts = useMemo(() => {
     const counts = new Map<string, { in: number; out: number }>()

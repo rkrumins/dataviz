@@ -3,11 +3,12 @@
  * view built the way Data Source views are (one anchored column per entity).
  *
  * Each card's ports end in one of four states:
- *   solid   — its lineage reaches something in the view, on the side facing
- *             it: a row, a collapsed container (the roll-up), a row of an
- *             anchored column that is not loaded, or that column's anchor;
- *             or it has lineage no line shows yet, on the conventional side
- *             (incoming left, outgoing right);
+ *   solid   — its lineage reaches something in the view: a row, a collapsed
+ *             container (the roll-up), a row of an anchored column that is
+ *             not loaded, or that column's anchor — incoming on the left,
+ *             outgoing on the right (or, set to "where lines attach", on the
+ *             side facing it); or it has lineage no line shows yet, on the
+ *             conventional side (incoming left, outgoing right);
  *   hollow  — the lineage that way leads outside the view, and the canvas
  *             placed it there;
  *   none    — it has none;
@@ -21,10 +22,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
-import { anchoredPortsEstate, groupedEstate } from '@/test/fixtures/traceEstates'
+import { anchoredPortsEstate, coarseCellsEstate, groupedEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
 import { useCanvasStore } from '@/store/canvas'
 import { useConnectionVisibilityStore } from '@/store/connectionVisibility'
+import { usePreferencesStore } from '@/store/preferences'
 
 // The stubs' own data, as the canvas hands it to the overlay. jsdom gives
 // every row the same box, so the overlay never has room to paint a stub;
@@ -44,6 +46,7 @@ vi.mock('@/hooks/useEdgeProjection', async (original) => {
 
 beforeEach(() => {
   useAuthStore.setState({ permissions: { global: ['system:admin'], ws: {} } } as never)
+  usePreferencesStore.setState({ lineagePortSides: 'direction' } as never)
 })
 
 const flow = (source: string, target: string) => ({
@@ -111,9 +114,9 @@ describe('an anchored view: every card ends solid, hollow, none or unknown', () 
       expect(ports('s1')).toEqual({ left: 'here:in', right: null })
       // Solid through a collapsed container's roll-up.
       expect(ports('SRC.DB_A')).toEqual({ left: null, right: 'here:out' })
-      // Same column: s9 is a Staging row that is not loaded, and a line to
-      // one's own column meets the left — with DB_A's roll-up arriving there.
-      expect(ports('s2')).toEqual({ left: 'here:both', right: null })
+      // Same column: s9 is a Staging row that is not loaded; its line leaves
+      // on the right, DB_A's roll-up arrives on the left.
+      expect(ports('s2')).toEqual({ left: 'here:in', right: 'here:out' })
       // A nested row inside an open container carries its own port; the
       // container, with no line of its own, carries none.
       expect(ports('SRC.DB_B.t2')).toEqual({ left: null, right: 'here:out' })
@@ -204,8 +207,8 @@ describe("a card's lineage into rows an anchored column has not drawn", () => {
       useCanvasStore.getState().addGraph([], [flow('s2', 's9'), flow('s2', 's1')] as never)
     })
     await waitFor(() => {
-      expect(ports('s2')).toEqual({ left: 'here:out', right: null })
-      const port = document.getElementById('layer-node-s2')?.querySelector<HTMLElement>('[data-lineage-port="left"]')
+      expect(ports('s2')).toEqual({ left: null, right: 'here:out' })
+      const port = document.getElementById('layer-node-s2')?.querySelector<HTMLElement>('[data-lineage-port="right"]')
       expect(port?.dataset.out).toBe('2')
     }, { timeout: 8000 })
   }, 20_000)
@@ -306,6 +309,53 @@ describe('a card whose lineage sits below it, or that the reader hid', () => {
     await h.toggle('logical:grp')
     await waitFor(() => {
       expect(ports('logical:grp')).toEqual({ left: 'unknown:both', right: 'unknown:both' })
+    }, { timeout: 8000 })
+  }, 20_000)
+})
+
+describe("the marker sides are the reader's setting", () => {
+  it('incoming left, outgoing right by default; "where lines attach" moves each marker to where its lines plug in', async () => {
+    const estate = anchoredPortsEstate()
+    await renderCanvasWithTrace(estate, {
+      focus: 'SRC.raw_orders',
+      browseHolds: estate.model.nodes.map(n => n.urn).filter(urn => urn !== 's9' && urn !== 'far'),
+      ancestorChains: true,
+      nodeDegrees: { s2: { in: 0, out: 1 }, rpt: { in: 0, out: 1 }, s1: { in: 1, out: 0 } },
+    })
+    // s2 → s9, a row of its own column that is not loaded; rpt → s1, right to left.
+    act(() => {
+      useCanvasStore.getState().addGraph([], [flow('s2', 's9'), flow('rpt', 's1')] as never)
+    })
+    await waitFor(() => {
+      expect(ports('s2')).toEqual({ left: null, right: 'here:out' })
+      expect(ports('rpt')).toEqual({ left: null, right: 'here:out' })
+      expect(ports('s1')).toEqual({ left: 'here:in', right: null })
+    }, { timeout: 8000 })
+
+    act(() => { usePreferencesStore.getState().setLineagePortSides('lines') })
+    await waitFor(() => {
+      expect(ports('s2')).toEqual({ left: 'here:out', right: null })
+      expect(ports('rpt')).toEqual({ left: 'here:out', right: null })
+      expect(ports('s1')).toEqual({ left: null, right: 'here:in' })
+    }, { timeout: 8000 })
+  }, 20_000)
+
+  it("a trace follows it too, reading where its lines attach from the trace's own lanes", async () => {
+    // One lane holds every card, and the browse canvas has loaded only its
+    // root: the trace's cards are in none of the browse layers.
+    const h = await renderCanvasWithTrace(coarseCellsEstate(), { focus: 'orders', browseHolds: ['dept'] })
+    await h.startTrace('orders')
+    expect(h.wires().map(w => `${w.source}>${w.target}`).sort()).toEqual(['orders>balances', 'orders>journal'])
+    await waitFor(() => {
+      expect(ports('orders')).toEqual({ left: null, right: 'here:out' })
+      expect(ports('journal')).toEqual({ left: 'here:in', right: null })
+    }, { timeout: 8000 })
+
+    // Within one lane the lines meet on the left.
+    act(() => { usePreferencesStore.getState().setLineagePortSides('lines') })
+    await waitFor(() => {
+      expect(ports('orders')).toEqual({ left: 'here:out', right: null })
+      expect(ports('journal')).toEqual({ left: 'here:in', right: null })
     }, { timeout: 8000 })
   }, 20_000)
 })

@@ -39,6 +39,14 @@ export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
  */
 export type LineageMotion = 'focus' | 'all' | 'off'
 
+/**
+ * Which side of an entity card marks its lineage — see `lineagePorts.ts`.
+ * 'direction': incoming on the left, outgoing on the right, wherever the
+ * lines run; 'lines': where the lines plug in, so a line to the left or
+ * within a column is marked on the left.
+ */
+export type LineagePortSides = 'direction' | 'lines'
+
 export interface NodeStyleConfig {
   color: string
   icon?: string
@@ -174,6 +182,11 @@ interface PreferencesState {
    *  for every surface (lib/lineageDirectionColors.ts). */
   lineageDirectionColors: LineageDirectionColors
   setLineageDirectionColors: (colors: LineageDirectionColors) => void
+  /** Which side of a card marks its incoming and outgoing lineage (Display ›
+   *  Marker sides). Incoming left, outgoing right by default — the user's
+   *  choice (2026-09-28); where the lines attach stays one click away. */
+  lineagePortSides: LineagePortSides
+  setLineagePortSides: (sides: LineagePortSides) => void
   /**
    * "N on this lineage" pills on the cards of a trace — how much of what is
    * inside a closed card the lineage runs through. On by default; lives
@@ -401,6 +414,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       toggleEdgeDirection: () => set((state) => ({ showEdgeDirection: !(state.showEdgeDirection ?? true) })),
       lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS,
       setLineageDirectionColors: (lineageDirectionColors) => set({ lineageDirectionColors }),
+      lineagePortSides: 'direction',
+      setLineagePortSides: (lineagePortSides) => set({ lineagePortSides }),
       showLineageCounts: true,
       toggleLineageCounts: () =>
         set((state) => ({ showLineageCounts: !state.showLineageCounts })),
