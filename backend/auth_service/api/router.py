@@ -943,10 +943,12 @@ async def _finish_sso_login(
         logger.info(
             "SSO sign-in carried a stale auth_time (kind=%s, slug=%s, "
             "age=%ds); asking the IdP for a fresh authentication",
-            snap.kind, slug, int(time.time()) - auth_time,
+            snap.kind, snap.slug, int(time.time()) - auth_time,
         )
+        # ``snap.slug`` — the registry's own value for the provider this
+        # request resolved — not the path parameter it was looked up by.
         bounce = RedirectResponse(
-            f"/api/v1/auth/{quote(slug, safe='')}/login"
+            f"/api/v1/auth/{quote(snap.slug, safe='')}/login"
             f"?next={quote(_safe_next(next_path), safe='/')}&force=1",
             status_code=status.HTTP_302_FOUND,
         )
