@@ -234,6 +234,27 @@ class ExpandRequest(BaseModel):
         populate_by_name = True
 
 
+class EdgesBeneathRequest(BaseModel):
+    """Two entities, each with everything it contains: the lineage relationships between them."""
+    source_urn: str = Field(alias="sourceUrn")
+    target_urn: str = Field(alias="targetUrn")
+
+    class Config:
+        populate_by_name = True
+
+
+class EdgesBeneathResult(BaseModel):
+    """The real (not rolled-up) lineage relationships from the source, or anything inside it, to the
+    target, or anything inside it. ``truncated``: a side's contents or the edge list hit a cap, so
+    this is not all of them."""
+    edges: List[GraphEdge]
+    total: int
+    truncated: bool = False
+
+    class Config:
+        populate_by_name = True
+
+
 # V2 alias — distinguishes the skeleton-first expand contract from the
 # legacy ExpandRequest. Same shape today; kept as a distinct symbol so the
 # API and engine signatures advertise V2 semantics.

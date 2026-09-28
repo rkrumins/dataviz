@@ -1,6 +1,6 @@
 /**
- * The entities at either end of a relationship: their names, and a way to open
- * one in the drawer.
+ * The entities at either end of a relationship: their names and types, and a
+ * way to open one in the drawer.
  */
 import { useCallback, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
@@ -8,39 +8,52 @@ import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { nodeIndexOf } from '@/lib/storeIndex'
 import { usePersonaStore } from '@/store/persona'
 import { resolveEntityName } from '@/lib/entityDisplayName'
+import { toCanvasNode } from '@/lib/canvasNodeMapper'
+import { formatUrnLabel } from '@/lib/urnLabels'
+import { useResolvedEntities } from '@/hooks/useResolvedNames'
+import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { withTimeout, TimeoutError } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 
 export interface Endpoint {
   id: string
   name: string
+  /** The entity type's id. */
   type?: string
-  /** Known to the canvas (or to the surface drawing it) — not just an id. */
+  /** Named — by the canvas, the surface drawing it (a trace) or the data source — not just an id. */
   known: boolean
 }
 
-/** Names for `ids`, from the canvas store or the surface drawing them (a trace).
- *  Pass a memoised `ids` array. Re-renders only when one of THESE nodes changes. */
+/** Names and types for `ids`: from the canvas store, else the surface drawing them (a trace), else
+ *  the data source — one batched lookup for the ends the canvas has not loaded (the real ends of a
+ *  lifted or rolled-up relationship, deep inside collapsed cards). Until it answers, an end reads
+ *  as the tail of its id. Pass a memoised `ids` array. Re-renders only when one of THESE nodes
+ *  changes, or the lookup answers. */
 export function useEndpoints(ids: readonly string[], resolveNode?: (id: string) => LineageNode | null): Map<string, Endpoint> {
   const found = useCanvasStore(useShallow((s) => {
     const index = nodeIndexOf(s.nodes)
     return ids.map((id) => index.get(id))
   }))
   const mode = usePersonaStore((s) => s.mode)
+  const local = useMemo(
+    () => ids.map((id, i) => found[i] ?? resolveNode?.(id) ?? undefined), [found, ids, resolveNode])
+  const unknown = useMemo(() => ids.filter((_, i) => !local[i]), [ids, local])
+  const fetched = useResolvedEntities(unknown, useGraphProviderIfAvailable())
   return useMemo(() => {
     const out = new Map<string, Endpoint>()
     ids.forEach((id, i) => {
       if (out.has(id)) return
-      const node = found[i] ?? resolveNode?.(id) ?? undefined
+      const remote = fetched.get(id)
+      const node = local[i] ?? (remote ? toCanvasNode(remote) : undefined)
       out.set(id, {
         id,
-        name: node ? resolveEntityName(node.data, mode, id) : id,
+        name: node ? resolveEntityName(node.data, mode, id) : formatUrnLabel(id, 48),
         type: node?.data.type as string | undefined,
         known: !!node,
       })
     })
     return out
-  }, [found, mode, ids, resolveNode])
+  }, [local, fetched, mode, ids])
 }
 
 /**

@@ -26,6 +26,7 @@ import type {
     NodePage,
     NodeDegree,
     EdgeQuery,
+    EdgesBeneath,
     LineageResult,
     ContainmentResult,
     TraceOptions,
@@ -738,6 +739,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return await this.fetch<GraphEdge[]>('/edges/between', {
             method: 'POST',
             body: JSON.stringify({ urns, edgeTypes, limit }),
+            timeoutMs: TIMEOUTS.EDGES_BETWEEN_MS,
+        })
+    }
+
+    async getEdgesBeneath(sourceUrn: URN, targetUrn: URN): Promise<EdgesBeneath> {
+        return await this.fetch<EdgesBeneath>('/edges/beneath', {
+            method: 'POST',
+            body: JSON.stringify({ sourceUrn, targetUrn }),
             timeoutMs: TIMEOUTS.EDGES_BETWEEN_MS,
         })
     }

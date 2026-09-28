@@ -40,3 +40,35 @@ export function shiftToClear(row: Extent, viewport: Extent, margin = 24): number
 
   return 0
 }
+
+/**
+ * Once the drawer has finished opening — the board's width has stopped moving — scroll the board by
+ * the least that shows every one of `rowIds`: the entity the drawer is about, or both ends of the
+ * line it is open on. A row not rendered is left to the reveal paths. Returns the cancel.
+ */
+export function keepClearOfDrawer(container: HTMLElement, rowIds: readonly string[]): () => void {
+  let frame = 0
+  let width = -1
+  let still = 0
+  let frames = 0
+  const whenSettled = () => {
+    const now = container.clientWidth
+    still = now === width ? still + 1 : 0
+    width = now
+    frames += 1
+    // Three identical frames means the width has stopped moving — which is
+    // true immediately when the drawer merely swapped subjects and never
+    // resized. The frame cap keeps a window being dragged from holding
+    // this open indefinitely.
+    if (still < 3 && frames < 60) { frame = requestAnimationFrame(whenSettled); return }
+    const rects = rowIds
+      .map((id) => document.getElementById(`layer-node-${id}`)?.getBoundingClientRect())
+      .filter((r): r is DOMRect => !!r)
+    if (rects.length === 0) return            // off-window: the reveal paths own that
+    const extent = { left: Math.min(...rects.map((r) => r.left)), right: Math.max(...rects.map((r) => r.right)) }
+    const shift = shiftToClear(extent, container.getBoundingClientRect())
+    if (shift !== 0) container.scrollLeft += shift
+  }
+  frame = requestAnimationFrame(whenSettled)
+  return () => cancelAnimationFrame(frame)
+}

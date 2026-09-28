@@ -17,7 +17,12 @@ import { useFeaturesStore } from '@/store/features'
 const h = vi.hoisted(() => ({
   record: undefined as GraphEdge | undefined,
   summary: undefined as Record<string, unknown> | undefined,
+  /** The data source, for ends the canvas has not loaded. */
+  provider: null as { getNodes: ReturnType<typeof vi.fn> } | null,
   scope: { wsId: 'ws' as string | undefined, graphId: 'g' as string | null, mainBranchId: 'main' as string | null, branchId: 'd1' as string | null },
+  /** The relationships beneath a roll-up, as the data source answers. */
+  beneath: { data: undefined, isLoading: false, isError: false } as { data?: { edges: GraphEdge[]; total: number; truncated: boolean }; isLoading: boolean; isError: boolean },
+  beneathCalls: [] as unknown[][],
 }))
 
 vi.mock('@/hooks/useRelationshipRecord', () => ({
@@ -30,6 +35,12 @@ vi.mock('@/hooks/useRelationshipRecord', () => ({
     refetch: vi.fn(),
   }),
 }))
+vi.mock('@/hooks/useRelationshipsBeneath', () => ({
+  useRelationshipsBeneath: (...args: unknown[]) => {
+    h.beneathCalls.push(args)
+    return args[3] ? h.beneath : { data: undefined, isLoading: false, isError: false }
+  },
+}))
 vi.mock('../useDrawerHistoryScope', () => ({ useDrawerHistoryScope: () => h.scope }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
   useEntitySummary: (ws?: string, g?: string | null, id?: string | null) => ({
@@ -37,6 +48,11 @@ vi.mock('@/features/versioning/hooks/useVersioning', () => ({
     isLoading: false,
   }),
   useBranches: () => ({ data: [] }),
+  useProjectionWatermark: () => ({ data: { committed: 3, projected: 3, fresh: true, status: 'idle', lastProjectedAt: '2026-02-02T00:00:00Z' } }),
+}))
+vi.mock('@/providers/GraphProviderContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/providers/GraphProviderContext')>()),
+  useGraphProviderIfAvailable: () => h.provider,
 }))
 vi.mock('@/features/versioning/components/EntityHistory', () => ({
   EntityHistory: ({ entityId }: { entityId: string }) => <div data-testid="entity-history">{entityId}</div>,
@@ -84,6 +100,9 @@ beforeEach(() => {
     userNames: { usr_ana: 'Ana', usr_bo: 'Bo' },
   }
   h.scope = { wsId: 'ws', graphId: 'g', mainBranchId: 'main', branchId: 'd1' }
+  h.provider = null
+  h.beneath = { data: undefined, isLoading: false, isError: false }
+  h.beneathCalls = []
   useStagedChangesStore.setState({ changes: [], redoStack: [] })
   useFeaturesStore.setState({ values: { versioningEnabled: true, editModeEnabled: true } } as never)
 })
@@ -96,10 +115,32 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(within(bridge).getByText('Orders')).toBeInTheDocument()
     expect(within(bridge).getByText('Revenue')).toBeInTheDocument()
     expect(screen.getByText('owner')).toBeInTheDocument()
-    const provenance = screen.getByText('Provenance').closest('.px-5') as HTMLElement
-    expect(within(provenance).getByText('Created').closest('div')).toHaveTextContent(/by.*Ana/)
-    expect(within(provenance).getByText('Last changed').closest('div')).toHaveTextContent(/by.*Bo/)
+    // Updated (who, when) and Synced, as in the entity drawer.
+    expect(screen.getByText('Updated').closest('div')).toHaveTextContent(/Bo/)
+    expect(screen.getByText('Synced')).toBeInTheDocument()
     expect(screen.getByTestId('entity-history')).toHaveTextContent('e1')
+  })
+
+  it('details say what the relationship means, and name each end and its type first, with the ids as the detail', () => {
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    const details = screen.getByText('Details').closest('.px-5') as HTMLElement
+    // No description in the ontology: its kind explains it.
+    expect(within(details).getByText('Meaning').closest('div')).toHaveTextContent('Data moves from the first entity to the second.')
+    expect(within(details).queryByText('Confidence')).not.toBeInTheDocument()
+    const from = within(details).getByText('From').closest('div') as HTMLElement
+    expect(within(from).getByRole('button', { name: 'Orders' })).toBeInTheDocument()
+    expect(within(from).getByText('dataset')).toBeInTheDocument()
+    expect(within(from).getByText('a')).toBeInTheDocument()
+    expect(within(within(details).getByText('ID').closest('div') as HTMLElement).getByText('e1')).toBeInTheDocument()
+  })
+
+  it('an end the canvas has not loaded is named by the data source', async () => {
+    h.provider = { getNodes: vi.fn().mockResolvedValue([{ urn: 'urn:li:dataset:deep', displayName: 'Deep Orders', entityType: 'dataset', properties: {} }]) }
+    setup({ kind: 'relationship', id: 'e1', source: 'a', target: 'urn:li:dataset:deep', edgeType: 'FLOWS_TO' })
+    render(<RelationshipDrawer canEdit />)
+    expect(await within(screen.getByTestId('relationship-bridge')).findByText('Deep Orders')).toBeInTheDocument()
+    expect(h.provider.getNodes).toHaveBeenCalledWith({ urns: ['urn:li:dataset:deep'], limit: 1 })
   })
 
   it('opens an end in the drawer on the same trail — Back returns to the relationship', async () => {
@@ -190,11 +231,12 @@ describe('RelationshipDrawer — a relationship', () => {
     expect(screen.getByText(/Not under version control/)).toBeInTheDocument()
   })
 
-  it('a read-only viewer sees no provenance and no history', () => {
+  it('without version control there is no created / updated and no history', () => {
     h.scope = { wsId: undefined, graphId: null, mainBranchId: null, branchId: null }
     setup(rel('e1'))
     render(<RelationshipDrawer />)
-    expect(screen.queryByText('Provenance')).not.toBeInTheDocument()
+    expect(screen.queryByText('Updated')).not.toBeInTheDocument()
+    expect(screen.getByText('History is available with version control.')).toBeInTheDocument()
     expect(screen.queryByTestId('entity-history')).not.toBeInTheDocument()
   })
 
@@ -222,7 +264,8 @@ describe('RelationshipDrawer — a connection', () => {
     const user = userEvent.setup()
     setup(connection)
     render(<RelationshipDrawer canEdit />)
-    expect(screen.getByText(/relationships listed/)).toBeInTheDocument()
+    expect(screen.getByText(/Stands for/)).toHaveTextContent('Stands for 2 flows · 2 relationships')
+    expect(screen.queryByText(/join entities inside/)).not.toBeInTheDocument()
     const rows = within(screen.getByRole('list', { name: /Relationships this line stands for/ })).getAllByRole('button')
     expect(rows).toHaveLength(2)
     await user.click(rows[1])
@@ -231,9 +274,121 @@ describe('RelationshipDrawer — a connection', () => {
     expect(s.drawerHistory.entries).toHaveLength(2)
   })
 
-  it('a summary line explains how to see what it summarises', () => {
+  it('says so when the relationships join entities inside the two cards', () => {
+    setup({ ...connection, members: [{ id: 'e1', source: 'c1', target: 'b', edgeType: 'FLOWS_TO', rollup: false }] })
+    render(<RelationshipDrawer />)
+    expect(screen.getByText(/join entities inside Orders and Revenue/)).toBeInTheDocument()
+  })
+
+  it('lists roll-ups apart from the relationships, says what they are, and narrows to either kind', async () => {
+    const user = userEvent.setup()
+    h.beneath = { data: { edges: [], total: 0, truncated: false }, isLoading: false, isError: false }
+    setup({
+      ...connection,
+      types: ['FLOWS_TO', 'AGGREGATED'],
+      members: [
+        { id: 'e1', source: 'a', target: 'b', edgeType: 'FLOWS_TO', rollup: false },
+        { id: 'agg1', source: 'a', target: 'b', edgeType: 'AGGREGATED', rollup: true },
+      ],
+    })
+    render(<RelationshipDrawer />)
+    const relationships = () => screen.queryByRole('list', { name: /Relationships this line stands for/ })
+    const rollups = () => screen.queryByRole('list', { name: /Roll-ups this line stands for/ })
+    expect(screen.getByText(/Stands for/)).toHaveTextContent('1 relationship · 1 roll-up')
+    expect(within(relationships()!).getAllByRole('button')).toHaveLength(1)
+    expect(within(rollups()!).getAllByRole('button')).toHaveLength(1)
+    expect(screen.getByText(/Summaries the aggregation job computes/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('radio', { name: /^Relationships/ }))
+    expect(relationships()).toBeInTheDocument()
+    expect(rollups()).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('radio', { name: /^Roll-ups/ }))
+    expect(relationships()).not.toBeInTheDocument()
+    expect(rollups()).toBeInTheDocument()
+  })
+
+  it('offers no filter when a line holds only one kind', () => {
+    setup(connection)
+    render(<RelationshipDrawer />)
+    expect(screen.queryByRole('radiogroup', { name: 'Show' })).not.toBeInTheDocument()
+  })
+
+  it('a summary line explains how to see what it summarises when they cannot be read', () => {
+    h.beneath = { data: undefined, isLoading: false, isError: true }
     setup({ ...connection, summaryOnly: true, members: [], weight: 40 })
     render(<RelationshipDrawer />)
     expect(screen.getByText(/Expand either end/)).toBeInTheDocument()
+  })
+
+  it('a line of relationships alone reads nothing more', () => {
+    setup(connection)
+    render(<RelationshipDrawer />)
+    expect(h.beneathCalls.every((args) => args[3] === false)).toBe(true)
+  })
+
+  describe('a roll-up — the real relationships beneath it', () => {
+    const beneath = (id: string, source: string, target: string, edgeType = 'FLOWS_TO'): GraphEdge =>
+      ({ id, sourceUrn: source, targetUrn: target, edgeType })
+    const rollupLine: DrawerEdgeTarget = {
+      ...connection, id: 'agg-a->b', types: ['AGGREGATED'], weight: 14,
+      members: [{ id: 'agg1', source: 'a', target: 'b', edgeType: 'AGGREGATED', rollup: true }],
+    }
+
+    it('lists them by name with the roll-up apart, and opens one on the trail', async () => {
+      const user = userEvent.setup()
+      h.provider = { getNodes: vi.fn(async () => [
+        { urn: 'c1', displayName: 'Board pack', entityType: 'dataset' },
+        { urn: 'c2', displayName: 'Revenue tile', entityType: 'dataset' },
+      ]) }
+      h.beneath = { data: { edges: [beneath('r1', 'c1', 'c2')], total: 1, truncated: false }, isLoading: false, isError: false }
+      setup(rollupLine)
+      render(<RelationshipDrawer />)
+      expect(h.beneathCalls.at(-1)).toEqual(['a', 'b', false, true])
+      expect(screen.getByText(/Stands for/)).toHaveTextContent('Stands for 14 flows · 1 relationship · 1 roll-up')
+      const list = screen.getByRole('list', { name: /Relationships this line stands for/ })
+      expect(await within(list).findByText('Board pack')).toBeInTheDocument()
+      expect(within(list).getByText('Revenue tile')).toBeInTheDocument()
+      expect(screen.getByRole('list', { name: /Roll-ups this line stands for/ })).toBeInTheDocument()
+      expect(screen.getByText(/join entities inside Orders and Revenue/)).toBeInTheDocument()
+
+      await user.click(within(list).getByRole('button'))
+      expect(useCanvasStore.getState().drawerEdge).toMatchObject({
+        kind: 'relationship', id: 'r1', source: 'c1', target: 'c2', edgeType: 'FLOWS_TO', lineId: 'agg-a->b',
+      })
+    })
+
+    it('lists a relationship once when the canvas already holds it', () => {
+      h.beneath = { data: { edges: [beneath('db-e1', 'a', 'b'), beneath('r2', 'c1', 'b')], total: 2, truncated: false }, isLoading: false, isError: false }
+      setup({ ...rollupLine, members: [...rollupLine.members, { id: 'e1', source: 'a', target: 'b', edgeType: 'FLOWS_TO', rollup: false }] })
+      render(<RelationshipDrawer />)
+      const rows = within(screen.getByRole('list', { name: /Relationships this line stands for/ })).getAllByRole('button')
+      expect(rows).toHaveLength(2)
+      expect(screen.getByText(/Stands for/)).toHaveTextContent('2 relationships · 1 roll-up')
+    })
+
+    it('shows rows loading, and no count until it is known', () => {
+      h.beneath = { data: undefined, isLoading: true, isError: false }
+      setup(rollupLine)
+      render(<RelationshipDrawer />)
+      expect(screen.getByLabelText(/Loading the relationships/)).toBeInTheDocument()
+      expect(screen.getByText(/Stands for/)).toHaveTextContent('Stands for 14 flows · 1 roll-up')
+    })
+
+    it('says when not all of them are listed', () => {
+      h.beneath = { data: { edges: [beneath('r1', 'c1', 'c2')], total: 1, truncated: true }, isLoading: false, isError: false }
+      setup(rollupLine)
+      render(<RelationshipDrawer />)
+      expect(screen.getByText(/Stands for/)).toHaveTextContent('1+ relationships')
+      expect(screen.getByText(/There may be others — expand either end to narrow down/)).toBeInTheDocument()
+    })
+
+    it('falls back to the guidance when they cannot be read', () => {
+      h.beneath = { data: undefined, isLoading: false, isError: true }
+      setup(rollupLine)
+      render(<RelationshipDrawer />)
+      expect(screen.getByText(/Expand either end — or double-click the line/)).toBeInTheDocument()
+      expect(screen.getByRole('list', { name: /Roll-ups this line stands for/ })).toBeInTheDocument()
+    })
   })
 })

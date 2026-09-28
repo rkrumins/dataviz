@@ -1,11 +1,12 @@
 /**
  * Presentational pieces of the relationship drawer: the source → target
- * "bridge", notices and detail rows.
+ * "bridge", notices, the details list and relationship type chips.
  */
 import type React from 'react'
 import { ArrowDown, ArrowUpDown, Loader2 } from 'lucide-react'
-import { useEntityColorSet } from '@/hooks/useEntityVisual'
+import { useEdgeVisual } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
+import { EntityTypeTag } from '../shell/EntityRef'
 import type { Endpoint } from './useEndpoints'
 
 /**
@@ -50,7 +51,6 @@ function EndpointCard({ role, endpoint, onOpen, pending, unreachable }: {
   pending: boolean
   unreachable: boolean
 }) {
-  const colors = useEntityColorSet(endpoint.type ?? '')
   return (
     <button
       type="button"
@@ -65,12 +65,7 @@ function EndpointCard({ role, endpoint, onOpen, pending, unreachable }: {
         {unreachable ? (
           <span className="block text-[11px] text-amber-600 dark:text-amber-400">Not on this view</span>
         ) : endpoint.type ? (
-          <span
-            className="inline-block mt-0.5 px-1.5 py-px rounded text-[10px] font-semibold uppercase tracking-wide"
-            style={{ backgroundColor: colors.bg, color: colors.text }}
-          >
-            {endpoint.type}
-          </span>
+          <EntityTypeTag typeId={endpoint.type} className="mt-0.5" />
         ) : null}
       </span>
       {pending && <Loader2 className="w-4 h-4 animate-spin text-ink-muted flex-shrink-0" />}
@@ -101,11 +96,34 @@ export function Notice({ tone, children, action }: {
   )
 }
 
-export function DetailRow({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
+/** Label → value rows in one quiet card. */
+export function DetailList({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-start justify-between gap-4 py-1.5">
-      <span className="text-xs text-ink-muted min-w-[96px]">{label}</span>
-      <span className={cn('text-xs text-ink text-right', mono ? 'font-mono break-all' : 'break-words')}>{children}</span>
+    <dl className="rounded-xl border border-black/[0.06] dark:border-glass-border divide-y divide-black/[0.06] dark:divide-glass-border bg-black/[0.015] dark:bg-white/[0.02]">
+      {children}
+    </dl>
+  )
+}
+
+export function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start gap-3 px-3 py-2.5">
+      <dt className="w-24 flex-shrink-0 pt-0.5 text-xs text-ink-muted">{label}</dt>
+      <dd className="min-w-0 flex-1 text-xs text-ink break-words">{children}</dd>
     </div>
+  )
+}
+
+/** A relationship type, in its own colour. */
+export function TypeChip({ type, label }: { type: string; label: string }) {
+  const color = useEdgeVisual(type).strokeColor
+  return (
+    <span
+      className="px-2 py-0.5 rounded-full text-[11px] font-semibold border"
+      style={{ color, backgroundColor: `${color}14`, borderColor: `${color}40` }}
+      title={type}
+    >
+      {label}
+    </span>
   )
 }

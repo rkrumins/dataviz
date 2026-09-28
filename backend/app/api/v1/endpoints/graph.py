@@ -24,7 +24,9 @@ from backend.app.models.graph import (
     ChildrenWithEdgesResult, NodePage, TopLevelNodesResult,
     TraceRequest, TraceResult, ExpandRequest,
 )
-from backend.common.models.graph import TraceClosureRequest, TraceClosureResult
+from backend.common.models.graph import (
+    EdgesBeneathRequest, EdgesBeneathResult, TraceClosureRequest, TraceClosureResult,
+)
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.providers.falkordb_provider import (
     _FAILOVER_RETRY_AFTER_S,
@@ -2884,6 +2886,19 @@ async def query_edges(
     a burst sheds 429."""
     async def compute() -> List[GraphEdge]:
         return await engine.get_edges(query)
+
+    return await _bounded_compute(engine, compute)()
+
+
+@router.post("/edges/beneath", response_model=EdgesBeneathResult, response_model_by_alias=True)
+async def get_edges_beneath(
+    request: EdgesBeneathRequest = Body(...),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """The real lineage relationships a roll-up stands for: from the source or anything it contains
+    to the target or anything it contains. Not cached; slot-bounded like the other heavy reads."""
+    async def compute() -> EdgesBeneathResult:
+        return await engine.get_edges_beneath(request.source_urn, request.target_urn)
 
     return await _bounded_compute(engine, compute)()
 
