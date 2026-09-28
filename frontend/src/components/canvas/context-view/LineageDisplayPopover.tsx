@@ -432,7 +432,7 @@ export function LineageDisplaySections({
                 <div
                   className={cn(
                     'mt-0.5 w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-colors',
-                    active ? 'border-accent-lineage' : 'border-ink-muted/40',
+                    active && 'border-accent-lineage',
                   )}
                 >
                   {active && (
