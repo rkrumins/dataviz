@@ -110,6 +110,14 @@ export interface GraphEdge {
     version?: string
 }
 
+/** The relationships beneath a roll-up (`getEdgesBeneath`). */
+export interface EdgesBeneath {
+    edges: GraphEdge[]
+    total: number
+    /** A bound was hit: these are not all of them. */
+    truncated: boolean
+}
+
 // ============================================
 // Introspection Types
 // ============================================
@@ -811,6 +819,13 @@ export interface GraphDataProvider {
      * Server-side filtered — only returns internal edges between loaded nodes.
      */
     getEdgesBetween(urns: URN[], edgeTypes?: string[], limit?: number): Promise<GraphEdge[]>
+
+    /**
+     * The real (not rolled-up) lineage relationships a roll-up between two entities stands for:
+     * from the source or anything it contains to the target or anything it contains. Bounded —
+     * `truncated` says a bound was hit.
+     */
+    getEdgesBeneath?(sourceUrn: URN, targetUrn: URN): Promise<EdgesBeneath>
 
     // ==========================================
     // Containment Hierarchy (CONTAINS relationships)

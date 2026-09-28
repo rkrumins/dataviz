@@ -4447,8 +4447,8 @@ export function ContextViewCanvas({
   }, [overlay.active, overlay.view, browseVisibleLineageEdges, traceHiddenTypes, traceLaneIndex])
 
   // The line the relationship drawer is open on, as it is drawn now. While the drawer is open it
-  // stays drawn (whatever the density mode), lit with its two cards while the rest dims, and clear
-  // of the drawer — the reader sees what they are reading about.
+  // stays drawn (whatever the density mode), glowing, and clear of the drawer — the reader sees
+  // what they are reading about. Nothing else dims for it: the rest of the lineage stays in view.
   const openLine = useMemo(
     () => (drawerEdge ? lineForTarget(drawerEdge, visibleLineageEdges) : null),
     [drawerEdge, visibleLineageEdges],
@@ -5166,18 +5166,11 @@ export function ContextViewCanvas({
     isTracing: traceActive, displayMap, childMap,
   })
 
-  // The line the drawer is open on lights the same way: it and its two cards,
-  // with the rest dimmed. The HOVER highlight (lighter, deferring to these) is
-  // the overlay's, applied to the DOM — see hoverSpotlight.ts.
-  const isHighlightActive = isClickHighlightActive || openLine !== null
-  const mergedHighlightNodes = useMemo(
-    () => (openLine ? new Set([...highlightState.nodes, openLine.source, openLine.target]) : highlightState.nodes),
-    [highlightState.nodes, openLine],
-  )
-  const mergedHighlightEdges = useMemo(
-    () => (openLine ? new Set([...highlightState.edges, openLine.id]) : highlightState.edges),
-    [highlightState.edges, openLine],
-  )
+  // The HOVER highlight (lighter, deferring to this one) is the overlay's,
+  // applied to the DOM — see hoverSpotlight.ts.
+  const isHighlightActive = isClickHighlightActive
+  const mergedHighlightNodes = highlightState.nodes
+  const mergedHighlightEdges = highlightState.edges
 
   // The Connections panel's highlight is a deliberate gesture on the panel,
   // so while it is active it wins over hover/click — on the OVERLAY only.

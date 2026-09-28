@@ -20,6 +20,9 @@ const h = vi.hoisted(() => ({
   /** The data source, for ends the canvas has not loaded. */
   provider: null as { getNodes: ReturnType<typeof vi.fn> } | null,
   scope: { wsId: 'ws' as string | undefined, graphId: 'g' as string | null, mainBranchId: 'main' as string | null, branchId: 'd1' as string | null },
+  /** The relationships beneath a roll-up, as the data source answers. */
+  beneath: { data: undefined, isLoading: false, isError: false } as { data?: { edges: GraphEdge[]; total: number; truncated: boolean }; isLoading: boolean; isError: boolean },
+  beneathCalls: [] as unknown[][],
 }))
 
 vi.mock('@/hooks/useRelationshipRecord', () => ({
@@ -31,6 +34,12 @@ vi.mock('@/hooks/useRelationshipRecord', () => ({
     isError: false,
     refetch: vi.fn(),
   }),
+}))
+vi.mock('@/hooks/useRelationshipsBeneath', () => ({
+  useRelationshipsBeneath: (...args: unknown[]) => {
+    h.beneathCalls.push(args)
+    return args[3] ? h.beneath : { data: undefined, isLoading: false, isError: false }
+  },
 }))
 vi.mock('../useDrawerHistoryScope', () => ({ useDrawerHistoryScope: () => h.scope }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
@@ -92,6 +101,8 @@ beforeEach(() => {
   }
   h.scope = { wsId: 'ws', graphId: 'g', mainBranchId: 'main', branchId: 'd1' }
   h.provider = null
+  h.beneath = { data: undefined, isLoading: false, isError: false }
+  h.beneathCalls = []
   useStagedChangesStore.setState({ changes: [], redoStack: [] })
   useFeaturesStore.setState({ values: { versioningEnabled: true, editModeEnabled: true } } as never)
 })
@@ -271,6 +282,7 @@ describe('RelationshipDrawer — a connection', () => {
 
   it('lists roll-ups apart from the relationships, says what they are, and narrows to either kind', async () => {
     const user = userEvent.setup()
+    h.beneath = { data: { edges: [], total: 0, truncated: false }, isLoading: false, isError: false }
     setup({
       ...connection,
       types: ['FLOWS_TO', 'AGGREGATED'],
@@ -302,9 +314,81 @@ describe('RelationshipDrawer — a connection', () => {
     expect(screen.queryByRole('radiogroup', { name: 'Show' })).not.toBeInTheDocument()
   })
 
-  it('a summary line explains how to see what it summarises', () => {
+  it('a summary line explains how to see what it summarises when they cannot be read', () => {
+    h.beneath = { data: undefined, isLoading: false, isError: true }
     setup({ ...connection, summaryOnly: true, members: [], weight: 40 })
     render(<RelationshipDrawer />)
     expect(screen.getByText(/Expand either end/)).toBeInTheDocument()
+  })
+
+  it('a line of relationships alone reads nothing more', () => {
+    setup(connection)
+    render(<RelationshipDrawer />)
+    expect(h.beneathCalls.every((args) => args[3] === false)).toBe(true)
+  })
+
+  describe('a roll-up — the real relationships beneath it', () => {
+    const beneath = (id: string, source: string, target: string, edgeType = 'FLOWS_TO'): GraphEdge =>
+      ({ id, sourceUrn: source, targetUrn: target, edgeType })
+    const rollupLine: DrawerEdgeTarget = {
+      ...connection, id: 'agg-a->b', types: ['AGGREGATED'], weight: 14,
+      members: [{ id: 'agg1', source: 'a', target: 'b', edgeType: 'AGGREGATED', rollup: true }],
+    }
+
+    it('lists them by name with the roll-up apart, and opens one on the trail', async () => {
+      const user = userEvent.setup()
+      h.provider = { getNodes: vi.fn(async () => [
+        { urn: 'c1', displayName: 'Board pack', entityType: 'dataset' },
+        { urn: 'c2', displayName: 'Revenue tile', entityType: 'dataset' },
+      ]) }
+      h.beneath = { data: { edges: [beneath('r1', 'c1', 'c2')], total: 1, truncated: false }, isLoading: false, isError: false }
+      setup(rollupLine)
+      render(<RelationshipDrawer />)
+      expect(h.beneathCalls.at(-1)).toEqual(['a', 'b', false, true])
+      expect(screen.getByText(/Stands for/)).toHaveTextContent('Stands for 14 flows · 1 relationship · 1 roll-up')
+      const list = screen.getByRole('list', { name: /Relationships this line stands for/ })
+      expect(await within(list).findByText('Board pack')).toBeInTheDocument()
+      expect(within(list).getByText('Revenue tile')).toBeInTheDocument()
+      expect(screen.getByRole('list', { name: /Roll-ups this line stands for/ })).toBeInTheDocument()
+      expect(screen.getByText(/join entities inside Orders and Revenue/)).toBeInTheDocument()
+
+      await user.click(within(list).getByRole('button'))
+      expect(useCanvasStore.getState().drawerEdge).toMatchObject({
+        kind: 'relationship', id: 'r1', source: 'c1', target: 'c2', edgeType: 'FLOWS_TO', lineId: 'agg-a->b',
+      })
+    })
+
+    it('lists a relationship once when the canvas already holds it', () => {
+      h.beneath = { data: { edges: [beneath('db-e1', 'a', 'b'), beneath('r2', 'c1', 'b')], total: 2, truncated: false }, isLoading: false, isError: false }
+      setup({ ...rollupLine, members: [...rollupLine.members, { id: 'e1', source: 'a', target: 'b', edgeType: 'FLOWS_TO', rollup: false }] })
+      render(<RelationshipDrawer />)
+      const rows = within(screen.getByRole('list', { name: /Relationships this line stands for/ })).getAllByRole('button')
+      expect(rows).toHaveLength(2)
+      expect(screen.getByText(/Stands for/)).toHaveTextContent('2 relationships · 1 roll-up')
+    })
+
+    it('shows rows loading, and no count until it is known', () => {
+      h.beneath = { data: undefined, isLoading: true, isError: false }
+      setup(rollupLine)
+      render(<RelationshipDrawer />)
+      expect(screen.getByLabelText(/Loading the relationships/)).toBeInTheDocument()
+      expect(screen.getByText(/Stands for/)).toHaveTextContent('Stands for 14 flows · 1 roll-up')
+    })
+
+    it('says when not all of them are listed', () => {
+      h.beneath = { data: { edges: [beneath('r1', 'c1', 'c2')], total: 1, truncated: true }, isLoading: false, isError: false }
+      setup(rollupLine)
+      render(<RelationshipDrawer />)
+      expect(screen.getByText(/Stands for/)).toHaveTextContent('1+ relationships')
+      expect(screen.getByText(/There may be others — expand either end to narrow down/)).toBeInTheDocument()
+    })
+
+    it('falls back to the guidance when they cannot be read', () => {
+      h.beneath = { data: undefined, isLoading: false, isError: true }
+      setup(rollupLine)
+      render(<RelationshipDrawer />)
+      expect(screen.getByText(/Expand either end — or double-click the line/)).toBeInTheDocument()
+      expect(screen.getByRole('list', { name: /Roll-ups this line stands for/ })).toBeInTheDocument()
+    })
   })
 })

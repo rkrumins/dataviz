@@ -41,6 +41,12 @@ relationships on the published graph are read-only, and say why.
   listed apart, with what they are. When a line holds both, "All · Relationships · Roll-ups" narrows
   the list to either, with counts. The canvas draws what it did before. Hovering a line says whether
   it is a roll-up or how many relationships it stands for.
+- **A roll-up lists the relationships it stands for.** Open a roll-up line (REPORTING → Executive
+  Board Dashboard, "Stands for 14 flows") and the drawer lists the real relationships between
+  everything inside the two cards, at any depth, by name — each opens like any other, and can be
+  changed in a draft. They are read from the data source (a draft sees its own), up to 1,000;
+  when there may be more it says so. New: `POST /graph/edges/beneath` (`{sourceUrn, targetUrn}` →
+  `{edges, total, truncated}`).
 - **One export can be 50 GB** (`GRAPH_EXPORT_MAX_BYTES`, was 20 GiB).
 - **A running export says how far it has got.** Its job's `summary` holds the records read or written
   so far, the passes (a spreadsheet reads everything once for its columns, then writes it), and the
@@ -95,11 +101,11 @@ relationships on the published graph are read-only, and say why.
 
 - **The line you clicked disappeared while you read about it.** In the default "On Hover" density a
   line is drawn only for the selected entity, and clicking the line took the selection, so the line
-  vanished as its drawer opened. Now the line a drawer is open on stays drawn, whatever the density.
-  It stays lit, with its two cards, while everything else dims, and the board scrolls just enough to
-  keep both ends clear of the drawer. The Graph canvas lights it the same way. The card that appears
-  when you hover over a line names both ends and their types (it could show ids) and gives each
-  relationship type its readable name.
+  vanished as its drawer opened. Now the line a drawer is open on stays drawn, whatever the density,
+  and glows, and the board scrolls just enough to keep both ends clear of the drawer. Nothing else
+  dims: every other line and card stays in view. The Graph canvas shows it as selected. The card
+  that appears when you hover over a line names both ends and their types (it could show ids) and
+  gives each relationship type its readable name.
 - **An unstaged edit in a drawer could be lost without a word.** Esc, starting a trace, opening the
   Hierarchy Builder or following a lineage row closed or swapped the drawer and dropped the edit, and
   a canvas click selected the other entity while the drawer still showed the first. Now anything

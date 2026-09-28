@@ -1,8 +1,8 @@
 /**
  * The line the relationship drawer is open on, on the real canvas. In the default "On Hover"
  * density only a selection's lines are drawn — and the click on the line takes the selection — yet
- * the open line stays drawn. In any density it stays lit while every other line dims, until the
- * drawer closes.
+ * the open line stays drawn, until the drawer closes. Nothing else dims for it: the rest of the
+ * lineage stays in view, as it always has.
  */
 import { describe, it, expect } from 'vitest'
 import { act, fireEvent } from '@testing-library/react'
@@ -48,11 +48,11 @@ describe('ContextViewCanvas — the line the drawer is open on', () => {
     expect(lineGroup(lineId)).toBeNull()
   }, 30000)
 
-  it('stays lit while every other line dims', async () => {
+  it('dims nothing else — every other line stays in full view', async () => {
     usePreferencesStore.setState({ lineageRenderMode: 'raw' })
     const { lineId } = await openOneOfTwoLines()
     expect(groups()).toHaveLength(2)
-    expect(lineGroup(lineId)!.style.opacity).toBe('')
-    expect(groups().find((g) => g.getAttribute('data-edge-id') !== lineId)!.style.opacity).toBe('0.08')
+    expect(lineGroup(lineId)).not.toBeNull()
+    for (const g of groups()) expect(g.style.opacity).toBe('')
   }, 30000)
 })

@@ -556,27 +556,19 @@ export function GraphCanvas({ className }: { className?: string }) {
     childMap,
     isClickHighlightActive,
   })
-  // The line the relationship drawer is open on lights like a selection — it and its two ends —
-  // for as long as the drawer is open on it.
+  const isHighlightActive = isClickHighlightActive || isHoverActive
+  const mergedHighlightNodes = isClickHighlightActive
+    ? highlightState.nodes
+    : hoverHighlight.nodes
+  const mergedHighlightEdges = isClickHighlightActive
+    ? highlightState.edges
+    : hoverHighlight.edges
+  // The line the relationship drawer is open on shows as selected for as long as the drawer is
+  // open on it. Nothing else dims for it.
   const openLine = useMemo(
     () => (drawerEdge ? lineForTarget(drawerEdge, allVisibleEdges as DrawnLine[]) : null),
     [drawerEdge, allVisibleEdges],
   )
-  const openLineHighlight = useMemo(
-    () => (openLine ? { nodes: new Set([openLine.source, openLine.target]), edges: new Set([openLine.id]) } : null),
-    [openLine],
-  )
-  const isHighlightActive = isClickHighlightActive || isHoverActive || openLineHighlight !== null
-  const mergedHighlightNodes = openLineHighlight
-    ? openLineHighlight.nodes
-    : isClickHighlightActive
-      ? highlightState.nodes
-      : hoverHighlight.nodes
-  const mergedHighlightEdges = openLineHighlight
-    ? openLineHighlight.edges
-    : isClickHighlightActive
-      ? highlightState.edges
-      : hoverHighlight.edges
 
   // 13. Edge filters
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } =

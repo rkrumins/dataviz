@@ -7,6 +7,10 @@
  * first, with why the line joins these two cards when their ends are inside them;
  * roll-ups — read-only summaries — are listed apart, with what they are. When a
  * line holds both, All · Relationships · Roll-ups narrows the list to one kind.
+ *
+ * A roll-up's own relationships are between entities inside the two cards, which
+ * the canvas has not loaded: they are read from the data source and listed with
+ * the rest, each openable like any other.
  */
 import { useId, useMemo, useState } from 'react'
 import { ChevronRight, Crosshair, Waypoints } from 'lucide-react'
@@ -14,13 +18,16 @@ import { useCanvasStore, type DrawerEdgeTarget, type EdgeMemberRef, type Lineage
 import { useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useEdgeVisual, useEntityColorSet, useEntityTypeLabel } from '@/hooks/useEntityVisual'
 import { targetFromMember } from '@/lib/drawerEdgeTarget'
+import { useRelationshipsBeneath } from '@/hooks/useRelationshipsBeneath'
 import { Button } from '@/components/ui/Button'
 import { Segmented } from '@/components/ui/Segmented'
+import { Skeleton } from '@/components/ui/Skeleton'
 import { Section } from '../DrawerSection'
 import { DrawerBody, DrawerHeader, DrawerShell } from '../shell/DrawerShell'
 import { DrawerTopBar, KindBadge } from '../shell/DrawerTopBar'
 import { Bridge, Notice, TypeChip } from './RelationshipParts'
 import { useEndpoints, useOpenEndpoint, type Endpoint } from './useEndpoints'
+import type { GraphEdge } from '@/providers/GraphDataProvider'
 import { openInEdgeExplorer, relationshipCopy } from './relationshipModel'
 
 /** Rows rendered at once — the Edge Explorer's own cap. */
@@ -36,25 +43,33 @@ export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLo
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
 }) {
   const relationshipTypes = useViewRelationshipTypes()
-  const shown = target.members.slice(0, ROW_CAP)
-  const relationships = shown.filter((m) => !m.rollup)
-  const rollups = shown.filter((m) => m.rollup)
+  // A roll-up (or a summary wire) stands for relationships the canvas has not loaded: read them.
+  const rolledUp = !!target.summaryOnly || target.members.some((m) => m.rollup)
+  const beneath = useRelationshipsBeneath(target.source, target.target, !!target.bidirectional, rolledUp)
+  const allRelationships = useMemo(() => withBeneath(target.members.filter((m) => !m.rollup), beneath.data?.edges), [target.members, beneath.data])
+  const allRollups = useMemo(() => target.members.filter((m) => m.rollup), [target.members])
+  const relationships = allRelationships.slice(0, ROW_CAP)
+  const rollups = allRollups.slice(0, ROW_CAP)
+  const hidden = allRelationships.length - relationships.length + allRollups.length - rollups.length
+  const truncated = !!beneath.data?.truncated
   const ids = useMemo(() => [...new Set([
     target.source, target.target,
-    ...target.members.slice(0, ROW_CAP).flatMap((m) => [m.source, m.target]),
-  ])], [target])
+    ...[...allRelationships.slice(0, ROW_CAP), ...allRollups.slice(0, ROW_CAP)].flatMap((m) => [m.source, m.target]),
+  ])], [target.source, target.target, allRelationships, allRollups])
   const endpoints = useEndpoints(ids, resolveNode)
   const opener = useOpenEndpoint(onFocusNode, resolveNode)
   const color = useEdgeVisual(target.types[0] ?? '').strokeColor
   const label = target.types.length === 1
     ? relationshipCopy(target.types[0], relationshipTypes).label
     : `${target.types.length || 'Several'} relationship types`
-  const relationshipCount = target.members.filter((m) => !m.rollup).length
-  const rollupCount = target.members.length - relationshipCount
+  const relationshipCount = allRelationships.length
+  const rollupCount = allRollups.length
+  // Counted once they are known: all loaded, or read from the data source.
+  const counted = !rolledUp || !!beneath.data
   // A relationship whose ends are inside the two cards, not the cards themselves.
   const sameEnds = (m: EdgeMemberRef) => (m.source === target.source && m.target === target.target)
     || (!!target.bidirectional && m.source === target.target && m.target === target.source)
-  const inside = target.members.some((m) => !m.rollup && !sameEnds(m))
+  const inside = allRelationships.some((m) => !sameEnds(m))
   // Both kinds on one line: the reader can narrow the list to either.
   const mixed = relationshipCount > 0 && rollupCount > 0
   const [kind, setKind] = useState<'all' | 'relationships' | 'rollups'>('all')
@@ -89,13 +104,13 @@ export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLo
         <p className="mt-3 text-xs text-ink-muted">
           Stands for <span className="font-semibold text-ink">{target.weight.toLocaleString()}</span>{' '}
           {target.weight === 1 ? 'flow' : 'flows'}
-          {!target.summaryOnly && (
-            <> · <span className="font-semibold text-ink">{relationshipCount.toLocaleString()}</span>{' '}
-              {relationshipCount === 1 ? 'relationship' : 'relationships'}
-              {rollupCount > 0 && (
-                <> · <span className="font-semibold text-ink">{rollupCount.toLocaleString()}</span>{' '}
-                  {rollupCount === 1 ? 'roll-up' : 'roll-ups'}</>
-              )}</>
+          {counted && (
+            <> · <span className="font-semibold text-ink">{relationshipCount.toLocaleString()}{truncated && '+'}</span>{' '}
+              {relationshipCount === 1 && !truncated ? 'relationship' : 'relationships'}</>
+          )}
+          {rollupCount > 0 && (
+            <> · <span className="font-semibold text-ink">{rollupCount.toLocaleString()}</span>{' '}
+              {rollupCount === 1 ? 'roll-up' : 'roll-ups'}</>
           )}
         </p>
         <div className="flex items-center gap-2 flex-wrap mt-3">
@@ -128,94 +143,110 @@ export function ConnectionView({ target, onClose, resolveNode, onFocusNode, onLo
           </Section>
         )}
 
-        {target.summaryOnly ? (
-          <Section title="Relationships">
-            <Notice tone="info">
-              This line summarises relationships between items inside these two. Expand either end — or
-              double-click the line — to see them.
-            </Notice>
-          </Section>
-        ) : (
-          <>
-            <Section
-              title="Relationships"
-              action={mixed ? (
-                <Segmented
-                  label="Show"
-                  value={kind}
-                  onChange={setKind}
-                  options={[
-                    { value: 'all', label: 'All', count: target.members.length },
-                    { value: 'relationships', label: 'Relationships', count: relationshipCount },
-                    { value: 'rollups', label: 'Roll-ups', count: rollupCount },
-                  ]}
-                />
-              ) : undefined}
-            >
-              {listRelationships && (
-                <>
-                  {inside && (
-                    <div className="mb-2">
-                      <Notice tone="info">
-                        These relationships join entities inside {source.name} and {dest.name}; the line is drawn
-                        between the cards that hold them. Open one to see it and, in a draft, change it.
-                      </Notice>
-                    </div>
-                  )}
-                  {relationships.length > 0 ? (
-                    <ul className="space-y-1.5" aria-label="Relationships this line stands for">
-                      {relationships.map((m) => (
-                        <MemberRow
-                          key={m.id}
-                          member={m}
-                          label={relationshipCopy(m.edgeType, relationshipTypes).label}
-                          source={endpoints.get(m.source)}
-                          target={endpoints.get(m.target)}
-                          onOpen={() => openMember(m)}
-                        />
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-xs text-ink-muted">
-                      None drawn here — this line is a roll-up. Expand either card to reach the relationships it summarises.
-                    </p>
-                  )}
-                </>
-              )}
-              {listRollups && rollups.length > 0 && (
-                <div className={listRelationships ? 'mt-5' : undefined}>
-                  <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Roll-ups · read-only</h4>
-                  <div className="mb-2">
-                    <Notice tone="info">
-                      Summaries the aggregation job computes from relationships between entities inside these cards.
-                      To change one, change the relationships it summarises.
-                    </Notice>
-                  </div>
-                  <ul className="space-y-1.5" aria-label="Roll-ups this line stands for">
-                    {rollups.map((m) => (
-                      <MemberRow
-                        key={m.id}
-                        member={m}
-                        label={relationshipCopy(m.edgeType, relationshipTypes).label}
-                        source={endpoints.get(m.source)}
-                        target={endpoints.get(m.target)}
-                        onOpen={() => openMember(m)}
-                      />
-                    ))}
-                  </ul>
+        <Section
+          title="Relationships"
+          action={mixed ? (
+            <Segmented
+              label="Show"
+              value={kind}
+              onChange={setKind}
+              options={[
+                { value: 'all', label: 'All', count: relationshipCount + rollupCount },
+                { value: 'relationships', label: 'Relationships', count: relationshipCount },
+                { value: 'rollups', label: 'Roll-ups', count: rollupCount },
+              ]}
+            />
+          ) : undefined}
+        >
+          {listRelationships && (
+            <>
+              {inside && (
+                <div className="mb-2">
+                  <Notice tone="info">
+                    These relationships join entities inside {source.name} and {dest.name}; the line is drawn
+                    between the cards that hold them. Open one to see it and, in a draft, change it.
+                  </Notice>
                 </div>
               )}
-            </Section>
-            {target.members.length > shown.length && (
-              <p className="px-5 pb-4 text-[11px] text-ink-muted">
-                +{(target.members.length - shown.length).toLocaleString()} more — expand either end to narrow down.
-              </p>
-            )}
-          </>
+              {relationships.length > 0 ? (
+                <ul className="space-y-1.5" aria-label="Relationships this line stands for">
+                  {relationships.map((m) => (
+                    <MemberRow
+                      key={m.id}
+                      member={m}
+                      label={relationshipCopy(m.edgeType, relationshipTypes).label}
+                      source={endpoints.get(m.source)}
+                      target={endpoints.get(m.target)}
+                      onOpen={() => openMember(m)}
+                    />
+                  ))}
+                </ul>
+              ) : !beneath.isLoading && (
+                beneath.data ? (
+                  <p className="text-xs text-ink-muted">None found between the entities inside these two.</p>
+                ) : (
+                  <Notice tone="info">
+                    This line summarises relationships between entities inside these two. Expand either end — or
+                    double-click the line — to see them.
+                  </Notice>
+                )
+              )}
+              {beneath.isLoading && (
+                <div className="space-y-1.5 mt-1.5" aria-label="Loading the relationships this line stands for">
+                  {[0, 1, 2].map((i) => <Skeleton key={i} className="h-11 w-full rounded-lg" />)}
+                </div>
+              )}
+            </>
+          )}
+          {listRollups && rollups.length > 0 && (
+            <div className={listRelationships ? 'mt-5' : undefined}>
+              <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Roll-ups · read-only</h4>
+              <div className="mb-2">
+                <Notice tone="info">
+                  Summaries the aggregation job computes from relationships between entities inside these cards.
+                  To change one, change the relationships it summarises.
+                </Notice>
+              </div>
+              <ul className="space-y-1.5" aria-label="Roll-ups this line stands for">
+                {rollups.map((m) => (
+                  <MemberRow
+                    key={m.id}
+                    member={m}
+                    label={relationshipCopy(m.edgeType, relationshipTypes).label}
+                    source={endpoints.get(m.source)}
+                    target={endpoints.get(m.target)}
+                    onOpen={() => openMember(m)}
+                  />
+                ))}
+              </ul>
+            </div>
+          )}
+        </Section>
+        {(hidden > 0 || truncated) && (
+          <p className="px-5 pb-4 text-[11px] text-ink-muted">
+            {hidden > 0 ? `+${hidden.toLocaleString()} more${truncated ? ', and possibly others' : ''}` : 'There may be others'}
+            {' '}— expand either end to narrow down.
+          </p>
         )}
       </DrawerBody>
     </DrawerShell>
   )
+}
+
+/** The loaded relationships, then those read from the data source that are not already among them
+ *  — by (source, target, type), which writes keep unique (a canvas copy's id can differ). */
+function withBeneath(loaded: EdgeMemberRef[], read: GraphEdge[] | undefined): EdgeMemberRef[] {
+  if (!read?.length) return loaded
+  const key = (m: EdgeMemberRef) => `${m.source}\n${m.target}\n${m.edgeType.toUpperCase()}`
+  const seen = new Set(loaded.map(key))
+  const more: EdgeMemberRef[] = []
+  for (const e of read) {
+    const m = { id: e.id, source: e.sourceUrn, target: e.targetUrn, edgeType: e.edgeType, rollup: false }
+    if (seen.has(key(m))) continue
+    seen.add(key(m))
+    more.push(m)
+  }
+  return [...loaded, ...more]
 }
 
 function MemberRow({ member, label, source, target, onOpen }: {

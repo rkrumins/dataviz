@@ -13,7 +13,7 @@ from ..models.graph import (
 )
 from backend.common.models.graph import (
     TraceResultV2, TraceExpandRequest, TraceDelta, TraceMeta, MegaNodeInfo,
-    TraceClosureRequest, TraceClosureResult,
+    TraceClosureRequest, TraceClosureResult, EdgesBeneathResult,
 )
 
 from ..providers.base import GraphDataProvider
@@ -1599,6 +1599,69 @@ class ContextEngine:
                 include_containment_edges=req.include_containment_edges,
                 drill_anchor=getattr(req, "drill_anchor", None),
             )
+
+    #: Bounds for ``get_edges_beneath``: containment depth walked, entities per side, edges returned,
+    #: and children reads in flight at once (each one a query, or a pooled Postgres session on a draft).
+    BENEATH_MAX_DEPTH = 16
+    BENEATH_MAX_NODES = 2000
+    BENEATH_MAX_EDGES = 1000
+    BENEATH_CONCURRENCY = 8
+
+    async def get_edges_beneath(self, source_urn: str, target_urn: str) -> EdgesBeneathResult:
+        """The real lineage relationships a roll-up between two entities stands for: from the source
+        or anything it contains (any depth) to the target or anything it contains. Built only on
+        ``get_children`` and ``get_edges``, so every provider — a draft's included — answers it."""
+        resolved = await self._resolve_ontology()
+        lineage = _real_lineage_types(resolved.lineage_edge_types or []) if resolved else []
+        containment = list(resolved.containment_edge_types or []) if resolved else []
+        if not lineage:
+            return EdgesBeneathResult(edges=[], total=0)
+
+        (sources, cut_s), (targets, cut_t) = await asyncio.gather(
+            self._contents(source_urn, containment),
+            self._contents(target_urn, containment),
+        )
+        found = await self.provider.get_edges(EdgeQuery(
+            source_urns=sources, target_urns=targets, edge_types=lineage,
+            limit=self.BENEATH_MAX_EDGES,
+        ))
+        src, tgt = set(sources), set(targets)
+        edges = {
+            e.id: e for e in found
+            if e.source_urn in src and e.target_urn in tgt and e.source_urn != e.target_urn
+            and e.edge_type.upper() not in SYNTHETIC_LINEAGE_EDGE_TYPES
+        }
+        ordered = sorted(edges.values(), key=lambda e: (e.source_urn, e.target_urn, e.edge_type))
+        return EdgesBeneathResult(
+            edges=ordered, total=len(ordered),
+            truncated=cut_s or cut_t or len(found) >= self.BENEATH_MAX_EDGES,
+        )
+
+    async def _contents(self, root: str, containment: List[str]) -> Tuple[List[str], bool]:
+        """The entity and everything it contains, one containment level at a time, within the
+        depth and size bounds. True when a bound cut the walk short."""
+        seen, level = [root], [root]
+        known = {root}
+        gate = asyncio.Semaphore(self.BENEATH_CONCURRENCY)
+
+        async def children(parent: str):
+            async with gate:
+                return await self.provider.get_children(parent, edge_types=containment, limit=self.BENEATH_MAX_NODES)
+
+        for _ in range(self.BENEATH_MAX_DEPTH):
+            if not level or not containment:
+                return seen, False
+            pages = await asyncio.gather(*(children(p) for p in level))
+            level = []
+            for child in (c for page in pages for c in page):
+                if child.urn in known:
+                    continue
+                if len(seen) >= self.BENEATH_MAX_NODES:
+                    return seen, True
+                known.add(child.urn)
+                seen.append(child.urn)
+                level.append(child.urn)
+        return seen, bool(level)
 
     async def _resolve_level(self, level_input: Any, source_urn: str, ontology: Any) -> int:
         """Resolve a level specifier (``"auto" | int | entity-type-id``) to an int.
