@@ -118,7 +118,10 @@ export function DisplayMenu({
   }, [open])
 
   const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
-  const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons })
+  const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
+  const lineagePortSides = usePreferencesStore((s) => s.lineagePortSides) ?? 'direction'
+  const setLineagePortSides = usePreferencesStore((s) => s.setLineagePortSides)
+  const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons, showMemoryUsage })
 
   return (
     <>
@@ -187,7 +190,7 @@ export function DisplayMenu({
                 {isCustom && (
                   <HoverTip
                     className="ml-auto inline-flex"
-                    label="Put zoom, density, badges and lineage appearance back to their defaults"
+                    label="Put zoom, density, icons, badges, tree lines and the memory gauge back to their defaults"
                   >
                     <button
                       type="button"
@@ -234,6 +237,8 @@ export function DisplayMenu({
                 onSetLineageRenderMode={onSetLineageRenderMode}
                 showEdgeDirection={showEdgeDirection}
                 onToggleEdgeDirection={onToggleEdgeDirection}
+                lineagePortSides={lineagePortSides}
+                onSetLineagePortSides={setLineagePortSides}
                 disabled={!lineageEnabled}
               />
               </div>

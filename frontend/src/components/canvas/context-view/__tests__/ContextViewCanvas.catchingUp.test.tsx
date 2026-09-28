@@ -164,6 +164,8 @@ describe('the canvas explains a source that is still catching up', () => {
       { timeout: 6000 },
     )
     expect(document.body.textContent ?? '').not.toContain('narrow the selection')
+    // Nor that summaries are missing: this banner already says why.
+    expect(document.querySelector('[data-testid="canvas-summaries-banner"]')).toBeNull()
     await h.settle()
   })
 

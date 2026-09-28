@@ -10,7 +10,7 @@
 import { useEffect, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
-import { unitNoun } from './connections/connectionUnits'
+import { formatUnitCount, unitNoun } from './connections/connectionUnits'
 import { LineagePortGlyph } from './LineagePortGlyph'
 import type { PortSide, PortView } from './lineagePorts'
 
@@ -25,13 +25,29 @@ interface Tip {
 
 function describe(tip: Tip): { lead: string; detail: string } {
   const lines = (n: number) => `${n.toLocaleString()} ${unitNoun(n, 'lines')}`
+  if (tip.view.kind === 'unknown') {
+    return {
+      lead: 'Lineage for this entity could not be counted — retrying',
+      detail: 'Grey says neither direction yet. The port takes its colours when the count comes back.',
+    }
+  }
+  if (tip.view.kind === 'lineage') {
+    // No line of it drawn yet, so no count of lines to give. Nor a promise
+    // of lines: its partners may be rows inside it, or of a hidden type.
+    return tip.view.dir === 'in'
+      ? { lead: 'Has incoming lineage', detail: 'Upstream — data flows into this entity. Selecting it draws the lines this view can show.' }
+      : { lead: 'Has outgoing lineage', detail: 'Downstream — data flows out of this entity. Selecting it draws the lines this view can show.' }
+  }
   if (tip.view.kind === 'beyond') {
+    // The count is the flows the canvas placed outside the view, as the
+    // stubs say.
     const n = tip.view.dir === 'in' ? tip.inCount : tip.outCount
+    const one = n <= 1
     return {
       lead: tip.view.dir === 'in'
-        ? `${lines(n)} come in from outside this canvas`
-        : `${lines(n)} go out to entities not on this canvas`,
-      detail: 'Lineage in the data source. None of its other ends is loaded here — trace it to see where it leads.',
+        ? `${formatUnitCount(n, 'flows')} ${one ? 'arrives' : 'arrive'} from entities outside this view`
+        : `${formatUnitCount(n, 'flows')} ${one ? 'leads' : 'lead'} to entities outside this view`,
+      detail: 'None of its other ends is in this view — trace it to see where it leads.',
     }
   }
   if (tip.view.dir === 'both') {
@@ -40,9 +56,12 @@ function describe(tip: Tip): { lead: string; detail: string } {
       detail: 'Incoming (upstream) above, outgoing (downstream) below. Select the entity to draw all of them.',
     }
   }
+  // Which way, never which edge: with incoming left and outgoing right, a
+  // line running right to left, or out to a card in the same column, plugs
+  // into the other edge.
   return tip.view.dir === 'in'
-    ? { lead: `${lines(tip.inCount)} come in here`, detail: 'Upstream — data flows into this entity. Select it to draw all of them.' }
-    : { lead: `${lines(tip.outCount)} go out here`, detail: 'Downstream — data flows out of this entity. Select it to draw all of them.' }
+    ? { lead: `${tip.inCount.toLocaleString()} incoming ${unitNoun(tip.inCount, 'lines')}`, detail: 'Upstream — data flows into this entity. Select it to draw all of them.' }
+    : { lead: `${tip.outCount.toLocaleString()} outgoing ${unitNoun(tip.outCount, 'lines')}`, detail: 'Downstream — data flows out of this entity. Select it to draw all of them.' }
 }
 
 export function PortHoverTip({ scrollerRef }: { scrollerRef: RefObject<HTMLElement | null> }) {

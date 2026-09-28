@@ -655,6 +655,10 @@ class AggregatedEdgeRequest(BaseModel):
     include_edge_types: Optional[List[str]] = Field(None, alias="includeEdgeTypes")  # open strings
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
+    # Leave out every cell one of whose ends holds the other: a container's
+    # roll-ups with its own descendants and ancestors (see
+    # ContextEngine.get_aggregated_edges).
+    exclude_internal: bool = Field(False, alias="excludeInternal")
 
     class Config:
         populate_by_name = True
@@ -762,8 +766,13 @@ class CreateEdgeRequest(BaseModel):
 
 
 class UpdateEdgeRequest(BaseModel):
-    """Update mutable properties of an existing edge. edge_type is immutable."""
+    """Update mutable properties of an existing edge. edge_type is immutable.
+
+    A PATCH: ``properties`` sets the named keys and keeps the rest;
+    ``unsetProperties`` names the keys to remove.
+    """
     properties: Dict[str, Any] = Field(default_factory=dict)
+    unset_properties: List[str] = Field(default_factory=list, alias="unsetProperties")
 
     class Config:
         populate_by_name = True

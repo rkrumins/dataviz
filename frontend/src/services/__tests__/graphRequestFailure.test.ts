@@ -15,6 +15,7 @@ import {
   isIdempotentGraphRead,
   isProviderOutageSignal,
   isRetryableGraphFailure,
+  readRetryBudget,
   retryDelayMs,
   toApiStatusError,
 } from '../graphRequestFailure'
@@ -121,6 +122,14 @@ describe('isRetryableGraphFailure / retryDelayMs', () => {
     expect(isRetryableGraphFailure(apiError(401, {}))).toBe(false)
     expect(isRetryableGraphFailure(apiError(403, {}))).toBe(false)
     expect(isRetryableGraphFailure(apiError(403, { detail: { error: 'csrf_failed' } }))).toBe(false)
+  })
+
+  it('a read that already cost a full deadline gets one more go, anything else the full budget', () => {
+    expect(readRetryBudget(apiError(504, {}))).toBe(1)
+    expect(readRetryBudget(new TypeError('Request timed out after 30s'))).toBe(1)
+    expect(readRetryBudget(apiError(429, {}, { 'Retry-After': '1' }))).toBe(2)
+    expect(readRetryBudget(apiError(502, ''))).toBe(2)
+    expect(readRetryBudget(new TypeError('Failed to fetch'))).toBe(2)
   })
 
   it('honours Retry-After (capped) and backs off otherwise, always with jitter', () => {

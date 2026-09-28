@@ -26,6 +26,8 @@ function run(opts: {
   edges: ReturnType<typeof edge>[]
   chains?: Record<string, string[]>
   hidden?: string[]
+  /** Roll-ups beside the rows' own: a selected container's, all of them. */
+  cells?: Array<[string, string, number]>
 }) {
   const flat: HierarchyNode[] = []
   const stack = [...opts.roots]
@@ -48,6 +50,9 @@ function run(opts: {
     isContainmentEdge: () => false,
     ancestorChains: opts.chains ? new Map(Object.entries(opts.chains)) : undefined,
     hiddenEdgeTypes: opts.hidden ? new Set(opts.hidden) : undefined,
+    holderEdges: new Map((opts.cells ?? []).map(([s, t, n]) => [`agg-${s}-${t}`, {
+      id: `agg-${s}-${t}`, sourceUrn: s, targetUrn: t, edgeCount: n, edgeTypes: ['FLOWS_TO'], confidence: 1, sourceEdgeIds: [],
+    }])),
   }))
   return result.current.offCanvasByNode
 }
@@ -98,5 +103,29 @@ describe('useEdgeProjection — off-canvas lineage per row', () => {
       hidden: ['FEEDS'],
     })
     expect(off.get('orders')!.out).toBe(1)
+  })
+})
+
+describe("useEdgeProjection — a closed container's own roll-ups beside its rows' flows", () => {
+  // C is drawn closed; the store holds c1's flow out of the view. C's own
+  // roll-up counts that flow among its three: it is not counted twice.
+  it('counts a flow to an end outside once, where a roll-up of the row already counts it', () => {
+    const off = run({
+      roots: [hNode('C', [hNode('c1')])],
+      edges: [edge('e1', 'c1', 'far-x')],
+      cells: [['C', 'far-x', 3]],
+    })
+    expect(off.get('C')!.out).toBe(3)
+    expect([...off.get('C')!.outPartners]).toEqual(['far-x'])
+  })
+
+  it('and where the roll-up names what holds that end', () => {
+    const off = run({
+      roots: [hNode('C', [hNode('c1')])],
+      edges: [edge('e1', 'c1', 't1'), edge('e2', 'u1', 'c1')],
+      chains: { t1: ['T'], T: [], u1: [] },
+      cells: [['C', 'T', 3]],
+    })
+    expect(off.get('C')).toMatchObject({ out: 3, in: 1 })
   })
 })

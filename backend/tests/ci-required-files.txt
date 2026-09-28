@@ -36,6 +36,7 @@ tests/test_automation_holds_scope.py
 tests/test_background_tasks.py
 tests/test_cache_refresh_route.py
 tests/test_canvas_endpoints.py
+tests/test_changeset_materialize.py
 tests/test_ci_required_list.py
 tests/test_cleanup_graph_indices.py
 tests/test_concurrency_tuning_doc.py
@@ -45,7 +46,10 @@ tests/test_cube_estimate_calibration.py
 tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_drift_probe_cost.py
+tests/test_edge_update_patch_semantics.py
+tests/test_entity_audit_unit.py
 tests/test_export_downloads.py
+tests/test_falkordb_edges_pair_binding.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
 tests/test_falkordb_native_properties.py
@@ -56,14 +60,18 @@ tests/test_falkordb_replica_reads.py
 tests/test_falkordb_replication.py
 tests/test_falkordb_run_guarded.py
 tests/test_falkordb_store_outage.py
+tests/test_fold_batch_ops.py
 tests/test_freshness_endpoints.py
 tests/test_freshness_source_doc.py
 tests/test_graph_cache.py
+tests/test_graph_cache_deploy_config.py
+tests/test_graph_change_op_contract.py
 tests/test_graph_export_api.py
 tests/test_graph_store_api.py
 tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
+tests/test_heal_native_leftovers.py
 tests/test_import_formats.py
 tests/test_import_job_liveness.py
 tests/test_import_uploads.py
@@ -84,8 +92,10 @@ tests/test_object_store.py
 tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
+tests/test_projection_property_removal_unit.py
 tests/test_projection_stalled_reconcile.py
 tests/test_property_index.py
+tests/test_property_patch.py
 tests/test_provider_failover_pause.py
 tests/test_provider_fleet_admission.py
 tests/test_provider_refresh_batch.py
@@ -109,6 +119,7 @@ tests/test_shard_capacity.py
 tests/test_source_changed_signal.py
 tests/test_store_governor.py
 tests/test_thread_count_assumption.py
+tests/test_timeout_middleware.py
 tests/test_top_level_provider_kwargs.py
 tests/test_transfer_jobs.py
 tests/test_typed_compiler.py

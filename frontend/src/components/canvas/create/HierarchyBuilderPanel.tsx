@@ -886,7 +886,8 @@ function RowDetails({ type, node, onSave }: { type?: EntityTypeSchema; node?: Li
     const fieldValues: Record<string, unknown> = {}
     for (const f of customFields) if (f.id in props) fieldValues[f.id] = props[f.id]
     return {
-      description: (props.description as string) ?? '',
+      // A node field; rows staged before it was one kept it among the properties.
+      description: (node?.data?.description as string | undefined) ?? (props.description as string | undefined) ?? '',
       tags: (node?.data?.classifications ?? []).join(', '),
       fieldValues,
     }

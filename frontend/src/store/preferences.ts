@@ -39,6 +39,14 @@ export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
  */
 export type LineageMotion = 'focus' | 'all' | 'off'
 
+/**
+ * Which side of an entity card marks its lineage — see `lineagePorts.ts`.
+ * 'direction': incoming on the left, outgoing on the right, wherever the
+ * lines run; 'lines': where the lines plug in, so a line to the left or
+ * within a column is marked on the left.
+ */
+export type LineagePortSides = 'direction' | 'lines'
+
 export interface NodeStyleConfig {
   color: string
   icon?: string
@@ -124,17 +132,11 @@ interface PreferencesState {
    * Global edge-count threshold for `auto` mode. When the projected edge
    * count exceeds this, the canvas falls back to stub rendering even if
    * per-node fan-in is low. Distinct from `lineageAutoThreshold` (per-node).
+   * In On Hover and Adaptive it is also the most lines a hovered or selected
+   * entity draws at once, strongest first ("Lines per entity" in On Hover).
    */
   autoStubThreshold: number
   setAutoStubThreshold: (n: number) => void
-  /**
-   * Browse-mode parent-pair fan-in threshold. Any collapsed-parent pair with
-   * more than this many leaf edges between its descendants collapses into
-   * one bundle. Default 1 — every multi-edge pair bundles immediately.
-   * Raise to 2/3 to keep small pairs un-bundled while still collapsing hubs.
-   */
-  lineageBundleFanIn: number
-  setLineageBundleFanIn: (n: number) => void
   /**
    * Show the "N connections not on canvas" indicators. Views are subsets
    * of a Data Source — a curated view legitimately excludes upstream /
@@ -173,10 +175,18 @@ interface PreferencesState {
    *  a small hint in their place, which opens the tray on a click. */
   showConnectedTrays: boolean
   toggleConnectedTrays: () => void
+  /** Arrowheads on lineage lines (Display › Direction). */
+  showEdgeDirection: boolean
+  toggleEdgeDirection: () => void
   /** Incoming (upstream) and outgoing (downstream) lineage colours — one pair
    *  for every surface (lib/lineageDirectionColors.ts). */
   lineageDirectionColors: LineageDirectionColors
   setLineageDirectionColors: (colors: LineageDirectionColors) => void
+  /** Which side of a card marks its incoming and outgoing lineage (Display ›
+   *  Marker sides). Incoming left, outgoing right by default — the user's
+   *  choice (2026-09-28); where the lines attach stays one click away. */
+  lineagePortSides: LineagePortSides
+  setLineagePortSides: (sides: LineagePortSides) => void
   /**
    * "N on this lineage" pills on the cards of a trace — how much of what is
    * inside a closed card the lineage runs through. On by default; lives
@@ -385,8 +395,6 @@ export const usePreferencesStore = create<PreferencesState>()(
       setLineageAutoThreshold: (lineageAutoThreshold) => set({ lineageAutoThreshold }),
       autoStubThreshold: 500,
       setAutoStubThreshold: (autoStubThreshold) => set({ autoStubThreshold }),
-      lineageBundleFanIn: 1,
-      setLineageBundleFanIn: (lineageBundleFanIn) => set({ lineageBundleFanIn }),
       showMissingConnectionIndicators: true,
       toggleMissingConnectionIndicators: () =>
         set((state) => ({ showMissingConnectionIndicators: !state.showMissingConnectionIndicators })),
@@ -402,8 +410,12 @@ export const usePreferencesStore = create<PreferencesState>()(
       toggleFrostedCards: () => set((state) => ({ frostedCards: !state.frostedCards })),
       showConnectedTrays: true,
       toggleConnectedTrays: () => set((state) => ({ showConnectedTrays: !state.showConnectedTrays })),
+      showEdgeDirection: true,
+      toggleEdgeDirection: () => set((state) => ({ showEdgeDirection: !(state.showEdgeDirection ?? true) })),
       lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS,
       setLineageDirectionColors: (lineageDirectionColors) => set({ lineageDirectionColors }),
+      lineagePortSides: 'direction',
+      setLineagePortSides: (lineagePortSides) => set({ lineagePortSides }),
       showLineageCounts: true,
       toggleLineageCounts: () =>
         set((state) => ({ showLineageCounts: !state.showLineageCounts })),
@@ -483,6 +495,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         showCanvasTypeBadge: true,
         showCanvasEntityIcons: true,
         subtleCanvasTreeLines: false,
+        showMemoryUsage: false,
       }),
 
       // Lineage Lens body mode

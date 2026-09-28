@@ -1,39 +1,23 @@
 /**
- * EntityHistory — the revision history of a single entity (node), in two groups:
- *   • In this draft — the active draft branch's own commits for this entity that aren't merged yet
- *     (shown first, amber, so you can see exactly what you changed in your branch — req: branch work
- *     must be visible per entity, not only after merge);
- *   • Published — the canonical `main` line ("the published history of this entity").
+ * EntityHistory — an entity's revisions, newest first, a page at a time, in two groups:
+ *   • In this draft — the open draft's own revisions, not merged yet (amber, first);
+ *   • Published — the canonical `main` line. A revision published after the draft began is marked:
+ *     the draft does not have it.
  *
- * The backend (entity_history) returns versions across ALL branches; we split by branch here and
- * diff each version against its predecessor WITHIN its own branch (the draft's first edit diffs
- * against the main base it branched from), reusing the same EntityDiff table the overlay uses.
+ * The server says what each revision changed, field by field and property by property, against
+ * the value it was made from (a draft's first edit, against main at the branch point) — so nothing
+ * here downloads or diffs whole payloads, and a long history costs one page at a time.
  */
 import { useMemo, type ComponentType } from 'react'
-import { Loader2, Plus, Pencil, Trash2, GitBranch } from 'lucide-react'
+import { Loader2, Plus, Pencil, Trash2, GitBranch, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { timeAgo } from '@/lib/timeAgo'
-import { useBranches, useEntityHistory } from '../hooks/useVersioning'
-import { deriveFieldDeltas, labelForPayload, type GraphChange } from '../model/changeModel'
-import { ownerName } from '../model/branchVocab'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { timeAgo, formatUtc } from '@/lib/timeAgo'
+import type { EntityRevision, RevisionChange } from '@/services/versioningApiService'
+import { useEntityHistoryPages } from '../hooks/useVersioning'
+import type { FieldDelta, GraphChange } from '../model/changeModel'
+import { actorName } from '../model/branchVocab'
 import { EntityDiff } from './EntityDiff'
-
-// A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
-// that failed to resolve to a name (which falls back to 'Unknown' via ownerName).
-const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
-  typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
-
-type Version = {
-  commit_id?: string
-  commit_seq?: number
-  branch_id?: string
-  op?: 'create' | 'update' | 'delete'
-  actor?: string
-  created_at?: string
-  payload?: Record<string, unknown> | null
-}
-
-type Row = { v: Version; change: GraphChange }
 
 const OP_META: Record<string, { label: string; cls: string; Icon: ComponentType<{ className?: string }> }> = {
   create: { label: 'created', cls: 'text-emerald-500', Icon: Plus },
@@ -41,45 +25,60 @@ const OP_META: Record<string, { label: string; cls: string; Icon: ComponentType<
   delete: { label: 'deleted', cls: 'text-rose-500', Icon: Trash2 },
 }
 
-/** Diff each version against its predecessor within one branch (first against `base`), newest-first. */
-function buildChain(entityId: string, versions: Version[], base: Record<string, unknown> | undefined): Row[] {
-  const asc = [...versions].sort((a, b) => (a.commit_seq ?? 0) - (b.commit_seq ?? 0))
-  const rows = asc.map((v, i) => {
-    const prev = i === 0 ? base : asc[i - 1].payload ?? undefined
-    const cur = v.payload ?? undefined
-    const status: GraphChange['status'] = v.op === 'create' ? 'added' : v.op === 'delete' ? 'removed' : 'modified'
-    const change: GraphChange = {
-      entityId,
-      kind: 'node',
-      status,
-      label: labelForPayload(entityId, cur ?? prev, 'node'),
-      fields: status === 'modified' ? deriveFieldDeltas(prev, cur) : undefined,
-      before: status === 'removed' ? prev : undefined,
-      after: status === 'added' ? cur : undefined,
-      origin: { source: 'commit', commitId: v.commit_id ?? '' },
-    }
-    return { v, change }
-  })
-  return rows.reverse()
+/** A change's row label: a property by its name, a field by its path. */
+const labelOf = (c: RevisionChange) => (c.path[0] === 'properties' ? c.path.slice(1).join('.') : c.path.join('.'))
+
+/** A revision in the shape the field diff renders. */
+function asChange(entityId: string, v: EntityRevision): GraphChange {
+  const fields: FieldDelta[] = (v.changes ?? []).map((c) => ({ field: labelOf(c), before: c.before, after: c.after }))
+  const side = (pick: 'before' | 'after') => Object.fromEntries(fields.map((f) => [f.field, f[pick]]))
+  const status: GraphChange['status'] = v.op === 'create' ? 'added' : v.op === 'delete' ? 'removed' : 'modified'
+  return {
+    entityId,
+    kind: 'node',
+    status,
+    label: entityId,
+    fields: status === 'modified' ? fields : undefined,
+    before: status === 'removed' ? side('before') : undefined,
+    after: status === 'added' ? side('after') : undefined,
+    origin: { source: 'commit', commitId: v.commit_id },
+  }
 }
 
-function Timeline({ rows, dotCls, userNames }: { rows: Row[]; dotCls: string; userNames?: Record<string, string> }) {
+function Timeline({ entityId, rows, dotCls, userNames }: {
+  entityId: string
+  rows: EntityRevision[]
+  dotCls: string
+  userNames?: Record<string, string>
+}) {
   return (
     <ol className="relative ml-1.5 border-l border-glass-border space-y-3 pl-4">
-      {rows.map(({ v, change }) => {
-        const op = OP_META[v.op ?? 'update'] ?? OP_META.update
+      {rows.map((v) => {
+        const op = OP_META[v.op] ?? OP_META.update
         return (
-          <li key={v.commit_id ?? v.commit_seq} className="relative">
+          <li key={v.id} className="relative">
             <span className={cn('absolute -left-[1.36rem] top-1 w-2.5 h-2.5 rounded-full ring-2 ring-canvas-elevated', dotCls)} />
             <p className="text-[11px] text-ink-muted flex items-center gap-1.5 flex-wrap">
               <op.Icon className={cn('w-3 h-3', op.cls)} />
               <span className={cn('font-medium', op.cls)}>{op.label}</span>
-              <span>by {actorLabel(v.actor, userNames)}</span>
+              <span>by {actorName(v.actor ?? undefined, userNames)}</span>
               <span>·</span>
-              <span>{v.created_at ? timeAgo(v.created_at) : ''}</span>
+              <HoverTip label={formatUtc(v.created_at)} className="inline-flex">
+                <span>{timeAgo(v.created_at)}</span>
+              </HoverTip>
+              {v.after_branch_point && (
+                <span className="px-1.5 py-px rounded text-[10px] font-semibold bg-sky-500/10 text-sky-700 dark:text-sky-300">
+                  after your draft began
+                </span>
+              )}
             </p>
+            {v.commit_message && (
+              <p className="mt-0.5 text-[11px] text-ink truncate" title={v.commit_message}>{v.commit_message}</p>
+            )}
             <div className="mt-1.5">
-              <EntityDiff change={change} />
+              {v.changes === null
+                ? <p className="text-[11px] text-ink-muted italic">What this revision changed is no longer on record.</p>
+                : <EntityDiff change={asChange(entityId, v)} />}
             </div>
           </li>
         )
@@ -94,49 +93,45 @@ export function EntityHistory({
   entityId,
   mainBranchId,
   branchId,
+  kind,
 }: {
   wsId: string
   graphId: string
   entityId: string
   mainBranchId?: string | null
-  /** Active draft branch — its unmerged commits for this entity are shown above the published ones. */
+  /** Active draft branch — its unmerged revisions for this entity are shown above the published ones. */
   branchId?: string | null
+  kind?: 'node' | 'edge'
 }) {
-  const q = useEntityHistory(wsId, graphId, entityId)
-  // The draft branched from main at base_commit_seq — needed so the first draft edit diffs against
-  // the value the author actually started from, not main's current head (which may have advanced on
-  // this entity after the branch opened). Cached; shared with the switcher/bar.
-  const branchesQ = useBranches(wsId, graphId)
-  const baseSeq = useMemo(() => {
-    if (!branchId || branchId === mainBranchId) return null
-    const b = (branchesQ.data ?? []).find((x) => x.branchId === branchId)
-    return b?.baseCommitSeq ?? null
-  }, [branchesQ.data, branchId, mainBranchId])
-
-  const { draftRows, publishedRows } = useMemo(() => {
-    const all = (q.data?.versions ?? []) as Version[]
-    const onDraft = !!branchId && branchId !== mainBranchId
-    const mainVersions = mainBranchId ? all.filter((v) => v.branch_id === mainBranchId) : all
-    const draftVersions = onDraft ? all.filter((v) => v.branch_id === branchId) : []
-    // The draft's first edit started from main's value AT the branch point (base_commit_seq) — pick
-    // the latest main version at/below it; fall back to main's head when the base seq is unknown.
-    const mainAsc = [...mainVersions].sort((a, b) => (a.commit_seq ?? 0) - (b.commit_seq ?? 0))
-    const eligible = baseSeq == null ? mainAsc : mainAsc.filter((v) => (v.commit_seq ?? 0) <= baseSeq)
-    const draftBase = eligible.length ? eligible[eligible.length - 1].payload ?? undefined : undefined
-    return {
-      publishedRows: buildChain(entityId, mainVersions, undefined),
-      draftRows: buildChain(entityId, draftVersions, draftBase),
-    }
-  }, [q.data, mainBranchId, branchId, entityId, baseSeq])
+  const draftId = branchId && branchId !== mainBranchId ? branchId : null
+  const q = useEntityHistoryPages(wsId, graphId, entityId, { branchId: draftId, kind })
+  const all = useMemo(() => q.data?.pages.flatMap((p) => p.versions) ?? [], [q.data])
+  const userNames = useMemo(
+    () => Object.assign({}, ...(q.data?.pages.map((p) => p.userNames ?? {}) ?? [])) as Record<string, string>,
+    [q.data],
+  )
+  const draftRows = useMemo(() => all.filter((v) => v.on_draft), [all])
+  const publishedRows = useMemo(() => all.filter((v) => !v.on_draft), [all])
 
   if (q.isLoading) {
     return (
-      <div className="flex items-center gap-2 text-[11px] text-ink-muted py-3 justify-center">
+      <div className="flex items-center gap-2 text-[11px] text-ink-muted py-3 justify-center" role="status">
         <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading history…
       </div>
     )
   }
-  if (draftRows.length === 0 && publishedRows.length === 0) {
+  if (q.isError) {
+    return (
+      <div className="flex items-center justify-between gap-2 text-[11px] text-ink-muted py-2" role="alert">
+        <span>Couldn’t load the history.</span>
+        <button type="button" onClick={() => { void q.refetch() }}
+          className="inline-flex items-center gap-1 font-semibold text-accent-lineage hover:underline">
+          <RefreshCw className="w-3 h-3" /> Retry
+        </button>
+      </div>
+    )
+  }
+  if (all.length === 0) {
     return <p className="text-[11px] text-ink-muted py-3">No history for this entity yet.</p>
   }
 
@@ -148,19 +143,26 @@ export function EntityHistory({
             <GitBranch className="w-3 h-3" />
             In this draft · not merged yet
           </div>
-          <Timeline rows={draftRows} dotCls="bg-amber-500" userNames={q.data?.userNames} />
+          <Timeline entityId={entityId} rows={draftRows} dotCls="bg-amber-500" userNames={userNames} />
         </div>
       )}
       {publishedRows.length > 0 && (
         <div className="space-y-2">
           {draftRows.length > 0 && (
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70">Published</div>
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Published</div>
           )}
-          <Timeline rows={publishedRows} dotCls="bg-accent-lineage" userNames={q.data?.userNames} />
+          <Timeline entityId={entityId} rows={publishedRows} dotCls="bg-accent-lineage" userNames={userNames} />
         </div>
       )}
-      {publishedRows.length === 0 && draftRows.length > 0 && (
-        <p className="text-[11px] text-ink-muted/70">Not yet on main — these changes are only in your draft.</p>
+      {q.hasNextPage && (
+        <button
+          type="button"
+          onClick={() => { void q.fetchNextPage() }}
+          disabled={q.isFetchingNextPage}
+          className="w-full inline-flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-semibold text-ink-muted border border-glass-border hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-60 transition-colors"
+        >
+          {q.isFetchingNextPage ? <><Loader2 className="w-3 h-3 animate-spin" /> Loading…</> : 'Show older revisions'}
+        </button>
       )}
     </div>
   )

@@ -3,7 +3,7 @@
  * with the invalidation fan-out that keeps the BranchSwitcher, diff overlay, and
  * history in sync after a save / publish / merge.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
 import type { ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
@@ -33,8 +33,11 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'diffVsMain', ws, gid, bid] as const,
   commitLog: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'commits', ws, gid, bid ?? 'all'] as const,
-  entityHistory: (ws?: string, gid?: string | null, eid?: string | null) =>
-    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid] as const,
+  // Under 'entity' so one invalidation of an entity's key prefix covers its summary and history.
+  entityHistory: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, scope?: string) =>
+    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'history', bid ?? 'main', scope ?? 'all'] as const,
+  entitySummary: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, withValue?: boolean) =>
+    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'summary', bid ?? 'main', withValue ? 'value' : 'meta'] as const,
   mergeRequests: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'mrs', ws, gid] as const,
   mergeRequest: (ws?: string, prId?: string | null) =>
@@ -194,12 +197,45 @@ export function useCommitLog(wsId?: string, graphId?: string | null, branchId?: 
   })
 }
 
-export function useEntityHistory(wsId?: string, graphId?: string | null, entityId?: string | null) {
-  return useQuery({
-    queryKey: VERSIONING_KEYS.entityHistory(wsId, graphId, entityId),
-    queryFn: () => api.getEntityHistory(wsId!, graphId!, entityId!),
-    enabled: !!wsId && !!graphId && !!entityId,
+/** Revisions fetched per page. */
+export const ENTITY_HISTORY_PAGE = 25
+
+/** An entity's revisions, newest first, a page at a time — `main`'s and the viewed draft's own
+ *  (`branchId`), narrowed by `scope`. `enabled: false` until the history is actually shown. */
+export function useEntityHistoryPages(
+  wsId: string | undefined,
+  graphId: string | null | undefined,
+  entityId: string | null | undefined,
+  opts: { branchId?: string | null; scope?: api.HistoryScope; kind?: 'node' | 'edge'; enabled?: boolean } = {},
+) {
+  const { branchId, scope = 'all', kind, enabled = true } = opts
+  return useInfiniteQuery({
+    queryKey: VERSIONING_KEYS.entityHistory(wsId, graphId, entityId, branchId, scope),
+    queryFn: ({ pageParam }) => api.getEntityHistoryPage(wsId!, graphId!, entityId!, {
+      branchId, scope, kind, limit: ENTITY_HISTORY_PAGE, before: pageParam,
+    }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => (last.hasMore ? last.nextBefore ?? null : null),
+    enabled: enabled && !!wsId && !!graphId && !!entityId,
     staleTime: 30_000,
+  })
+}
+
+/** Who created an entity and who last changed it on the line being read, its revision counts
+ *  and (`includeValue`) its current value and token — a few index lookups, never the whole
+ *  history. */
+export function useEntitySummary(
+  wsId: string | undefined,
+  graphId: string | null | undefined,
+  entityId: string | null | undefined,
+  opts: { branchId?: string | null; kind?: 'node' | 'edge'; includeValue?: boolean } = {},
+) {
+  const { branchId, kind, includeValue = false } = opts
+  return useQuery({
+    queryKey: VERSIONING_KEYS.entitySummary(wsId, graphId, entityId, branchId, includeValue),
+    queryFn: () => api.getEntitySummary(wsId!, graphId!, entityId!, { branchId, kind, includeValue }),
+    enabled: !!wsId && !!graphId && !!entityId,
+    staleTime: 15_000,
   })
 }
 

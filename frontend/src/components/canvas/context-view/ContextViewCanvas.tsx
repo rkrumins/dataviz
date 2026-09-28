@@ -32,7 +32,8 @@ import { isSelectableNode, useCanvasStore, useCanvasVersion, type LineageEdge, t
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { registerLayoutWriter } from '@/store/canvasLayoutBridge'
 import { useSaveProblemsStore } from '@/store/saveProblemsStore'
-import { OntologyViolationError } from '@/services/versioningApiService'
+import { IntegrityError, MergeConflictError, OntologyViolationError } from '@/services/versioningApiService'
+import { markConflicts } from '@/features/versioning/model/mapConflicts'
 import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -50,7 +51,7 @@ import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
-import type { TraceV2Result } from '@/providers/GraphDataProvider'
+import type { AggregatedEdgeInfo, TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
@@ -58,13 +59,18 @@ import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
+import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
+import { primeLineageFor } from '@/lib/primeLineageFor'
+import { lookupRetryDelayMs } from '@/config/polling'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
 import {
   childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
   openedViewMessage, openingViewMessage,
 } from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
-import { useAncestorChains } from '@/hooks/useAncestorChains'
+import { containmentUpPath, useAncestorChains } from '@/hooks/useAncestorChains'
+import { useHolderRollups } from '@/hooks/useHolderRollups'
+import { useContainerRollups } from '@/hooks/useContainerRollups'
 import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
 import { buildPlacements, type PlacementInfo } from './placement'
 import {
@@ -73,8 +79,11 @@ import {
 } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
+import { renderedAggregationTargets, unparentedRows } from './aggregationTargets'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
-import { EntityDrawer } from '../../panels/EntityDrawer'
+import { EntityDrawer } from '../../panels/entity/EntityDrawer'
+import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
+import { targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
@@ -128,7 +137,6 @@ import { SORT_MODE_LABELS } from './LayerSortMenu'
 import { CanvasStatusChips } from './CanvasStatusChips'
 import { computeFitZoom, COLUMN_GAP_PX } from './fitZoom'
 import { useLayerFold } from './useLayerFold'
-import { BRING_IN_BATCH } from './ghostCues'
 import { shiftToClear } from './drawerClearance'
 import { LineageLens, type LensWalkSeed } from './LineageLens'
 import {
@@ -223,6 +231,7 @@ function makeConnectionTypeResolver(
  *  projecting it only produces noise (see the call site). */
 const EMPTY_EDGES: unknown[] = []
 const EMPTY_AGG_EDGES: Map<string, unknown> = new Map()
+const NO_HOLDER_EDGES: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
 /** Module constant, not an inline `?? []`. `LayerColumn` is `React.memo`'d, and
  *  a fresh array literal per render defeated that memo for every EMPTY column —
  *  so the columns with nothing in them re-rendered on every canvas render. */
@@ -232,6 +241,9 @@ const EMPTY_LAYER_NODES: HierarchyNode[] = []
  *  click; without this each of those rewrites the entry (and its
  *  localStorage line) several times over for a single gesture. */
 const TRACE_EXPANSION_RECORD_MS = 250
+/** The longest the aggregated fetch waits for child loads to settle after
+ *  the rows it is for changed. */
+const AGGREGATION_SETTLE_CEILING_MS = 2000
 import { useLensChildren } from '@/hooks/useLensChildren'
 import { aggregateFlowRibbons } from './flowRibbons'
 import type { ColumnGeometryApi } from './types'
@@ -245,7 +257,7 @@ import { generateKeyBetween } from '@/utils/orderKeys'
 import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { bySignificance } from './lineDensity'
-import { buildNodePorts } from './lineagePorts'
+import { buildNodePorts, columnEndLayer, partialLines, portTotals, unloadedColumnLines, unplacedLines } from './lineagePorts'
 import { PortHoverTip } from './PortHoverTip'
 import { LineageGuide } from './LineageGuide'
 import { zoomScalesPercentages } from '@/lib/cssZoom'
@@ -403,9 +415,9 @@ export function ContextViewCanvas({
   // Set form for the columns, which ask "is this row selected?" per row.
   const selectedNodeIdSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds])
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  const drawerEdge = useCanvasStore((s) => s.drawerEdge)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const edgeFetchFailures = useCanvasStore((s) => s.edgeFetchFailures)
-  const clearEdgeFetchFailures = useCanvasStore((s) => s.clearEdgeFetchFailures)
   const edgesTruncated = useCanvasStore((s) => s.edgesTruncated)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
@@ -419,13 +431,12 @@ export function ContextViewCanvas({
   const isContainmentEdge = useViewIsContainmentEdge()
   const edgeTypeMetadata = useEdgeTypeMetadataMap()
 
-  // Lineage rendering preferences — drive the Stubs/Auto/Raw mode, the
-  // auto-mode size cutover, and the bundle fan-in threshold. Read with
-  // separate selectors so unrelated preference changes don't re-render.
+  // Lineage rendering preferences — drive the Stubs/Auto/Raw mode and the
+  // auto-mode size cutover. Read with separate selectors so unrelated
+  // preference changes don't re-render.
   const lineageRenderMode = usePreferencesStore((s) => s.lineageRenderMode)
   const setLineageRenderMode = usePreferencesStore((s) => s.setLineageRenderMode)
   const autoStubThreshold = usePreferencesStore((s) => s.autoStubThreshold)
-  const lineageBundleFanIn = usePreferencesStore((s) => s.lineageBundleFanIn)
 
   // Canvas display settings — driven by the header's DisplaySettingsPopover.
   // `?? default` guards users whose persisted preferences predate these
@@ -690,6 +701,10 @@ export function ContextViewCanvas({
   // on-screen node map (so the edge drill resolves against what is drawn).
   const childLoadRef = useRef<{ cancel: (id: string) => void; loadingNodes: ReadonlySet<string> } | null>(null)
   const renderMapRef = useRef<Map<string, HierarchyNode>>(new Map())
+  // Every node drawn as a row of its own (`drawnRows`, below). A reveal asks
+  // this, not renderMap, which also holds the nodes folded inside closed rows.
+  const drawnRowsRef = useRef<ReadonlySet<string>>(new Set())
+  const isDrawnRow = useCallback((id: string) => drawnRowsRef.current.has(id), [])
 
   // Forward-ref for the duplicate-subtree layer wiring. onNodeCopied /
   // onNodeDuplicated fire from useDuplicateSubtree / useCanvasInteractions,
@@ -763,12 +778,17 @@ export function ContextViewCanvas({
       // Implementation handled by the existing moveToLayer function
     },
     onCloseEdgePanel: () => {
-      if (isEdgePanelOpen) { closeEdgePanel(); return true }
+      // The Explorer is only on screen when neither drawer is.
+      if (isEdgePanelOpen && !drawerNodeId && !drawerEdge) { closeEdgePanel(); return true }
       return false
     },
     onCloseEntityDrawer: () => {
       if (isStagedPanelOpen) { closeStagedChangesPanel(); return true }
-      if (drawerNodeId) { closeNodeDrawer(); clearSelection(); return true }
+      if (drawerNodeId || drawerEdge) {
+        // One move: with unsaved edits in the drawer, neither happens until the reader decides.
+        useCanvasStore.getState().requestDrawerMove(() => { closeNodeDrawer(); clearSelection() })
+        return true
+      }
       return false
     },
     // ESC exits an active trace before any other panel close — gives the
@@ -807,7 +827,14 @@ export function ContextViewCanvas({
     error: aggregationError,
     loadMoreDetail: loadMoreAggregatedDetail,
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
+    retryAggregated,
   } = useAggregatedLineage({ granularity: null })
+  // Beside the rows' own roll-ups: theirs with the rows the view holds but
+  // has not loaded (see the aggregated fetch below).
+  const { holderEdges, fetchHolders } = useHolderRollups(lineageGranularity)
+  // And a selected collapsed container's, all of them (see the selection
+  // effects below).
+  const { containerEdges, containerPartial, containerRead, fetchContainerRollups } = useContainerRollups(lineageGranularity)
   // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
   // when the visible container set (and so the URN key) hasn't changed. Scoped
   // to this canvas's provider, so an invalidation aimed at one graph (a node
@@ -1271,6 +1298,11 @@ export function ContextViewCanvas({
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
+  // What the reader last saw open, for the chevron's handler to decide
+  // expand-or-collapse from (see toggleNode). Assigned after commit:
+  // a click only ever lands on a committed row.
+  const expandedNodesRef = useRef(expandedNodes)
+  useEffect(() => { expandedNodesRef.current = expandedNodes }, [expandedNodes])
 
   // Per-view expanded state: save/restore on view switch to prevent stale data
   const expandedByViewRef = useRef<Map<string, Set<string>>>(new Map())
@@ -1370,7 +1402,7 @@ export function ContextViewCanvas({
 
 
   // Edge details
-  const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } = useEdgeDetailPanel()
+  const { isOpen: isEdgePanelOpen, close: closeEdgePanel } = useEdgeDetailPanel()
   const { filters: edgeFilters, toggle: toggleEdgeFilter } = useEdgeTypeFilters()
   const ontologyMetadata = useMemo(() => ({ edgeTypeMetadata }), [edgeTypeMetadata])
   const selectEdge = useCanvasStore((s) => s.selectEdge)
@@ -1444,8 +1476,10 @@ export function ContextViewCanvas({
   // Lineage flow toggle
   const [showLineageFlow, setShowLineageFlow] = useState(initialShowLineageFlow)
 
-  // Edge direction toggle — controls arrowheads + animated mid-edge chevron
-  const [showEdgeDirection, setShowEdgeDirection] = useState(true)
+  // Edge direction toggle — controls arrowheads + animated mid-edge chevron.
+  // A preference, so it is remembered like every other Display switch.
+  const showEdgeDirection = usePreferencesStore((s) => s.showEdgeDirection) ?? true
+  const toggleEdgeDirection = usePreferencesStore((s) => s.toggleEdgeDirection)
 
   // Trace bottom dock — expanded vs compact. Lifted to the canvas so a
   // global Cmd/Ctrl+I shortcut can toggle it from anywhere.
@@ -1730,22 +1764,12 @@ export function ContextViewCanvas({
   }, [sortedLayers, nodeMap, childMap, childPaging])
 
 
-  // Helper: Calculate currently visible top-level nodes (containers)
-  const getVisibleContainerUrns = useCallback(() => {
-    return nodes
-      .filter(n => {
-        const parentId = parentMap.get(n.id)
-        if (!parentId) return true // Root
-        return expandedNodes.has(parentId)
-      })
-      .map(n => (n.data?.urn as string) || n.id)
-      .filter(Boolean)
-  }, [nodes, parentMap, expandedNodes])
-
   // Track previous aggregation target fingerprint to avoid redundant fetches
   const prevAggregationKeyRef = useRef<string>('')
+  // When the first change the aggregated fetch has not yet run for arrived.
+  const aggregationPendingSinceRef = useRef<number | null>(null)
 
-  // Stable node URN-to-ID map (updated via ref to avoid effect dependency on nodes)
+  // The latest nodes, for callbacks that must not depend on `nodes`
   const nodesRef = useRef(nodes)
   nodesRef.current = nodes
 
@@ -1817,7 +1841,15 @@ export function ContextViewCanvas({
     const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
     const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
     return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
-  }, [drawerNodeId, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+  }, [drawerNodeId, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+
+  // A relationship the drawer shows was resolved from THIS view's lines. Leaving
+  // the view (or this canvas) closes it, trail and all, rather than carrying a
+  // snapshot of lines that are no longer drawn into another view.
+  useEffect(() => () => {
+    const s = useCanvasStore.getState()
+    if (s.drawerEdge || s.drawerHistory.entries.some(e => e.kind === 'edge')) s.forceCloseDrawer()
+  }, [activeView?.id])
 
   // ─── Node sort modes ────────────────────────────────────────────────────────
   // Persisted state: view-wide `defaultNodeSortMode` + per-layer `nodeSortMode`
@@ -1850,7 +1882,7 @@ export function ContextViewCanvas({
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
-  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes } = useLayerAssignment({
+  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
@@ -2217,35 +2249,39 @@ export function ContextViewCanvas({
     nodeId: string | readonly string[],
     direction: 'up' | 'down' | 'both' = 'both',
   ) => {
-    // A bulk trace walks every selected entity and the overlay draws their
-    // UNION. History, re-centre and the "already tracing this" check are all
-    // about a single focal, so they follow the FIRST seed — which for an
-    // ordinary one-entity trace is the only one, and nothing changes.
-    const nodeIds = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
-    if (nodeIds.length === 0) return
-    const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
-    const urn = urns[0]!
-    const view = {
-      showUpstream: direction !== 'down',
-      showDownstream: direction !== 'up',
-      depthUp: FULL_WALK_INITIAL_DEPTH,
-      depthDown: FULL_WALK_INITIAL_DEPTH,
-      // Re-pressing Trace on the focal already on screen does NOT re-seed the
-      // overlay, so recording an empty picture here would leave the entry
-      // describing a trace nobody is looking at. A genuinely new focal has no
-      // picture yet: empty means "as it opens", and the seed decides.
-      traceExpansion: canvasTraceRef.current.tracedUrn === urn
-        ? [...(overlayRef.current?.traceExpansion ?? [])]
-        : [],
-    }
-    setTraceShowUpstream(view.showUpstream)
-    setTraceShowDownstream(view.showDownstream)
-    setTraceDepthUp(view.depthUp)
-    setTraceDepthDown(view.depthDown)
-    // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
-    flushExpansionRecord()
-    setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeIds[0]!, view, timestamp: Date.now() }))
-    beginTrace(urns)
+    // A trace takes the canvas over and closes the drawer: a drawer move, held — whole — while
+    // the drawer has edits not staged yet.
+    useCanvasStore.getState().requestDrawerMove(() => {
+      // A bulk trace walks every selected entity and the overlay draws their
+      // UNION. History, re-centre and the "already tracing this" check are all
+      // about a single focal, so they follow the FIRST seed — which for an
+      // ordinary one-entity trace is the only one, and nothing changes.
+      const nodeIds = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
+      if (nodeIds.length === 0) return
+      const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
+      const urn = urns[0]!
+      const view = {
+        showUpstream: direction !== 'down',
+        showDownstream: direction !== 'up',
+        depthUp: FULL_WALK_INITIAL_DEPTH,
+        depthDown: FULL_WALK_INITIAL_DEPTH,
+        // Re-pressing Trace on the focal already on screen does NOT re-seed the
+        // overlay, so recording an empty picture here would leave the entry
+        // describing a trace nobody is looking at. A genuinely new focal has no
+        // picture yet: empty means "as it opens", and the seed decides.
+        traceExpansion: canvasTraceRef.current.tracedUrn === urn
+          ? [...(overlayRef.current?.traceExpansion ?? [])]
+          : [],
+      }
+      setTraceShowUpstream(view.showUpstream)
+      setTraceShowDownstream(view.showDownstream)
+      setTraceDepthUp(view.depthUp)
+      setTraceDepthDown(view.depthDown)
+      // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
+      flushExpansionRecord()
+      setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeIds[0]!, view, timestamp: Date.now() }))
+      beginTrace(urns)
+    })
   }, [displayMap, beginTrace, flushExpansionRecord])
 
   // History restore: the entry's own view params, no push (back/forward
@@ -2685,6 +2721,18 @@ export function ContextViewCanvas({
   const renderByLayer = traceRender?.byLayer ?? nodesByLayer
   const renderFlat = traceRender?.flat ?? displayFlat
   const renderMap = traceRender?.map ?? displayMap
+  // The rows the columns draw: each column's roots and, below an open row,
+  // its children — LayerColumn's flat tree, without the column chrome.
+  const drawnRows = useMemo(() => {
+    const rows = new Set<string>()
+    const stack = [...renderByLayer.values()].flat()
+    while (stack.length > 0) {
+      const node = stack.pop()!
+      rows.add(node.id)
+      if (expandedForRender.has(node.id)) stack.push(...node.children)
+    }
+    return rows
+  }, [renderByLayer, expandedForRender])
 
 
   // Suppress parent AGGREGATED edges whose drill currently has at least one
@@ -3240,7 +3288,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore, exhaustedParents, loadMoreFeeds } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryEdges, loadMoreRoots, rootsLoaded, rootsHaveMore, exhaustedParents, loadMoreFeeds } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -3372,6 +3420,7 @@ export function ContextViewCanvas({
   useEffect(() => {
     childLoadRef.current = { cancel: cancelChildLoad, loadingNodes }
     renderMapRef.current = renderMap
+    drawnRowsRef.current = drawnRows
     // The keyboard handlers are assembled before the session exists, so
     // they reach it the same way they reach fit-to-width.
     searchRef.current = search
@@ -3380,7 +3429,9 @@ export function ContextViewCanvas({
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
   // (Expanded nodes are excluded: their children are already visible and stand in
   // for them, so including both ends would double-count the same TRANSFORMS edges
-  // at two hierarchy levels.)
+  // at two hierarchy levels.) The set is read off the rendered tree
+  // (renderedAggregationTargets): an anchored column's rows are targets, and its
+  // anchor, which is the column rather than a row, never is.
   //
   // Two gates keep this off the hot path. `/edges/aggregated` is the most
   // expensive endpoint we have — it is the tightest fair-share bucket on the
@@ -3388,9 +3439,13 @@ export function ContextViewCanvas({
   // children that lands. Without the quiescence gate, draining a large container
   // one page at a time produced one aggregated fan-out per page.
   //
-  //   1. Skip entirely while any child load is in flight. The tree is mid-flight;
+  //   1. Wait while any child load is in flight. The tree is mid-flight;
   //      whatever we computed now would be superseded the moment the page lands.
   //      `loadingNodes` is in the dep array, so settling re-runs the effect.
+  //      But never past AGGREGATION_SETTLE_CEILING_MS after the change: one
+  //      slow page, or columns paging as the reader scrolls, held back the
+  //      roll-ups of every other row for as long as it lasted. The fetch
+  //      asks only about the rows that changed, so going early is cheap.
   //   2. Debounce, so expanding a spine (several parents loading back-to-back)
   //      collapses into a single fetch once the dust settles.
   //
@@ -3398,33 +3453,53 @@ export function ContextViewCanvas({
   // edges at the trace's effective level, so the parallel /aggregated-lineage
   // fetch is redundant + racy when a trace is active. In browse mode the
   // hook fires as before.
+  //
+  // Beside the rows, their roll-ups with the HOLDERS (useHolderRollups): each
+  // anchor with rows past its loaded page, and each open container with
+  // children not loaded yet, counted from the store, so a child drawn in
+  // another column is loaded all the same. They hold rows that are in the
+  // view, and the rows' lineage into them draws nothing else. On a draft or
+  // a branch too: an answer cut short there costs only the holders' own
+  // request, which asks again on its own clock, never the rows' lines.
   useEffect(() => {
     if (!showLineageFlow || nodes.length === 0) return
     if (traceActive) return
-    // Wait for the tree to settle. Re-runs when loadingNodes empties.
-    if (loadingNodes.size > 0) return
+    // Wait for the tree to settle (re-runs when loadingNodes empties), but
+    // not past the ceiling.
+    const now = Date.now()
+    aggregationPendingSinceRef.current ??= now
+    const untilCeiling = Math.max(0, aggregationPendingSinceRef.current + AGGREGATION_SETTLE_CEILING_MS - now)
+    const delay = loadingNodes.size > 0 ? untilCeiling : Math.min(300, untilCeiling)
 
     const fetchDebounced = setTimeout(() => {
-      const currentVisibleList = getVisibleContainerUrns()
-
-      const urnToIdMap = new Map(nodesRef.current.map(n => [(n.data?.urn as string) || n.id, n.id]))
-      const aggregationTargets = currentVisibleList.filter(urn => {
-        const nodeId = urnToIdMap.get(urn)
-        return nodeId && !expandedNodes.has(nodeId)
+      aggregationPendingSinceRef.current = null
+      const aggregationTargets = renderedAggregationTargets(nodesByLayer, expandedNodes)
+      const holders = new Set<string>()
+      anchorMoreByLayer.forEach(({ anchorUrn }) => holders.add(anchorUrn))
+      expandedNodes.forEach(id => {
+        const node = displayMap.get(id)
+        if (!node || node.isLogical) return
+        const total = Number(node.data?.childCount ?? 0) || 0
+        const pager = childPaging[id]
+        if (pager && !pager.hasMore && pager.childCount === total) return
+        if (total > (childMap.get(id) ?? []).length) holders.add(node.urn || id)
       })
+      const aggregationHolders = [...holders].sort()
 
       // Only fetch if the target set actually changed
-      const aggregationKey = `${aggregatedCacheVersion}:` + aggregationTargets.sort().join(',')
+      const aggregationKey = `${aggregatedCacheVersion}:${lineageGranularity}:` + aggregationTargets.sort().join(',')
+        + `|${aggregationHolders.join(',')}`
       if (aggregationKey === prevAggregationKeyRef.current) return
       prevAggregationKeyRef.current = aggregationKey
 
       if (aggregationTargets.length > 0) {
         fetchAggregated(aggregationTargets, aggregationTargets)
+        void fetchHolders(aggregationTargets, aggregationHolders)
       }
-    }, 300)
+    }, delay)
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes])
+  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes, lineageGranularity, fetchHolders, anchorMoreByLayer, displayMap, childMap, childPaging])
 
   // Source-changed self-refresh: while the aggregated overlay is flagged
   // `source_changed`, poll readiness and invalidate the aggregated cache once
@@ -3453,6 +3528,17 @@ export function ContextViewCanvas({
   // recovers), so it is safe at this component's top level; it is read by JSX
   // only and is in no memo's dependency array.
   const projectionCatchUp = useProjectionCatchUp(dataSourceId, aggregationStaleReason)
+  // The summaries — the connections between collapsed items — the answer
+  // lacks, when the source is not simply behind (the banner above says that
+  // better): 'missing' when the source has none, or only ones an older
+  // version built; 'partial' when a read could not finish them (a branch's
+  // derived roll-ups hit their scope or hop bound, or part of the read
+  // failed). Neither is a cap the reader can narrow their way out of.
+  const summariesGap = projectionCatchUp.catchingUp ? null
+    : aggregationStaleReason === 'unmaterialized' || aggregationStaleReason === 'legacy_cells' ? 'missing'
+      : aggregationStaleReason === 'derive_scope_cap' || aggregationStaleReason === 'derive_hop_bound'
+        || aggregationStaleReason === 'degraded' ? 'partial'
+        : null
 
   // A node can become expanded WITHOUT going through the toggle handler that
   // loads its first page — the per-view expanded-state restore above replays a
@@ -3627,7 +3713,12 @@ export function ContextViewCanvas({
     loadChildren: loadChildrenSorted,
     provider,
     focus: scrollHitIntoView,
+    // Drawn, not merely loaded: the drawer hears 'unavailable' for an entity
+    // the store holds and no column draws.
+    isRendered: isDrawnRow,
   })
+  // The partner reveal, built far below with the chains it reads.
+  const revealPartnersRef = useRef<ReturnType<typeof useRevealPartners> | null>(null)
   const revealOnCanvas = useCallback(async (nodeId: string, revealOpts?: RevealOptions) => {
     if (traceWriteLocked()) {
       // Drawing: open the overlay's own chain. Still walking: there is
@@ -3636,8 +3727,14 @@ export function ContextViewCanvas({
       if (expandTraceChain(nodeId) && !revealOpts?.skipFocus) scrollHitIntoView(nodeId)
       return
     }
-    await revealAndFocus(nodeId, revealOpts)
-  }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked])
+    // A row of an anchored column past its loaded page is in the view, and
+    // the walk below cannot reach it: loading the anchor's children resumes
+    // its pager at the NEXT page. Its path can, as selecting a card brings
+    // its partners in. Anything else takes the walk, which then only
+    // focuses a row this brought in.
+    if (!isDrawnRow(nodeId)) await revealPartnersRef.current?.([nodeId], { anchoredOnly: true })
+    return revealAndFocus(nodeId, revealOpts)
+  }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked, isDrawnRow])
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed
   // ancestors), then walk each one through the SAME virtualizer-aware
@@ -4088,10 +4185,14 @@ export function ContextViewCanvas({
     // clears pendingLoadRef).
     if (pendingLoadRef.current.has(nodeId)) return
 
-    // Determine action from committed state via updater function — avoids stale closure read.
-    let wasExpanded = false
+    // Decide from what the reader clicked on: the committed expansion. Not
+    // from inside the updater — React runs an updater at once only when
+    // nothing else is queued for this component, so on a busy canvas (a
+    // store write, a page landing) it waited for the next render, this read
+    // "was collapsed", and a collapse ran the expand path: the row closed but
+    // nothing it drew was pruned, and its load in flight was not cancelled.
+    const wasExpanded = expandedNodesRef.current.has(nodeId)
     setExpandedNodes((prev) => {
-      wasExpanded = prev.has(nodeId)
       const next = new Set(prev)
       if (wasExpanded) next.delete(nodeId)
       else next.add(nodeId)
@@ -4107,9 +4208,8 @@ export function ContextViewCanvas({
         // Trace path: also batch-drill the AGGREGATED edges incident to
         // this node so the server returns the next-finer level of trace
         // edges between this node's subtree and its peers' subtrees. The
-        // density-tier renderer + browse-mode bundling now absorb the
-        // result; the historical reason this was disabled (canvas
-        // overload) no longer applies.
+        // density-tier renderer now absorbs the result; the historical
+        // reason this was disabled (canvas overload) no longer applies.
         await announceChildLoad(nodeId)
         if (trace.isTracing) {
           // Fire-and-forget: drill runs in the background and merges into
@@ -4182,6 +4282,20 @@ export function ContextViewCanvas({
       // The walk still seeds from ``nodeId`` so its descendants get
       // enumerated; we just skip adding ``nodeId`` to the removal
       // set itself.
+      //
+      // Only what the node DRAWS goes. A descendant drawn somewhere else — a
+      // child placed in another column or group, or the anchor of another
+      // column, with everything under it — is its own column's row, not
+      // this one's, and stays with its lines.
+      const drawnHere = new Set<string>()
+      const drawnStack = [...(displayMap.get(nodeId)?.children ?? [])]
+      while (drawnStack.length > 0) {
+        const child = drawnStack.pop()!
+        drawnHere.add(child.id)
+        drawnStack.push(...child.children)
+      }
+      const drawnElsewhere = (id: string) => (displayMap.has(id) && !drawnHere.has(id))
+        || promotedAnchors.has((nodeMap.get(id)?.data?.urn as string | undefined) ?? id)
       const subtreeIds = new Set<string>()
       const stack: string[] = [nodeId]
       while (stack.length > 0) {
@@ -4189,6 +4303,7 @@ export function ContextViewCanvas({
         const children = childMap.get(id)
         if (!children) continue
         for (const cid of children) {
+          if (drawnElsewhere(cid)) continue
           if (!subtreeIds.has(cid)) { subtreeIds.add(cid); stack.push(cid) }
         }
       }
@@ -4275,7 +4390,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, announceChildLoad, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon])
+  }, [displayMap, announceChildLoad, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon, promotedAnchors, nodeMap])
 
 
 
@@ -4306,15 +4421,6 @@ export function ContextViewCanvas({
     return byNode
   }, [sortedLayers, nodeLayerMap])
 
-  // Browse-mode bundling is on by default. The previous behaviour gated it
-  // behind `edges.length > 800`, which meant the most common dense case
-  // (300–700 edges with high per-pair fan-in) never bundled — bundling
-  // would only kick in after the canvas was already overloaded. Letting
-  // the projection run from the first edge collapses leaf pairs to
-  // collapsed-parent bundles immediately; expanded parents stay at leaf
-  // resolution because the walk respects `expandedNodes`.
-  const browseBundleEnabled = !overlay.active
-
   // Edge projection — BROWSE only. In trace mode the overlay's own wire
   // ledger has already decided the grain (see traceWireLedger), so the
   // projection would be re-deciding it from a store that holds none of the
@@ -4329,12 +4435,28 @@ export function ContextViewCanvas({
   //
   // Keyed on `overlay.active`, not `traceActive`: during the walk the canvas
   // is still showing BROWSE and must keep its wires and its honest count.
-  // Where the lineage endpoints the canvas never loaded live, so their lines
-  // roll up to a container on screen rather than read as leaving the view.
-  // A preview behind `canvasLineageRollupEnabled` (off by default: a roll-up
-  // trades detail for coverage). Browse only, as the projection below.
-  const lineageRollup = useFeature('canvasLineageRollupEnabled')
-  const ancestorChains = useAncestorChains(lineageRollup && showLineageFlow && !overlay.active, isContainmentEdge)
+  // Where the lineage endpoints the canvas does not draw live, so their lines
+  // roll up to a container on screen, or into the column they belong to,
+  // rather than read as leaving the view. Always on: it is how the canvas
+  // tells in-view from outside. Browse only, as the projection below.
+  // Drawn rows with no loaded parent are asked too: a row placed in another
+  // column than the closed row above it must not be counted twice. So are
+  // anchors with no loaded parent: a cell to what holds one counts its
+  // column's flows too.
+  const unparented = useMemo(() => unparentedRows(nodesByLayer, parentMap, promotedAnchors),
+    [nodesByLayer, parentMap, promotedAnchors])
+  // A selected container's own roll-ups (useContainerRollups) are placed as
+  // a holder's are: their far ends get chains, and the projection keeps of
+  // each only what the rows it reaches do not carry.
+  const chainedCells = useMemo(() => containerEdges.size === 0 ? aggregatedEdges
+    : new Map<string, { aggregated: AggregatedEdgeInfo }>([
+      ...[...containerEdges].map(([id, aggregated]) => [id, { aggregated }] as const),
+      ...aggregatedEdges,
+    ]), [aggregatedEdges, containerEdges])
+  const extraCells = useMemo(() => containerEdges.size === 0 ? holderEdges
+    : new Map([...containerEdges, ...holderEdges]), [holderEdges, containerEdges])
+  const ancestorChains = useAncestorChains(showLineageFlow && !overlay.active, isContainmentEdge,
+    renderMap, promotedAnchors, chainedCells, unparented)
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
@@ -4343,22 +4465,21 @@ export function ContextViewCanvas({
     showLineageFlow, isTracing: overlay.active,
     traceContextSet, isContainmentEdge,
     suppressedAggEdgeKeys,
-    // Browse-mode bundling: kicks in only outside trace mode and only when
-    // edge density would otherwise overload the canvas. Walks endpoints up
-    // the containment chain in passes; collapses parent-pairs whose fan-in
-    // exceeds the threshold.
-    browseBundleEnabled,
+    // Delegation reads the containment parents to tell when an open
+    // container's line is covered by its children's lines.
     browseBundleParentMap: parentMap,
-    browseBundleFanInThreshold: lineageBundleFanIn,
     nodeLayerIndexMap,
     // Hiding a type is real: the projection drops those relationships per
     // group member. While the OVERLAY draws it is already fed EMPTY_EDGES,
     // and the trace's own hidden set is ephemeral, so browse's persisted
     // set has no say there.
     hiddenEdgeTypes: overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes,
-    // Chains already fetched stay cached, so switching the flag off must
-    // also stop them being USED.
-    ancestorChains: lineageRollup ? ancestorChains : undefined,
+    ancestorChains,
+    // An anchor is drawn as its column: lineage naming it is in the view.
+    promotedAnchors,
+    holderEdges: overlay.active ? NO_HOLDER_EDGES : extraCells,
+    // A view open to its whole data source holds every partner somewhere.
+    openScope: activeEntityScope === 'all',
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation
@@ -4469,21 +4590,29 @@ export function ContextViewCanvas({
     // (LineageNeighbors) falls back to raw `edges` when empty.
   }, [visibleLineageEdgesFingerprint, setVisibleEdges])
 
+  // The lines the canvas can draw. A line that stands aside for its
+  // children's finer ones (`isDelegated`) draws only while one of its ends is
+  // hovered, from the hover pool, so it takes no slot in a budget, adds to no
+  // count, and makes no ribbon or Flows row of its own.
+  const drawableLineageEdges = useMemo(
+    () => visibleLineageEdges.filter(e => !e.isDelegated),
+    [visibleLineageEdges],
+  )
+
   // Render-mode resolution: `raw` shows every projected edge; `stubs`
   // suppresses ambient edges in favour of per-node indicators (hover /
   // selection materializes); `auto` renders everything below
   // `autoStubThreshold` and switches to a BUDGETED presentation above it.
-  // The mode resolves identically in trace and browse — trace mode no
-  // longer bypasses the gate. Trace's focus-incident edges stay
-  // materialized via `effectiveLineageEdges` so the anchor is legible.
+  // A trace bypasses it: the walk already bounds its lines and every trace
+  // wire draws. Display › Edge Density says so.
   const isStubsMode = useMemo(() => {
     // Trace mode: the flow IS the point, and the walk budget already
     // bounds the edge count — every trace wire draws, no stub culling.
     if (overlay.active) return false
     if (lineageRenderMode === 'raw') return false
     if (lineageRenderMode === 'stubs') return true
-    return visibleLineageEdges.length > autoStubThreshold
-  }, [overlay.active, lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
+    return drawableLineageEdges.length > autoStubThreshold
+  }, [overlay.active, lineageRenderMode, drawableLineageEdges.length, autoStubThreshold])
 
   // The ambient budget ranks by `bySignificance` (lineDensity.ts): how many
   // lines a line replaces, never the weight it stands for.
@@ -4498,12 +4627,12 @@ export function ContextViewCanvas({
   // readable; SVG path count stays bounded regardless of graph size.
   const rankedAmbientEdges = useMemo(() => {
     if (!isStubsMode || lineageRenderMode !== 'auto') return null
-    return [...visibleLineageEdges].sort(bySignificance).slice(0, autoStubThreshold)
-  }, [isStubsMode, lineageRenderMode, visibleLineageEdges, autoStubThreshold])
+    return [...drawableLineageEdges].sort(bySignificance).slice(0, autoStubThreshold)
+  }, [isStubsMode, lineageRenderMode, drawableLineageEdges, autoStubThreshold])
 
   // Effective edge set passed to the renderer, plus the shown/total
-  // bookkeeping the status chips surface. Focus (selection / trace anchor)
-  // materializes incident edges in every stub-y mode, but a hub's fan is
+  // bookkeeping the status chips surface. Focus (every selected entity /
+  // trace anchor) materializes incident edges in every stub-y mode, but a hub's fan is
   // ALSO capped at the strongest `autoStubThreshold` — 650 curves at once is
   // noise; the Lineage Lens enumerates the full fan properly and the chip
   // points there. A HOVERED entity's lines follow the same rule, drawn by
@@ -4513,14 +4642,13 @@ export function ContextViewCanvas({
       return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
     }
     const ambient = rankedAmbientEdges ?? []
-    const ambientTotal = lineageRenderMode === 'auto' ? visibleLineageEdges.length : 0
-    const focusIds = new Set<string>()
-    if (selectedNodeId) focusIds.add(selectedNodeId)
+    const ambientTotal = lineageRenderMode === 'auto' ? drawableLineageEdges.length : 0
+    const focusIds = new Set<string>(selectedNodeIds)
     if (overlay.active && canvasTrace.tracedUrn) focusIds.add(urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
     if (focusIds.size === 0) {
       return { edges: ambient, ambientShown: ambient.length, ambientTotal, focusShown: 0, focusTotal: 0 }
     }
-    const focusAll = visibleLineageEdges.filter(e =>
+    const focusAll = drawableLineageEdges.filter(e =>
       focusIds.has(e.source) || focusIds.has(e.target)
     )
     const focus = focusAll.length > autoStubThreshold
@@ -4537,7 +4665,7 @@ export function ContextViewCanvas({
       focusShown: focus.length,
       focusTotal: focusAll.length,
     }
-  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
+  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeIds, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
   const effectiveLineageEdges = edgePresentation.edges
 
   // ── Fold distant layers (useLayerFold, layerFold.ts) ────────────────────
@@ -4621,64 +4749,197 @@ export function ContextViewCanvas({
     [sortedLayers],
   )
 
-  // An off-canvas stub's click: bring that row's partners onto the canvas, a
-  // batch at a time — the stub's count drops as they land, so the next click
-  // brings the next batch. Each is the drawer's reveal (its ancestors walked
-  // open) without the per-row scroll "Show all" does: a hundred scrolls in a
-  // row is a slideshow, not a reveal.
-  const bringInOffCanvas = useCallback(async (nodeId: string, side: 'in' | 'out') => {
-    const lineage = offCanvasByNode.get(nodeId)
-    const batch = lineage ? [...(side === 'out' ? lineage.outPartners : lineage.inPartners)].slice(0, BRING_IN_BATCH) : []
-    if (batch.length === 0) return
-    let next = 0
-    const worker = async () => {
-      while (next < batch.length) {
-        const id = batch[next++]
-        try { await revealOnCanvas(id, { skipFocus: true }) } catch { /* counted below */ }
+  // Selecting a card draws its lines, and a line needs a row at its far end.
+  // A partner that is a row of an anchored column past its loaded page — or,
+  // in a view open to its whole data source, past its type column's page —
+  // is in the view (the card's port says so) but has none, so selecting the
+  // card brings those partners in along their paths (useRevealPartners),
+  // quietly: there is nothing to announce, the lines just draw. With several cards
+  // selected, the partners of each, taken in turn so one card cannot use up
+  // the rest's share, strongest first where a container's own roll-ups say
+  // how many flows each stands for. At most REVEAL_PARTNERS_CAP per
+  // selection, whether they are placed at once or later, as their chains
+  // arrive (`partnersAskedRef` keeps count); never while a trace holds the
+  // canvas. A partner is done with once it has landed; one that missed (a
+  // read shed, a timeout) is asked once more, after lookupRetryDelayMs, and
+  // then left for the next selection.
+  const revealPartners = useRevealPartners({
+    provider,
+    setExpandedNodes,
+    markFirstPageHandled,
+    chainOf: (urn) => ancestorChains?.get(urn),
+    isVisible: isDrawnRow,
+    isAnchor: (urn) => promotedAnchors.has(urn),
+    openScope: activeEntityScope === 'all',
+    containmentEdgeTypes,
+    lineageEdgeTypes,
+  })
+  useEffect(() => { revealPartnersRef.current = revealPartners })
+  // Per selection: the partners done with, out now, and missed once (held
+  // back until their wait is up).
+  const partnersAskedRef = useRef({
+    selection: '', asked: new Set<string>(), out: new Set<string>(), waiting: new Set<string>(), missedOnce: new Set<string>(),
+  })
+  const [partnerRetryDue, setPartnerRetryDue] = useState(0)
+  const partnerTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>())
+  useEffect(() => {
+    const timers = partnerTimersRef.current
+    return () => timers.forEach(clearTimeout)
+  }, [])
+  useEffect(() => {
+    const selection = selectedNodeIds.join('\n')
+    if (partnersAskedRef.current.selection !== selection) {
+      partnersAskedRef.current = { selection, asked: new Set(), out: new Set(), waiting: new Set(), missedOnce: new Set() }
+    }
+    const round = partnersAskedRef.current
+    const { asked, out, waiting } = round
+    if (selectedNodeIds.length === 0 || traceWriteLocked()) return
+    const strength = new Map<string, number>()
+    containerEdges.forEach(c => {
+      for (const end of [c.sourceUrn, c.targetUrn]) strength.set(end, Math.max(strength.get(end) ?? 0, c.edgeCount))
+    })
+    const each = selectedNodeIds.map(id => {
+      const lineage = offCanvasByNode.get(id)
+      return [...(lineage?.columns.values() ?? [])]
+        .flatMap(flows => [...flows.inPartners, ...flows.outPartners])
+        .concat([...(lineage?.unknownPartners ?? [])])
+        .sort((a, b) => (strength.get(b) ?? 0) - (strength.get(a) ?? 0))
+    })
+    const batch = new Set<string>()
+    const held = (partner: string) => asked.has(partner) || out.has(partner) || waiting.has(partner)
+    const room = () => asked.size + out.size + waiting.size + batch.size < REVEAL_PARTNERS_CAP
+    for (let i = 0; room() && each.some(partners => i < partners.length); i++) {
+      for (const partners of each) {
+        if (i < partners.length && room() && !held(partners[i])) batch.add(partners[i])
       }
     }
-    await Promise.all(Array.from({ length: Math.min(6, batch.length) }, worker))
-    const loaded = new Set(useCanvasStore.getState().nodes.map(n => n.id))
-    const landed = batch.filter(id => loaded.has(id))
-    if (landed.length < batch.length) {
-      useNotificationStore.getState().add({
-        type: landed.length === 0 ? 'error' : 'warning',
-        message: landed.length === 0
-          ? `Couldn't bring any of those ${batch.length} entities onto the canvas`
-          : `Brought ${landed.length} of ${batch.length} entities onto the canvas — the rest could not be placed`,
+    if (batch.size === 0) return
+    batch.forEach(partner => out.add(partner))
+    void revealPartners([...batch])
+      .catch(() => ({ landed: [] as string[], missed: [...batch] }))
+      .then(({ landed, missed }) => {
+        batch.forEach(partner => out.delete(partner))
+        landed.forEach(partner => asked.add(partner))
+        const again = missed.filter(partner => !round.missedOnce.has(partner))
+        missed.forEach(partner => { if (round.missedOnce.has(partner)) asked.add(partner) })
+        if (again.length === 0) return
+        again.forEach(partner => { round.missedOnce.add(partner); waiting.add(partner) })
+        const timer = setTimeout(() => {
+          partnerTimersRef.current.delete(timer)
+          again.forEach(partner => waiting.delete(partner))
+          setPartnerRetryDue(n => n + 1)
+        }, lookupRetryDelayMs(1))
+        partnerTimersRef.current.add(timer)
       })
-    }
-    // Show where they went only when none of them landed in sight: the
-    // batch can take seconds, and a scroll that arrives after the reader has
-    // moved on takes them somewhere they did not ask to go.
-    const box = horizontalScrollRef.current?.getBoundingClientRect()
-    const inSight = box && landed.some(id => {
-      const r = paintedRow(id)?.getBoundingClientRect()
-      return r && r.bottom > box.top && r.top < box.bottom && r.right > box.left && r.left < box.right
-    })
-    if (landed[0] && !inSight) scrollHitIntoView(landed[0])
-  }, [offCanvasByNode, revealOnCanvas, scrollHitIntoView])
+  }, [selectedNodeIds, offCanvasByNode, revealPartners, traceWriteLocked, containerEdges, partnerRetryDue])
 
-  // The panel reads the SAME array the overlay is handed, so "in view"
-  // means post-budget and the drawn set is a subset of the model.
+  // What each closed logical group on the canvas stands for: its members,
+  // through the groups nested in it, each to the group's row. A group is no
+  // entity and has no flows of its own, so selecting one acts through them:
+  // its leaf members are read (below), its container members asked for
+  // their roll-ups (the container effect further down).
+  const closedGroupOf = useMemo(() => {
+    const rowOf = new Map<string, string>()
+    for (const id of drawnRows) {
+      const group = renderMap.get(id)
+      if (!group?.isLogical || expandedForRender.has(id)) continue
+      const stack = [...group.children]
+      while (stack.length > 0) {
+        const member = stack.pop()!
+        if (member.isLogical) stack.push(...member.children)
+        else rowOf.set(member.id, id)
+      }
+    }
+    return rowOf
+  }, [drawnRows, renderMap, expandedForRender])
+
+  // A leaf row the view opened with never read its own flows: a first page
+  // arrives with the view, and only a page loaded through loadChildren reads
+  // them (useGraphHydration). The store then holds none of its flows to rows
+  // past another column's page, and selecting it had no partner to bring
+  // in. Selecting a leaf, or a closed group holding it, reads them, once per
+  // graph: their far ends get their places (useAncestorChains), and the
+  // effect above brings in the rows among them. A container's lineage is its
+  // descendants', not its own flows, so a container is not read here.
+  //
+  // A leaf is read once its read has landed, and keeps the flows it landed:
+  // one a collapse since pruned is read again. A read that failed is asked
+  // again when the leaf is selected again, not while it stays selected.
+  // `turn` counts selections; a failed read notes the one it failed in.
+  const primedOnSelectRef = useRef({
+    generation: -1, selection: '', turn: 0,
+    read: new Map<string, string[]>(), reading: new Set<string>(), failed: new Map<string, number>(),
+  })
+  useEffect(() => {
+    if (traceWriteLocked()) return
+    const { graphGeneration } = useCanvasStore.getState()
+    const selection = selectedNodeIds.join('\n')
+    if (primedOnSelectRef.current.generation !== graphGeneration) {
+      primedOnSelectRef.current = { generation: graphGeneration, selection, turn: 0, read: new Map(), reading: new Set(), failed: new Map() }
+    }
+    const round = primedOnSelectRef.current
+    if (round.selection !== selection) { round.selection = selection; round.turn += 1 }
+    const { read, reading, failed } = round
+    const edgeIndex = useCanvasStore.getState()._edgeIndex
+    const selected = new Set(selectedNodeIds)
+    const members = [...closedGroupOf].filter(([, row]) => selected.has(row)).map(([member]) => member)
+    const leaves = [...selectedNodeIds.filter(id => drawnRows.has(id)), ...members].filter(id => {
+      const node = displayMap.get(id)
+      return !reading.has(id) && failed.get(id) !== round.turn
+        && !read.get(id)?.every(e => edgeIndex.has(e))
+        && !!node && !id.startsWith('logical:')
+        && node.children.length === 0 && !(Number(node.data?.childCount) > 0)
+    }).slice(0, REVEAL_PARTNERS_CAP)
+    if (leaves.length === 0) return
+    leaves.forEach(id => reading.add(id))
+    const asked = new Set(leaves)
+    const turn = round.turn
+    const missed = (ids: readonly string[]) => ids.forEach(id => failed.set(id, turn))
+    void primeLineageFor(provider, leaves, lineageEdgeTypes, containmentEdgeTypes)
+      .then(({ edges: flows, partial, failed: lost }) => {
+        // Not for a graph since replaced, nor on a row removed meanwhile.
+        const store = useCanvasStore.getState()
+        if (store.graphGeneration !== graphGeneration) return
+        const kept = flows.filter(e =>
+          [e.source, e.target].every(end => !asked.has(end) || store._nodeIndex.has(end)))
+        if (kept.length > 0) store.addGraph([], kept)
+        store.markLineagePartial(partial)
+        const landed = useCanvasStore.getState()._edgeIndex
+        const notRead = new Set(lost)
+        missed(lost)
+        for (const id of leaves) {
+          if (!notRead.has(id)) read.set(id, kept.filter(e => (e.source === id || e.target === id) && landed.has(e.id)).map(e => e.id))
+        }
+      })
+      .catch(e => {
+        missed(leaves)
+        console.warn('[select] lineage priming failed', e)
+      })
+      .finally(() => leaves.forEach(id => reading.delete(id)))
+  }, [selectedNodeIds, closedGroupOf, displayMap, drawnRows, provider, lineageEdgeTypes, containmentEdgeTypes, traceWriteLocked])
+
+  // The panel lists every line the canvas can draw — not the budgeted
+  // subset the overlay is handed, which in On Hover is empty until something
+  // is hovered — minus lines that stand aside for finer ones. Hovering or
+  // pinning a row draws its lines from the hover pool (LineageFlowOverlay).
   const connectionModel = useMemo(
-    () => buildConnectionModel(effectiveLineageEdges),
-    [effectiveLineageEdges]
+    () => buildConnectionModel(drawableLineageEdges),
+    [drawableLineageEdges]
   )
 
   // Flow ribbons — macro volume per (layer → layer) pair, aggregated over
-  // EVERY projected edge (not just the budgeted subset) so the bands show
+  // EVERY drawable line (not just the budgeted subset) so the bands show
   // the true totals the budget summarizes. Only in Adaptive's summarized
   // state; user-toggleable.
   const flowRibbons = useMemo(() => {
     if (!showFlowRibbons || !isStubsMode || lineageRenderMode !== 'auto') return undefined
     const ribbons = aggregateFlowRibbons(
-      visibleLineageEdges,
+      drawableLineageEdges,
       nodeLayerMap,
       sortedLayers.map(l => l.id),
     )
     return ribbons.length > 0 ? ribbons : undefined
-  }, [showFlowRibbons, isStubsMode, lineageRenderMode, visibleLineageEdges, nodeLayerMap, sortedLayers])
+  }, [showFlowRibbons, isStubsMode, lineageRenderMode, drawableLineageEdges, nodeLayerMap, sortedLayers])
 
   // Edges whose drill-down is in flight — match by `${sourceUrn}->${targetUrn}`
   // against `trace.expandingPairs`. The renderer pulses these so the
@@ -4701,24 +4962,72 @@ export function ContextViewCanvas({
     return ids
   }, [trace.expandingPairs, effectiveLineageEdges, displayMap])
 
+  // ── Total lineage per entity — "no lineage" vs "lineage elsewhere".
+  // Degrees over the whole graph, fetched per hydration settle for every
+  // view: each card's lineage ports read them (lineagePorts.ts), so a card
+  // whose lineage no line shows yet still shows it. Absent totals mean
+  // UNKNOWN, never a false "no lineage" claim. A card whose count FAILED
+  // says so on its ports until the hook's retry counts it.
+  const { totals: externalDegrees, failed: degreeFailures, uncountable } = useExternalDegrees(showLineageFlow)
+  // What the ports read (portTotals): a container's roll-up cells only while
+  // it is closed, and a closed logical group's members summed.
+  const { totals: lineagePortTotals, failed: lineagePortUnknown } = useMemo(() =>
+    portTotals([...renderByLayer.values()].flat(), externalDegrees, degreeFailures,
+      id => expandedForRender.has(id)),
+  [renderByLayer, externalDegrees, degreeFailures, expandedForRender])
+
   // Per-node lineage counts. Drives the in/out indicators on each entity
   // card — computed in EVERY render mode so a node always communicates
   // "has lineage in/out" vs "has none" (full ribbons in stubs mode, a
-  // quiet tab otherwise; see LineageFlowOverlay). Counts come from the
-  // full projected set (not the hover-filtered slice) so the markers
+  // quiet tab otherwise; see LineageFlowOverlay). Counts come from every
+  // drawable line (not the hover-filtered slice) so the markers
   // reflect the entity's true lineage volume regardless of which edges
   // happen to be materialized for the current hover.
   // Where each card's lines plug in, by side and direction — its lineage
-  // ports (lineagePorts.ts). Sides follow the columns' left-to-right order,
-  // exactly as lineRoute.ts attaches the lines themselves.
-  const nodePorts = useMemo(
-    () => buildNodePorts(visibleLineageEdges, (id) => nodeLayerIndexMap.get(id)),
-    [visibleLineageEdges, nodeLayerIndexMap],
-  )
+  // ports (lineagePorts.ts). Which side marks what is the reader's setting
+  // (lineagePortSides): incoming left and outgoing right, the default, or
+  // where the lines attach — the columns' left-to-right order, exactly as
+  // lineRoute.ts attaches the lines themselves. Lineage into an anchored
+  // column's rows that are not drawn is in the view too: it plugs in as a
+  // line to that column (unloadedColumnLines). Lineage whose far end has no
+  // known place yet (unplacedLines), or read only in part (partialLines: a
+  // row's flows, or a selected container's roll-ups, or a closed
+  // container's not read yet), is held: solid on the conventional side,
+  // never hollow. Browse only, as the stubs are — a trace's wires are its
+  // own, and so are its columns: its lanes (traceLaneIndex). The browse
+  // layers hold none of the cards a walk brought in; read against them,
+  // every trace wire took incoming left, outgoing right, whatever the
+  // setting.
+  const lineagePartial = useCanvasStore((s) => s.lineagePartial)
+  const lineagePortSides = usePreferencesStore((s) => s.lineagePortSides) ?? 'direction'
+  const nodePorts = useMemo(() => {
+    const layerOrdinal = new Map(sortedLayers.map((l, i) => [l.id, i]))
+    // A closed group's member holds it on the group's row.
+    const heldOn = (ids: ReadonlySet<string>) => new Set([...ids].map(id => closedGroupOf.get(id) ?? id))
+    // A closed container with no flow of its own one way, whose roll-up
+    // cells say it has lineage that way, is held until its own roll-ups
+    // that way are read: flows placed outside before then may be only some.
+    const unread = { in: new Set<string>(), out: new Set<string>() }
+    lineagePortTotals.forEach((t, id) => {
+      if (id.startsWith('logical:')) return
+      if (t.in === 0 && (t.rollupIn ?? 0) > 0 && !containerRead.in.has(id)) unread.in.add(id)
+      if (t.out === 0 && (t.rollupOut ?? 0) > 0 && !containerRead.out.has(id)) unread.out.add(id)
+    })
+    return buildNodePorts(
+      overlay.active ? visibleLineageEdges
+        : [...visibleLineageEdges, ...unloadedColumnLines(offCanvasByNode), ...unplacedLines(offCanvasByNode),
+          ...partialLines(lineagePartial), ...partialLines({ in: heldOn(containerPartial.in), out: heldOn(containerPartial.out) }),
+          ...partialLines({ in: heldOn(unread.in), out: heldOn(unread.out) })],
+      overlay.active ? (id) => traceLaneIndex.get(id)
+        : (id) => nodeLayerIndexMap.get(id) ?? layerOrdinal.get(columnEndLayer(id) ?? ''),
+      lineagePortSides,
+    )
+  }, [visibleLineageEdges, overlay.active, offCanvasByNode, lineagePartial, containerPartial, containerRead, lineagePortTotals,
+    closedGroupOf, nodeLayerIndexMap, sortedLayers, lineagePortSides, traceLaneIndex])
 
   const nodeStubCounts = useMemo(() => {
     const counts = new Map<string, { in: number; out: number }>()
-    for (const e of visibleLineageEdges) {
+    for (const e of drawableLineageEdges) {
       const s = counts.get(e.source) ?? { in: 0, out: 0 }
       s.out++
       counts.set(e.source, s)
@@ -4727,7 +5036,7 @@ export function ContextViewCanvas({
       counts.set(e.target, t)
     }
     return counts
-  }, [visibleLineageEdges])
+  }, [drawableLineageEdges])
 
   // The entities with the most lineage on the canvas — the Adaptive guide
   // names them, each one click from all of its lines. Only while Adaptive is
@@ -4965,91 +5274,129 @@ export function ContextViewCanvas({
   // anchors the focus edges to the chip rects. Chip click reuses the
   // reveal mechanism (per-partner Frame); the "+N more" overflow routes
   // to the Lens — the full, searchable list.
-  // ── Total lineage per entity — "no lineage" vs "lineage elsewhere".
-  // Degrees over the whole graph, fetched per hydration settle for every
-  // view: each card's lineage ports read them (lineagePorts.ts), so a card
-  // whose lineage all leads to entities not on this canvas still shows it.
-  // In a CURATED view they also drive the "outside this view" cue: external
-  // = total − internal(loaded). Absent totals mean UNKNOWN → no cue, never
-  // a false "no lineage" claim.
-  const externalDegrees = useExternalDegrees(showLineageFlow)
-  const showExternalCue = activeEntityScope === 'curated' && showMissingConnectionIndicators
-  // Ambient per-node cue: external = total − internal(loaded), for every
-  // loaded node with a KNOWN total. One O(E) pass builds internal
-  // degrees; nodes absent from externalDegrees stay absent here
-  // (unknown ≠ zero). Empty map when the feature is off — the overlay
-  // renders nothing.
-  const externalCueByNode = useMemo(() => {
-    const cue = new Map<string, { in: number; out: number }>()
-    if (!showExternalCue || externalDegrees.size === 0) return cue
-    const lineageTypeSet = new Set(lineageEdgeTypes)
-    const internal = new Map<string, { in: number; out: number }>()
-    for (const e of edges) {
-      const t = (e.data?.edgeType as string) || ''
-      if (lineageTypeSet.size > 0 && !lineageTypeSet.has(t)) continue
-      const s = internal.get(e.source) ?? { in: 0, out: 0 }
-      s.out++; internal.set(e.source, s)
-      const tg = internal.get(e.target) ?? { in: 0, out: 0 }
-      tg.in++; internal.set(e.target, tg)
+  // Selecting a collapsed container draws its lines. Its lineage is its
+  // rows', and the canvas asks for roll-ups only among the rows it draws and
+  // those it holds past a page: one whose partners are rows past another
+  // column's page that no holder cell names, or rows inside a closed row,
+  // had lineage and no line. So for a selected container drawn closed, with
+  // lineage one way that its drawn lines do not account for — none drawn,
+  // flows into a column that names no row, lineage held, or more of its own
+  // flows counted than drawn — the canvas asks for all of its roll-ups that
+  // way (useContainerRollups). The projection places their far ends, and the
+  // partner reveal above brings in the rows of other columns among them.
+  // On a reader that cannot count (a branch), nothing says a container has
+  // lineage, and selecting it is how to find out: it asks both ways. A
+  // closed group selected asks for its container members, each on its own
+  // counts: their lines are the group's. Each way of each container once per
+  // selection; one opened, or gone, takes its cells. Never while a trace
+  // holds the canvas. A cell to what the
+  // container holds or what holds it, as far as the canvas knows (loaded
+  // containment, chains it has), is dropped before its end is asked about.
+  const containerAskedRef = useRef<{ selection: string; asked: Set<string> }>({ selection: '', asked: new Set() })
+  const containmentRef = useRef({ parentMap, ancestorChains })
+  useEffect(() => { containmentRef.current = { parentMap, ancestorChains } })
+  useEffect(() => {
+    const selection = selectedNodeIds.join('\n')
+    if (containerAskedRef.current.selection !== selection) {
+      containerAskedRef.current = { selection, asked: new Set() }
     }
-    externalDegrees.forEach((total, urn) => {
-      const loc = internal.get(urn) ?? { in: 0, out: 0 }
-      const exIn = Math.max(0, total.in - loc.in)
-      const exOut = Math.max(0, total.out - loc.out)
-      if (exIn + exOut > 0) cue.set(urn, { in: exIn, out: exOut })
-    })
-    return cue
-  }, [showExternalCue, externalDegrees, edges, lineageEdgeTypes])
+    const { asked } = containerAskedRef.current
+    const closedContainer = (id: string) => {
+      const node = displayMap.get(id)
+      return !!node && !expandedNodes.has(id) && !id.startsWith('logical:')
+        && (node.children.length > 0 || Number(node.data?.childCount) > 0)
+    }
+    // Drawn closed, or folded into a closed group on the canvas.
+    const heldClosed = (id: string) => closedContainer(id) && (drawnRows.has(id) || closedGroupOf.has(id))
+    const asks = { out: [] as string[], in: [] as string[] }
+    const picked = new Set(selectedNodeIds)
+    const selected = traceWriteLocked() ? [] : [
+      ...selectedNodeIds.filter(id => drawnRows.has(id) && closedContainer(id)),
+      ...[...closedGroupOf].filter(([member, row]) => picked.has(row) && closedContainer(member)).map(([member]) => member),
+    ]
+    if (selected.length > 0) {
+      // The flows each card's drawn lines stand for, per way.
+      const drawn = { in: new Map<string, number>(), out: new Map<string, number>() }
+      const add = (way: 'in' | 'out', id: string, n: number) => drawn[way].set(id, (drawn[way].get(id) ?? 0) + n)
+      for (const e of drawableLineageEdges) {
+        const n = Number(e.edgeCount) || 1
+        add('out', e.source, n)
+        add('in', e.target, n)
+        if (e.isBidirectional) { add('in', e.source, n); add('out', e.target, n) }
+      }
+      for (const id of selected) {
+        const urn = displayMap.get(id)?.urn || id
+        const total = lineagePortTotals.get(id)
+        const ports = nodePorts.get(id)
+        const outside = offCanvasByNode.get(id)
+        for (const way of ['out', 'in'] as const) {
+          const evidence = (total?.[way] ?? 0) + ((way === 'in' ? total?.rollupIn : total?.rollupOut) ?? 0)
+            + (ports ? ports.left[way] + ports.right[way] + ports.held[way] : 0) + (outside?.[way] ?? 0)
+          const drawnFlows = drawn[way].get(id) ?? 0
+          const undrawn = drawnFlows === 0 ? evidence > 0 || uncountable
+            : [...(outside?.columns.values() ?? [])].some(flows => flows[way] > 0)
+              || (ports?.held[way] ?? 0) > 0 || (total?.[way] ?? 0) > drawnFlows
+          const key = `${way}\n${urn}`
+          if (!undrawn || asked.has(key)) continue
+          asked.add(key)
+          asks[way].push(urn)
+        }
+      }
+    }
+    const inside = (container: string, far: string) => {
+      const { parentMap: parents, ancestorChains: chains } = containmentRef.current
+      const up = (end: string) => containmentUpPath(end, parents, chains)
+      return up(far).includes(container) || up(container).includes(far)
+    }
+    void fetchContainerRollups(asks, urn => heldClosed(urnToIdMap.get(urn) ?? urn), inside)
+  }, [selectedNodeIds, displayMap, drawnRows, expandedNodes, closedGroupOf, drawableLineageEdges, lineagePortTotals, nodePorts,
+    offCanvasByNode, uncountable, urnToIdMap, fetchContainerRollups, traceWriteLocked])
 
+  // The curated "outside this view" cue on each card, and the selected
+  // card's chip: the flows the projection PLACED outside the view
+  // (offCanvasByNode), never a total less the edges loaded — a partner past
+  // a page, or inside the card, is not loaded and is in the view.
+  const showExternalCue = activeEntityScope === 'curated' && showMissingConnectionIndicators
   const selectedExternalLineage = useMemo(() => {
-    if (!showExternalCue || !selectedNodeId) return null
-    const total = externalDegrees.get(selectedNodeId)
-    if (!total) return null
-    const lineageTypeSet = new Set(lineageEdgeTypes)
-    let inLoaded = 0
-    let outLoaded = 0
-    for (const e of edges) {
-      const t = (e.data?.edgeType as string) || ''
-      if (lineageTypeSet.size > 0 && !lineageTypeSet.has(t)) continue
-      if (e.source === selectedNodeId) outLoaded++
-      else if (e.target === selectedNodeId) inLoaded++
-    }
-    const exIn = Math.max(0, total.in - inLoaded)
-    const exOut = Math.max(0, total.out - outLoaded)
-    return exIn + exOut > 0 ? { in: exIn, out: exOut } : null
-  }, [showExternalCue, selectedNodeId, externalDegrees, edges, lineageEdgeTypes])
+    const outside = showExternalCue && selectedNodeId ? offCanvasByNode.get(selectedNodeId) : undefined
+    return outside && outside.in + outside.out > 0 ? { in: outside.in, out: outside.out } : null
+  }, [showExternalCue, selectedNodeId, offCanvasByNode])
 
   // ── External lineage PREVIEW (feature-flagged) — the guided
-  // click-through: fetch ONE node's out-of-scope partners on demand
-  // (bounded: two edge queries + one name lookup) and show them in the
-  // Lens, badged. Nothing enters the canvas store — a preview must
-  // never mutate a curated view's scope.
+  // click-through: list ONE node's out-of-scope partners on demand
+  // (bounded: one name lookup) and show them in the Lens, badged.
+  // Nothing enters the canvas store — a preview must never mutate a
+  // curated view's scope.
   const externalLineagePreview = usePreferencesStore((s) => s.externalLineagePreview)
   const [externalPreview, setExternalPreview] = useState<{
     nodeId: string
     loading: boolean
     records: Array<{ urn: string; label: string; direction: 'in' | 'out'; edgeType: string }>
   } | null>(null)
-  const handlePreviewExternal = useCallback(async () => {
-    const urn = selectedNodeId
+  const handlePreviewExternal = useCallback(async (target?: string) => {
+    const urn = target ?? selectedNodeId
     if (!urn) return
     setExternalPreview({ nodeId: urn, loading: true, records: [] })
     openLens(urn)
     try {
-      const types = lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined
-      const [outEdges, inEdges] = await Promise.all([
-        provider.getEdges({ sourceUrns: [urn], edgeTypes: types, limit: 200 }),
-        provider.getEdges({ targetUrns: [urn], edgeTypes: types, limit: 200 }),
-      ])
-      const loaded = new Set(useCanvasStore.getState().nodes.map(n => n.id))
-      const partners = new Map<string, { direction: 'in' | 'out'; edgeType: string }>()
-      for (const e of outEdges) {
-        const p = e.targetUrn
-        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'out', edgeType: e.edgeType ?? '' })
-      }
-      for (const e of inEdges) {
-        const p = e.sourceUrn
-        if (p && p !== urn && !loaded.has(p) && !partners.has(p)) partners.set(p, { direction: 'in', edgeType: e.edgeType ?? '' })
+      // The partners are the far ends the projection placed outside, not
+      // the node's own edges read again: a row of an anchored column past
+      // its loaded page is not loaded, and is in the view; a partner with no
+      // place yet is not listed either; and a closed container's partners
+      // are its rows', which only its roll-ups name.
+      const outside = offCanvasByNode.get(urn)
+      const partners = new Map<string, 'in' | 'out'>()
+      outside?.outPartners.forEach(p => partners.set(p, 'out'))
+      outside?.inPartners.forEach(p => { if (!partners.has(p)) partners.set(p, 'in') })
+      // The badge is the type of the node's own flow to a partner, from one
+      // pass over the store; a partner only a roll-up names has none.
+      const edgeTypes = new Map<string, string>()
+      for (const e of useCanvasStore.getState().edges) {
+        const way = e.source === urn ? 'out' : e.target === urn ? 'in' : undefined
+        const p = way === 'out' ? e.target : e.source
+        if (!way || partners.get(p) !== way || edgeTypes.has(p)) continue
+        const type = normalizeEdgeType(e)
+        if (!isContainmentEdge(type) && type !== 'AGGREGATED' && !e.data?.isAggregated) edgeTypes.set(p, type)
       }
       const partnerUrns = [...partners.keys()].slice(0, 100)
       const named = partnerUrns.length > 0
@@ -5062,15 +5409,24 @@ export function ContextViewCanvas({
         records: partnerUrns.map(p => ({
           urn: p,
           label: labelByUrn.get(p) || p.split(':').pop() || p,
-          direction: partners.get(p)!.direction,
-          edgeType: partners.get(p)!.edgeType,
+          direction: partners.get(p)!,
+          edgeType: edgeTypes.get(p) ?? '',
         })),
       })
     } catch {
       // Preview is advisory — fail closed to "no preview", never block the lens.
       setExternalPreview({ nodeId: urn, loading: false, records: [] })
     }
-  }, [selectedNodeId, lineageEdgeTypes, provider, openLens])
+  }, [selectedNodeId, provider, openLens, offCanvasByNode, isContainmentEdge])
+
+  // A stub's click. Its lineage leaves the view, so there is nothing to bring
+  // in: the Focus Lens on its row shows where it goes — with the external
+  // preview's partners badged, when that is on. Declared below both, which a
+  // callback naming them must be.
+  const openOffCanvasInLens = useCallback((nodeId: string) => {
+    if (externalLineagePreview) void handlePreviewExternal(nodeId)
+    else openLens(nodeId)
+  }, [externalLineagePreview, handlePreviewExternal, openLens])
 
   // The Anchor Rail — the focused entity's off-screen partners as chips in
   // their columns — is decided by the overlay (the selection at once, a
@@ -5141,7 +5497,7 @@ export function ContextViewCanvas({
 
   // Highlight state: connected nodes/edges for selected node
   const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
-    selectedNodeId, visibleLineageEdges: effectiveLineageEdges,
+    selectedNodeId, selectedNodeIds, visibleLineageEdges: effectiveLineageEdges,
     isTracing: traceActive, displayMap, childMap,
   })
 
@@ -5179,10 +5535,21 @@ export function ContextViewCanvas({
 
   const clearSelection = useCanvasStore((s) => s.clearSelection)
 
+  // A click on a line opens what it stands for in the relationship drawer —
+  // resolved NOW, against the lines as drawn, because a line's id does not
+  // outlive the next expand, drill or filter.
+  const handleEdgeClick = useCallback((lineId: string) => {
+    const line = visibleLineageEdges.find(e => e.id === lineId)
+    if (!line) return
+    const { edges: storeEdges, openEdgeDrawer } = useCanvasStore.getState()
+    selectEdge(lineId)
+    openEdgeDrawer(targetFromLine(line as DrawnLine, (id) => storeEdges.find(e => e.id === id)))
+  }, [visibleLineageEdges, selectEdge])
+
   // Drill-down: double-click an AGGREGATED edge to fetch finer-level lineage
   // between the two ancestors and merge it into the canvas. The trace store
   // tracks each drilldown by `${sourceUrn}->${targetUrn}@${atLevel}` so collapse
-  // can revert. Single-click still selects/opens the EdgeDetailPanel.
+  // can revert. Single-click opens the relationship drawer (handleEdgeClick).
   const handleEdgeDoubleClick = useCallback(async (edgeId: string) => {
     // Resolve the bundle from the projected edges first — bundle ids look
     // like `bundle-${sourceId}->${targetId}` and are not in the canvas
@@ -5200,7 +5567,7 @@ export function ContextViewCanvas({
     // browse and trace mode for client-side bundles — the trace AGGREGATED
     // server drill (Path 2) only kicks in when the bundle itself is the
     // server-returned AGG edge.
-    if (bundle && (bundle.isBrowseBundle || bundle.isBundled)) {
+    if (bundle && bundle.isBundled) {
       const isServerAgg = bundle.isAggregated  // backed by server AGGREGATED edge
       if (!isServerAgg || !trace.isTracing) {
         // Resolve against what is ON SCREEN: during a trace the rows and the
@@ -5217,6 +5584,14 @@ export function ContextViewCanvas({
           && (((trySource.data?.childCount as number) ?? trySource.children?.length ?? 0) > 0)
         const targetHasChildren = !!tryTarget && !openNow.has(bundle.target)
           && (((tryTarget.data?.childCount as number) ?? tryTarget.children?.length ?? 0) > 0)
+        if (sourceHasChildren || targetHasChildren) {
+          // The two clicks of this double-click opened the drawer on the line
+          // being drilled. The drill replaces that line — don't leave its drawer behind.
+          const open = useCanvasStore.getState().drawerEdge
+          if (open && (open.kind === 'connection' ? open.id : open.lineId) === edgeId) {
+            useCanvasStore.getState().closeNodeDrawer()
+          }
+        }
         if (sourceHasChildren) await toggleNode(bundle.source)
         if (targetHasChildren) await toggleNode(bundle.target)
         // If neither side had unrevealed children, fall through and let the
@@ -5275,6 +5650,13 @@ export function ContextViewCanvas({
   // config — ontology-agnostic.
   const buildTypeLayerMapMemo = useMemo(() => buildTypeLayerMap(sortedLayers), [sortedLayers])
 
+  // The drawers are memoised: what this canvas hands them must keep its identity across renders.
+  const drawerTraceUp = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'up'), [startCanvasTrace])
+  const drawerTraceDown = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'down'), [startCanvasTrace])
+  const drawerFullTrace = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'both'), [startCanvasTrace])
+  const drawerLocateMany = useCallback((ids: string[]) => { void locateManyOnCanvas(ids) }, [locateManyOnCanvas])
+  const drawerStartEditing = canManage && versioningEnabled && canEnterEdit && editModeEnabled && !traceActive ? handleEnterEdit : undefined
+
   return (
     <div
       data-trace-active={traceActive ? 'true' : 'false'}
@@ -5315,7 +5697,7 @@ export function ContextViewCanvas({
         showLineageFlow={showLineageFlow}
         onToggleLineageFlow={() => setShowLineageFlow(!showLineageFlow)}
         showEdgeDirection={showEdgeDirection}
-        onToggleEdgeDirection={() => setShowEdgeDirection(v => !v)}
+        onToggleEdgeDirection={toggleEdgeDirection}
         lineageRenderMode={lineageRenderMode}
         onSetLineageRenderMode={setLineageRenderMode}
         traceActive={traceActive}
@@ -5454,12 +5836,31 @@ export function ContextViewCanvas({
             <span>{catchUpMessage(projectionCatchUp.commitsBehind)}</span>
           </div>
         )}
+        {/* Summaries banner — ONE, and plain: the lines between collapsed
+            items come from summaries the source builds, and without them a
+            collapsed item shows no line and nothing says why. Opening an
+            item is what the reader can do; building them is the source's
+            job, so there is no button. */}
+        {summariesGap && (
+          <div
+            data-canvas-interactive
+            data-testid="canvas-summaries-banner"
+            role="status"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 dark:text-amber-400 text-xs flex items-center gap-2 z-20"
+          >
+            {summariesGap === 'missing'
+              ? 'Connections between collapsed items haven’t been summarised for this source yet — open an item to see the connections inside it.'
+              : 'Some connections between collapsed items could not be summarised — open an item to see them.'}
+          </div>
+        )}
         {/* Aggregation truncation banner — backend signal that the visible
             edge set was capped. The "computing" and "last computed Xh ago"
             banners were removed: the materialization-triggered flag was
             sticky after first paint and the staleness banner fired even
-            for fresh aggregations. Trust the data already on canvas. */}
-        {((aggregationTruncated && !projectionCatchUp.catchingUp && !readPressure) || edgesTruncated) && (
+            for fresh aggregations. Trust the data already on canvas. Only
+            for a cap on the answer's size: an answer short for a reason the
+            banners above name is not helped by narrowing. */}
+        {((aggregationTruncated && !projectionCatchUp.catchingUp && !readPressure && !summariesGap) || edgesTruncated) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
@@ -5544,7 +5945,9 @@ export function ContextViewCanvas({
             swallowed to keep nodes rendering; the canvas may be missing
             relationships. That fetch is the RAW one, structural edges
             included, so the banner uses the covering word rather than
-            "flows". Retry re-hydrates and refetches aggregated edges. */}
+            "flows". Retry refetches the edges among what is loaded, and
+            the roll-ups still missing only when those are what failed —
+            which is only once their own retries have run out. */}
         {(edgeFetchFailures > 0 || aggregationError) && (
           <div
             data-canvas-interactive
@@ -5554,9 +5957,8 @@ export function ContextViewCanvas({
             <button
               className="ml-auto px-2 py-0.5 rounded-md border border-amber-500/40 font-semibold hover:bg-amber-500/10 transition-colors"
               onClick={() => {
-                clearEdgeFetchFailures()
-                invalidateAggregatedEdges()
-                retryHydration()
+                if (aggregationError) void retryAggregated()
+                if (edgeFetchFailures > 0) void retryEdges()
               }}
             >
               Retry
@@ -5707,19 +6109,34 @@ export function ContextViewCanvas({
                   ? `Nothing was saved. ${problems[0].reason}`
                   : `Nothing was saved. ${problems.length} changes need attention.`,
                   { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
+              } else if (e instanceof MergeConflictError && Object.keys(e.current).length > 0) {
+                // Refused as a whole: someone else changed fields these edits change. Put each
+                // conflict on its change — with the current value — for the user to settle there.
+                const n = markConflicts(e) || e.conflicts.length
+                useStagedChangesStore.getState().openReviewPanel()
+                notify('error', `Nothing was saved — ${n === 1 ? 'a change conflicts' : `${n} changes conflict`} with edits made since you opened ${n === 1 ? 'it' : 'them'}.`,
+                  { label: 'Review', onClick: () => useStagedChangesStore.getState().openReviewPanel() })
+              } else if (e instanceof IntegrityError) {
+                notify('error', `Nothing was saved. ${e.message}`)
               } else {
                 notify('error', (e as Error).message)
               }
             }
             return
           }
-          // Main mode: legacy per-change apply.
+          // Main mode: the view's layout changes persist with the view; graph edits never write to
+          // the published graph — they stay staged, marked, for the user to take to a draft.
           const result = stagedChangeList.length > 0
-            ? await applyStagedChanges(provider, scopeWsId)
+            ? await applyStagedChanges(provider, scopeWsId, { graphWrites: false })
             : { ok: 0, failed: 0 }
           if (result.failed === 0) {
             await flushLayoutSave()
             closeStagedChangesPanel()
+          } else {
+            if (result.ok > 0) await flushLayoutSave()
+            notify('warning', `${result.failed} ${result.failed === 1 ? 'change edits' : 'changes edit'} the published graph — open a draft to save ${result.failed === 1 ? 'it' : 'them'}.`,
+              canManage && versioningEnabled && canEnterEdit && editModeEnabled
+                ? { label: 'Open a draft', onClick: handleEnterEdit } : undefined)
           }
         }} />
 
@@ -6105,9 +6522,8 @@ export function ContextViewCanvas({
               nodes={renderFlat}
               edges={effectiveLineageEdges}
               expandedNodes={expandedForRender}
-              selectEdge={selectEdge}
-              isEdgePanelOpen={isEdgePanelOpen}
-              toggleEdgePanel={toggleEdgePanel}
+              onEdgeClick={handleEdgeClick}
+              openLineId={drawerEdge ? (drawerEdge.kind === 'connection' ? drawerEdge.id : drawerEdge.lineId ?? null) : null}
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={overlay.active}
               traceResult={overlay.active ? nativeTraceResult : trace.result}
@@ -6127,10 +6543,12 @@ export function ContextViewCanvas({
               // On Hover / Adaptive draw a hovered entity's lines from here.
               hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}
               hoverBudget={autoStubThreshold}
-              offCanvasLineage={overlay.active ? undefined : offCanvasByNode}
-              // During a trace the reveal itself refuses to write the store
-              // (revealOnCanvas), so the click is safe to offer throughout.
-              onBringInOffCanvas={(nodeId, side) => { void bringInOffCanvas(nodeId, side) }}
+              // A stub is a missing-link alert: lineage that leaves the view.
+              // It follows the alerts switch, as the chip and the cue do.
+              offCanvasLineage={overlay.active || !showMissingConnectionIndicators ? undefined : offCanvasByNode}
+              // Opening the Lens writes nothing to the canvas, so the click is
+              // safe to offer throughout.
+              onOpenOffCanvas={openOffCanvasInLens}
               layerNames={layerNameById}
             />
           )}
@@ -6317,8 +6735,10 @@ export function ContextViewCanvas({
                 geometryRegistry={columnGeometryRegistry}
                 overscan={effectiveOverscan}
                 lineageCounts={nodeStubCounts}
-                externalCue={externalCueByNode}
-                lineageTotals={externalDegrees}
+                externalCue={showExternalCue ? offCanvasByNode : undefined}
+                lineageTotals={lineagePortTotals}
+                lineageUnknown={lineagePortUnknown}
+                lineageOutside={offCanvasByNode}
                 lineagePorts={nodePorts}
                 showLineageIndicators={showLineageFlow}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
@@ -6406,22 +6826,38 @@ export function ContextViewCanvas({
         {!builderOpen && !buildOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
-            // Read-only for the whole trace window, like the canvas behind it.
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable}
+            onStartEditing={drawerStartEditing}
             writesLocked={traceActive}
             resolveNode={resolveTraceNode}
             onFocusConnections={openLens}
-            onTraceUp={(nodeId) => startCanvasTrace(nodeId, 'up')}
-            onTraceDown={(nodeId) => startCanvasTrace(nodeId, 'down')}
-            onFullTrace={(nodeId) => startCanvasTrace(nodeId, 'both')}
+            onTraceUp={drawerTraceUp}
+            onTraceDown={drawerTraceDown}
+            onFullTrace={drawerFullTrace}
             onFocusNode={revealOnCanvas}
             onRevealPath={revealSearchHit}
-            onLocateMany={(ids) => { void locateManyOnCanvas(ids) }}
+            onLocateMany={drawerLocateMany}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && drawerEdge && (
+          <RelationshipDrawer
+            key="relationship-drawer"
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable}
+            writesLocked={traceActive}
+            resolveNode={resolveTraceNode}
+            onFocusNode={revealOnCanvas}
+            onLocateMany={drawerLocateMany}
+            onDeleteEdge={canvasWritable ? interactions.deleteEdge : undefined}
+            onStartEditing={drawerStartEditing}
+          />
+        )}
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}
+            canEdit={canvasWritable}
             onClose={closeEdgePanel}
             edgeFilters={dynamicEdgeFilters}
             onToggleFilter={toggleEdgeFilter}

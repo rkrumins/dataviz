@@ -49,7 +49,7 @@ import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import { useBranchStore } from '@/store/branchStore'
 import { useFeaturesStore } from '@/store/features'
-import type { GraphDataProvider, GraphNode, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
+import type { GraphDataProvider, GraphNode, NodeDegree, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
 
@@ -96,6 +96,16 @@ export interface TraceCanvasHarness {
    *  `settle()` (which barely advances the clock) will read an empty list —
    *  wait past the debounce first. */
   aggregatedGranularities(): Array<string | null>
+  /** The `sourceUrns` every `/edges/aggregated` request carried, in order —
+   *  the entities the canvas asked for roll-ups of. Debounced like the
+   *  granularities above. */
+  aggregatedSources(): string[][]
+  /** The `targetUrns` every `/edges/aggregated` request carried, in order
+   *  (empty when it named none). Debounced like the sources above. */
+  aggregatedTargets(): string[][]
+  /** The URNs every `/nodes/ancestor-chains` request carried, in order.
+   *  Recorded only with `ancestorChains`, and debounced like the above. */
+  chainRequests(): string[][]
   /** Click one of the dock's direction radios. */
   setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
   /** Open the header's Depth chip and click a preset by label. */
@@ -312,7 +322,7 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null> },
+  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null>; aggregatedSources: string[][]; aggregatedTargets: string[][]; chains: string[][] },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
@@ -323,6 +333,16 @@ function stubProvider(
    *  about the completeness of the wires it drew, and that decision has no
    *  other observable. */
   aggregatedExtra?: Record<string, unknown>,
+  /** Totals `/nodes/degree` answers with (see `renderCanvasWithTrace`). */
+  nodeDegrees?: Record<string, NodeDegree | 'fail'>,
+  /** Answer `/nodes/ancestor-chains` from the estate's containment. */
+  ancestorChains?: boolean,
+  /** Parents whose children page never answers (see `renderCanvasWithTrace`). */
+  holdChildren?: readonly string[],
+  /** Roll-up cells `/edges/aggregated` answers with (see `renderCanvasWithTrace`). */
+  aggregatedCells?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>,
+  /** Flows `getEdges` answers with (see `renderCanvasWithTrace`). */
+  flows?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
@@ -361,16 +381,19 @@ function stubProvider(
       return closure
     },
     getChildren: async (parentUrn: string) => childrenFor(parentUrn),
-    getChildrenWithEdges: async (parentUrn: string) => ({
-      children: childrenFor(parentUrn),
-      containmentEdges: (kids.get(parentUrn) ?? []).map(child => ({
-        id: `c:${parentUrn}>${child}`, sourceUrn: parentUrn, targetUrn: child, edgeType: 'CONTAINS',
-      })),
-      lineageEdges: [],
-      totalChildren: (kids.get(parentUrn) ?? []).length,
-      hasMore: false,
-      nextCursor: null,
-    }),
+    getChildrenWithEdges: async (parentUrn: string) => {
+      if (holdChildren?.includes(parentUrn)) await new Promise<never>(() => {})
+      return {
+        children: childrenFor(parentUrn),
+        containmentEdges: (kids.get(parentUrn) ?? []).map(child => ({
+          id: `c:${parentUrn}>${child}`, sourceUrn: parentUrn, targetUrn: child, edgeType: 'CONTAINS',
+        })),
+        lineageEdges: [],
+        totalChildren: (kids.get(parentUrn) ?? []).length,
+        hasMore: false,
+        nextCursor: null,
+      }
+    },
     getParent: async (childUrn: string) => byUrn.get(parentMap.get(childUrn) ?? '') ?? null,
     // The NAME LOOKUP the server serves: exactly the urns asked for, and
     // counted — a caller that asks twice for the same name is a defect.
@@ -380,15 +403,61 @@ function stubProvider(
       if (!urns) return nodes
       return urns.map(u => byUrn.get(u)).filter((n): n is GraphNode => !!n)
     },
-    getEdges: async () => [],
-    // The aggregated fan-out the browse canvas fires for its visible
-    // containers. It answers nothing — what a test reads is the LEVEL the
-    // canvas asked for, which is the whole blast radius of the granularity
-    // it auto-selects.
-    getAggregatedEdges: async (request: { granularity?: string | null }) => {
-      calls.aggregated.push(request?.granularity ?? null)
-      return { aggregatedEdges: [], totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
+    // One-sided flow reads (lineage priming, the external preview): those
+    // from one of its sources, or into one of its targets.
+    getEdges: async (query?: { sourceUrns?: string[]; targetUrns?: string[] }) => (flows ?? [])
+      .filter(f => query?.sourceUrns?.includes(f.sourceUrn) || query?.targetUrns?.includes(f.targetUrn))
+      .map(f => ({ id: `f:${f.sourceUrn}>${f.targetUrn}`, sourceUrn: f.sourceUrn, targetUrn: f.targetUrn, edgeType: 'TRANSFORMS' })),
+    // Containment among the URNs asked — what a reveal primes its paths with.
+    getEdgesBetween: async (urns: string[]) => {
+      const asked = new Set(urns)
+      return estate.model.containmentEdges
+        .filter(c => asked.has(c.sourceUrn) && asked.has(c.targetUrn))
+        .map(c => ({ id: `c:${c.sourceUrn}>${c.targetUrn}`, sourceUrn: c.sourceUrn, targetUrn: c.targetUrn, edgeType: 'CONTAINS' }))
     },
+    // The aggregated fan-out the browse canvas fires for its visible
+    // containers. It answers nothing — what a test reads is what the canvas
+    // asked for: the LEVEL, which is the whole blast radius of the
+    // granularity it auto-selects, and the entities it asked about.
+    getAggregatedEdges: async (request: { granularity?: string | null; sourceUrns?: string[]; targetUrns?: string[] }) => {
+      calls.aggregated.push(request?.granularity ?? null)
+      calls.aggregatedSources.push([...(request?.sourceUrns ?? [])])
+      calls.aggregatedTargets.push([...(request?.targetUrns ?? [])])
+      const S = new Set(request?.sourceUrns ?? [])
+      const T = request?.targetUrns ? new Set(request.targetUrns) : null
+      // Naming no source asks for everything into the targets.
+      const cells = (aggregatedCells ?? []).filter(c => (S.size === 0 ? !!T : S.has(c.sourceUrn)) && (!T || T.has(c.targetUrn)))
+      return { aggregatedEdges: cells, totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
+    },
+    // The server answers every URN it could count, so every URN asked about
+    // is answered here: one the test did not list has no lineage (nor any
+    // roll-up cell, when asked), and one listed as 'fail' is left out, as a
+    // URN the server could not count is. Asked, the server always says
+    // whether a URN holds roll-up cells; a test that wants the flags left
+    // out (the server's check failed) takes them out with `wrapProvider`.
+    ...(nodeDegrees ? {
+      getNodeDegrees: async (urns: string[], _types?: string[], options?: { includeRollups?: boolean }) => {
+        const none = options?.includeRollups ? { in: 0, out: 0, rollupIn: 0, rollupOut: 0 } : { in: 0, out: 0 }
+        return Object.fromEntries(urns
+          .filter(urn => nodeDegrees[urn] !== 'fail')
+          .map(urn => [urn, { ...none, ...(nodeDegrees[urn] as NodeDegree | undefined) }]))
+      },
+    } : {}),
+    // Parent first, root last. A URN the estate does not hold is left out —
+    // unknown, as the server leaves out a URN it could not answer.
+    ...(ancestorChains ? {
+      getAncestorChains: async (urns: string[]) => {
+        calls.chains.push([...urns])
+        const chains: Record<string, string[]> = {}
+        for (const urn of urns) {
+          if (!byUrn.has(urn)) continue
+          const chain: string[] = []
+          for (let up = parentMap.get(urn); up; up = parentMap.get(up)) chain.push(up)
+          chains[urn] = chain
+        }
+        return chains
+      },
+    } : {}),
     computeLayerAssignments: async () => ({
       assignments,
       parentMap,
@@ -404,13 +473,13 @@ function stubProvider(
  *  ERR_INVALID_URL (a relative path with no origin) swallowed into a
  *  `console.error`. Answer it with the layout the store already holds, so the
  *  effect finds nothing to change and returns. */
-function stubFetch(estate: TraceEstate): () => void {
+function stubFetch(estate: TraceEstate, entityScope: 'all' | 'curated' = 'curated'): () => void {
   const original = globalThis.fetch
   const view = {
     id: 'harness-view',
     config: {
       layout: { type: 'reference', referenceLayout: { layers: estate.layers, assignments: estate.assignments } },
-      content: { entityScope: 'curated' },
+      content: { entityScope },
     },
   }
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -478,6 +547,7 @@ function seedView(
   estate: TraceEstate,
   entityTypes: readonly unknown[] = [],
   dataSourceId?: string,
+  entityScope: 'all' | 'curated' = 'curated',
 ): void {
   useSchemaStore.setState({
     activeViewId: 'harness-view',
@@ -491,7 +561,7 @@ function seedView(
         ...(dataSourceId ? { dataSourceId } : {}),
         content: {
           visibleEntityTypes: [], visibleRelationshipTypes: [],
-          defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated',
+          defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope,
         },
         layout: {
           type: 'reference',
@@ -529,6 +599,33 @@ export async function renderCanvasWithTrace(
     /** Give the seeded view a data source, arming the canvas hooks that are
      *  inert without one. Absent by default. */
     dataSourceId?: string
+    /** Lineage totals per URN for `/nodes/degree`. Every URN the canvas asks
+     *  about is answered, and one not listed has none ({ in: 0, out: 0 }, and
+     *  no roll-up cell when asked); one listed without the roll-up flags has
+     *  none of those either, as the server says when asked; one listed as
+     *  'fail' is never answered (its count failed). Absent by default: the
+     *  provider then cannot count degrees at all. */
+    nodeDegrees?: Record<string, NodeDegree | 'fail'>
+    /** Answer `/nodes/ancestor-chains` from the estate's containment. Off by
+     *  default: the provider then cannot walk containment. */
+    ancestorChains?: boolean
+    /** Parents whose children page never answers, so opening one leaves a
+     *  child load in flight for as long as the test runs. */
+    holdChildren?: readonly string[]
+    /** Roll-up cells for `/edges/aggregated`: each request is answered with
+     *  those from one of its sources to one of its targets, as the server
+     *  does — to any target when it names none, from any source when it
+     *  names none. `aggregatedExtra.aggregatedEdges` overrides them. */
+    aggregatedCells?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
+    /** The view's entityScope. Curated by default; 'all' opens the view to
+     *  its whole data source. */
+    entityScope?: 'all' | 'curated'
+    /** Flows `getEdges` answers with, by source or target, as TRANSFORMS
+     *  edges with id `f:<source>><target>`. Absent: it answers none. */
+    flows?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
+    /** A test's own turn on the stub provider: wrap a read to fail it, or
+     *  hold it. */
+    wrapProvider?: (provider: GraphDataProvider) => GraphDataProvider
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -541,7 +638,7 @@ export async function renderCanvasWithTrace(
     if (key.startsWith('nx:trace-history:')) localStorage.removeItem(key)
   }
   releaseFetch?.()
-  releaseFetch = stubFetch(estate)
+  releaseFetch = stubFetch(estate, opts.entityScope)
   usePreferencesStore.setState({ canvasDensity: 'spacious' } as never)
   // AUTHORING MUST BE LIVE for a test of the trace's write gates to mean
   // anything: with no draft open (or edit mode off) every connect/edit path
@@ -560,7 +657,7 @@ export async function renderCanvasWithTrace(
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
-  seedView(estate, opts.entityTypes, opts.dataSourceId)
+  seedView(estate, opts.entityTypes, opts.dataSourceId, opts.entityScope)
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []
@@ -596,7 +693,7 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null> }
+  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null>, aggregatedSources: [] as string[][], aggregatedTargets: [] as string[][], chains: [] as string[][] }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   // A Router, because the header's BranchSwitcher keeps the active branch in the
   // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
@@ -605,7 +702,7 @@ export async function renderCanvasWithTrace(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
-          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra),
+          provider: (opts.wrapProvider ?? (p => p))(stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains, opts.holdChildren, opts.aggregatedCells, opts.flows)),
           isLoading: false, error: null, scopeKind: 'ready',
           workspaceId: 'harness-ws', dataSourceId: null,
           providerReady: true, providerVersion: 1,
@@ -755,10 +852,10 @@ export async function renderCanvasWithTrace(
     connectPickerOpen: () =>
       [...document.querySelectorAll('h3')].some(h => h.textContent?.trim() === 'Connect'),
     missingConnections: () => {
-      // The chip reads "<n> flows outside this view" (curated) or
-      // "… not on canvas" (open). Absent entirely when the count is 0.
+      // The chip reads "<n> flows outside this view". Absent entirely when
+      // the count is 0.
       const label = [...document.querySelectorAll<HTMLElement>('span')]
-        .find(el => /^flows (outside this view|not on canvas)$/.test(el.textContent?.trim() ?? ''))
+        .find(el => el.textContent?.trim() === 'flows outside this view')
       const count = label?.previousElementSibling?.textContent?.trim()
       if (count === undefined) return null
       return Number(count.replace(/,/g, ''))
@@ -885,6 +982,9 @@ export async function renderCanvasWithTrace(
     },
     providerCalls: () => providerCalls.traceClosure,
     aggregatedGranularities: () => [...providerCalls.aggregated],
+    aggregatedSources: () => providerCalls.aggregatedSources.map(urns => [...urns]),
+    aggregatedTargets: () => providerCalls.aggregatedTargets.map(urns => [...urns]),
+    chainRequests: () => providerCalls.chains.map(urns => [...urns]),
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
       await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })

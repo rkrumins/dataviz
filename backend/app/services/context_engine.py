@@ -838,12 +838,23 @@ class ContextEngine:
         """Get distinct values for a node property."""
         return await self.provider.get_distinct_values(property_name)
 
-    async def get_node_degrees(self, urns, edge_types=None):
-        """Total lineage degree per URN (see provider docstring). Providers
-        without the capability degrade to {} — absent means unknown."""
+    async def get_node_degrees(self, urns, edge_types=None, include_rollups=False):
+        """Total lineage degree per URN (see provider docstring). A draft
+        counts through its base, moved by its own flows. The versioned-branch
+        reader cannot count at all, and says so the way its other unsupported
+        reads do (a 501 at the route): answering {} read as "unknown" for
+        every urn, which the canvas asked about again. It holds no roll-up
+        cells, so a collapsed container's presence would cost a containment
+        descent per container on every open, and raw counts alone would read
+        each such container as having no lineage.
+        Roll-up presence is passed on only when asked for."""
         fn = getattr(self.provider, "get_node_degrees", None)
         if fn is None:
-            return {}
+            raise NotImplementedError(
+                f"node degrees are not available on {type(self.provider).__name__}"
+            )
+        if include_rollups:
+            return await fn(urns, edge_types, include_rollups=True)
         return await fn(urns, edge_types)
 
     async def save_custom_graph(
@@ -2039,6 +2050,25 @@ class ContextEngine:
         # affordance; the one-time migration heals the legacy
         # stampVersion<2 backlog. See readpath-perf plan, trigger-model
         # decision (2026-07-12).
+
+        # ``excludeInternal``: a selected container's roll-ups with no far side
+        # named hold a cell to each of its own descendants a flow inside it
+        # reaches, and to the ancestors it shares with a far end. The canvas
+        # cannot tell those apart for the rows of a closed container it never
+        # loaded, and they are the heaviest cells, so they filled its bound and
+        # cut off the partners it asked for. Both ends are placed through their
+        # chains (the chain cache, on FalkorDB); an end with no known chain
+        # cannot be told inside, and its cell is kept.
+        if request.exclude_internal and result.aggregated_edges:
+            chains = await self.get_ancestor_chains(sorted(
+                {u for e in result.aggregated_edges for u in (e.source_urn, e.target_urn)}))
+            kept = [e for e in result.aggregated_edges
+                    if e.source_urn not in chains.get(e.target_urn, ())
+                    and e.target_urn not in chains.get(e.source_urn, ())]
+            if len(kept) < len(result.aggregated_edges):
+                result = result.model_copy(update={
+                    "aggregated_edges": kept,
+                    "total_source_edges": sum(e.edge_count for e in kept)})
         return result
 
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:
@@ -2205,6 +2235,7 @@ class ContextEngine:
         import uuid as _uuid
         from backend.app.ontology.mutation_validator import MutationOp, validate_edge_mutation
         from backend.common.models.graph import EdgeMutationResult
+        from backend.common.property_patch import strip_deletes
 
         resolved = await self._get_resolved_ontology()
 
@@ -2235,7 +2266,7 @@ class ContextEngine:
             targetUrn=request.target_urn,
             edgeType=request.edge_type,
             confidence=1.0,
-            properties=request.properties,
+            properties=strip_deletes(request.properties) or {},
         )
 
         try:
@@ -2252,11 +2283,15 @@ class ContextEngine:
         return EdgeMutationResult(edge=edge, success=True, warnings=val.warnings or [])
 
     async def update_edge(self, edge_id: str, request) -> Any:
-        """Update mutable edge properties."""
+        """Update mutable edge properties — a PATCH: ``properties`` sets, ``unsetProperties``
+        removes, everything else is kept. Raises ``InvalidPatch`` for a contradictory request."""
         from backend.common.models.graph import EdgeMutationResult
+        from backend.common.property_patch import normalize_update
 
+        patch = normalize_update(
+            {"properties": request.properties}, getattr(request, "unset_properties", None))["properties"]
         try:
-            edge = await self.provider.update_edge(edge_id, request.properties)
+            edge = await self.provider.update_edge(edge_id, patch)
             if edge is None:
                 return EdgeMutationResult(success=False, error=f"Edge '{edge_id}' not found")
             return EdgeMutationResult(edge=edge, success=True)

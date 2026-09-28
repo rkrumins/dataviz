@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { HierarchyNode } from '@/types/hierarchy'
 
+import { NO_PLACE_FOUND } from '../useAncestorChains'
 import { useEdgeProjection } from '../useEdgeProjection'
 
 const hNode = (id: string, children: HierarchyNode[] = []): HierarchyNode => ({
@@ -36,8 +37,9 @@ type Projected = { source: string; target: string; isGhost?: boolean }
 function run(opts: {
   roots: HierarchyNode[]
   edges: ReturnType<typeof edge>[]
-  chains?: Record<string, string[]>
+  chains?: Record<string, readonly string[]>
   expandedNodes?: Set<string>
+  openScope?: boolean
 }) {
   const flat: HierarchyNode[] = []
   const stack = [...opts.roots]
@@ -60,6 +62,7 @@ function run(opts: {
       traceContextSet: new Set(),
       isContainmentEdge: () => false,
       ancestorChains: opts.chains ? new Map(Object.entries(opts.chains)) : undefined,
+      openScope: opts.openScope,
     }),
   )
   return {
@@ -110,14 +113,15 @@ describe('useEdgeProjection — ends filed under their chain', () => {
     expect(res.lines[0].isGhost).toBeFalsy()
   })
 
-  it('leaves an end unresolved when its chain is unknown or reaches nothing on canvas', () => {
+  it('counts an end outside only once its chain reaches nothing on canvas; one not answered yet is pending', () => {
     const res = run({
       roots: [hNode('fact')],
       edges: [edge('e1', 'fact', 'no-chain'), edge('e2', 'fact', 'elsewhere')],
       chains: { elsewhere: ['other-schema', 'other-platform'] },
     })
     expect(res.lines).toHaveLength(0)
-    expect(res.unresolvedEdgeCount).toBe(2)
+    expect(res.unresolvedEdgeCount).toBe(1)
+    expect([...res.offCanvasByNode.get('fact')!.outPartners]).toEqual(['elsewhere'])
   })
 
   it('draws no line when both ends land in the same container — and says so', () => {
@@ -129,5 +133,60 @@ describe('useEdgeProjection — ends filed under their chain', () => {
     expect(res.lines).toHaveLength(0)
     expect(res.unresolvedEdgeCount).toBe(0)
     expect(res.hiddenInsideCollapsedCount).toBe(1)
+  })
+})
+
+describe('useEdgeProjection — an end whose place is not known', () => {
+  it('holds a pending end on its row, per direction: no stub, not counted', () => {
+    const res = run({
+      roots: [hNode('fact')],
+      edges: [edge('e1', 'fact', 'far'), edge('e2', 'src', 'fact'), edge('e3', 'src-2', 'fact')],
+      chains: {},
+    })
+    const fact = res.offCanvasByNode.get('fact')!
+    expect(fact.unplaced).toEqual({ in: 2, out: 1 })
+    expect(fact.in + fact.out).toBe(0)
+    expect(fact.inPartners.size + fact.outPartners.size).toBe(0)
+    expect(res.unresolvedEdgeCount).toBe(0)
+  })
+
+  it('reads an end whose place was never found as unknown, never outside', () => {
+    const lost = run({ roots: [hNode('fact')], edges: [edge('e1', 'fact', 'far')], chains: { far: NO_PLACE_FOUND } })
+    expect(lost.offCanvasByNode.get('fact')).toMatchObject({ out: 0, unplaced: { in: 0, out: 1 } })
+    expect(lost.unresolvedEdgeCount).toBe(0)
+
+    // A real root is still outside.
+    const root = run({ roots: [hNode('fact')], edges: [edge('e1', 'fact', 'far')], chains: { far: [] } })
+    expect(root.offCanvasByNode.get('fact')).toMatchObject({ out: 1, unplaced: { in: 0, out: 0 } })
+    expect(root.unresolvedEdgeCount).toBe(1)
+  })
+})
+
+describe('useEdgeProjection — a view open to its whole data source', () => {
+  it('never files an end outside: one whose chain reaches nothing drawn is in the view, column unknown', () => {
+    const res = run({
+      roots: [hNode('fact'), hNode('warehouse')],
+      edges: [
+        edge('e1', 'fact', 'feed-row-201'),
+        edge('e2', 'a-root', 'fact'),
+        edge('e3', 'fact', 'in-warehouse'),
+      ],
+      chains: { 'feed-row-201': ['unloaded-schema'], 'a-root': [], 'in-warehouse': ['warehouse'] },
+      openScope: true,
+    })
+    const fact = res.offCanvasByNode.get('fact')!
+    expect(fact.in + fact.out).toBe(0)
+    expect(fact.unplaced).toEqual({ in: 1, out: 1 })
+    // Named, for selecting the card to bring in.
+    expect([...fact.unknownPartners!].sort()).toEqual(['a-root', 'feed-row-201'])
+    expect(res.unresolvedEdgeCount).toBe(0)
+    // An end a drawn container holds still rolls up to it.
+    expect(res.lines.map(l => [l.source, l.target])).toEqual([['fact', 'warehouse']])
+  })
+
+  it('nor with no chain source at all', () => {
+    const res = run({ roots: [hNode('fact')], edges: [edge('e1', 'fact', 'far')], openScope: true })
+    expect(res.offCanvasByNode.get('fact')).toMatchObject({ out: 0, unplaced: { in: 0, out: 1 } })
+    expect(res.unresolvedEdgeCount).toBe(0)
   })
 })

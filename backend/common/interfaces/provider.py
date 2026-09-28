@@ -678,7 +678,9 @@ class GraphDataProvider(ABC):
 
     @abstractmethod
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
-        """Update mutable properties of an edge. Returns updated edge or None if not found."""
+        """PATCH an edge's properties: each key in *properties* is set, a key whose value is
+        ``backend.common.property_patch.PROP_DELETE`` is removed, every other stored property
+        is kept (``apply_properties_patch``). Returns the updated edge or None if not found."""
         pass
 
     @abstractmethod

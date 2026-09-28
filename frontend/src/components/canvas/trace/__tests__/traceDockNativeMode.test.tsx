@@ -162,6 +162,16 @@ describe('TraceDockTitleBar — the direction arrows in nativeMode', () => {
     expect(trace.retrace).not.toHaveBeenCalled()
   })
 
+  it('the upstream and downstream counts wear the lineage direction pair', () => {
+    renderTitleBar(true)
+    const up = screen.getByLabelText('4 upstream nodes')
+    const down = screen.getByLabelText('2 downstream nodes')
+    expect(up.className).toMatch(/\bborder-lineage-in\/40\b/)
+    expect(up.querySelector('svg')!.getAttribute('class')).toMatch(/\btext-lineage-in\b/)
+    expect(down.className).toMatch(/\bborder-lineage-out\/40\b/)
+    expect(down.querySelector('svg')!.getAttribute('class')).toMatch(/\btext-lineage-out\b/)
+  })
+
   it('legacy mode still encodes direction as depth and re-traces', () => {
     const trace = renderTitleBar(false)
     fireEvent.click(screen.getByRole('radio', { name: /downstream only/i }))
@@ -204,5 +214,12 @@ describe('TraceDockMetricStrip — sources outside this view', () => {
   it('reads as one source in the singular', () => {
     const { container } = strip(1)
     expect(within(container).getByText(/1 source outside this view/i)).toBeInTheDocument()
+  })
+
+  it('the Upstream and Downstream metrics wear the lineage direction pair', () => {
+    strip(0)
+    const metric = (label: string) => screen.getByText(label).closest('.relative')!
+    expect(metric('Upstream').querySelector('.bg-lineage-in')).not.toBeNull()
+    expect(metric('Downstream').querySelector('.bg-lineage-out')).not.toBeNull()
   })
 })

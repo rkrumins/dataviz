@@ -35,6 +35,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.raw_path_route import RawPathSegmentRoute
+from backend.common.property_patch import InvalidPatch, normalize_update
+from backend.app.services.versioning.entity_audit import (
+    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
@@ -63,7 +67,10 @@ from backend.app.services.versioning.service import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# Matched on the RAW path so an encoded '/' stays inside its parameter — entity ids
+# carry URNs with paths (`…bucket/key…`, and edge ids built from two of them), which
+# the decoded path would split into a 404 (see RawPathSegmentRoute).
+router = APIRouter(route_class=RawPathSegmentRoute)
 
 
 # ── Admin feature flags (Admin → Features) ────────────────────────────────────
@@ -614,6 +621,27 @@ class StageOp(_ApiModel):
     payload: Optional[dict] = None
     ref: Optional[str] = None
     change_reason: Optional[str] = Field(default=None, alias="changeReason")
+    unset_properties: Optional[List[str]] = Field(
+        default=None, alias="unsetProperties",
+        description="update only: property names to remove (an update merges properties key by key).")
+
+
+def _stage_ops(ops: List[StageOp]) -> List[dict]:
+    """Staged ops as the service takes them: an update's ``unsetProperties`` becomes the one
+    internal removal form (``property_patch``). A contradictory patch is a 422."""
+    out = []
+    for op in ops:
+        staged = op.model_dump(exclude_none=True)
+        unset = staged.pop("unset_properties", None)
+        try:
+            if unset and staged.get("op") != "update":
+                raise InvalidPatch(f"unsetProperties applies to an update, not a {staged.get('op')}")
+            if unset:
+                staged["payload"] = normalize_update(staged.get("payload"), unset)
+        except InvalidPatch as exc:
+            raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
+        out.append(staged)
+    return out
 
 
 class StageRequest(_ApiModel):
@@ -917,8 +945,28 @@ class RebaseResponse(_ApiModel):
 
 class EntityHistoryResponse(_ApiModel):
     entity_id: str = Field(alias="entityId")
+    kind: Optional[str] = None
     versions: List[dict]
     # id → display name for every version's actor (see _attach_user_names).
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    has_more: bool = Field(default=False, alias="hasMore")
+    # Cursor for the next (older) page; pass it back as `before`.
+    next_before: Optional[str] = Field(default=None, alias="nextBefore")
+
+
+class EntitySummaryResponse(_ApiModel):
+    """Who created an entity and who last changed it, on the line being read (see entity_audit)."""
+    entity_id: str = Field(alias="entityId")
+    kind: str
+    exists: bool
+    version: Optional[str] = None
+    inherited: bool = False
+    created: Optional[dict] = None
+    updated: Optional[dict] = None
+    revisions: Dict[str, int] = Field(default_factory=dict)
+    changed_on_main_since_branch: bool = Field(default=False, alias="changedOnMainSinceBranch")
+    base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
+    value: Optional[dict] = None
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
@@ -1625,10 +1673,11 @@ async def stage_changes(
     session: AsyncSession = Depends(get_db_session),
 ):
     rules = await _rules_for_meta(session, ws_id, _meta)
+    ops = _stage_ops(body.ops)
     with _domain_errors():
         assigned = await svc.stage_changes(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
-            ops=[op.model_dump(exclude_none=True) for op in body.ops],
+            ops=ops,
             ontology_rules=rules,
         )
     return {"assigned": assigned, "count": len(body.ops)}
@@ -2058,19 +2107,67 @@ async def get_commit_state(
             "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
 
 
+async def _assert_line_readable(svc, graph_id: str, branch_id: Optional[str], viewer: Viewer) -> None:
+    """A draft named by ``branchId`` must be the caller's to read (403), and the graph's (404)."""
+    if branch_id:
+        with _domain_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+
+
 @router.get("/graphs/{graph_id}/entities/{entity_id}/history", response_model=EntityHistoryResponse)
 async def get_entity_history(
     ws_id: str, graph_id: str, entity_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId",
+                                     description="the draft being viewed — its own revisions join main's"),
+    scope: str = Query("all", pattern="^(all|draft|published)$"),
+    limit: int = Query(HISTORY_DEFAULT_LIMIT, ge=1, le=HISTORY_MAX_LIMIT),
+    before: Optional[str] = Query(None, description="`nextBefore` of the previous page"),
+    include: Optional[str] = Query(None, pattern="^payload$", description="`payload`: each revision's full value"),
+    kind: Optional[str] = Query(None, pattern="^(node|edge)$"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    versions = await svc.entity_history(graph_id=graph_id, entity_id=entity_id, viewer=viewer)
-    payload = {"entity_id": entity_id, "versions": versions}
-    await _attach_user_names(session, versions, wrapper=payload)
+    """An entity's revisions, newest first, a page at a time — ``main``'s and those of the draft
+    being viewed, never another user's. Each says what it changed, property by property."""
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
+    with _domain_errors():
+        try:
+            page = await entity_history_page(
+                svc, graph_id=graph_id, entity_id=entity_id, branch_id=branch_id, scope=scope,
+                limit=limit, before=before, include_payload=include == "payload", kind=kind)
+        except InvalidCursor as exc:       # a ValueError, which would otherwise read as a 404
+            raise HTTPException(status_code=422, detail={"type": "invalid_cursor", "message": str(exc)})
+    payload = {"entity_id": entity_id, "kind": page.get("kind"), "versions": page["versions"],
+               "has_more": page["hasMore"], "next_before": page["nextBefore"]}
+    await _attach_user_names(session, page["versions"], wrapper=payload)
     return payload
+
+
+@router.get("/graphs/{graph_id}/entities/{entity_id}/summary", response_model=EntitySummaryResponse)
+async def get_entity_summary(
+    ws_id: str, graph_id: str, entity_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    kind: Optional[str] = Query(None, pattern="^(node|edge)$"),
+    include: Optional[str] = Query(None, pattern="^value$", description="`value`: the entity and its token"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Who created the entity and who last changed it, as the line being read has it (a draft
+    sees ``main`` at its branch point), its revision counts and — ``include=value`` — its value
+    and optimistic-concurrency token. Bounded: a few index lookups, never the whole history."""
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
+    with _domain_errors():
+        summary = await entity_summary(svc, graph_id=graph_id, entity_id=entity_id, branch_id=branch_id,
+                                       kind=kind, include_value=include == "value")
+    await _attach_user_names(session, [e for e in (summary["created"], summary["updated"]) if e],
+                             wrapper=summary)
+    return summary
 
 
 @router.get("/graphs/{graph_id}/commits", response_model=CommitLogResponse)

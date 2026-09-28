@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Collection, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
@@ -35,13 +35,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from . import config, db
-from .changeset import Delta, materialize, net_delta, diff_states
+from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
+from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from .entity_serde import edge_payload_from_parts
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
-from .typed_merge import preserve_stored_type
 from .ontology import (
     Ontology, OntologyRules, canonicalize_payload_types,
     validate_entities, validate_entities_rich,
@@ -153,9 +153,26 @@ class MergeConflict(RuntimeError):
     the chosen payloads to land the merge.
     """
 
-    def __init__(self, conflicts):
+    def __init__(self, conflicts, current: Optional[Mapping[str, Tuple[str, Optional[dict]]]] = None):
         super().__init__(f"{len(conflicts)} unresolved merge conflict(s)")
         self.conflicts = conflicts
+        #: entity_id → (kind, the value the edit conflicts WITH) — what a client rebases onto.
+        #: Filled by ``apply_ops``'s optimistic-concurrency check; empty for a merge/publish.
+        self.current = dict(current or {})
+
+
+@dataclass
+class ApplyResult:
+    """What one ``apply_ops`` batch wrote."""
+
+    commit_id: Optional[str]
+    #: entity_id → (kind, the value after this batch — ``None`` once deleted) for every entity the
+    #: batch addressed or cascaded, changed or not: what a client refreshes its copies (and their
+    #: optimistic-concurrency tokens) from, so the next edit of the same entity is not a conflict
+    #: with its own last save.
+    written: Dict[str, Tuple[str, Optional[dict]]]
+    #: node entity_id → urn for every node the batch read or wrote (edge endpoints included).
+    urns: Dict[str, str] = field(default_factory=dict)
 
 
 class OntologyViolation(RuntimeError):
@@ -612,6 +629,8 @@ class GraphVersioningService:
                 ref = op.get("ref", entity_id)
                 assigned[ref] = entity_id
                 payload = op.get("payload")
+                if op["op"] == "create":
+                    payload = strip_deletes(payload)     # a new entity has nothing to remove
                 if op["entity_kind"] == "node":
                     payload = _sanitize_node_properties(payload)
                 if op["op"] != "delete":
@@ -3781,25 +3800,36 @@ class GraphVersioningService:
         Each maps to rollup ``(Sx, Tx)`` for every requested **visible** source ``Sx`` that is an
         ancestor-or-self of ``sourceUrn`` and target ``Tx`` ancestor-or-self of ``targetUrn`` (``Sx`` ≠
         ``Tx``) — the same ancestor-pair semantics the FalkorDB materialiser bakes in, evaluated on the
-        draft's COMPOSED containment so re-parenting in the draft is honoured. Bounded by the delta size."""
+        draft's COMPOSED containment so re-parenting in the draft is honoured. Bounded by the delta size.
+
+        One side may be left open, as the base read allows: no targets means every ancestor-or-self of
+        ``targetUrn`` (every cell out of the sources), no sources every ancestor-or-self of
+        ``sourceUrn``. The named side is walked first, and a delta edge that misses it costs no walk
+        of the other."""
         cset = {t.upper() for t in (containment_edge_types or [])}
         src_set = set(source_urns or [])
-        tgt_set = set(target_urns or source_urns or [])
+        tgt_set = set(target_urns or [])
         out: Dict[Tuple[str, str], Dict[str, object]] = {}
+        if not (src_set or tgt_set):
+            return out
         async with self._session() as s:
-            async def _visible_ancestors(urn: str, visible: set) -> set:
-                if not visible:
-                    return set()
+            async def _visible_ancestors(urn: str, visible: Optional[set]) -> set:
+                """``urn``'s ancestors-or-self among ``visible``; all of them when it is None."""
                 eid = await self._eid_for_urn(s, graph_id, branch_id, urn)
-                hit = {urn} & visible                      # the node itself, if it is a visible container
+                hit = {urn} if visible is None else {urn} & visible  # the node itself, if it is a visible container
                 if eid is not None and cset:
                     anc_eids, _ = await self._containment_ancestors(s, graph_id, branch_id, {eid}, cset, None)
                     vals = await self._current_values(s, graph_id, branch_id, anc_eids)
-                    hit |= {((vals.get(e) or {}).get("urn") or f"gv:{e}") for e in anc_eids} & visible
+                    urns = {((vals.get(e) or {}).get("urn") or f"gv:{e}") for e in anc_eids}
+                    hit |= urns if visible is None else urns & visible
                 return hit
             for su, tu, et, sign in lineage_delta:
-                sxs = await _visible_ancestors(su, src_set)
-                txs = await _visible_ancestors(tu, tgt_set)
+                if src_set:
+                    sxs = await _visible_ancestors(su, src_set)
+                    txs = await _visible_ancestors(tu, tgt_set or None) if sxs else set()
+                else:
+                    txs = await _visible_ancestors(tu, tgt_set)
+                    sxs = await _visible_ancestors(su, None) if txs else set()
                 for sx in sxs:
                     for tx in txs:
                         if sx == tx:
@@ -5365,6 +5395,18 @@ class GraphVersioningService:
         :class:`ConcurrencyError`. Under ``strict`` ontology enforcement the written
         entities are validated (the write-through gate, parity with publish/stage).
         """
+        result = await self.apply_ops_detailed(
+            graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
+            containment_edge_types=containment_edge_types, ontology_rules=ontology_rules)
+        return result.commit_id
+
+    async def apply_ops_detailed(
+        self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
+        message: str = "edit", branch_id: Optional[str] = None,
+        containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
+    ) -> ApplyResult:
+        """:meth:`apply_ops`, answering with every addressed entity's value after the batch."""
         return await self._retry_seq(
             f"apply_ops on {graph_id}/{branch_id or 'main'}",
             lambda: self._apply_ops_once(
@@ -5378,7 +5420,7 @@ class GraphVersioningService:
         message: str, branch_id: Optional[str],
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
-    ) -> Optional[str]:
+    ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
@@ -5399,36 +5441,18 @@ class GraphVersioningService:
 
             ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
 
-            # Resolve ops → new payloads for the AFFECTED entities only.
-            new_vals: Dict[str, Optional[dict]] = {}
-            kind_by_entity: Dict[str, str] = {}
-            update_ids: set = set()
-            base_versions: Dict[str, str] = {}        # entity_id → client's OCC token (content_hash)
-            for op in ops:
-                eid = op["entity_id"]
-                payload = op.get("payload") or {}
-                kind_by_entity[eid] = (op.get("entity_kind")
-                                       or ("edge" if _is_edge_payload(payload) else "node"))
-                earlier = new_vals.get(eid)
-                if op["op"] == "update" and earlier is not None:
-                    # Several ops on ONE entity in one batch COMPOSE, in order: an update after a
-                    # create (a node renamed before its first save) patches the create's payload,
-                    # and two updates become one patch — composed as patches, so a property the
-                    # first removes stays removed. Replacing instead stored a renamed new node as
-                    # {displayName} alone — no type, no urn — which then failed every read of the
-                    # draft.
-                    new_vals[eid] = (self._compose_patches(earlier, payload) if eid in update_ids
-                                     else self._patch_payload(earlier, payload))
-                else:
-                    new_vals[eid] = None if op["op"] == "delete" else dict(payload)
-                    if op["op"] == "update":
-                        update_ids.add(eid)
-                        if op.get("base_version"):
-                            base_versions[eid] = op["base_version"]
-                    else:
-                        update_ids.discard(eid)          # a create / delete restarts the entity
-                if new_vals[eid] is not None and kind_by_entity[eid] == "node":
-                    new_vals[eid] = _sanitize_node_properties(new_vals[eid])
+            # Resolve ops → new payloads for the AFFECTED entities only. Several ops on ONE
+            # entity in one batch COMPOSE, in order: an update after a create (a node renamed
+            # before its first save) patches the create's payload, and two updates become one
+            # patch that keeps BOTH updates' property removals (applying the first onto the
+            # second dropped the first's removal). Replacing instead stored a renamed new node
+            # as {displayName} alone — no type, no urn — which then failed every read of the draft.
+            fold = fold_batch_ops(
+                ops, is_edge_payload=_is_edge_payload, sanitize_node=_sanitize_node_properties)
+            new_vals: Dict[str, Optional[dict]] = fold.new_vals
+            kind_by_entity: Dict[str, str] = fold.kind_by_entity
+            update_ids: set = fold.update_ids
+            base_versions: Dict[str, str] = fold.base_versions   # entity_id → client's OCC token
 
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
             cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
@@ -5455,12 +5479,17 @@ class GraphVersioningService:
                     new_vals[eid] = out.merged
                     for cf in out.conflicts:
                         occ_conflicts.append({
-                            "entity_id": eid, "path": list(cf.path), "base": cf.base,
+                            "entity_id": eid, "entity_kind": kind_by_entity.get(eid, "node"),
+                            "path": list(cf.path), "base": cf.base,
                             "ours": cf.ours, "theirs": cf.theirs, "kind": cf.kind})
                 else:
                     new_vals[eid] = self._patch_payload(cur, patch)
             if occ_conflicts:
-                raise MergeConflict(occ_conflicts)
+                # Each conflicting entity's CURRENT value rides along, so the client can rebase the
+                # user's edit onto it without another read.
+                raise MergeConflict(occ_conflicts, current={
+                    c["entity_id"]: (c["entity_kind"], cur_vals.get(c["entity_id"]))
+                    for c in occ_conflicts})
 
             # Cascade a node delete to its containment subtree (ontology-driven) AND every
             # live edge incident to any deleted node (source or target, ANY type) — so no
@@ -5540,9 +5569,12 @@ class GraphVersioningService:
                 for v in new_vals.values():
                     canonicalize_payload_types(v, ontology_rules)
 
+            written = {eid: (kind_by_entity.get(eid, "node"), v) for eid, v in new_vals.items()}
+            urns = {eid: (v.get("urn") or eid) for eid, v in {**cur_vals, **new_vals}.items()
+                    if v is not None and not _is_edge_payload(v)}
             deltas = net_delta({k: cur_vals.get(k) for k in new_vals}, new_vals)
             if not deltas:
-                return None
+                return ApplyResult(None, written, urns)
             for d in deltas:
                 kind_by_entity.setdefault(
                     d.entity_id, "edge" if _is_edge_payload(cur_vals.get(d.entity_id) or {}) else "node")
@@ -5572,7 +5604,7 @@ class GraphVersioningService:
                 ps = await s.get(ProjectionStateORM, graph_id)
                 if ps is not None:
                     ps.target_commit_seq = new_seq
-            return commit.id
+            return ApplyResult(commit.id, written, urns)
 
     async def _bulk_insert_versions(self, s, graph_id, branch_id, commit, node_deltas, edge_deltas, actor) -> None:
         """Chunked multi-row INSERTs into the version tables + a bulk head upsert
@@ -5627,42 +5659,17 @@ class GraphVersioningService:
 
     @staticmethod
     def _patch_payload(base: Optional[dict], patch: dict) -> dict:
-        """Apply a partial update `patch` onto `base`: top-level fields override, and the
-        nested ``properties`` dict is DEEP-merged (a partial properties patch must not drop
-        the keys it didn't mention). Mirrors the merge the canvas endpoint used to do.
-
-        A key the base already has keeps its stored value when the patch sends the same
-        value back in a lossier form — the browser's rounded copy of a 19-digit integer,
-        or digits as text (``typed_merge.preserve_stored_type``) — so a drawer edit of
-        one field can no longer rewrite every other property it round-trips."""
-        base = base or {}
-        out = {**base, **patch}
-        if patch.get("properties") is not None or base.get("properties") is not None:
-            base_props = base.get("properties") or {}
-            merged = {**base_props}
-            for k, v in (patch.get("properties") or {}).items():
-                merged[k] = preserve_stored_type(base_props[k], v) if k in base_props else v
-            # A bulk import can explicitly REMOVE a property by patching it with this sentinel
-            # (rowmodel.PROP_DELETE — a `\N` cell / properties_json null); drop those keys. The
-            # literal never occurs in real data, so this is inert for every other write path.
-            out["properties"] = {k: v for k, v in merged.items() if v != "__nx_prop_delete__"}
-        return out
+        """Apply a partial update `patch` onto `base` (see ``backend.common.property_patch``):
+        top-level fields override, ``properties`` is merged key by key, and a property marked
+        for removal (``unsetProperties`` on the wire, or an import's ``\\N``) is removed."""
+        return apply_patch(base, patch)
 
     @staticmethod
     def _compose_patches(first: dict, second: dict) -> dict:
-        """Two partial updates of ONE entity in one batch, as the one patch they make in order:
-        ``second`` wins field by field and, inside ``properties``, key by key. A removal
-        (``__nx_prop_delete__``) is kept for the stored value to lose — :meth:`_patch_payload`
-        treats its base as a stored payload and would drop the marker, bringing the key back. A
-        value the second re-sends in a lossier form keeps the first's, as two saves in turn would."""
-        out = {**first, **second}
-        if first.get("properties") is not None or second.get("properties") is not None:
-            before = first.get("properties") or {}
-            merged = {**before}
-            for k, v in (second.get("properties") or {}).items():
-                merged[k] = preserve_stored_type(before[k], v) if k in before else v
-            out["properties"] = merged
-        return out
+        """Two partial updates of ONE entity in one batch, as the one patch they make in order
+        (see ``backend.common.property_patch.compose_patches``): a removal stays a removal until
+        it meets the stored value."""
+        return compose_patches(first, second)
 
     async def _payloads_by_content_hash(
         self, s, graph_id: str, eid_to_token: Mapping[str, str], kind_by_entity: Mapping[str, str]

@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field, PrivateAttr, RootModel
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +38,8 @@ from backend.common.models.search import (
     SearchMembershipRequest,
     SearchQuery,
 )
+from backend.common.property_patch import (
+    InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
@@ -46,10 +48,11 @@ from backend.app.services.deep_search import (
     SearchRunContext,
     get_deep_search_settings,
 )
-from backend.common.adapters import ProviderFailingOver
+from backend.common.adapters import ProviderBusy, ProviderFailingOver, ProviderUnavailable
 from backend.app.services.fair_share import get_fair_share
 from backend.app.config import resilience
 from backend.app.services.graph_cache import (
+    _DETERMINISTIC_CUTS,
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CANVAS_BOOTSTRAP,
@@ -101,7 +104,6 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 # feature. Both fail OPEN (a database hiccup must not black out a product area); only the
 # SECURITY flag (signupEnabled, in auth.py) fails closed.
 require_trace = require_feature("traceEnabled")        # POST /trace*
-require_lineage_rollup = require_feature("canvasLineageRollupEnabled")  # POST /nodes/ancestor-chains
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
 require_export = require_feature("graphExportEnabled")  # /search/exports*
 
@@ -1270,7 +1272,11 @@ async def trace_expand_batch(
 
     Partial-success: pair-level failures are swallowed (with a logged warning)
     so the rest of the batch returns; total failure returns 404 with the
-    list of pair-level error messages in the response body. Shape matches
+    list of pair-level error messages in the response body. A shed pair is
+    not a failure: the batch answers 429 + Retry-After, as /trace/expand
+    does, and the client retries it. A pair the provider could not answer
+    right now (a node failing over, a deadline) marks the answer truncated
+    with reason "failed", so it is not cached as complete. Shape matches
     /trace/expand so the frontend's normalizeTraceV2 handles either."""
     import asyncio
     if not request.pairs:
@@ -1280,6 +1286,9 @@ async def trace_expand_batch(
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
     pair_errors: List[str] = []
+    # Of those, the pairs the provider could not answer right now: asked
+    # again, they may answer.
+    unanswered: List[str] = []
 
     async def run_one(p: _TraceExpandPair):
         req = ExpandRequest(
@@ -1291,18 +1300,32 @@ async def trace_expand_batch(
         )
         try:
             return await engine.expand_aggregated_edge(req)
+        except ProviderBusy:
+            # "Ask again in a moment" for the whole batch, not a pair to drop:
+            # the rest would answer 200 as complete and be cached as such.
+            raise
         except Exception as exc:
             # Catch ALL exceptions per pair — provider unavailability, value
             # errors, missing URNs, etc. Surface to the response body so the
             # frontend can render a partial result with the failure list.
             msg = f"{p.source_urn} → {p.target_urn} @ {p.next_level}: {type(exc).__name__}: {exc}"
             pair_errors.append(msg)
+            if isinstance(exc, (ProviderUnavailable, TimeoutError)):
+                unanswered.append(msg)
             logger.warning("trace/expand-batch pair failed: %s", msg, exc_info=False)
             return None
 
     async def compute_batch() -> TraceResult:
-        results = await asyncio.gather(*(run_one(p) for p in request.pairs))
-        return _merge_expand_results(results, request, pair_errors)
+        tasks = [asyncio.ensure_future(run_one(p)) for p in request.pairs]
+        try:
+            results = await asyncio.gather(*tasks)
+        except ProviderBusy:
+            # gather does not stop the pairs still out: stop them, rather than
+            # leave them running against a store that just said it is full.
+            for t in tasks:
+                t.cancel()
+            raise
+        return _merge_expand_results(results, request, pair_errors, short=bool(unanswered))
 
     # Response-cached like the single /trace/expand (this handler used to
     # bypass GraphCache entirely, so every re-expand of the same drilled
@@ -1331,7 +1354,7 @@ async def trace_expand_batch(
     )
 
 
-def _merge_expand_results(results, request, pair_errors) -> TraceResult:
+def _merge_expand_results(results, request, pair_errors, short: bool) -> TraceResult:
     successes = [r for r in results if r is not None]
     if not successes:
         raise HTTPException(
@@ -1370,6 +1393,11 @@ def _merge_expand_results(results, request, pair_errors) -> TraceResult:
             len(successes), len(request.pairs),
         )
 
+    # The response cache keeps an answer by its reason: a cap for the full
+    # TTL, a read that gave up only briefly. So a pair lost for now says
+    # "failed", and otherwise a pair's cut that may do better outranks a cap.
+    cuts = sorted((r.truncation_reason for r in successes if r.truncated),
+                  key=lambda why: why is None or why in _DETERMINISTIC_CUTS)
     return TraceResult(
         nodes=list(nodes_by_id.values()),
         edges=list(edges_by_id.values()),
@@ -1378,7 +1406,8 @@ def _merge_expand_results(results, request, pair_errors) -> TraceResult:
         downstream_urns=downstream_urns,
         focus=focus,
         effective_level=effective_level,
-        truncated=truncated_any,
+        truncated=truncated_any or short,
+        truncation_reason="failed" if short else next(iter(cuts), None),
     )
 
 
@@ -2602,7 +2631,11 @@ async def get_node_ancestors(
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    return await engine.get_ancestors(urn, limit=limit, offset=offset)
+    """Slot-bounded like /nodes/ancestor-chains: a burst sheds 429."""
+    async def compute() -> List[GraphNode]:
+        return await engine.get_ancestors(urn, limit=limit, offset=offset)
+
+    return await _bounded_compute(engine, compute)()
 
 
 class AncestorChainsRequest(BaseModel):
@@ -2614,7 +2647,6 @@ class AncestorChainsRequest(BaseModel):
 @router.post(
     "/nodes/ancestor-chains",
     response_model=Dict[str, Dict[str, List[str]]],
-    dependencies=[Depends(require_lineage_rollup)],
 )
 async def get_node_ancestor_chains(
     body: AncestorChainsRequest,
@@ -2760,13 +2792,30 @@ async def get_edges_between(
 
 
 class _DegreesResult(RootModel[Dict[str, Dict[str, int]]]):
-    """RootModel wrapper so GraphCache can serialize /nodes/degree."""
+    """RootModel wrapper so GraphCache can serialize /nodes/degree.
+
+    ``degraded_detail`` is what GraphCache's ``_is_incomplete_result`` reads:
+    an answer that left urns out (a bucket failed: absent = unknown) is kept
+    only for the negative TTL and never becomes the last-known-good, so the
+    canvas's retry can complete it. Not serialized."""
+
+    _unanswered: int = PrivateAttr(default=0)
+
+    @property
+    def degraded_detail(self) -> Optional[str]:
+        return f"{self._unanswered} urns could not be counted" if self._unanswered else None
+
+
+class NodeDegreeQuery(InternalEdgeQuery):
+    """``includeRollups`` adds ``rollupIn`` / ``rollupOut`` to each urn's
+    totals: 1 when it has a roll-up cell in that direction, else 0."""
+    include_rollups: bool = Field(False, alias="includeRollups")
 
 
 @router.post("/nodes/degree", response_model=Dict[str, Dict[str, int]])
 async def get_node_degrees(
     response: Response,
-    query: InternalEdgeQuery = Body(...),
+    query: NodeDegreeQuery = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """TOTAL lineage degree (in/out) per URN over the full graph.
@@ -2782,25 +2831,47 @@ async def get_node_degrees(
     ``nodes_degree``, which is not a registered key, so ``is_enabled``
     answered False and every call bypassed the cache the docstring above
     promised — silently, since a bypass is a legal outcome.
+
+    An answer that left urns out is never cached as THE answer (see
+    ``_DegreesResult``). A draft counts through its base. A reader that
+    cannot count at all (a versioned branch, or a draft on one) is a 501,
+    like /nodes/ancestor-chains.
+
+    ``includeRollups`` opts in to roll-up presence for container markers
+    (see ``NodeDegreeQuery``); a request without it is answered as before.
     """
     async def compute() -> _DegreesResult:
-        return _DegreesResult(await engine.get_node_degrees(query.urns, query.edge_types))
+        result = _DegreesResult(await engine.get_node_degrees(
+            query.urns, query.edge_types, include_rollups=query.include_rollups,
+        ))
+        # An urn whose roll-up flags are absent (its probe failed) is as
+        # unanswered as an absent urn.
+        flags = {"rollupIn", "rollupOut"} if query.include_rollups else set()
+        result._unanswered = sum(
+            1 for u in set(query.urns)
+            if u not in result.root or not flags <= result.root[u].keys()
+        )
+        return result
 
-    scope = _cache_scope(engine)
-    if scope is None:
-        return (await _bounded_compute(engine, compute)()).root
-    result = await get_graph_cache().get_or_compute(
-        scope=scope,
-        endpoint=ENDPOINT_NODES_DEGREE,
-        params={
-            "urns": sorted(query.urns),
-            "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
-        },
-        compute=_bounded_compute(engine, compute),
-        model_cls=_DegreesResult,
-        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
-        expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
-    )
+    try:
+        scope = _cache_scope(engine)
+        if scope is None:
+            return (await _bounded_compute(engine, compute)()).root
+        result = await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_NODES_DEGREE,
+            params={
+                "urns": sorted(query.urns),
+                "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
+                "includeRollups": query.include_rollups,
+            },
+            compute=_bounded_compute(engine, compute),
+            model_cls=_DegreesResult,
+            on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
     return result.root
 
 
@@ -2809,8 +2880,12 @@ async def query_edges(
     query: EdgeQuery = Body(..., embed=True),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Advanced edge query (bulk fetch)."""
-    return await engine.get_edges(query)
+    """Advanced edge query (bulk fetch). Slot-bounded like /edges/between:
+    a burst sheds 429."""
+    async def compute() -> List[GraphEdge]:
+        return await engine.get_edges(query)
+
+    return await _bounded_compute(engine, compute)()
 
 
 @router.post("/nodes/query", response_model=List[GraphNode], response_model_by_alias=True)
@@ -3280,6 +3355,10 @@ async def get_aggregated_edges(
     Get aggregated edges between containers.
     Returns summarized edge information showing lineage connections
     at a higher granularity level (e.g., between datasets instead of columns).
+
+    Without ``targetUrns`` it answers every edge out of the sources; with an
+    empty ``sourceUrns`` and ``targetUrns`` set, every edge into the targets.
+    ``excludeInternal`` leaves out every cell one of whose ends holds the other.
     """
     await _enforce_fair_share(engine, ENDPOINT_AGGREGATED)
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
@@ -3295,17 +3374,21 @@ async def get_aggregated_edges(
     # input order map to the same cache key — the frontend's chunked
     # fan-out frequently produces equivalent batches in different orders.
     failing_over: dict = {}
+    params = {
+        "sourceUrns": sorted(request.source_urns or []),
+        "targetUrns": sorted(request.target_urns or []) if request.target_urns else None,
+        "granularity": request.granularity,
+        "includeEdgeTypes": sorted(request.include_edge_types or []) if request.include_edge_types else None,
+        "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
+        "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
+    }
+    # Only when set: an ask without it keeps the key its cached answers have.
+    if request.exclude_internal:
+        params["excludeInternal"] = True
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_AGGREGATED,
-        params={
-            "sourceUrns": sorted(request.source_urns or []),
-            "targetUrns": sorted(request.target_urns or []) if request.target_urns else None,
-            "granularity": request.granularity,
-            "includeEdgeTypes": sorted(request.include_edge_types or []) if request.include_edge_types else None,
-            "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
-            "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
-        },
+        params=params,
         compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
@@ -3400,8 +3483,12 @@ async def update_edge(
     _: object = Depends(require_ws_manage),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Update mutable properties of an existing edge. Edge type is immutable."""
-    result = await engine.update_edge(edge_id, request)
+    """Update mutable properties of an existing edge — a PATCH: ``properties`` sets the
+    named keys, ``unsetProperties`` removes keys, the rest are kept. Edge type is immutable."""
+    try:
+        result = await engine.update_edge(edge_id, request)
+    except InvalidPatch as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
     await _invalidate_cache(engine)
     return result
 
@@ -3481,6 +3568,10 @@ class GraphChangeOp(BaseModel):
     id: Optional[str] = Field(default=None, description="entity id / urn (update/delete, or an explicit create id)")
     ref: Optional[str] = Field(default=None, description="client temp ref → echoed back in `assigned` for creates")
     payload: Optional[dict] = None
+    unset_properties: Optional[List[str]] = Field(
+        default=None, alias="unsetProperties",
+        description="update only: property names to REMOVE. An update merges `payload.properties` "
+        "key by key, so a property left out is kept — this is how one is removed.")
     base_version: Optional[str] = Field(
         default=None, alias="baseVersion",
         description="optimistic-concurrency token: the `version` (content hash) the client read for "
@@ -3499,6 +3590,12 @@ class GraphChangesRequest(BaseModel):
 class GraphChangesResponse(BaseModel):
     commit_id: Optional[str] = Field(default=None, alias="commitId")
     assigned: dict = Field(default_factory=dict)
+    # Every entity the save addressed (or its cascade removed), as a reader returns it now —
+    # `{id: {kind, version, node|edge}}`, `{kind, version: null, deleted: true}` once gone — so
+    # the client refreshes its copies and their tokens without a re-read, and the next edit of
+    # the same entity is not a conflict with its own last save. Capped (`entitiesTruncated`).
+    entities: dict = Field(default_factory=dict)
+    entities_truncated: bool = Field(default=False, alias="entitiesTruncated")
 
     class Config:
         populate_by_name = True
@@ -3541,6 +3638,9 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
     ops: List[dict] = []
     for i, o in enumerate(request_ops):
         kind = "edge" if o.kind == "edge" else "node"
+        unset = getattr(o, "unset_properties", None)
+        if unset and o.op != "update":
+            raise InvalidPatch(f"unsetProperties applies to an update, not a {o.op}")
         if o.op == "delete":
             if not o.id:
                 continue
@@ -3559,20 +3659,25 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn):
             }})
         elif o.op == "create":
             eid = create_eid[i]
-            payload = dict(o.payload or {})
+            payload = dict(strip_deletes(o.payload) or {})     # a new entity has nothing to remove
             if kind == "edge":                 # an edge may point at nodes created in THIS same batch
                 for f in endpoint_fields:
                     if f in payload:
                         payload[f] = _ref(payload[f])
             else:                              # node — stamp the (minted-or-given) urn into the payload
+                payload = dict(lift_top_level_node_fields(payload))
                 payload["urn"] = eid
             ops.append({"op": "create", "entity_kind": kind, "entity_id": eid, "payload": payload})
-        else:  # update — forward the RAW partial patch + the OCC base_version; the service does the
+        else:  # update — forward the partial patch + the OCC base_version; the service does the
                # authoritative field-level merge (patch onto current, or a 3-way conflict check).
+               # `unsetProperties` becomes the service's one internal removal form here.
             if not o.id:
                 continue
+            payload = normalize_update(o.payload, unset)
+            if kind == "node":
+                payload = lift_top_level_node_fields(payload)
             ops.append({"op": "update", "entity_kind": kind, "entity_id": _ref(o.id),
-                        "payload": o.payload or {}, "base_version": o.base_version})
+                        "payload": payload, "base_version": o.base_version})
     return ops, assigned
 
 
@@ -3604,13 +3709,17 @@ async def apply_graph_changes(
     graph_id = g["graph_id"]
 
     from backend.app.ontology.urn import make_urn
-    ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+    try:
+        ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+    except InvalidPatch as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
 
     if not ops:
         return {"commitId": None, "assigned": assigned}
 
+    from backend.app.services.versioning.entity_audit import ENTITY_VIEW_CAP, entity_views
     try:
-        commit_id = await svc.apply_ops(
+        result = await svc.apply_ops_detailed(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
             message=request.message or "Canvas edits",
             containment_edge_types=await _resolve_containment_types(engine),
@@ -3619,7 +3728,10 @@ async def apply_graph_changes(
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except MergeConflict as exc:
-        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+        # `current`: each conflicting entity as it is now, for the client to rebase the edit onto.
+        raise HTTPException(status_code=409, detail={
+            "type": "merge_conflict", "conflicts": exc.conflicts,
+            "current": entity_views(exc.current)[0]})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
 
@@ -3634,7 +3746,9 @@ async def apply_graph_changes(
     await get_graph_cache().bump_generation(
         CacheScope(workspace_id=ws_id, data_source_id=dataSourceId, branch_id=branchId)
     )
-    return {"commitId": commit_id, "assigned": assigned}
+    entities, truncated = entity_views(result.written, result.urns, cap=ENTITY_VIEW_CAP)
+    return {"commitId": result.commit_id, "assigned": assigned,
+            "entities": entities, "entitiesTruncated": truncated}
 
 
 class DeleteImpactResponse(BaseModel):
