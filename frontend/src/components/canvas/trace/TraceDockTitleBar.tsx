@@ -231,21 +231,21 @@ export function TraceDockTitleBar({
         <span
           className={cn(
             'inline-flex items-center gap-1.5 px-2.5 h-9 rounded-xl',
-            'bg-white/[0.06] border border-blue-400/40',
+            'bg-white/[0.06] border border-lineage-in/40',
           )}
           aria-label={`${trace.upstreamCount} upstream nodes`}
         >
-          <ArrowUp className="w-4 h-4 text-blue-600 dark:text-blue-400" strokeWidth={2.4} aria-hidden />
+          <ArrowUp className="w-4 h-4 text-lineage-in" strokeWidth={2.4} aria-hidden />
           <span className="text-sm font-bold tabular-nums text-ink">{upDisplay.toLocaleString()}</span>
         </span>
         <span
           className={cn(
             'inline-flex items-center gap-1.5 px-2.5 h-9 rounded-xl',
-            'bg-white/[0.06] border border-emerald-400/40',
+            'bg-white/[0.06] border border-lineage-out/40',
           )}
           aria-label={`${trace.downstreamCount} downstream nodes`}
         >
-          <ArrowDown className="w-4 h-4 text-emerald-600 dark:text-emerald-400" strokeWidth={2.4} aria-hidden />
+          <ArrowDown className="w-4 h-4 text-lineage-out" strokeWidth={2.4} aria-hidden />
           <span className="text-sm font-bold tabular-nums text-ink">{downDisplay.toLocaleString()}</span>
         </span>
       </div>

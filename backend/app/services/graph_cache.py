@@ -288,6 +288,8 @@ _ENABLED_ENDPOINTS = {
 #: its ``grain=coarse`` page only (``trace_closure_coarse`` reads incident
 #: rollup cells) — the fine walk reads raw lineage, but both grains share one
 #: endpoint namespace, so the endpoint is scoped to the stricter of the two.
+#: ``nodes-degree`` likewise for its ``includeRollups`` answers (roll-up
+#: presence), which is every answer the canvas asks for.
 _ROLLUP_ENDPOINTS = frozenset({
     ENDPOINT_AGGREGATED,
     ENDPOINT_TRACE,
@@ -295,6 +297,7 @@ _ROLLUP_ENDPOINTS = frozenset({
     ENDPOINT_TRACE_CLOSURE,
     ENDPOINT_CANVAS_BOOTSTRAP,
     ENDPOINT_CANVAS_EXPAND,
+    ENDPOINT_NODES_DEGREE,
 })
 
 
@@ -644,6 +647,20 @@ class GraphCache:
                 _swallow_if_unobserved(fut)
             raise
         finally:
+            # Still pending here only on a BaseException: the request tier
+            # cancelled this handler, and CancelledError reaches none of the
+            # clauses above. Followers wait on ``shield(existing)``, which
+            # their own cancellation cannot end, so an unresolved future
+            # strands every one of them until its own tier fires. Fail it
+            # with an ordinary error and they compute for themselves.
+            if not fut.done():
+                logger.warning(
+                    "graph_cache: the %s leader for %s was cancelled before it "
+                    "answered; its followers compute for themselves",
+                    endpoint, scope.data_source_id or "-",
+                )
+                fut.set_exception(RuntimeError(f"{endpoint} leader was cancelled"))
+                _swallow_if_unobserved(fut)
             self._inflight.pop(cache_key, None)
             # Hand leadership back at once rather than making the next caller
             # wait out the TTL — including when we failed, so the retry is

@@ -24,6 +24,7 @@ from backend.app.services.graph_cache import (
     ENDPOINT_AGGREGATED,
     ENDPOINT_CHILDREN,
     ENDPOINT_LAYER_ASSIGNMENT,
+    ENDPOINT_NODES_DEGREE,
     ENDPOINT_TOP_LEVEL,
     ENDPOINT_TRACE,
     ENDPOINT_TRACE_CLOSURE,
@@ -250,6 +251,47 @@ async def test_in_process_singleflight_coalesces_concurrent_calls() -> None:
     assert result_a.value == 7
     assert result_b.value == 7
     assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_leader_does_not_strand_its_followers(caplog) -> None:
+    """The request tier cancels a handler that runs too long, and
+    CancelledError is not an Exception, so it slips past every clause that
+    resolves the leader's future. Followers wait on ``shield(existing)``,
+    which their own cancellation cannot end: each one hung until its own
+    tier fired. They must fall through and compute for themselves, and the
+    log must say a leader was cancelled."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    leading = asyncio.Event()
+
+    async def never_answers() -> _Result:
+        leading.set()
+        await asyncio.Event().wait()
+        return _Result(value=0)  # pragma: no cover
+
+    def call(compute):
+        return cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "cancelled"}, compute=compute, model_cls=_Result,
+        )
+
+    leader = asyncio.create_task(call(never_answers))
+    await leading.wait()
+    follower = asyncio.create_task(call(AsyncMock(return_value=_Result(value=5))))
+    await asyncio.sleep(0.01)       # the follower parks on the leader's future
+    with caplog.at_level("WARNING", logger=graph_cache.logger.name):
+        leader.cancel()
+        result = await asyncio.wait_for(follower, 1.0)
+
+    assert result.value == 5
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+    assert cache._inflight == {}
+    assert any(
+        "leader" in r.getMessage() and ENDPOINT_CHILDREN in r.getMessage()
+        for r in caplog.records if r.levelname == "WARNING"
+    )
 
 
 # ─── cross-process singleflight (the election) ─────────────────────────
@@ -3035,6 +3077,30 @@ async def test_a_rollup_rebuild_leaves_the_hierarchy_reads_cached() -> None:
         "a rollup rebuild moved no node, edge or containment relationship, and "
         "must not throw away the hierarchy cache"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_rollup_rebuild_refreshes_the_degree_totals() -> None:
+    """``/nodes/degree`` with ``includeRollups`` reads roll-up presence out of
+    the :AGGREGATED layer. Keyed on content alone, a source opened before its
+    first rebuild kept "no roll-ups" on every container for the full TTL."""
+    redis = _shared_bus()
+    cache = GraphCache(redis)
+    scope = CacheScope("ws1", "ds1")
+    degrees = AsyncMock(return_value=_Result(value=1, children=[1]))
+    params = {"urns": ["a"], "edgeTypes": None, "includeRollups": True}
+
+    async def read() -> None:
+        await cache.get_or_compute(
+            scope=scope, endpoint=ENDPOINT_NODES_DEGREE, params=params,
+            compute=degrees, model_cls=_Result,
+        )
+
+    await read()
+    await cache.bump_rollup_generation(scope)
+    await read()
+
+    assert degrees.await_count == 2, "a rebuilt roll-up layer was answered from cache"
 
 
 @pytest.mark.asyncio

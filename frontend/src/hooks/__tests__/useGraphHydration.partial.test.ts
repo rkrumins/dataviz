@@ -6,8 +6,11 @@
  *
  *  - A curated view whose batches PARTLY failed renders the entities that
  *    arrived, records the gap (count of assigned entities in the failed
- *    batches) and stays in a failed status so the retry loop keeps going —
- *    CanvasRouter shows a pill over the data rather than the blocking card.
+ *    batches) and stays in a failed status — CanvasRouter shows a pill over
+ *    the data rather than the blocking card.
+ *  - A retry asks only for the entities whose batch failed, and after the
+ *    fast attempts a partial load stops retrying on its own: the pill's Retry
+ *    resumes it.
  *  - A retry of the SAME view does not clear the canvas between attempts.
  *  - A genuinely new view still starts from an empty canvas.
  *  - Placements the load asked for and didn't get are recorded as not found, but never those in
@@ -72,6 +75,11 @@ function node(i: number) {
   return { urn: `urn:e:${i}`, entityType: 'object', displayName: `e${i}` }
 }
 
+/** The URNs each getNodes call asked for, in call order. */
+function askedUrns(): string[][] {
+  return (mockProvider.getNodes.mock.calls as unknown as Array<[{ urns?: string[] }]>).map(c => c[0].urns ?? [])
+}
+
 function assignUrns(count: number) {
   const assignments: Record<string, { layerId: string }> = {}
   for (let i = 0; i < count; i++) assignments[`urn:e:${i}`] = { layerId: 'L1' }
@@ -119,16 +127,70 @@ describe('useGraphHydration — partial loads and retries keep data on screen', 
     await waitFor(() => expect(result.current.hydrationStatus).toBe('slow'))
     expect(useCanvasStore.getState().nodes.length).toBe(1)
 
-    // Let the retry loop run at least one failed attempt: the node must
-    // still be there — a retry never empties the canvas.
-    const callsAtFailure = mockProvider.getNodes.mock.calls.length
-    await waitFor(() => expect(mockProvider.getNodes.mock.calls.length).toBeGreaterThan(callsAtFailure))
+    // Let the retry loop run at least one failed attempt (the first load made
+    // two calls): the node must still be there — a retry never empties the
+    // canvas.
+    await waitFor(() => expect(mockProvider.getNodes.mock.calls.length).toBeGreaterThan(2))
     expect(useCanvasStore.getState().nodes.length).toBeGreaterThanOrEqual(1)
 
     secondBatchFails = false
+    // The fast attempts are spent by now (one, in this file), so the reader's
+    // Retry is what asks again.
+    act(() => result.current.retryHydration())
     await waitFor(() => expect(result.current.hydrationStatus).toBe('ready'), { timeout: 5_000 })
     expect(useCanvasStore.getState().nodes.length).toBe(2)
     expect(useCanvasStore.getState().nodeFetchFailures).toBe(0)
+  })
+
+  it('a retry asks only for the batch that failed', async () => {
+    assignUrns(150) // batches: 100 + 50
+    mockProvider.getNodes.mockImplementation(async (...args: unknown[]) => {
+      const q = args[0] as { urns?: string[] }
+      if (q.urns && q.urns.length === 50) throw apiError(504, 'PROVIDER_TIMEOUT')
+      return [node(0)]
+    })
+
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('slow'))
+    // The first attempt asked for both batches; wait for the retry.
+    await waitFor(() => expect(mockProvider.getNodes.mock.calls.length).toBeGreaterThan(2))
+    for (const urns of askedUrns().slice(2)) {
+      expect(urns).toHaveLength(50)
+      expect(urns.every(u => Number(u.split(':')[2]) >= 100)).toBe(true)
+    }
+    // What the first attempt brought stays on screen, and is not reported
+    // as a placement that points at nothing.
+    expect(useCanvasStore.getState().nodes.map(n => n.id)).toContain('urn:e:0')
+    expect(useCanvasStore.getState().placementsNotFound?.urns ?? []).not.toContain('urn:e:0')
+    // The edges are still asked for over everything on screen.
+    const lastEdges = mockProvider.getEdgesBetween.mock.calls.at(-1) as unknown as [string[]]
+    expect(lastEdges[0]).toContain('urn:e:0')
+  })
+
+  it('a partial load stops retrying on its own after the fast attempts, and Retry resumes it', async () => {
+    assignUrns(150) // batches: 100 + 50
+    mockProvider.getNodes.mockImplementation(async (...args: unknown[]) => {
+      const q = args[0] as { urns?: string[] }
+      if (q.urns && q.urns.length === 50) throw apiError(504, 'PROVIDER_TIMEOUT')
+      return [node(0)]
+    })
+    // Every attempt asks for the failing batch, so it counts attempts.
+    const attempts = () => askedUrns().filter(urns => urns.length === 50).length
+
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+    // The first load, then the one fast attempt this file allows.
+    await waitFor(() => expect(attempts()).toBe(2))
+    await waitFor(() => expect(result.current.autoRetryStopped).toBe(true))
+    // The slow cadence here is 20ms: nothing more is asked.
+    await new Promise(r => setTimeout(r, 200))
+    expect(attempts()).toBe(2)
+    expect(result.current.hydrationStatus).toBe('slow')
+    expect(useCanvasStore.getState().nodes.length).toBe(1)
+
+    act(() => result.current.retryHydration())
+    expect(result.current.autoRetryStopped).toBe(false)
+    await waitFor(() => expect(attempts()).toBeGreaterThan(2))
+    await waitFor(() => expect(result.current.autoRetryStopped).toBe(true))
   })
 
   it('a genuinely new view starts from an empty canvas', async () => {

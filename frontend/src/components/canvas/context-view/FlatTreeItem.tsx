@@ -16,7 +16,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
-import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { formatUnitCount, unitMeaning } from './connections/connectionUnits'
 import { portView, type NodePorts } from './lineagePorts'
 import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
@@ -94,9 +94,16 @@ interface FlatTreeItemProps {
   portStrengthLeft?: number
   portStrengthRight?: number
   /** Lineage in/out over the WHOLE graph (`/nodes/degree`); undefined = not
-   *  known. Shows a hollow port for lineage with nothing on this canvas. */
+   *  known. Shows a solid port for lineage no line on this canvas shows. */
   lineageTotals?: { in: number; out: number }
-  /** Out-of-view lineage cue (curated views) — sky dashed marks. */
+  /** Counting `lineageTotals` failed and is being retried: with nothing
+   *  else to say it has lineage, the card's ports say it is unknown. */
+  lineageUnknown?: boolean
+  /** Flows the canvas placed OUTSIDE this view, by direction: a hollow port
+   *  while none of that direction is in it. */
+  lineageOutside?: { in: number; out: number }
+  /** Out-of-view lineage cue (curated views) — dashed marks in the
+   *  lineage direction colours. */
   externalIn?: number
   externalOut?: number
 }
@@ -152,6 +159,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   portStrengthLeft = 0,
   portStrengthRight = 0,
   lineageTotals,
+  lineageUnknown = false,
+  lineageOutside,
   externalIn = 0,
   externalOut = 0,
 }: FlatTreeItemProps) {
@@ -282,8 +291,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
   const personaMode = usePersonaMode()
   const displayName = resolveEntityName(node.data, personaMode, node.name)
-  const leftPort = portView('left', ports, lineageTotals)
-  const rightPort = portView('right', ports, lineageTotals)
+  const leftPort = portView('left', ports, lineageTotals, lineageUnknown, lineageOutside)
+  const rightPort = portView('right', ports, lineageTotals, lineageUnknown, lineageOutside)
   const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
@@ -467,10 +476,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         "hover:bg-gradient-to-r hover:to-transparent",
         "hover:from-accent-lineage/[0.07] dark:hover:from-accent-lineage/[0.13]",
         // Selected state with accent glow
-        isSelected && !isBulkSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
+        isSelected && !isBulkSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgb(var(--nx-accent-lineage-rgb)_/_0.3)]",
         // One of several: the row has to be findable while scanning a column,
         // so the ring is a full 2px in the accent rather than a 30% hairline.
-        isBulkSelected && "bg-gradient-to-r from-accent-lineage/25 via-accent-lineage/[0.12] to-transparent shadow-[inset_0_0_0_2px_rgba(var(--accent-lineage-rgb),0.7)]",
+        isBulkSelected && "bg-gradient-to-r from-accent-lineage/25 via-accent-lineage/[0.12] to-transparent shadow-[inset_0_0_0_2px_rgb(var(--nx-accent-lineage-rgb)_/_0.7)]",
         // Search result highlight — direct match (advanced search or quick search)
         isSearchResult && !isSelected && cn(
             "bg-gradient-to-r from-amber-500/15 to-transparent",
@@ -563,9 +572,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             dropIndicator === 'before' ? '-top-[3px]' : '-bottom-[3px]',
           )}
         >
-          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgba(var(--accent-lineage-rgb),0.9)] flex-shrink-0" />
-          <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgba(var(--accent-lineage-rgb),0.7)]" />
-          <span className="flex items-center gap-0.5 rounded-full bg-accent-lineage pl-1 pr-1.5 py-0.5 text-[9px] font-semibold text-white shadow-[0_1px_6px_rgba(var(--accent-lineage-rgb),0.6)] max-w-[150px] flex-shrink-0">
+          <div className="w-2 h-2 rounded-full bg-accent-lineage shadow-[0_0_8px_rgb(var(--nx-accent-lineage-rgb)_/_0.9)] flex-shrink-0" />
+          <div className="h-[2px] flex-1 rounded-full bg-accent-lineage shadow-[0_0_6px_rgb(var(--nx-accent-lineage-rgb)_/_0.7)]" />
+          <span className="flex items-center gap-0.5 rounded-full bg-accent-lineage pl-1 pr-1.5 py-0.5 text-[9px] font-semibold text-white shadow-[0_1px_6px_rgb(var(--nx-accent-lineage-rgb)_/_0.6)] max-w-[150px] flex-shrink-0">
             {dropIndicator === 'before'
               ? <LucideIcons.ArrowUpToLine className="w-2.5 h-2.5 flex-shrink-0" />
               : <LucideIcons.ArrowDownToLine className="w-2.5 h-2.5 flex-shrink-0" />}
@@ -960,7 +969,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // Selection speaks in the accent, not in the entity's type colour:
           // a rail tinted per type reads as decoration, and a column of them
           // cannot be scanned for "what did I pick?".
-          style={{ backgroundColor: isSelected ? 'rgb(var(--accent-lineage-rgb))' : nodeColor }}
+          style={{ backgroundColor: isSelected ? 'rgb(var(--nx-accent-lineage-rgb))' : nodeColor }}
           initial={false}
           animate={{
             width: isBulkSelected ? 4 : 3,
@@ -976,32 +985,34 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           lines, the card's height, in the lineage direction colours —
           incoming, outgoing, or split when a side carries both
           (lineagePorts.ts). Solid: lines to entities on this canvas, glowing
-          brighter the more they carry. Hollow: lineage in the data, none of
-          it on this canvas. No rail: no lineage that way. ── */}
+          brighter the more they carry — or, on the conventional side,
+          lineage no line shows yet. Hollow: lineage the canvas placed
+          outside this view. Grey: its lineage could not be counted. No
+          rail: no lineage that way. ── */}
       {leftPort && (
         <LineagePortGlyph
           side="left" view={leftPort} strength={portStrengthLeft}
-          counts={leftPort.kind === 'here' ? ports?.left : lineageTotals}
+          counts={leftPort.kind === 'here' ? ports?.left : lineageOutside}
         />
       )}
       {rightPort && (
         <LineagePortGlyph
           side="right" view={rightPort} strength={portStrengthRight}
-          counts={rightPort.kind === 'here' ? ports?.right : lineageTotals}
+          counts={rightPort.kind === 'here' ? ports?.right : lineageOutside}
         />
       )}
       {externalIn > 0 && (
         <div
           className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
-          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
+          style={{ borderColor: 'rgb(var(--nx-lineage-in-rgb))', opacity: 0.55 }}
+          title={`${formatUnitCount(externalIn, 'flows')} ${externalIn === 1 ? 'arrives' : 'arrive'} from entities outside this view — ${unitMeaning('flows')}`}
         />
       )}
       {externalOut > 0 && (
         <div
           className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
-          style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
+          style={{ borderColor: 'rgb(var(--nx-lineage-out-rgb))', opacity: 0.55 }}
+          title={`${formatUnitCount(externalOut, 'flows')} ${externalOut === 1 ? 'leads' : 'lead'} to entities outside this view — ${unitMeaning('flows')}`}
         />
       )}
     </div>

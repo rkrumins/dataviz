@@ -1,0 +1,354 @@
+/**
+ * useExternalDegrees — every card's lineage total, and which ones could not
+ * be counted.
+ *
+ * An answer is kept whatever the canvas does while it is in flight; only a
+ * provider switch drops it. A URN the server left out, or answered without
+ * the roll-up flags asked for, or whose request failed, is reported as
+ * failed and asked again on the hook's own backoff, with no canvas change
+ * needed. A roll-up rebuild asks every card again; a failover retry poking
+ * one graph's cache does not. A pass stops at its first failed chunk. A
+ * reader that cannot count (501) is left alone, with nothing read as
+ * failed, until a long wait or a rebuild: then it is asked again.
+ */
+import { act, renderHook } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { useCanvasStore } from '@/store/canvas'
+import { invalidateAggregatedEdges, invalidateAggregatedEdgesForScope } from '@/hooks/useAggregatedLineage'
+
+const holder: { current: Record<string, unknown> } = { current: {} }
+vi.mock('@/providers', async (original) => ({
+  ...(await original<typeof import('@/providers')>()),
+  useGraphProvider: () => holder.current,
+}))
+// The view's lineage types include the roll-up cells' own type, as the
+// server's system edge types do.
+const LINEAGE = ['FLOWS_TO', 'AGGREGATED']
+vi.mock('@/hooks/useViewSchema', () => ({ useViewLineageEdgeTypes: () => LINEAGE }))
+
+import { useExternalDegrees } from '../useExternalDegrees'
+
+type Degrees = Record<string, { in: number; out: number; rollupIn?: number; rollupOut?: number }>
+
+const node = (id: string) => ({ id, type: 'entity', position: { x: 0, y: 0 }, data: { urn: id } })
+
+function seed(version: number, ids: string[]) {
+  act(() => {
+    useCanvasStore.setState({ nodes: ids.map(node) as never, edges: [], _version: version })
+  })
+}
+
+// As the server answers when roll-up presence is asked for: flows, and the flags.
+const COUNT = { in: 1, out: 2, rollupIn: 0, rollupOut: 0 }
+const counted = (urns: string[]): Degrees => Object.fromEntries(urns.map(u => [u, COUNT]))
+
+function deferred<T>() {
+  let resolve!: (v: T) => void
+  let reject!: (e: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+
+const render = (enabled = true) => renderHook(() => useExternalDegrees(enabled))
+
+/** Past the settle debounce, with every promise it starts drained. */
+const settle = () => act(async () => { await vi.advanceTimersByTimeAsync(800) })
+/** Past the first retry's backoff (2 s, jittered up to +30%). */
+const pastFirstRetry = () => act(async () => { await vi.advanceTimersByTimeAsync(3_000) })
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  seed(1, ['a', 'b', 'logical:group-1'])
+})
+afterEach(() => {
+  vi.useRealTimers()
+  act(() => { useCanvasStore.setState({ nodes: [], edges: [] }) })
+  holder.current = {}
+})
+
+describe('useExternalDegrees — answers are kept', () => {
+  it('counts every card once, never a logical group', async () => {
+    const getNodeDegrees = vi.fn(async (urns: string[]) => counted(urns))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+    // Flows by type, never the roll-up cells as flows; whether a container
+    // holds cells is asked for on its own.
+    expect(getNodeDegrees.mock.calls[0]).toEqual([['a', 'b'], ['FLOWS_TO'], { includeRollups: true }])
+    expect(result.current.totals.get('a')).toEqual(COUNT)
+    expect(result.current.failed.size).toBe(0)
+
+    seed(2, ['a', 'b', 'c'])
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(2)
+    expect(getNodeDegrees.mock.calls[1][0]).toEqual(['c'])
+  })
+
+  it('an answer that lands after the canvas changed is kept', async () => {
+    const pending = deferred<Degrees>()
+    const getNodeDegrees = vi.fn()
+      .mockImplementationOnce(() => pending.promise)
+      .mockImplementation(async (urns: string[]) => counted(urns))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    // A page lands while the count is in flight.
+    seed(2, ['a', 'b', 'c'])
+    await act(async () => { pending.resolve(counted(['a', 'b'])) })
+    await settle()
+    expect(result.current.totals.get('a')).toEqual(COUNT)
+    expect(result.current.totals.get('b')).toEqual(COUNT)
+  })
+
+  it('the chunks after a canvas change are still asked', async () => {
+    const ids = Array.from({ length: 401 }, (_, i) => `n${i}`)
+    seed(2, ids)
+    const first = deferred<Degrees>()
+    const getNodeDegrees = vi.fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementation(async (urns: string[]) => counted(urns))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+    seed(3, ids)
+    await act(async () => { first.resolve(counted(ids.slice(0, 400))) })
+    await settle()
+    expect(getNodeDegrees.mock.calls[1][0]).toEqual(['n400'])
+    expect(result.current.totals.size).toBe(401)
+  })
+
+  it('a provider switch drops answers still in flight', async () => {
+    const stale = deferred<Degrees>()
+    const before = { getNodeDegrees: vi.fn(() => stale.promise) }
+    holder.current = before
+    const { result, rerender } = render()
+    await settle()
+
+    const after = { getNodeDegrees: vi.fn(async (urns: string[]) => counted(urns)) }
+    holder.current = after
+    rerender()
+    await act(async () => { stale.resolve({ a: { in: 99, out: 99 } }) })
+    await settle()
+    expect(after.getNodeDegrees).toHaveBeenCalledTimes(1)
+    expect(result.current.totals.get('a')).toEqual(COUNT)
+  })
+})
+
+describe('useExternalDegrees — roll-up presence', () => {
+  it('keeps whether a container holds roll-up cells', async () => {
+    const getNodeDegrees = vi.fn(async () => ({
+      a: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 },
+      b: COUNT,
+    }))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    expect(result.current.totals.get('b')).toEqual(COUNT)
+    expect(result.current.failed.size).toBe(0)
+  })
+
+  it('a card answered without its flags keeps its flows, reads as failed, and is asked again', async () => {
+    // The server's roll-up check failed: flows counted, flags left out.
+    const getNodeDegrees = vi.fn()
+      .mockImplementationOnce(async () => ({ a: { in: 0, out: 0 }, b: { in: 1, out: 2, rollupOut: 0 } }))
+      .mockImplementation(async () => ({ a: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }, b: COUNT }))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0 })
+    expect(result.current.totals.get('b')).toEqual({ in: 1, out: 2, rollupOut: 0 })
+    expect([...result.current.failed].sort()).toEqual(['a', 'b'])
+
+    await pastFirstRetry()
+    await settle()
+    expect(getNodeDegrees.mock.calls[1][0]).toEqual(['a', 'b'])
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    expect(result.current.failed.size).toBe(0)
+  })
+
+  it('a roll-up rebuild asks every card again, and keeps what it knew until then', async () => {
+    const getNodeDegrees = vi.fn()
+      .mockImplementationOnce(async () => ({ a: { in: 0, out: 0, rollupIn: 0, rollupOut: 1 }, b: COUNT }))
+      // The fresh check fails for `a`: its flags are the ones it had.
+      .mockImplementationOnce(async () => ({ a: { in: 0, out: 0 }, b: { ...COUNT, rollupIn: 1 } }))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+
+    act(() => { invalidateAggregatedEdges() })
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(2)
+    expect(getNodeDegrees.mock.calls[1][0]).toEqual(['a', 'b'])
+    expect(result.current.totals.get('b')).toEqual({ ...COUNT, rollupIn: 1 })
+    expect(result.current.totals.get('a')).toEqual({ in: 0, out: 0, rollupIn: 0, rollupOut: 1 })
+    expect([...result.current.failed]).toEqual(['a'])
+  })
+
+  it("a failover retry poking one graph's cache asks no card again", async () => {
+    const getNodeDegrees = vi.fn(async (urns: string[]) => counted(urns))
+    holder.current = { scopeKey: 'ds1:main', getNodeDegrees }
+
+    render()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+
+    act(() => { invalidateAggregatedEdgesForScope('ds1:main') })
+    await settle()
+    act(() => { invalidateAggregatedEdgesForScope('ds1:main') })
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('useExternalDegrees — what could not be counted', () => {
+  it('a URN the server left out is failed, then asked again on its own', async () => {
+    const getNodeDegrees = vi.fn()
+      .mockImplementationOnce(async () => counted(['a']))
+      .mockImplementation(async (urns: string[]) => counted(urns))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(result.current.totals.has('b')).toBe(false)
+    expect([...result.current.failed]).toEqual(['b'])
+
+    await pastFirstRetry()
+    await settle()
+    expect(getNodeDegrees.mock.calls[1][0]).toEqual(['b'])
+    expect(result.current.totals.get('b')).toEqual(COUNT)
+    expect(result.current.failed.size).toBe(0)
+  })
+
+  it('a failed request is asked again with no canvas change', async () => {
+    const getNodeDegrees = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('busy'), { status: 504 }))
+      .mockImplementation(async (urns: string[]) => counted(urns))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+    expect([...result.current.failed].sort()).toEqual(['a', 'b'])
+
+    await pastFirstRetry()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(2)
+    expect(result.current.totals.size).toBe(2)
+    expect(result.current.failed.size).toBe(0)
+  })
+
+  it('a failed chunk stops the pass; the rest are asked on the retry', async () => {
+    const ids = Array.from({ length: 401 }, (_, i) => `n${i}`)
+    seed(2, ids)
+    const getNodeDegrees = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('busy'), { status: 504 }))
+      .mockImplementation(async (urns: string[]) => counted(urns))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+    expect(result.current.failed.size).toBe(401)
+
+    await pastFirstRetry()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(3)
+    expect(result.current.totals.size).toBe(401)
+    expect(result.current.failed.size).toBe(0)
+  })
+
+  it('a reader that cannot count (501) is left alone for a long while, and nothing reads as failed', async () => {
+    const getNodeDegrees = vi.fn().mockRejectedValue(Object.assign(new Error('no'), { status: 501 }))
+    holder.current = { getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+    seed(2, ['a', 'b', 'c'])
+    await settle()
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+    expect(result.current.totals.size).toBe(0)
+    expect(result.current.failed.size).toBe(0)
+    // No total is then evidence of none.
+    expect(result.current.uncountable).toBe(true)
+  })
+
+  it('a 501 is asked again after a long wait: main counts again once its projection caught up', async () => {
+    let lagging = true
+    const getNodeDegrees = vi.fn(async (urns: string[]) => {
+      if (lagging) throw Object.assign(new Error('no'), { status: 501 })
+      return counted(urns)
+    })
+    holder.current = { scopeKey: 'ds1:main', getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    expect(result.current.uncountable).toBe(true)
+    lagging = false
+    seed(2, ['a', 'b', 'c'])
+    act(() => { invalidateAggregatedEdgesForScope('ds1:main') })
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+    expect(getNodeDegrees).toHaveBeenCalledTimes(1)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000) })
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(2)
+    expect(result.current.uncountable).toBe(false)
+    expect([...result.current.totals.keys()].sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('a 501 is asked again at once on a roll-up rebuild', async () => {
+    let lagging = false
+    const getNodeDegrees = vi.fn(async (urns: string[]) => {
+      if (lagging) throw Object.assign(new Error('no'), { status: 501 })
+      return counted(urns)
+    })
+    holder.current = { scopeKey: 'ds1:main', getNodeDegrees }
+
+    const { result } = render()
+    await settle()
+    // A publish: main's projection lags, and the canvas invalidates at once.
+    lagging = true
+    act(() => { invalidateAggregatedEdges() })
+    await settle()
+    expect(getNodeDegrees).toHaveBeenCalledTimes(2)
+    expect(result.current.uncountable).toBe(true)
+
+    // It catches up, and invalidates again; a row loaded after is counted.
+    lagging = false
+    act(() => { invalidateAggregatedEdges() })
+    await settle()
+    expect(result.current.uncountable).toBe(false)
+    seed(3, ['a', 'b', 'c'])
+    await settle()
+    expect(result.current.totals.has('c')).toBe(true)
+  })
+
+  it('a reader with no count at all says so; one that counts does not', async () => {
+    holder.current = {}
+    expect(render().result.current.uncountable).toBe(true)
+    holder.current = { getNodeDegrees: vi.fn(async (urns: string[]) => counted(urns)) }
+    expect(render().result.current.uncountable).toBe(false)
+  })
+
+  it('asks nothing while off', async () => {
+    const getNodeDegrees = vi.fn()
+    holder.current = { getNodeDegrees }
+    render(false)
+    await settle()
+    expect(getNodeDegrees).not.toHaveBeenCalled()
+  })
+})

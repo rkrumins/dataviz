@@ -3,12 +3,12 @@ import { getCircuitBreaker, classifyEndpoint } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { readJsonLossless } from '@/lib/losslessJson'
 import {
-    MAX_READ_RETRIES,
     isClientTimeout,
     isIdempotentGraphRead,
     isNetworkError,
     isProviderOutageSignal,
     isRetryableGraphFailure,
+    readRetryBudget,
     retryDelayMs,
     toApiStatusError,
 } from '@/services/graphRequestFailure'
@@ -24,6 +24,7 @@ import type {
     URN,
     NodeQuery,
     NodePage,
+    NodeDegree,
     EdgeQuery,
     EdgesBeneath,
     LineageResult,
@@ -374,8 +375,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
                     const timedOut = isClientTimeout(err)
                     // A timeout already cost a full deadline — one more go
                     // is enough; a dropped connection gets the full budget.
-                    const budget = timedOut ? 1 : MAX_READ_RETRIES
-                    if (retryable && attempt < budget && isRetryableGraphFailure(err)) {
+                    if (retryable && attempt < readRetryBudget(err) && isRetryableGraphFailure(err)) {
                         await this._retryPause(err, attempt, fetchOptions.signal)
                         continue
                     }
@@ -400,7 +400,8 @@ export class RemoteGraphProvider implements GraphDataProvider {
                         // the client waits at least as long as it suggests.
                         circuitBreaker.recordFailure(error.retryAfterMs)
                     }
-                    if (retryable && attempt < MAX_READ_RETRIES && isRetryableGraphFailure(error)) {
+                    // A 504 is the same as a client timeout: one more go.
+                    if (retryable && attempt < readRetryBudget(error) && isRetryableGraphFailure(error)) {
                         await this._retryPause(error, attempt, fetchOptions.signal)
                         continue
                     }
@@ -515,13 +516,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
         }
     }
 
-    async getNodeDegrees(urns: string[], edgeTypes?: string[]): Promise<Record<string, { in: number; out: number }>> {
+    async getNodeDegrees(
+        urns: string[], edgeTypes?: string[], options?: { includeRollups?: boolean },
+    ): Promise<Record<string, NodeDegree>> {
         // Total lineage degree per URN over the FULL graph. A URN absent
         // from the response is UNKNOWN (its provider bucket failed) —
         // callers must never treat absence as zero.
-        return await this.fetch<Record<string, { in: number; out: number }>>('/nodes/degree', {
+        return await this.fetch<Record<string, NodeDegree>>('/nodes/degree', {
             method: 'POST',
-            body: JSON.stringify({ urns, edgeTypes }),
+            body: JSON.stringify({ urns, edgeTypes, ...(options?.includeRollups ? { includeRollups: true } : {}) }),
         })
     }
 
@@ -530,6 +533,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         const res = await this.fetch<{ chains: Record<string, string[]> }>('/nodes/ancestor-chains', {
             method: 'POST',
             body: JSON.stringify({ urns }),
+            timeoutMs: TIMEOUTS.ANCESTOR_CHAINS_MS,
         })
         return res.chains
     }

@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field, PrivateAttr, RootModel
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,10 +50,11 @@ from backend.app.services.deep_search import (
     SearchRunContext,
     get_deep_search_settings,
 )
-from backend.common.adapters import ProviderFailingOver
+from backend.common.adapters import ProviderBusy, ProviderFailingOver, ProviderUnavailable
 from backend.app.services.fair_share import get_fair_share
 from backend.app.config import resilience
 from backend.app.services.graph_cache import (
+    _DETERMINISTIC_CUTS,
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CANVAS_BOOTSTRAP,
@@ -105,7 +106,6 @@ require_ws_manage = requires("workspace:datasource:manage", workspace="ws_id")
 # feature. Both fail OPEN (a database hiccup must not black out a product area); only the
 # SECURITY flag (signupEnabled, in auth.py) fails closed.
 require_trace = require_feature("traceEnabled")        # POST /trace*
-require_lineage_rollup = require_feature("canvasLineageRollupEnabled")  # POST /nodes/ancestor-chains
 require_edit_mode = require_feature("editModeEnabled")  # the graph-mutation routes
 require_export = require_feature("graphExportEnabled")  # /search/exports*
 
@@ -1274,7 +1274,11 @@ async def trace_expand_batch(
 
     Partial-success: pair-level failures are swallowed (with a logged warning)
     so the rest of the batch returns; total failure returns 404 with the
-    list of pair-level error messages in the response body. Shape matches
+    list of pair-level error messages in the response body. A shed pair is
+    not a failure: the batch answers 429 + Retry-After, as /trace/expand
+    does, and the client retries it. A pair the provider could not answer
+    right now (a node failing over, a deadline) marks the answer truncated
+    with reason "failed", so it is not cached as complete. Shape matches
     /trace/expand so the frontend's normalizeTraceV2 handles either."""
     import asyncio
     if not request.pairs:
@@ -1284,6 +1288,9 @@ async def trace_expand_batch(
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
     pair_errors: List[str] = []
+    # Of those, the pairs the provider could not answer right now: asked
+    # again, they may answer.
+    unanswered: List[str] = []
 
     async def run_one(p: _TraceExpandPair):
         req = ExpandRequest(
@@ -1295,18 +1302,32 @@ async def trace_expand_batch(
         )
         try:
             return await engine.expand_aggregated_edge(req)
+        except ProviderBusy:
+            # "Ask again in a moment" for the whole batch, not a pair to drop:
+            # the rest would answer 200 as complete and be cached as such.
+            raise
         except Exception as exc:
             # Catch ALL exceptions per pair — provider unavailability, value
             # errors, missing URNs, etc. Surface to the response body so the
             # frontend can render a partial result with the failure list.
             msg = f"{p.source_urn} → {p.target_urn} @ {p.next_level}: {type(exc).__name__}: {exc}"
             pair_errors.append(msg)
+            if isinstance(exc, (ProviderUnavailable, TimeoutError)):
+                unanswered.append(msg)
             logger.warning("trace/expand-batch pair failed: %s", msg, exc_info=False)
             return None
 
     async def compute_batch() -> TraceResult:
-        results = await asyncio.gather(*(run_one(p) for p in request.pairs))
-        return _merge_expand_results(results, request, pair_errors)
+        tasks = [asyncio.ensure_future(run_one(p)) for p in request.pairs]
+        try:
+            results = await asyncio.gather(*tasks)
+        except ProviderBusy:
+            # gather does not stop the pairs still out: stop them, rather than
+            # leave them running against a store that just said it is full.
+            for t in tasks:
+                t.cancel()
+            raise
+        return _merge_expand_results(results, request, pair_errors, short=bool(unanswered))
 
     # Response-cached like the single /trace/expand (this handler used to
     # bypass GraphCache entirely, so every re-expand of the same drilled
@@ -1335,7 +1356,7 @@ async def trace_expand_batch(
     )
 
 
-def _merge_expand_results(results, request, pair_errors) -> TraceResult:
+def _merge_expand_results(results, request, pair_errors, short: bool) -> TraceResult:
     successes = [r for r in results if r is not None]
     if not successes:
         raise HTTPException(
@@ -1374,6 +1395,11 @@ def _merge_expand_results(results, request, pair_errors) -> TraceResult:
             len(successes), len(request.pairs),
         )
 
+    # The response cache keeps an answer by its reason: a cap for the full
+    # TTL, a read that gave up only briefly. So a pair lost for now says
+    # "failed", and otherwise a pair's cut that may do better outranks a cap.
+    cuts = sorted((r.truncation_reason for r in successes if r.truncated),
+                  key=lambda why: why is None or why in _DETERMINISTIC_CUTS)
     return TraceResult(
         nodes=list(nodes_by_id.values()),
         edges=list(edges_by_id.values()),
@@ -1382,7 +1408,8 @@ def _merge_expand_results(results, request, pair_errors) -> TraceResult:
         downstream_urns=downstream_urns,
         focus=focus,
         effective_level=effective_level,
-        truncated=truncated_any,
+        truncated=truncated_any or short,
+        truncation_reason="failed" if short else next(iter(cuts), None),
     )
 
 
@@ -2606,7 +2633,11 @@ async def get_node_ancestors(
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    return await engine.get_ancestors(urn, limit=limit, offset=offset)
+    """Slot-bounded like /nodes/ancestor-chains: a burst sheds 429."""
+    async def compute() -> List[GraphNode]:
+        return await engine.get_ancestors(urn, limit=limit, offset=offset)
+
+    return await _bounded_compute(engine, compute)()
 
 
 class AncestorChainsRequest(BaseModel):
@@ -2618,7 +2649,6 @@ class AncestorChainsRequest(BaseModel):
 @router.post(
     "/nodes/ancestor-chains",
     response_model=Dict[str, Dict[str, List[str]]],
-    dependencies=[Depends(require_lineage_rollup)],
 )
 async def get_node_ancestor_chains(
     body: AncestorChainsRequest,
@@ -2764,13 +2794,30 @@ async def get_edges_between(
 
 
 class _DegreesResult(RootModel[Dict[str, Dict[str, int]]]):
-    """RootModel wrapper so GraphCache can serialize /nodes/degree."""
+    """RootModel wrapper so GraphCache can serialize /nodes/degree.
+
+    ``degraded_detail`` is what GraphCache's ``_is_incomplete_result`` reads:
+    an answer that left urns out (a bucket failed: absent = unknown) is kept
+    only for the negative TTL and never becomes the last-known-good, so the
+    canvas's retry can complete it. Not serialized."""
+
+    _unanswered: int = PrivateAttr(default=0)
+
+    @property
+    def degraded_detail(self) -> Optional[str]:
+        return f"{self._unanswered} urns could not be counted" if self._unanswered else None
+
+
+class NodeDegreeQuery(InternalEdgeQuery):
+    """``includeRollups`` adds ``rollupIn`` / ``rollupOut`` to each urn's
+    totals: 1 when it has a roll-up cell in that direction, else 0."""
+    include_rollups: bool = Field(False, alias="includeRollups")
 
 
 @router.post("/nodes/degree", response_model=Dict[str, Dict[str, int]])
 async def get_node_degrees(
     response: Response,
-    query: InternalEdgeQuery = Body(...),
+    query: NodeDegreeQuery = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """TOTAL lineage degree (in/out) per URN over the full graph.
@@ -2786,25 +2833,47 @@ async def get_node_degrees(
     ``nodes_degree``, which is not a registered key, so ``is_enabled``
     answered False and every call bypassed the cache the docstring above
     promised — silently, since a bypass is a legal outcome.
+
+    An answer that left urns out is never cached as THE answer (see
+    ``_DegreesResult``). A draft counts through its base. A reader that
+    cannot count at all (a versioned branch, or a draft on one) is a 501,
+    like /nodes/ancestor-chains.
+
+    ``includeRollups`` opts in to roll-up presence for container markers
+    (see ``NodeDegreeQuery``); a request without it is answered as before.
     """
     async def compute() -> _DegreesResult:
-        return _DegreesResult(await engine.get_node_degrees(query.urns, query.edge_types))
+        result = _DegreesResult(await engine.get_node_degrees(
+            query.urns, query.edge_types, include_rollups=query.include_rollups,
+        ))
+        # An urn whose roll-up flags are absent (its probe failed) is as
+        # unanswered as an absent urn.
+        flags = {"rollupIn", "rollupOut"} if query.include_rollups else set()
+        result._unanswered = sum(
+            1 for u in set(query.urns)
+            if u not in result.root or not flags <= result.root[u].keys()
+        )
+        return result
 
-    scope = _cache_scope(engine)
-    if scope is None:
-        return (await _bounded_compute(engine, compute)()).root
-    result = await get_graph_cache().get_or_compute(
-        scope=scope,
-        endpoint=ENDPOINT_NODES_DEGREE,
-        params={
-            "urns": sorted(query.urns),
-            "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
-        },
-        compute=_bounded_compute(engine, compute),
-        model_cls=_DegreesResult,
-        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
-        expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
-    )
+    try:
+        scope = _cache_scope(engine)
+        if scope is None:
+            return (await _bounded_compute(engine, compute)()).root
+        result = await get_graph_cache().get_or_compute(
+            scope=scope,
+            endpoint=ENDPOINT_NODES_DEGREE,
+            params={
+                "urns": sorted(query.urns),
+                "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
+                "includeRollups": query.include_rollups,
+            },
+            compute=_bounded_compute(engine, compute),
+            model_cls=_DegreesResult,
+            on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+            expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
     return result.root
 
 
@@ -2813,8 +2882,12 @@ async def query_edges(
     query: EdgeQuery = Body(..., embed=True),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Advanced edge query (bulk fetch)."""
-    return await engine.get_edges(query)
+    """Advanced edge query (bulk fetch). Slot-bounded like /edges/between:
+    a burst sheds 429."""
+    async def compute() -> List[GraphEdge]:
+        return await engine.get_edges(query)
+
+    return await _bounded_compute(engine, compute)()
 
 
 @router.post("/edges/beneath", response_model=EdgesBeneathResult, response_model_by_alias=True)
@@ -3297,6 +3370,10 @@ async def get_aggregated_edges(
     Get aggregated edges between containers.
     Returns summarized edge information showing lineage connections
     at a higher granularity level (e.g., between datasets instead of columns).
+
+    Without ``targetUrns`` it answers every edge out of the sources; with an
+    empty ``sourceUrns`` and ``targetUrns`` set, every edge into the targets.
+    ``excludeInternal`` leaves out every cell one of whose ends holds the other.
     """
     await _enforce_fair_share(engine, ENDPOINT_AGGREGATED)
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
@@ -3312,17 +3389,21 @@ async def get_aggregated_edges(
     # input order map to the same cache key — the frontend's chunked
     # fan-out frequently produces equivalent batches in different orders.
     failing_over: dict = {}
+    params = {
+        "sourceUrns": sorted(request.source_urns or []),
+        "targetUrns": sorted(request.target_urns or []) if request.target_urns else None,
+        "granularity": request.granularity,
+        "includeEdgeTypes": sorted(request.include_edge_types or []) if request.include_edge_types else None,
+        "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
+        "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
+    }
+    # Only when set: an ask without it keeps the key its cached answers have.
+    if request.exclude_internal:
+        params["excludeInternal"] = True
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_AGGREGATED,
-        params={
-            "sourceUrns": sorted(request.source_urns or []),
-            "targetUrns": sorted(request.target_urns or []) if request.target_urns else None,
-            "granularity": request.granularity,
-            "includeEdgeTypes": sorted(request.include_edge_types or []) if request.include_edge_types else None,
-            "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
-            "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
-        },
+        params=params,
         compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),

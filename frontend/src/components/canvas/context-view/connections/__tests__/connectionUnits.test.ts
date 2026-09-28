@@ -47,6 +47,7 @@ const SURFACES: Array<[string, string]> = [
   ['../../FlatTreeItem.tsx', './connections/connectionUnits'],
   ['../../CanvasStatusChips.tsx', './connections/connectionUnits'],
   ['../../LayerColumn.tsx', './connections/connectionUnits'],
+  ['../../OffCanvasStub.tsx', './connections/connectionUnits'],
   ['../../../../panels/LineageNeighbors.tsx', '@/components/canvas/context-view/connections/connectionUnits'],
 ]
 
@@ -113,6 +114,12 @@ describe('every surface names the unit it shows', () => {
     expect(src).not.toMatch(/entity has \{focusTotal/)
   })
 
+  it('the fan chip speaks for the whole selection, one entity or several', () => {
+    const src = read('../../CanvasStatusChips.tsx')
+    expect(src).toContain('The selection touches {focusTotal')
+    expect(src).not.toMatch(/This entity touches/)
+  })
+
   it('the column periphery counts lines, and says so', () => {
     const src = read('../../LayerColumn.tsx')
     expect(src).not.toMatch(/connection\{periphery/)
@@ -148,7 +155,6 @@ const KIND: Array<[string, RegExp[], string[]]> = [
       /downstream connection/,
     ],
     [
-      'flows not on canvas',
       'flows outside this view',
       'Large flow fan',
       // Adaptive's "strongest N of M" moved out of the chips into the lineage

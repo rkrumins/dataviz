@@ -194,6 +194,22 @@ async def test_timeout_before_response_started_emits_504():
     assert "timed out" in body_text.lower()
 
 
+async def test_a_timeout_before_the_response_names_its_path_in_the_log(caplog):
+    """The most common 504 on view open left no line on the server at all,
+    so nothing said which request the tier had cut short."""
+    path = "/api/v1/ws/graph/edges/between"
+    mw = _TimeoutMiddleware(_slow_before_start_app(delay=2.0))
+    with caplog.at_level("WARNING", logger="backend.app.main"):
+        await mw(_http_scope(path), _Receiver(), _Sink())
+
+    lines = [
+        r.getMessage() for r in caplog.records
+        if r.levelname == "WARNING" and "timed out before a response" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    assert "GET" in lines[0] and path in lines[0]
+
+
 async def test_timeout_after_response_started_emits_closing_chunk():
     """T-2 (stream-corruption case): the bug we are actually fixing.
 

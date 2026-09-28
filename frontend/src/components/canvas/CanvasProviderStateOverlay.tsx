@@ -114,6 +114,10 @@ export interface CanvasProviderStatePillProps {
   partial: boolean
   /** Assigned entities the failed batches held (0 when unknown). */
   missingEntities: number
+  /** False once the canvas has stopped retrying on its own (a partial load
+   *  past its fast attempts): the rest loads when the reader presses Retry.
+   *  Defaults to true. */
+  retrying?: boolean
   onRetry?: () => void
 }
 
@@ -130,6 +134,7 @@ export const CanvasProviderStatePill = React.memo(function CanvasProviderStatePi
   state,
   partial,
   missingEntities,
+  retrying = true,
   onRetry,
 }: CanvasProviderStatePillProps) {
   const calm = state !== 'unavailable'
@@ -142,7 +147,7 @@ export const CanvasProviderStatePill = React.memo(function CanvasProviderStatePi
         : state === 'error' ? 'This view hit an error while refreshing'
           : 'Graph service is unavailable'
   const detail = calm
-    ? 'showing what’s loaded · retrying automatically'
+    ? (retrying ? 'showing what’s loaded · retrying automatically' : 'showing what’s loaded · Retry loads the rest')
     : 'showing the last loaded data · watching for recovery'
   return (
     <div className="pointer-events-none absolute top-4 left-1/2 z-40 -translate-x-1/2">

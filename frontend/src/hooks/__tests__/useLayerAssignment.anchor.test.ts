@@ -193,3 +193,32 @@ describe('useLayerAssignment — an anchor that nothing places', () => {
     expect(out.unassignedNodes.map(n => n.id)).not.toContain('finance')
   })
 })
+
+describe('useLayerAssignment — which column each promoted anchor is', () => {
+  // The anchor is drawn AS its column, so no row map holds it: lineage that
+  // names it has to learn its column from here.
+  it('returns each promoted anchor with its column', () => {
+    const out = render([layer('l1', { anchorUrn: 'finance' })], { finance: assign('l1') })
+    expect(out.promotedAnchors.get('finance')).toBe('l1')
+  })
+
+  it('leaves out an anchor that fell back to a row', () => {
+    const nodesOnly = [
+      { id: 'finance', data: { urn: 'finance', type: 'obj', label: 'finance', childCount: 5000 } },
+    ]
+    const { result } = renderHook(() =>
+      useLayerAssignment({
+        nodes: nodesOnly,
+        sortedLayers: [layer('l1', { anchorUrn: 'finance' })],
+        nodeEdgeFingerprint: 'none',
+        instanceAssignments: new Map(),
+        effectiveAssignments: new Map(),
+        nodeMap: new Map(nodesOnly.map(n => [n.id, n])),
+        childMap: new Map(),
+        parentMap: new Map(),
+        assignments: { finance: assign('l1') },
+      }),
+    )
+    expect(result.current.promotedAnchors.has('finance')).toBe(false)
+  })
+})

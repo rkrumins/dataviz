@@ -16,6 +16,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
+  ArrowLeftRight,
   ChevronDown,
   Eye,
   Layers,
@@ -29,7 +30,7 @@ import {
 import { useReducedMotionConfig } from 'framer-motion'
 import { cn } from '@/lib/utils'
 import { CollapsibleSection } from './DisplaySettingsPopover'
-import { usePreferencesStore, type LineageMotion, type LineageRenderMode } from '@/store/preferences'
+import { usePreferencesStore, type LineageMotion, type LineagePortSides, type LineageRenderMode } from '@/store/preferences'
 import { LINEAGE_DIRECTION_PRESETS, resolveLineageDirectionColors } from '@/lib/lineageDirectionColors'
 import { PortLegend } from './LineageGuide'
 
@@ -38,6 +39,8 @@ interface LineageDisplayPopoverProps {
   onSetLineageRenderMode: (mode: LineageRenderMode) => void
   showEdgeDirection: boolean
   onToggleEdgeDirection: () => void
+  lineagePortSides: LineagePortSides
+  onSetLineagePortSides: (sides: LineagePortSides) => void
 }
 
 interface DensityOption {
@@ -68,6 +71,23 @@ const DENSITY_OPTIONS: DensityOption[] = [
   },
 ]
 
+/** Which side of a card marks its incoming and outgoing lineage
+ *  (lineagePorts.ts). */
+const PORT_SIDES_OPTIONS: Array<{ sides: LineagePortSides; label: string; short: string; description: string }> = [
+  {
+    sides: 'direction',
+    label: 'Incoming left, outgoing right',
+    short: 'In left · out right',
+    description: 'Each side shows one direction; a line running right to left, or out to a card in the same column, plugs into the other edge.',
+  },
+  {
+    sides: 'lines',
+    label: 'Where lines attach',
+    short: 'Where lines attach',
+    description: 'A marker sits where its lines plug in; lines within a column meet on the left.',
+  },
+]
+
 const MODE_SHORT_LABEL: Record<LineageRenderMode, string> = {
   stubs: 'Stubs',
   auto: 'Auto',
@@ -81,6 +101,8 @@ export function LineageDisplayPopover({
   onSetLineageRenderMode,
   showEdgeDirection,
   onToggleEdgeDirection,
+  lineagePortSides,
+  onSetLineagePortSides,
 }: LineageDisplayPopoverProps) {
   const [open, setOpen] = useState(false)
   const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null)
@@ -200,6 +222,8 @@ export function LineageDisplayPopover({
                 onSetLineageRenderMode={onSetLineageRenderMode}
                 showEdgeDirection={showEdgeDirection}
                 onToggleEdgeDirection={onToggleEdgeDirection}
+                lineagePortSides={lineagePortSides}
+                onSetLineagePortSides={onSetLineagePortSides}
               />
             </motion.div>
           )}
@@ -215,6 +239,8 @@ interface LineageDisplaySectionsProps {
   onSetLineageRenderMode: (mode: LineageRenderMode) => void
   showEdgeDirection: boolean
   onToggleEdgeDirection: () => void
+  lineagePortSides: LineagePortSides
+  onSetLineagePortSides: (sides: LineagePortSides) => void
   /** When true, every control renders inert (native `disabled`) and muted —
    *  used by the header's DisplayMenu when Lineage is off. */
   disabled?: boolean
@@ -230,6 +256,8 @@ export function LineageDisplaySections({
   onSetLineageRenderMode,
   showEdgeDirection,
   onToggleEdgeDirection,
+  lineagePortSides,
+  onSetLineagePortSides,
   disabled = false,
 }: LineageDisplaySectionsProps) {
   return (
@@ -243,6 +271,7 @@ export function LineageDisplaySections({
       >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           How many edges materialise on the canvas at once.
+          <span className="block mt-0.5">A trace draws every line it walks, whatever this is set to.</span>
         </p>
         <div
           role="radiogroup"
@@ -297,7 +326,7 @@ export function LineageDisplaySections({
             )
           })}
         </div>
-        {lineageRenderMode === 'auto' && <AdaptiveBudgetSlider disabled={disabled} />}
+        {lineageRenderMode !== 'raw' && <AdaptiveBudgetSlider disabled={disabled} mode={lineageRenderMode} />}
         {lineageRenderMode === 'auto' && <FlowRibbonsToggle disabled={disabled} />}
       </CollapsibleSection>
 
@@ -361,6 +390,72 @@ export function LineageDisplaySections({
             </div>
           </div>
         </button>
+      </CollapsibleSection>
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      {/* Marker sides — which side of each card marks its incoming and
+          outgoing lineage (lineagePorts.ts). A trace follows it too. */}
+      <CollapsibleSection
+        id="marker-sides"
+        icon={ArrowLeftRight}
+        title="Marker sides"
+        summary={PORT_SIDES_OPTIONS.find(o => o.sides === lineagePortSides)?.short ?? 'In left · out right'}
+      >
+        <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+          Which side of each card marks its incoming and outgoing lineage.
+          <span className="block mt-0.5">The lines are drawn the same either way.</span>
+        </p>
+        <div
+          role="radiogroup"
+          aria-label="Marker sides"
+          className="flex flex-col gap-1"
+        >
+          {PORT_SIDES_OPTIONS.map(opt => {
+            const active = lineagePortSides === opt.sides
+            return (
+              <button
+                key={opt.sides}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                disabled={disabled}
+                onClick={() => onSetLineagePortSides(opt.sides)}
+                className={cn(
+                  'flex items-start gap-2.5 px-2.5 py-2 rounded-lg border text-left transition-colors',
+                  disabled && 'cursor-not-allowed',
+                  active
+                    ? 'bg-accent-lineage/15 border-accent-lineage/40 shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
+                    : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+                )}
+              >
+                <div
+                  className={cn(
+                    'mt-0.5 w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-colors',
+                    active && 'border-accent-lineage',
+                  )}
+                >
+                  {active && (
+                    <div className="w-1.5 h-1.5 rounded-full bg-accent-lineage" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div
+                    className={cn(
+                      'text-[12px] font-medium leading-tight',
+                      active ? 'text-accent-lineage' : 'text-ink',
+                    )}
+                  >
+                    {opt.label}
+                  </div>
+                  <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+                    {opt.description}
+                  </div>
+                </div>
+              </button>
+            )
+          })}
+        </div>
       </CollapsibleSection>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
@@ -571,7 +666,8 @@ function DirectionColors({ disabled }: { disabled: boolean }) {
       </div>
       <p className="pt-1 pb-2 text-[11px] text-ink-muted leading-snug">
         Incoming and outgoing lineage, the same everywhere — the ports on each
-        card, the entity panel, the Focus Lens and traces.
+        card, the entity panel, the Focus Lens and traces. Lines outside a
+        trace keep the colour of their flow type.
       </p>
       <div role="radiogroup" aria-label="Lineage colours" className="grid grid-cols-2 gap-1">
         {LINEAGE_DIRECTION_PRESETS.map(preset => {
@@ -686,22 +782,25 @@ const BUDGET_STEP = 50
 
 /** Adaptive edge budget — how many of the strongest flows render at once
  *  above the threshold (and the size of a focused node's materialized
- *  fan). Reads/writes the persisted preference directly, mirroring the
+ *  fan). In On Hover the same number is only that fan: "Lines per entity".
+ *  Reads/writes the persisted preference directly, mirroring the
  *  self-contained MissingConnectionsToggle pattern. */
-function AdaptiveBudgetSlider({ disabled }: { disabled: boolean }) {
+function AdaptiveBudgetSlider({ disabled, mode }: { disabled: boolean; mode: LineageRenderMode }) {
   const budget = usePreferencesStore((s) => s.autoStubThreshold)
   const setBudget = usePreferencesStore((s) => s.setAutoStubThreshold)
   const clamped = Math.min(BUDGET_MAX, Math.max(BUDGET_MIN, budget ?? 500))
+  const perEntity = mode === 'stubs'
   return (
     <div className="mt-2 px-2.5 py-2 rounded-lg bg-black/[0.02] dark:bg-white/[0.02] border border-black/[0.06] dark:border-white/[0.05]">
       <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
         <Sliders className="w-3 h-3" />
-        <span>Edge Budget</span>
+        <span>{perEntity ? 'Lines per entity' : 'Edge Budget'}</span>
         <span className="ml-auto tabular-nums text-accent-lineage/80">{clamped.toLocaleString()}</span>
       </div>
       <p className="pt-1 pb-1.5 text-[11px] text-ink-muted/80 leading-snug">
-        How many of the strongest flows stay visible at once on dense
-        graphs. Markers summarize the rest.
+        {perEntity
+          ? 'The most lines a hovered or selected entity draws at once, strongest first. When a selection has more, a chip on the canvas says so.'
+          : 'How many of the strongest flows stay visible at once on dense graphs, and the most a hovered or selected entity draws. Markers summarize the rest.'}
       </p>
       <input
         type="range"
@@ -712,7 +811,7 @@ function AdaptiveBudgetSlider({ disabled }: { disabled: boolean }) {
         disabled={disabled}
         onChange={(e) => setBudget(parseInt(e.target.value, 10))}
         className="w-full accent-accent-lineage"
-        aria-label="Adaptive edge budget"
+        aria-label={perEntity ? 'Lines per entity' : 'Adaptive edge budget'}
       />
       <div className="flex justify-between text-[9.5px] text-ink-muted/60 tabular-nums">
         <span>{BUDGET_MIN} · calm</span>

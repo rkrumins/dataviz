@@ -4,32 +4,36 @@
  */
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
-import { unitNoun } from './connections/connectionUnits'
-import { BRING_IN_BATCH, OFF_CANVAS_STUB_WIDTH } from './ghostCues'
+import { formatUnitCount } from './connections/connectionUnits'
+import { OFF_CANVAS_STUB_WIDTH } from './ghostCues'
 
 const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
 
 export function OffCanvasStub({
   side,
   count,
+  partners,
   x,
   y,
-  onBringIn,
+  onOpen,
 }: {
   /** `out`: flows leaving the row (stub on its right). `in`: arriving (left). */
   side: 'in' | 'out'
+  /** Underlying flows that leave the view on this side. */
   count: number
+  /** The entities outside the view they reach — what a click shows. */
+  partners: number
   /** The row's edge and centre line, in the badge layer's coordinates. */
   x: number
   y: number
-  onBringIn?: () => void
+  onOpen?: () => void
 }) {
-  const noun = unitNoun(count, 'flows')
+  const one = count === 1
   const said = side === 'out'
-    ? `${count.toLocaleString()} ${noun} lead to entities that are not on the canvas`
-    : `${count.toLocaleString()} ${noun} arrive from entities that are not on the canvas`
-  const action = onBringIn
-    ? `Click to bring ${count > BRING_IN_BATCH ? `the first ${BRING_IN_BATCH}` : 'them'} in.`
+    ? `${formatUnitCount(count, 'flows')} ${one ? 'leads' : 'lead'} to entities outside this view`
+    : `${formatUnitCount(count, 'flows')} ${one ? 'arrives' : 'arrive'} from entities outside this view`
+  const action = onOpen
+    ? `Click to see ${partners === 1 ? 'that entity' : `those ${partners.toLocaleString()} entities`} in the Focus Lens.`
     : null
   return (
     <div
@@ -51,13 +55,16 @@ export function OffCanvasStub({
           data-canvas-interactive
           data-off-canvas-stub={side}
           aria-label={action ? `${said}. ${action}` : said}
-          onClick={(e) => { e.stopPropagation(); onBringIn?.() }}
-          disabled={!onBringIn}
+          onClick={(e) => { e.stopPropagation(); onOpen?.() }}
+          disabled={!onOpen}
           className={cn(
             'pointer-events-auto group/stub flex flex-col w-full rounded-md py-0.5',
             side === 'out' ? 'items-start' : 'items-end',
-            'text-ink-muted hover:text-accent-lineage focus-visible:outline-none',
-            'focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors',
+            // The direction's own colour, as on the card's ports.
+            side === 'out'
+              ? 'text-lineage-out focus-visible:ring-lineage-out/40'
+              : 'text-lineage-in focus-visible:ring-lineage-in/40',
+            'focus-visible:outline-none focus-visible:ring-2 transition-colors',
           )}
         >
           <span className="px-0.5 text-[9px] font-semibold tabular-nums leading-none">{compact.format(count)}</span>

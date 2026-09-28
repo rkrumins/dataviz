@@ -48,6 +48,24 @@ describe('aggregateFlowRibbons', () => {
     expect(ribbons.map(r => `${r.sourceLayerId}->${r.targetLayerId}`))
       .toEqual(['L1->L2', 'L2->L3'])   // top 2 by count, presented in column order
   })
+
+  it('a right-to-left pair takes no slot — a band reads left to right, and the overlay draws no other', () => {
+    const edges = [
+      { source: 'b1', target: 'a1', edgeCount: 500 },
+      { source: 'a1', target: 'b1', edgeCount: 3 },
+    ]
+    expect(aggregateFlowRibbons(edges, layerMap, order, 1)).toEqual([
+      { sourceLayerId: 'L1', targetLayerId: 'L2', count: 3 },
+    ])
+  })
+
+  it('a two-way bundle counts toward the forward band, whichever way its id put it', () => {
+    const ribbons = aggregateFlowRibbons(
+      [{ source: 'b1', target: 'a1', isBidirectional: true, edgeCount: 10 }],
+      layerMap, order,
+    )
+    expect(ribbons).toEqual([{ sourceLayerId: 'L1', targetLayerId: 'L2', count: 10 }])
+  })
 })
 
 describe('formatRibbonCount', () => {

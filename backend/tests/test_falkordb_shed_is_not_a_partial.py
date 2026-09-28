@@ -257,3 +257,127 @@ def test_a_batch_lost_to_anything_else_keeps_its_prefix_and_says_why(monkeypatch
     assert result.truncated and result.stale
     assert result.stale_reason == "degraded"       # the stale vocabulary is unchanged
     assert result.truncation_reason == "failed"    # …and the cache now has a reason
+
+
+# ── /edges/between: one label bucket failing fails the read ──────────────
+
+
+def _bucketed_edges_provider(fail_with, *, pairs=True):
+    """``get_edges`` over two label buckets, where urn:b's bucket raises —
+    by pairs of buckets (both ends bound), or anchored on one end."""
+    from types import SimpleNamespace
+
+    p = fp.FalkorDBProvider(host="x", graph_name="g")
+    if not pairs:
+        p._PAIR_BIND_MAX_PAIRS = 0
+
+    async def _connected():
+        return None
+
+    async def _buckets(urns):
+        return [("A", ["urn:a"]), ("B", ["urn:b"])]
+
+    async def _ro_query(cypher, params=None, timeout=None, **kw):
+        sources = params.get("sourceUrns", params.get("anchorUrns"))
+        if sources == ["urn:b"]:
+            raise fail_with
+        targets = params.get("targetUrns", ["urn:b"])
+        rows = [["urn:a", "urn:b", "FLOWS_TO", {}]] if "urn:b" in targets else []
+        return SimpleNamespace(result_set=rows)
+
+    p._ensure_connected = _connected
+    p._label_buckets = _buckets
+    p._ro_query = _ro_query
+    return p
+
+
+def _between():
+    from backend.common.models.graph import EdgeQuery
+
+    return EdgeQuery(source_urns=["urn:a", "urn:b"], target_urns=["urn:a", "urn:b"])
+
+
+both_paths = pytest.mark.parametrize("pairs", [True, False], ids=["pair-bound", "one-sided"])
+
+
+@both_paths
+async def test_a_failed_label_bucket_fails_edges_between_instead_of_answering_part_of_it(pairs):
+    """Answering with the other buckets' edges was a 200 missing a whole
+    label's lineage, which the response cache kept for its full TTL."""
+    p = _bucketed_edges_provider(QUEUE_FULL, pairs=pairs)
+    with pytest.raises(ResponseError):
+        await p.get_edges(_between())
+
+
+@both_paths
+async def test_through_the_breaker_a_full_bucket_is_a_429_not_a_short_200(pairs):
+    proxy = CircuitBreakerProxy(_bucketed_edges_provider(QUEUE_FULL, pairs=pairs), name="p")
+    with pytest.raises(ProviderBusy):
+        await proxy.get_edges(_between())
+
+
+@both_paths
+async def test_a_graph_that_does_not_exist_yet_still_has_no_edges(pairs):
+    p = _bucketed_edges_provider(ResponseError("Invalid graph operation on empty key"), pairs=pairs)
+    edges = await p.get_edges(_between())
+    assert [(e.source_urn, e.target_urn) for e in edges] == [("urn:a", "urn:b")]
+
+
+# ── a shed is never turned into a smaller (or a heavier) answer ──────────
+
+
+def _shedding_provider(shed, *, buckets=None):
+    """A provider whose every store read is refused with ``shed``, and which
+    records the cypher it was asked to run."""
+    p = fp.FalkorDBProvider(host="x", graph_name="g")
+    p.asked = []
+
+    async def _connected():
+        return None
+
+    async def _ro_query(cypher, params=None, timeout=None, **kw):
+        p.asked.append(cypher)
+        raise shed
+
+    p._ensure_connected = _connected
+    p._ro_query = _ro_query
+    if buckets is not None:
+        async def _buckets(urns):
+            return buckets
+        p._label_buckets = _buckets
+    return p
+
+
+async def test_a_shed_during_label_resolution_is_not_turned_into_a_full_scan():
+    """The unlabeled fallback is a full node scan: load turned into more load."""
+    p = _shedding_provider(ProviderBusy("falkordb", "shed"))
+    with pytest.raises(ProviderBusy):
+        await p._resolve_urn_labels_bulk(["u1"])
+    assert not [c for c in p.asked if c.startswith("MATCH (n) WHERE n.urn IN")]
+
+
+async def test_label_buckets_lets_a_shed_out():
+    p = fp.FalkorDBProvider(host="x", graph_name="g")
+
+    async def _resolve(urns):
+        raise ProviderBusy("falkordb", "shed")
+
+    p._resolve_urn_labels_bulk = _resolve
+    with pytest.raises(ProviderBusy):
+        await p._label_buckets(["u1"])
+
+
+async def test_a_shed_node_bucket_is_not_read_as_missing_entities():
+    from backend.common.models.graph import NodeQuery
+
+    p = _shedding_provider(QUEUE_FULL, buckets=[("A", ["u1"])])
+    with pytest.raises(ResponseError):
+        await p.get_nodes(NodeQuery(urns=["u1"], limit=1, include_child_count=False))
+
+
+async def test_a_shed_degree_bucket_is_not_cached_as_unknown():
+    """Absent means unknown, and /nodes/degree caches it for the full TTL:
+    those cards would never get their lineage markers."""
+    p = _shedding_provider(ProviderBusy("falkordb", "shed"), buckets=[("A", ["u1"])])
+    with pytest.raises(ProviderBusy):
+        await p.get_node_degrees(["u1"], ["FLOWS_TO"])

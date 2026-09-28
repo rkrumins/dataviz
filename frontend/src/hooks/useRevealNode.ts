@@ -54,6 +54,10 @@ export interface UseRevealNodeOptions {
   focus: (nodeId: string) => void
   /** Backend lookup for the deep-hidden case. */
   provider: GraphDataProvider
+  /** Is this node drawn as a row? When given, a target the store holds but
+   *  no column draws (above the view's roots, in no layer) is not revealed:
+   *  it is 'unavailable', and nothing is focused or pulsed. */
+  isRendered?: (nodeId: string) => boolean
 }
 
 export interface RevealOptions {
@@ -144,6 +148,10 @@ export function useRevealNode(
     // a chance to commit new positions/projections before we pan.
     await new Promise<void>((r) => requestAnimationFrame(() => r()))
     await new Promise<void>((r) => requestAnimationFrame(() => r()))
+
+    // In the store is not on the canvas: say so rather than focus nothing.
+    const { isRendered } = optsRef.current
+    if (isRendered && !isRendered(nodeId)) return 'unavailable'
 
     // ── 4. Hand off to the canvas-specific focus implementation ──────────
     // Skipped by batch flows ("Locate N on canvas") that prefer a single
