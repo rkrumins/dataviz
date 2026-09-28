@@ -206,7 +206,7 @@ export function LineageFlowOverlay({
   // real rendered element, so this is measured geometry (unlike the
   // removed pass-through layer, which drew to estimates).
   const [proxyEdges, setProxyEdges] = useState<Array<{
-    id: string; source: string; target: string; pathD: string; color: string
+    id: string; lineId: string; source: string; target: string; pathD: string; color: string
   }>>([])
   // Ghost lines — from a row to the PORTAL chip at the viewport edge for its
   // partners scrolled out of sight sideways. One per row and side, level with
@@ -228,6 +228,9 @@ export function LineageFlowOverlay({
   const selectedFocusRef = useRef<string | null>(null)
   const dwellFocusRef = useRef<string | null>(null)
   const railTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastHoveredRef = useRef<string | null>(null)
+  const lingerHoverRef = useRef<string | null>(null)
+  const lingerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const railFingerprintRef = useRef('')
   const dockedProxyIdsRef = useRef<Set<string>>(new Set())
   // Column periphery emission gate (see the summary block in updateFlow).
@@ -366,7 +369,7 @@ export function LineageFlowOverlay({
     if (!containerRef.current) return
     // Read from the DOM, where the rows write it — never canvas state, so a
     // hover costs this pass and not a canvas re-render (hoverSpotlight.ts).
-    const hovered = document.documentElement.dataset.hoveredNode ?? null
+    const hovered = document.documentElement.dataset.hoveredNode ?? lingerHoverRef.current
 
     const containerRect = containerRef.current.getBoundingClientRect()
     // Find scroll parent once
@@ -497,7 +500,7 @@ export function LineageFlowOverlay({
     const focusId = focusNodeIdRef.current
     const focusDomId = focusId ? `layer-node-${focusId}` : null
     const proxyCandidates = new Map<string, AnchorProxyCandidate>()
-    const proxyEdgesNext: Array<{ id: string; source: string; target: string; pathD: string; color: string }> = []
+    const proxyEdgesNext: Array<{ id: string; lineId: string; source: string; target: string; pathD: string; color: string }> = []
     const owningLayerCache = new Map<string, string | null>()
     const findOwningLayer = (nodeId: string): string | null => {
       if (!geometryRegistry) return null
@@ -523,6 +526,8 @@ export function LineageFlowOverlay({
       if (fromTgt) for (const e of fromTgt) candidateEdges.add(e)
     })
     for (const e of hoverLinesFor(hovered)) candidateEdges.add(e)
+    const pinned = hoveredEdgeId ? poolById?.get(hoveredEdgeId) : undefined
+    if (pinned) candidateEdges.add(pinned)
     // A Flows-panel row lights its lines even where On Hover draws none:
     // they come from the pool, capped like a hover.
     if (isHighlightActive && highlightedEdges && poolById) {
@@ -642,7 +647,7 @@ export function LineageFlowOverlay({
 
           if (edge.isGhost) edgeOpacity = Math.min(0.7, edgeOpacity)
 
-          const delegation = delegatedLineState(edge, hovered)
+          const delegation = edge.id === hoveredEdgeId ? 'full' : delegatedLineState(edge, hovered)
           if (delegation === 'hidden') return
           if (delegation === 'faint') {
             edgeOpacity = 0.15
@@ -768,7 +773,7 @@ export function LineageFlowOverlay({
               const chipCx = (cRect.left + cRect.right) / 2 - containerRect.left
               const focusCx = (vRect.left + vRect.right) / 2 - containerRect.left
               let pathD: string
-              if (Math.abs(chipCx - focusCx) < 40) {
+              if (cRect.left < vRect.right && cRect.right > vRect.left) {
                 // Same column — bow out through the left lane.
                 const px = vRect.left - containerRect.left - 8
                 const ex2 = cRect.left - containerRect.left - 4
@@ -785,6 +790,7 @@ export function LineageFlowOverlay({
               }
               proxyEdgesNext.push({
                 id: `proxy-edge-${edge.source}-${edge.target}`,
+                lineId: edge.id,
                 source: sourceId, target: targetId, pathD, color,
               })
               return // the docked edge replaces the stub/badge for this connection
@@ -1446,6 +1452,16 @@ export function LineageFlowOverlay({
     const onHover = () => {
       applySpotlight()
       const hovered = document.documentElement.dataset.hoveredNode ?? null
+      if (lingerTimerRef.current) clearTimeout(lingerTimerRef.current)
+      lingerHoverRef.current = hovered === null ? lastHoveredRef.current : null
+      lastHoveredRef.current = hovered
+      if (lingerHoverRef.current) {
+        lingerTimerRef.current = setTimeout(() => {
+          lingerTimerRef.current = null
+          lingerHoverRef.current = null
+          scheduleUpdate()
+        }, 400)
+      }
       // The rail follows a hovered entity only once the pointer DWELLS (a
       // drive-by must not flash chips), and when the hover ends it LINGERS
       // long enough for the pointer to travel to a chip — a rail that
@@ -1471,6 +1487,7 @@ export function LineageFlowOverlay({
     return () => {
       observer.disconnect()
       if (railTimerRef.current) clearTimeout(railTimerRef.current)
+      if (lingerTimerRef.current) clearTimeout(lingerTimerRef.current)
     }
   }, [applySpotlight, scheduleUpdate])
 
@@ -1595,6 +1612,7 @@ export function LineageFlowOverlay({
     setHoveredEdgeId(null)
     setHoverMousePos(null)
   }, [])
+  const dockedHits = useMemo(() => proxyEdges.map(pe => ({ id: pe.lineId, pathD: pe.pathD })), [proxyEdges])
   const handleHitClick = useCallback((edgeId: string, e: React.MouseEvent) => {
     e.stopPropagation()
     onEdgeClick(edgeId)
@@ -2161,7 +2179,7 @@ export function LineageFlowOverlay({
      */}
     {visibleEdges.length <= HIT_DENSITY_LIMIT ? (
       <HitLayer
-        edges={visibleEdges}
+        edges={dockedHits.length === 0 ? visibleEdges : [...visibleEdges, ...dockedHits]}
         onEnter={handleHitEnter}
         onMove={handleHitMove}
         onLeave={handleHitLeave}
@@ -2171,6 +2189,7 @@ export function LineageFlowOverlay({
     ) : (
       <FocusHitLayer
         visibleEdges={visibleEdges}
+        docked={dockedHits}
         hoveredEdgeId={hoveredEdgeId}
         highlightedEdges={highlightedEdges}
         isHighlightActive={isHighlightActive}
@@ -2345,7 +2364,7 @@ type HitLayerHandlers = {
 }
 
 function HitLayer({ edges, onEnter, onMove, onLeave, onClickEdge, onDoubleClickEdge }: {
-  edges: ComputedEdge[]
+  edges: ReadonlyArray<Pick<ComputedEdge, 'id' | 'pathD'>>
 } & HitLayerHandlers) {
   return (
     <div className="absolute inset-0 pointer-events-none z-20">
@@ -2394,8 +2413,9 @@ function useLingering(value: string | null, ms: number): string | null {
  *  incident to the hovered node, the selection-highlighted set, or the
  *  currently hovered edge get hit paths. Mounts useHoveredNodeId in this
  *  child so its rAF-driven re-renders never touch the main overlay. */
-function FocusHitLayer({ visibleEdges, hoveredEdgeId, highlightedEdges, isHighlightActive, ...handlers }: {
+function FocusHitLayer({ visibleEdges, docked, hoveredEdgeId, highlightedEdges, isHighlightActive, ...handlers }: {
   visibleEdges: ComputedEdge[]
+  docked: ReadonlyArray<Pick<ComputedEdge, 'id' | 'pathD'>>
   hoveredEdgeId: string | null
   highlightedEdges?: Set<string>
   isHighlightActive?: boolean
@@ -2407,6 +2427,6 @@ function FocusHitLayer({ visibleEdges, hoveredEdgeId, highlightedEdges, isHighli
     (isHighlightActive && highlightedEdges?.has(e.id)) ||
     e.id === hoveredEdgeId
   ), [visibleEdges, effectiveNode, isHighlightActive, highlightedEdges, hoveredEdgeId])
-  if (focus.length === 0) return null
-  return <HitLayer edges={focus} {...handlers} />
+  if (focus.length === 0 && docked.length === 0) return null
+  return <HitLayer edges={docked.length === 0 ? focus : [...focus, ...docked]} {...handlers} />
 }

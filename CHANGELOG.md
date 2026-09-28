@@ -99,6 +99,13 @@ relationships on the published graph are read-only, and say why.
 
 ### Fixed
 
+- **Some of a selected entity's lines could not be clicked.** A line to a partner scrolled out of
+  the same column runs to its "Connected" tray entry or "↓ N connected" pill. It was drawn but
+  took no clicks, and on the pill it ran diagonally across the rows. It now opens the relationship
+  drawer like any other line, and it leaves through the column's gutter to reach the pill instead
+  of crossing the rows. In "On Hover" density, a hovered entity's lines vanished as soon as the
+  pointer left the entity to reach one. They now stay while the pointer crosses over, and for as
+  long as it rests on a line.
 - **The line you clicked disappeared while you read about it.** In the default "On Hover" density a
   line is drawn only for the selected entity, and clicking the line took the selection, so the line
   vanished as its drawer opened. Now the line a drawer is open on stays drawn, whatever the density,
