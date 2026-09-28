@@ -55,6 +55,10 @@ that **comes with what sits inside it** (a table and its columns) owns
 everything beneath it; one kept **on its own** owns only itself, and its
 contents count as left out.
 
+Routes run over every kind of lineage. Hiding a relationship type in the
+**Connections** panel hides its lines, and no virtual hop is drawn in their
+place; a virtual hop whose hidden steps happen to use that type still shows.
+
 ### How far a hop reaches
 
 A subset draws hops up to **10 steps** long by default. Set anything from 1 to

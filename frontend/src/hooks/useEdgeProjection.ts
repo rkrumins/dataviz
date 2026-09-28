@@ -296,6 +296,7 @@ const noFlows = (): MutableFlows => ({ in: 0, out: 0, inPartners: new Set(), out
 const OFF_CANVAS_PARTNER_CAP = 500
 
 const NO_OFF_CANVAS: ReadonlyMap<string, OffCanvasLineage> = new Map()
+const NO_HIDDEN_PAIRS: ReadonlySet<string> = new Set()
 
 // ============================================
 // Hook
@@ -478,7 +479,7 @@ export function useEdgeProjection({
   // Now depends on the stable `ancestorMap` instead of rebuilding it here.
   // This memo only re-runs when edges or the ancestorMap actually change.
   const projection = useMemo(() => {
-    if (!showLineageFlow) return { edges: [], unresolvedCount: 0, hiddenInsideCount: 0, offCanvas: NO_OFF_CANVAS }
+    if (!showLineageFlow) return { edges: [], unresolvedCount: 0, hiddenInsideCount: 0, offCanvas: NO_OFF_CANVAS, hiddenPairs: NO_HIDDEN_PAIRS }
 
     const edgeGroups = new Map<string, any[]>()
 
@@ -938,6 +939,9 @@ export function useEdgeProjection({
 
     // Finalize: bundle groups into projected edges (without delegation — applied in separate memo)
     const projected: any[] = []
+    // Pairs whose every relationship is of a type the reader hid: joined all
+    // the same, so no virtual hop stands in for the line they chose not to see.
+    const hiddenPairs = new Set<string>()
     edgeGroups.forEach((groupEdges, key) => {
       // Hidden types are applied per MEMBER, not per group: grouping stayed
       // identical above so the bidirectional collapse behaves exactly as
@@ -950,7 +954,10 @@ export function useEdgeProjection({
             return ts.length === 0 || ts.some(t => !hiddenEdgeTypes.has(t.toUpperCase()))
           })
         : groupEdges
-      if (members.length === 0) return
+      if (members.length === 0) {
+        hiddenPairs.add(key)
+        return
+      }
 
       const distinctTypes = new Set<string>()
       let isAggregated = false
@@ -1088,8 +1095,9 @@ export function useEdgeProjection({
     })
 
     const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
-    if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
-    return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
+    const hiddenPairsResult = hiddenPairs.size > 0 ? hiddenPairs : NO_HIDDEN_PAIRS
+    if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult, hiddenPairs: hiddenPairsResult }
+    return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult, hiddenPairs: hiddenPairsResult }
   }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts, openScope, layerOfNode])
 
   const projectedEdges = projection.edges
@@ -1180,12 +1188,14 @@ export function useEdgeProjection({
     const base = visibleLineageEdgesWithDelegation
     if (!showLineageFlow || isTracing || !bridgeLinks || bridgeLinks.length === 0) return base
 
+    // The row an end is drawn on, as `rowOf` above finds it: the collapsed row
+    // it is folded into first — displayMap also holds what a closed row folds
+    // away.
     const resolve = (urn: string): string | undefined => {
       const id = urnToIdMap.get(urn) ?? urn
-      if (displayMap.has(id)) return id
-      return ancestorMap.get(id) ?? ancestorMap.get(urn)
+      return ancestorMap.get(id) ?? ancestorMap.get(urn) ?? (displayMap.has(id) ? id : undefined)
     }
-    const joined = new Set<string>()
+    const joined = new Set<string>(projection.hiddenPairs)
     for (const e of base) {
       joined.add(`${e.source}->${e.target}`)
       if (e.isBidirectional) joined.add(`${e.target}->${e.source}`)
@@ -1244,7 +1254,7 @@ export function useEdgeProjection({
       })
     })
     return [...base, ...extra]
-  }, [visibleLineageEdgesWithDelegation, showLineageFlow, isTracing, bridgeLinks, urnToIdMap, displayMap, ancestorMap, nodeLayerIndexMap])
+  }, [visibleLineageEdgesWithDelegation, projection.hiddenPairs, showLineageFlow, isTracing, bridgeLinks, urnToIdMap, displayMap, ancestorMap, nodeLayerIndexMap])
 
   return {
     lineageEdges,

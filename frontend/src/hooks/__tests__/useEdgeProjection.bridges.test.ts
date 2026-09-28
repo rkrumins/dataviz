@@ -28,6 +28,7 @@ function run(opts: {
   bridges?: BridgeLink[]
   tracing?: boolean
   layers?: Record<string, number>
+  hidden?: string[]
 }) {
   const all: HierarchyNode[] = []
   const stack = [...opts.roots]
@@ -43,7 +44,9 @@ function run(opts: {
     nodesByLayer: new Map([['L1', opts.roots]]),
     expandedNodes: new Set(),
     displayFlat: flat,
-    displayMap: new Map(flat.map(n => [n.id, n])),
+    // Every node of the tree, as the canvas passes it: what a closed row
+    // folds away is in displayMap too.
+    displayMap: new Map(all.map(n => [n.id, n])),
     urnToIdMap: new Map(all.map(n => [n.urn!, n.id])),
     showLineageFlow: true,
     isTracing: opts.tracing ?? false,
@@ -51,6 +54,7 @@ function run(opts: {
     isContainmentEdge: () => false,
     nodeLayerIndexMap: opts.layers ? new Map(Object.entries(opts.layers)) : undefined,
     bridgeLinks: opts.bridges,
+    hiddenEdgeTypes: opts.hidden ? new Set(opts.hidden) : undefined,
   }))
   return result.current.visibleLineageEdges.filter((e: { id: string }) => isBridgeLineId(e.id))
 }
@@ -103,6 +107,15 @@ describe('useEdgeProjection — virtual hops', () => {
     })
     expect(line.isGhost).toBe(true)
     expect(line.bridgeHops).toBeUndefined()
+  })
+
+  it('brings back no line the reader hid by its type', () => {
+    expect(run({
+      roots: [hNode('A'), hNode('C')],
+      edges: [edge('e1', 'A', 'C')],
+      hidden: ['FLOWS_TO'],
+      bridges: [{ source: 'A', target: 'C', hops: 1 }],
+    })).toEqual([])
   })
 
   it('lands a member folded into a closed group on the group', () => {
