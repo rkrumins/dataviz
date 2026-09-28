@@ -177,6 +177,49 @@ describe('useEdgeProjection — roll-ups resolve to the row the reader sees', ()
   })
 })
 
+describe('useEdgeProjection — a sibling past an open container\'s page', () => {
+  // P is open in L3 with one child loaded, c1; c9 is another child of P that
+  // no page has brought in yet, so its chain files it under P. r sits in L4.
+  const layers = { L3: [hNode('P', [hNode('c1')])], L4: [hNode('r')] }
+  const parentMap = { c1: 'P' }
+  const expandedNodes = new Set(['P'])
+  const chains = { c9: ['P'] }
+
+  it('names it in the open container\'s column instead of drawing a line from the child up to its own parent', () => {
+    const res = run({ layers, parentMap, expandedNodes, chains, edges: [edge('e1', 'c1', 'c9'), edge('e2', 'c9', 'c1')] })
+    expect(res.lines).toEqual([])
+    const c1 = res.offCanvasByNode.get('c1')!
+    expect(c1).toMatchObject({ in: 0, out: 0 })
+    expect(c1.columns.get('L3')).toMatchObject({ in: 1, out: 1, unnamed: { in: 0, out: 0 } })
+    expect([...c1.columns.get('L3')!.outPartners]).toEqual(['c9'])
+    expect([...c1.columns.get('L3')!.inPartners]).toEqual(['c9'])
+    expect(res.unresolvedEdgeCount).toBe(0)
+    expect(res.hiddenInsideCollapsedCount).toBe(0)
+  })
+
+  it('still draws a line to the open container from a row it does not hold, and to the container itself', () => {
+    const res = run({ layers, parentMap, expandedNodes, chains, edges: [edge('e1', 'r', 'c9'), edge('e2', 'c1', 'P')] })
+    expect(res.lines).toEqual([['r', 'P'], ['c1', 'P']])
+    expect(res.offCanvasByNode.size).toBe(0)
+  })
+
+  it('does the same for a drilled edge and for a roll-up cell', () => {
+    const drilled = run({
+      layers, parentMap, expandedNodes, chains,
+      aggregated: [expanded('x1', [{ id: 'd1', sourceUrn: 'c1', targetUrn: 'c9', edgeType: 'FLOWS_TO' }])],
+    })
+    expect(drilled.lines).toEqual([])
+    expect(drilled.offCanvasByNode.get('c1')?.columns.get('L3')).toMatchObject({ in: 0, out: 1 })
+    expect(drilled.unresolvedEdgeCount).toBe(0)
+
+    const rolled = run({ layers, parentMap, expandedNodes, chains, aggregated: [agg('a1', 'c9', 'c1', 4)] })
+    expect(rolled.lines).toEqual([])
+    expect(rolled.offCanvasByNode.get('c1')?.columns.get('L3')).toMatchObject({ in: 4, out: 0 })
+    expect([...(rolled.offCanvasByNode.get('c1')?.columns.get('L3')?.inPartners ?? [])]).toEqual(['c9'])
+    expect(rolled.unresolvedEdgeCount).toBe(0)
+  })
+})
+
 describe('useEdgeProjection — counting', () => {
   it('counts the flows that leave the view, weighted, and not the hidden ones', () => {
     const res = run({

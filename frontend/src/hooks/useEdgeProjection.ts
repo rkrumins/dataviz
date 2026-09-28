@@ -225,9 +225,10 @@ export interface OffCanvasFlows {
 
 /**
  * Flows into an anchored column that are not drawn yet. The partners are the
- * rows of it past its loaded page they name; `unnamed` counts those that
- * name its anchor, drawn as the column itself, with no row to bring in (an
- * anchor's rest).
+ * rows of it past its loaded page they name (or an open container's children
+ * not loaded yet, in its column); `unnamed` counts those that name its
+ * anchor, drawn as the column itself, with no row to bring in (an anchor's
+ * rest).
  */
 export interface ColumnFlows extends OffCanvasFlows {
   unnamed: { in: number; out: number }
@@ -237,7 +238,8 @@ export interface ColumnFlows extends OffCanvasFlows {
  * `in`/`out` are the flows that truly LEAVE the view. `columns` holds, per
  * layer id, the flows into an anchored column that are not drawn yet: a row
  * of it past its loaded page, or its anchor, which has no partner to bring
- * in because it is drawn as the column. Those are in the view, never a stub.
+ * in because it is drawn as the column (or an open container's children not
+ * loaded yet, in its column). Those are in the view, never a stub.
  * `unplaced` counts the flows whose far end has no known place: still being
  * asked (pending), or never found (unknown). Neither in the view nor out of
  * it as far as anyone can tell, so never a stub, and never a hollow port.
@@ -309,6 +311,20 @@ export function useEdgeProjection({
 
   // ── Flat node index — O(1) lookup replacing O(N) tree search ──────────
   const nodeIndex = useMemo(() => buildNodeIndex(nodesByLayer), [nodesByLayer])
+
+  // ── The column each node of the tree is drawn in ───────────────────────
+  const layerOfNode = useMemo(() => {
+    const layers = new Map<string, string>()
+    nodesByLayer.forEach((roots, layerId) => {
+      const stack = [...roots]
+      while (stack.length > 0) {
+        const node = stack.pop()!
+        layers.set(node.id, layerId)
+        for (const child of node.children) stack.push(child)
+      }
+    })
+    return layers
+  }, [nodesByLayer])
 
   // ── Incremental ancestorMap state ──────────────────────────────────────
   const ancestorMapRef = useRef<Map<string, string>>(new Map())
@@ -515,6 +531,29 @@ export function useEdgeProjection({
       return known
     }
 
+    // Where the far end lands, seen from the near one. A far end its chain
+    // files under an OPEN row that also holds the near end — a sibling past
+    // that row's loaded page, or one further down — is not that row: drawn
+    // there, the line would run from a child up to its own parent. It is a
+    // child of it not loaded yet, in its column: named there, as a row of an
+    // anchored column past its page is, so selecting the near row brings it
+    // in (useRevealPartners stops its walk at the open row). Nothing loaded
+    // folds into an open row, so any end on one but the row itself came by
+    // its chain. Cheapest checks first, so a line between two rows costs a
+    // Set lookup.
+    const within = (near: Place, nearUrn: string, far: Place, farUrn: string): Place => {
+      if (far.at !== 'row' || near.at !== 'row' || near.id === far.id || !expandedNodes.has(far.id)) return far
+      if ((urnToIdMap.get(farUrn) ?? farUrn) === far.id) return far
+      if (!upPath(nearUrn).includes(displayMap.get(far.id)?.urn ?? far.id)) return far
+      const layerId = layerOfNode.get(far.id)
+      return layerId ? { at: 'column', layerId } : far
+    }
+    const placePair = (s: string, t: string): [Place, Place] => {
+      const S = place(s)
+      const T = place(t)
+      return [within(T, t, S, s), within(S, s, T, t)]
+    }
+
     // A line between an entity and one of its own ancestors — an anchor and
     // its own row, a source and a cell inside it, an open row and its child —
     // is the entity summarised against itself: no line, no stub, not counted.
@@ -676,8 +715,7 @@ export function useEdgeProjection({
       const shared = loadedShare.get(pairKey(agg.sourceUrn, agg.targetUrn))
       const weight = cellWeight(agg) - (shared ?? 0)
       if (weight <= 0) return
-      const S = place(agg.sourceUrn)
-      const T = place(agg.targetUrn)
+      const [S, T] = placePair(agg.sourceUrn, agg.targetUrn)
       if (isSelfRollup(agg.sourceUrn, agg.targetUrn, S, T, true)) return
       if (S.at !== 'row' || T.at !== 'row') {
         // The weight leaves out what the loaded rows carry, so a cell naming
@@ -764,8 +802,7 @@ export function useEdgeProjection({
       .forEach(edge => {
         const type = normalizeEdgeType(edge)
         const aggregated = type === 'AGGREGATED' || !!edge.data?.isAggregated
-        const S = place(edge.source)
-        const T = place(edge.target)
+        const [S, T] = placePair(edge.source, edge.target)
         if (isSelfRollup(edge.source, edge.target, S, T, aggregated)) return
         if (S.at !== 'row' || T.at !== 'row') {
           fileUndrawn(S, T, edge.source, edge.target, [type], memberWeight(edge), aggregated)
@@ -817,8 +854,7 @@ export function useEdgeProjection({
       .filter(e => e.state === 'expanded')
       .flatMap(e => e.detailedEdges)
       .forEach(edge => {
-        const S = place(edge.sourceUrn)
-        const T = place(edge.targetUrn)
+        const [S, T] = placePair(edge.sourceUrn, edge.targetUrn)
         if (isSelfRollup(edge.sourceUrn, edge.targetUrn, S, T, false)) return
         if (S.at !== 'row' || T.at !== 'row') {
           fileUndrawn(S, T, edge.sourceUrn, edge.targetUrn, edge.edgeType ? [edge.edgeType] : [], 1, false)
@@ -1030,7 +1066,7 @@ export function useEdgeProjection({
     const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
     if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
     return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts, openScope])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts, openScope, layerOfNode])
 
   const projectedEdges = projection.edges
 

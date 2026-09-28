@@ -181,3 +181,19 @@ describe('a Snowflake column whose store holds its own roll-up cells', () => {
     expect(outsideChip()).toBe('1')
   }, 30_000)
 })
+
+describe('a sibling past an open schema\'s page', () => {
+  it('selecting a row it flows into brings it in, where a line from the schema used to stand for it', async () => {
+    // int_stg_orders_t2 is a child of INTERMEDIATE_T1 its page never
+    // brought: named in the Snowflake column, not drawn as the open schema.
+    const h = await openView()
+    expect(h.visibleCardIds()).not.toContain('int_stg_orders_t2')
+
+    act(() => { useCanvasStore.getState().selectNode('int_clean_orders_t2') })
+
+    await waitFor(() => expect(h.visibleCardIds()).toContain('int_stg_orders_t2'), { timeout: 8000 })
+    await h.settle()
+    expect(outside()).toEqual({ int_clean_orders_t2: '1 in, 0 out' })
+    expect(h.consoleErrors()).toEqual([])
+  }, 30_000)
+})
