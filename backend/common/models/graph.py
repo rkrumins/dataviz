@@ -655,6 +655,10 @@ class AggregatedEdgeRequest(BaseModel):
     include_edge_types: Optional[List[str]] = Field(None, alias="includeEdgeTypes")  # open strings
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     containment_edge_types: Optional[List[str]] = Field(None, alias="containmentEdgeTypes")
+    # Leave out every cell one of whose ends holds the other: a container's
+    # roll-ups with its own descendants and ancestors (see
+    # ContextEngine.get_aggregated_edges).
+    exclude_internal: bool = Field(False, alias="excludeInternal")
 
     class Config:
         populate_by_name = True

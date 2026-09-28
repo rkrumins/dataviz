@@ -143,3 +143,234 @@ export function coarseThenFineEstate() {
   return { model, layers: base.layers, assignments: base.assignments }
 }
 
+
+/**
+ * A view built the way Data Source views are: ONE COLUMN PER ENTITY. Each
+ * layer is anchored at an entity, the anchor is promoted to be the column
+ * itself (never a row), and its children are the column's rows.
+ *
+ *   SRC ⊃ {SRC.orders, SRC.customers}   ← column "Source"
+ *   DST ⊃ {DST.revenue}                 ← column "Target"
+ *   SRC.orders → DST.revenue
+ */
+export function anchoredEstate() {
+  const nodes = [
+    wn('SRC', 'dataPlatform', 2), wn('SRC.orders', 'dataset'), wn('SRC.customers', 'dataset'),
+    wn('DST', 'dataPlatform', 1), wn('DST.revenue', 'dataset'),
+  ]
+  const containmentEdges = [has('SRC', 'SRC.orders'), has('SRC', 'SRC.customers'), has('DST', 'DST.revenue')]
+  const lineageEdges = [raw('SRC.orders', 'DST.revenue')]
+  const model: LensWalkModel = {
+    focusUrn: 'SRC.orders', nodes, lineageEdges, containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(['DST.revenue']),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'src', name: 'Source', order: 0, entityTypes: [], anchorUrn: 'SRC' },
+    { id: 'dst', name: 'Target', order: 1, entityTypes: [], anchorUrn: 'DST' },
+  ]
+  const assignments = { SRC: { layerId: 'src' }, DST: { layerId: 'dst' } }
+  return { model, layers, assignments }
+}
+
+/**
+ * An anchored view where every card has its own lineage story: what each
+ * card's lineage ports must say on open.
+ *
+ *   SRC ⊃ {raw_orders, DB_A ⊃ {DB_A.t1}, DB_B ⊃ {DB_B.t2}, quiet}   ← column "Source"
+ *   STG ⊃ {s1, s2, s9}             ← column "Staging"; s9 is not loaded
+ *   REP ⊃ {dash, rpt, uncounted}   ← column "Report"
+ *   far                            ← held by nothing in the view
+ *
+ * The lineage (a test adds it to the store, and serves the DB_A cell as a
+ * roll-up): raw_orders → s1; raw_orders → STG (another column's anchor);
+ * DB_A ⇒ s2 (a roll-up cell); s2 → s9; DB_B.t2 → rpt; far → dash.
+ */
+export function anchoredPortsEstate() {
+  const nodes = [
+    wn('SRC', 'dataPlatform', 4), wn('SRC.raw_orders', 'dataset'),
+    wn('SRC.DB_A', 'container', 1), wn('SRC.DB_A.t1', 'dataset'),
+    wn('SRC.DB_B', 'container', 1), wn('SRC.DB_B.t2', 'dataset'),
+    wn('SRC.quiet', 'dataset'),
+    wn('STG', 'dataPlatform', 3), wn('s1', 'dataset'), wn('s2', 'dataset'), wn('s9', 'dataset'),
+    wn('REP', 'dataPlatform', 3), wn('dash', 'dataset'), wn('rpt', 'dataset'), wn('uncounted', 'dataset'),
+    wn('far', 'dataset'),
+  ]
+  const containmentEdges = [
+    has('SRC', 'SRC.raw_orders'), has('SRC', 'SRC.DB_A'), has('SRC.DB_A', 'SRC.DB_A.t1'),
+    has('SRC', 'SRC.DB_B'), has('SRC.DB_B', 'SRC.DB_B.t2'), has('SRC', 'SRC.quiet'),
+    has('STG', 's1'), has('STG', 's2'), has('STG', 's9'),
+    has('REP', 'dash'), has('REP', 'rpt'), has('REP', 'uncounted'),
+  ]
+  const model: LensWalkModel = {
+    focusUrn: 'SRC.raw_orders', nodes, lineageEdges: [], containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'src', name: 'Source', order: 0, entityTypes: [], anchorUrn: 'SRC' },
+    { id: 'stg', name: 'Staging', order: 1, entityTypes: [], anchorUrn: 'STG' },
+    { id: 'rep', name: 'Report', order: 2, entityTypes: [], anchorUrn: 'REP' },
+  ]
+  const assignments = { SRC: { layerId: 'src' }, STG: { layerId: 'stg' }, REP: { layerId: 'rep' } }
+  return { model, layers, assignments }
+}
+
+/**
+ * `anchoredPortsEstate` with one column's anchor held by a platform the view
+ * does not draw:
+ *
+ *   PLAT ⊃ under   (one of the anchors: SRC, STG or REP)
+ */
+export function nestedAnchorPortsEstate(under: string) {
+  const base = anchoredPortsEstate()
+  const model: LensWalkModel = {
+    ...base.model,
+    nodes: [...base.model.nodes, wn('PLAT', 'dataPlatform', 1)],
+    containmentEdges: [...base.model.containmentEdges, has('PLAT', under)],
+  }
+  return { model, layers: base.layers, assignments: base.assignments }
+}
+
+/**
+ * A container drawn across three columns:
+ *
+ *   P ⊃ {P.c1, P.C, A}   P in "Left", P.c1 with it
+ *   P.C                  placed in "Right", beside R
+ *   A ⊃ {A.a1}           the anchor of "Anchored": nested under P
+ */
+export function splitChildEstate() {
+  const nodes = [
+    wn('P', 'container', 3), wn('P.c1', 'dataset'), wn('P.C', 'dataset'),
+    wn('A', 'container', 1), wn('A.a1', 'dataset'), wn('R', 'dataset'),
+  ]
+  const containmentEdges = [has('P', 'P.c1'), has('P', 'P.C'), has('P', 'A'), has('A', 'A.a1')]
+  const model: LensWalkModel = {
+    focusUrn: 'R', nodes, lineageEdges: [], containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'left', name: 'Left', order: 0, entityTypes: [] },
+    { id: 'right', name: 'Right', order: 1, entityTypes: [] },
+    { id: 'anch', name: 'Anchored', order: 2, entityTypes: [], anchorUrn: 'A' },
+  ]
+  const assignments = { P: { layerId: 'left' }, 'P.C': { layerId: 'right' }, R: { layerId: 'right' }, A: { layerId: 'anch' } }
+  return { model, layers, assignments }
+}
+
+/**
+ * A curated column holding a view-only group:
+ *
+ *   Group ⊃ {g.a, g.b}   a logical group in "Left"
+ *   solo                 beside it
+ */
+export function groupedEstate() {
+  const nodes = [wn('g.a', 'dataset'), wn('g.b', 'dataset'), wn('solo', 'dataset')]
+  const model: LensWalkModel = {
+    focusUrn: 'solo', nodes, lineageEdges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'left', name: 'Left', order: 0, entityTypes: [], logicalNodes: [{ id: 'grp', name: 'Group', type: 'group' }] },
+  ]
+  const assignments = {
+    'g.a': { layerId: 'left', logicalNodeId: 'grp' },
+    'g.b': { layerId: 'left', logicalNodeId: 'grp' },
+    solo: { layerId: 'left' },
+  }
+  return { model, layers, assignments }
+}
+
+/**
+ * A curated column holding a view-only group, beside an anchored column:
+ *
+ *   Group ⊃ {g.a, g.c}   a logical group in "Left"; g.c ⊃ {g.c.t}
+ *   solo                 beside it
+ *   STG ⊃ {s1, s2, s9}   the anchor of "Staging"
+ *   far                  in no column
+ */
+export function groupAndAnchorEstate() {
+  const nodes = [
+    wn('g.a', 'dataset'), wn('g.c', 'container', 1), wn('g.c.t', 'dataset'), wn('solo', 'dataset'),
+    wn('STG', 'dataPlatform', 3), wn('s1', 'dataset'), wn('s2', 'dataset'), wn('s9', 'dataset'),
+    wn('far', 'dataset'),
+  ]
+  const containmentEdges = [has('g.c', 'g.c.t'), has('STG', 's1'), has('STG', 's2'), has('STG', 's9')]
+  const model: LensWalkModel = {
+    focusUrn: 'solo', nodes, lineageEdges: [], containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'left', name: 'Left', order: 0, entityTypes: [], logicalNodes: [{ id: 'grp', name: 'Group', type: 'group' }] },
+    { id: 'stg', name: 'Staging', order: 1, entityTypes: [], anchorUrn: 'STG' },
+  ]
+  const assignments = {
+    'g.a': { layerId: 'left', logicalNodeId: 'grp' },
+    'g.c': { layerId: 'left', logicalNodeId: 'grp' },
+    solo: { layerId: 'left' },
+    STG: { layerId: 'stg' },
+  }
+  return { model, layers, assignments }
+}
+
+/**
+ * A view open to its whole data source, one column per entity type:
+ *
+ *   Sources   src1, src2
+ *   Reports   rep1, rep2, rep9   (rep9 past the column's first page)
+ *
+ * and misc1, of a type no column places.
+ */
+export function perTypeEstate() {
+  const nodes = [wn('src1', 'source'), wn('src2', 'source'), wn('rep1', 'report'), wn('rep2', 'report'), wn('rep9', 'report'),
+    wn('misc1', 'misc')]
+  const model: LensWalkModel = {
+    focusUrn: 'src1', nodes, lineageEdges: [], containmentEdges: [],
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'sources', name: 'Sources', order: 0, entityTypes: ['source'] },
+    { id: 'reports', name: 'Reports', order: 1, entityTypes: ['report'] },
+  ]
+  return { model, layers, assignments: {} }
+}
+
+/**
+ * One column per entity, curated, as in a Snowflake / Postgres view:
+ *
+ *   pg ⊃ {pg.raw_orders, pg.raw_items}                  anchor of "Sources"
+ *   snow ⊃ {GOLD ⊃ {gold.fct_orders, gold.dim_items},   anchor of "Snowflake"
+ *           INTERMEDIATE_T1 ⊃ {int_clean_order_items_t2, int_clean_orders_t2, int_stg_orders_t2}}
+ *   ext                                                  held by no column
+ */
+export function snowflakeColumnEstate() {
+  const nodes = [
+    wn('pg', 'dataPlatform', 2), wn('pg.raw_orders', 'dataset'), wn('pg.raw_items', 'dataset'),
+    wn('snow', 'dataPlatform', 2),
+    wn('GOLD', 'container', 2), wn('gold.fct_orders', 'dataset'), wn('gold.dim_items', 'dataset'),
+    wn('INTERMEDIATE_T1', 'container', 3),
+    wn('int_clean_order_items_t2', 'dataset'), wn('int_clean_orders_t2', 'dataset'), wn('int_stg_orders_t2', 'dataset'),
+    wn('ext', 'dataset'),
+  ]
+  const containmentEdges = [
+    has('pg', 'pg.raw_orders'), has('pg', 'pg.raw_items'),
+    has('snow', 'GOLD'), has('GOLD', 'gold.fct_orders'), has('GOLD', 'gold.dim_items'),
+    has('snow', 'INTERMEDIATE_T1'), has('INTERMEDIATE_T1', 'int_clean_order_items_t2'),
+    has('INTERMEDIATE_T1', 'int_clean_orders_t2'), has('INTERMEDIATE_T1', 'int_stg_orders_t2'),
+  ]
+  const model: LensWalkModel = {
+    focusUrn: 'int_clean_orders_t2', nodes, lineageEdges: [], containmentEdges,
+    upstreamUrns: new Set(), downstreamUrns: new Set(),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const layers: ViewLayerConfig[] = [
+    { id: 'sources', name: 'Sources', order: 0, entityTypes: [], anchorUrn: 'pg' },
+    { id: 'snowflake', name: 'Snowflake', order: 1, entityTypes: [], anchorUrn: 'snow' },
+  ]
+  const assignments = { pg: { layerId: 'sources' }, snow: { layerId: 'snowflake' } }
+  return { model, layers, assignments }
+}

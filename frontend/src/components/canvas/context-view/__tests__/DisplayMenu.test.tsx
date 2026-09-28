@@ -4,9 +4,10 @@
  * fire their callbacks, the Lineage-appearance section renders muted/inert
  * when Lineage is off, and Reset fires onReset.
  */
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { DisplayMenu } from '../header/DisplayMenu'
+import { usePreferencesStore } from '@/store/preferences'
 
 function baseProps() {
   return {
@@ -78,5 +79,80 @@ describe('DisplayMenu', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
     expect(props.onReset).toHaveBeenCalled()
+  })
+
+  it('Reset is offered when only the memory gauge is pinned, and says what it puts back', async () => {
+    usePreferencesStore.setState({ showMemoryUsage: true })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const reset = screen.getByRole('button', { name: 'Reset' })
+    fireEvent.focus(reset)
+    expect(await screen.findByText(
+      'Put zoom, density, icons, badges, tree lines and the memory gauge back to their defaults',
+    )).toBeInTheDocument()
+    usePreferencesStore.setState({ showMemoryUsage: false })
+  })
+
+  it('On Hover shows the per-entity cap, and the slider sets it', () => {
+    usePreferencesStore.setState({ autoStubThreshold: 500 })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const slider = screen.getByRole('slider', { name: 'Lines per entity' })
+    expect(screen.getByText(/The most lines a hovered or selected entity draws at once/)).toBeInTheDocument()
+    fireEvent.change(slider, { target: { value: '300' } })
+    expect(usePreferencesStore.getState().autoStubThreshold).toBe(300)
+  })
+
+  it('Adaptive keeps its edge budget, and says it caps a focused entity too', () => {
+    render(<DisplayMenu {...baseProps()} lineageRenderMode="auto" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByRole('slider', { name: 'Adaptive edge budget' })).toBeInTheDocument()
+    expect(screen.queryByRole('slider', { name: 'Lines per entity' })).not.toBeInTheDocument()
+    expect(screen.getByText(/the most a hovered or selected entity draws/)).toBeInTheDocument()
+  })
+
+  it('the Edge Density section says a trace draws every line', () => {
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByText('A trace draws every line it walks, whatever this is set to.')).toBeInTheDocument()
+  })
+
+  it('Marker sides: incoming left, outgoing right by default; a choice is stored', () => {
+    usePreferencesStore.setState({ lineagePortSides: 'direction' })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const sides = screen.getByRole('radiogroup', { name: 'Marker sides' })
+    const byDirection = within(sides).getByRole('radio', { name: /Incoming left, outgoing right/ })
+    const byLines = within(sides).getByRole('radio', { name: /Where lines attach/ })
+    expect(byDirection).toHaveAttribute('aria-checked', 'true')
+    // A line within one column moves only its outgoing end: its incoming
+    // end still plugs into the left edge, where its marker is.
+    expect(byDirection).toHaveTextContent('Each side shows one direction; a line running right to left, or out to a card in the same column, plugs into the other edge.')
+    expect(byLines).toHaveTextContent('A marker sits where its lines plug in; lines within a column meet on the left.')
+
+    fireEvent.click(byLines)
+    expect(usePreferencesStore.getState().lineagePortSides).toBe('lines')
+    expect(byLines).toHaveAttribute('aria-checked', 'true')
+    expect(byDirection).toHaveAttribute('aria-checked', 'false')
+    // A Lineage setting, like the rest of that section: the Canvas section's
+    // Reset neither offers itself for it nor puts it back.
+    expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument()
+    usePreferencesStore.setState({ lineagePortSides: 'direction' })
+  })
+
+  it('Marker sides are inert while Lineage is off', () => {
+    usePreferencesStore.setState({ lineagePortSides: 'direction' })
+    render(<DisplayMenu {...baseProps()} lineageEnabled={false} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const byLines = within(screen.getByRole('radiogroup', { name: 'Marker sides' })).getByRole('radio', { name: /Where lines attach/ })
+    expect(byLines).toBeDisabled()
+    fireEvent.click(byLines)
+    expect(usePreferencesStore.getState().lineagePortSides).toBe('direction')
   })
 })

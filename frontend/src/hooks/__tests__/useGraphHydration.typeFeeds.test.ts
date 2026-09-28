@@ -17,7 +17,8 @@
  *    client count would turn into repeats and an early stop;
  *  - a failed page is reported and retried from the same position;
  *  - the page's lineage is read with two ANCHORED queries (out of / into the
- *    page) — the one-query form scans every lineage edge in the graph.
+ *    page) — the one-query form scans every lineage edge in the graph — and
+ *    for flows only: no stored :AGGREGATED cell is asked for or kept.
  */
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -26,7 +27,7 @@ const TOTAL = 450
 const urn = (i: number) => `urn:t:${String(i).padStart(4, '0')}`
 const ANCHOR = urn(440)          // sorts far past the first page of 200
 
-const { mockProvider, calls } = vi.hoisted(() => ({
+const { mockProvider, calls, schema } = vi.hoisted(() => ({
   mockProvider: {
     getNodes: vi.fn(),
     getNodesPage: vi.fn(),
@@ -38,6 +39,7 @@ const { mockProvider, calls } = vi.hoisted(() => ({
     })),
   },
   calls: [] as Array<Record<string, unknown>>,
+  schema: { lineage: ['FLOWS_TO'] as string[] },
 }))
 
 vi.mock('@/providers/GraphProviderContext', () => ({
@@ -46,7 +48,7 @@ vi.mock('@/providers/GraphProviderContext', () => ({
 }))
 vi.mock('@/hooks/useViewSchema', () => ({
   useViewContainmentEdgeTypes: () => ['CONTAINS'],
-  useViewLineageEdgeTypes: () => ['FLOWS_TO'],
+  useViewLineageEdgeTypes: () => schema.lineage,
   useViewRootEntityTypes: () => ['domain'],
   useViewEntityTypes: () => [
     { id: 'domain', hierarchy: { canBeContainedBy: [], canContain: [] } },
@@ -112,6 +114,7 @@ describe('open-scope type feeds', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     calls.length = 0
+    schema.lineage = ['FLOWS_TO']
     useCanvasStore.getState().setGraph([], [])
   })
 
@@ -194,6 +197,26 @@ describe('open-scope type feeds', () => {
     expect(lineageQueries.some(q => q.anyUrns)).toBe(false)
     expect(lineageQueries.some(q => q.sourceUrns?.length)).toBe(true)
     expect(lineageQueries.some(q => q.targetUrns?.length)).toBe(true)
+  })
+
+  it('asks a feed page for no roll-up cell, and keeps none the server sends anyway', async () => {
+    // A view whose lineage types list AGGREGATED: the page's reads leave it
+    // out, as /edges/between does; a cell that arrives regardless is dropped.
+    schema.lineage = ['FLOWS_TO', 'AGGREGATED']
+    serve()
+    const canvas = await hydrate()
+    const flow = { id: 'f-page', sourceUrn: urn(210), targetUrn: urn(220), edgeType: 'FLOWS_TO' }
+    const cell = { id: 'agg-page', sourceUrn: urn(211), targetUrn: urn(220), edgeType: 'AGGREGATED' }
+    mockProvider.getEdges.mockImplementation((async (q: { sourceUrns?: string[] }) =>
+      (q.sourceUrns ? [flow, cell] : [])) as never)
+    await act(async () => { await canvas.result.current.loadMoreFeeds(['domain']) })
+    const asked = (mockProvider.getEdges.mock.calls as unknown as unknown[][])
+      .map(c => (c[0] as { edgeTypes?: string[] }).edgeTypes ?? [])
+    expect(asked.some(types => types.includes('FLOWS_TO'))).toBe(true)
+    expect(asked.flat()).not.toContain('AGGREGATED')
+    const ids = useCanvasStore.getState().edges.map(e => e.id)
+    expect(ids).toContain('f-page')
+    expect(ids).not.toContain('agg-page')
   })
 })
 

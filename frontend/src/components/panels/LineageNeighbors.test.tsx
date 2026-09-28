@@ -791,6 +791,35 @@ describe('LineageNeighbors — clicking a partner that is not on the canvas', ()
       mockProviderHolder.current = null
     }
   })
+
+  it('is listed like any other partner: nothing says it is missing', async () => {
+    // A partner the canvas has not drawn may well be in the view — a row of
+    // an anchored column past its loaded page — so the row and the list say
+    // nothing about rendering or loading.
+    const user = userEvent.setup()
+    useCanvasStore.setState({
+      nodes: [makeNode('focal-y', 'dataset', 'Focal Y')],
+      edges: [],
+      visibleEdges: [],
+      drawerNodeId: null,
+    } as never)
+    mockProviderHolder.current = {
+      getEdges: async (q: { sourceUrns?: string[] }) =>
+        q.sourceUrns?.length
+          ? [{ id: 'sy1', sourceUrn: 'focal-y', targetUrn: 'far-away', edgeType: 'FLOWS_TO' }]
+          : [],
+      getNodes: async () => [],
+    }
+    try {
+      render(<LineageNeighbors nodeId="focal-y" onFocusNode={vi.fn()} />)
+      await waitFor(() => expect(screen.getByText('1 connected entity')).toBeInTheDocument())
+      await user.click(screen.getByText('Data Consumers'))
+      expect(await screen.findByText('far-away')).toBeInTheDocument()
+      expect(screen.queryByText(/not rendered|rendered on canvas|not loaded|not on (this|the) canvas/i)).toBeNull()
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
 })
 
 describe('LineageNeighbors — show all on canvas', () => {
@@ -1104,7 +1133,10 @@ describe('LineageNeighbors — a partner opens down its own path', () => {
       await waitFor(() => expect(countIn('Data Sources').getByText('1')).toBeInTheDocument())
       await user.click(screen.getByText('Data Sources'))
       await user.click(screen.getByText('Web Analytics'))
-      expect(await screen.findByText(/doesn.t hold that entity/)).toBeInTheDocument()
+      // It says what happened, never that the view does not hold it: an
+      // entity in the view can be past a column's loaded page.
+      expect(await screen.findByText(/couldn.t bring that entity into view/)).toBeInTheDocument()
+      expect(screen.queryByText(/doesn.t hold/)).toBeNull()
     } finally {
       mockProviderHolder.current = null
     }

@@ -630,6 +630,292 @@ async def test_trace_closure_provider_not_implemented_returns_501_through_cache_
     ] == []
 
 
+# ── POST /nodes/degree ────────────────────────────────────────────────
+
+class _DegreeStub(_StubProvider):
+    """Counts every urn but u2, whose bucket failed: absent means unknown."""
+
+    async def get_node_degrees(self, urns, edge_types=None):
+        return {u: {"in": 1, "out": 2} for u in urns if u != "u2"}
+
+
+async def _post_degrees(test_client: AsyncClient, engine, monkeypatch, cache=None, urns=("u1", "u2"),
+                        **extra):
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    async def _override():
+        return engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    if cache is not None:
+        monkeypatch.setattr(graph_module, "get_graph_cache", lambda: cache)
+    try:
+        return await test_client.post(
+            "/api/v1/test-ws/graph/nodes/degree",
+            json={"urns": list(urns), "edgeTypes": ["FLOWS_TO"], **extra},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+
+def _answer_writes(redis):
+    """The SETs that stored an answer (primary or last-known-good), not the
+    cache's own bookkeeping."""
+    from backend.app.services import graph_cache as _gc
+
+    bookkeeping = (_gc._LEADER_PREFIX, _gc._BUILTAT_PREFIX, _gc._OVERSIZED_PREFIX)
+    return [c for c in redis.set.await_args_list if not str(c.args[0]).startswith(bookkeeping)]
+
+
+async def test_node_degrees_on_a_reader_that_cannot_count_is_501(test_client: AsyncClient, monkeypatch):
+    """A draft on a base that has no degree count (a versioned branch).
+    Answering {} read as "unknown" for every card, and the canvas asked
+    again forever."""
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+
+    overlay = DraftOverlayProvider(
+        _BaseWithoutClosure(), svc=None, graph_id="g1", branch_id="draft1",
+    )
+    resp = await _post_degrees(test_client, ContextEngine(provider=overlay), monkeypatch)
+    assert resp.status_code == 501
+
+
+async def test_node_degrees_501_through_the_cache_wrapper(test_client: AsyncClient, monkeypatch):
+    engine, cache, redis = _make_scoped_engine_and_cache(_StubProvider())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache)
+    assert resp.status_code == 501
+    assert redis.get.await_count >= 1
+    assert _answer_writes(redis) == []
+
+
+async def test_an_incomplete_degree_answer_is_held_only_briefly(test_client: AsyncClient, monkeypatch):
+    """An answer missing urns is served, but kept only for the negative TTL
+    and never as the last-known-good: the canvas's retry must be able to
+    complete it rather than be handed the same gap for the full TTL."""
+    from backend.app.services import graph_cache as _gc
+
+    engine, cache, redis = _make_scoped_engine_and_cache(_DegreeStub())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"u1": {"in": 1, "out": 2}}
+    writes = _answer_writes(redis)
+    assert [c.kwargs.get("ex") for c in writes] == [_gc._NEGATIVE_TTL]
+    assert not [c for c in writes if str(c.args[0]).startswith(_gc._LKG_PREFIX)]
+
+
+async def test_a_complete_degree_answer_is_still_cached(test_client: AsyncClient, monkeypatch):
+    from backend.app.services import graph_cache as _gc
+
+    engine, cache, redis = _make_scoped_engine_and_cache(_DegreeStub())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, urns=("u1", "u3"))
+
+    assert resp.status_code == 200
+    writes = _answer_writes(redis)
+    assert _gc._NEGATIVE_TTL not in [c.kwargs.get("ex") for c in writes]
+    assert [c for c in writes if str(c.args[0]).startswith(_gc._LKG_PREFIX)]
+
+
+class _RollupStub(_StubProvider):
+    """Counts roll-up presence only when asked to."""
+
+    async def get_node_degrees(self, urns, edge_types=None, *, include_rollups=False):
+        out = {u: {"in": 0, "out": 0} for u in urns}
+        if include_rollups:
+            for v in out.values():
+                v.update(rollupIn=0, rollupOut=1)
+        return out
+
+
+class _ParamsCache:
+    """Records the params each answer is cached under, and computes it."""
+
+    def __init__(self):
+        self.params = []
+
+    async def get_or_compute(self, *, params, compute, **kw):
+        self.params.append(params)
+        return await compute()
+
+
+async def test_node_degrees_carry_rollup_presence_when_asked(test_client: AsyncClient, monkeypatch):
+    """A container whose lineage all sits below it has none of its own: its
+    marker needs to know it holds roll-ups. Opt-in, and cached apart from a
+    plain answer so neither is served for the other."""
+    engine, _, _ = _make_scoped_engine_and_cache(_RollupStub())
+    cache = _ParamsCache()
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, urns=("u1",), includeRollups=True)
+    assert resp.status_code == 200
+    assert resp.json() == {"u1": {"in": 0, "out": 0, "rollupIn": 0, "rollupOut": 1}}
+
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, urns=("u1",))
+    assert resp.json() == {"u1": {"in": 0, "out": 0}}
+    assert [p["includeRollups"] for p in cache.params] == [True, False]
+
+
+async def test_a_plain_degree_request_still_reaches_a_reader_without_rollups(
+    test_client: AsyncClient, monkeypatch,
+):
+    engine, _, _ = _make_scoped_engine_and_cache(_DegreeStub())
+    resp = await _post_degrees(test_client, engine, monkeypatch, _ParamsCache(), urns=("u1",))
+    assert resp.status_code == 200
+    assert resp.json() == {"u1": {"in": 1, "out": 2}}
+
+
+class _RollupLostStub(_StubProvider):
+    """Counted every urn, but its roll-up probe failed: the flags are absent."""
+
+    async def get_node_degrees(self, urns, edge_types=None, *, include_rollups=False):
+        return {u: {"in": 1, "out": 2} for u in urns}
+
+
+async def test_a_degree_answer_without_its_rollup_flags_is_held_only_briefly(
+    test_client: AsyncClient, monkeypatch,
+):
+    """Absent flags are unknown, like an absent urn: kept for the negative
+    TTL and never as the last-known-good, so the next ask can fill them."""
+    from backend.app.services import graph_cache as _gc
+
+    engine, cache, redis = _make_scoped_engine_and_cache(_RollupLostStub())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, urns=("u1",), includeRollups=True)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"u1": {"in": 1, "out": 2}}
+    writes = _answer_writes(redis)
+    assert [c.kwargs.get("ex") for c in writes] == [_gc._NEGATIVE_TTL]
+    assert not [c for c in writes if str(c.args[0]).startswith(_gc._LKG_PREFIX)]
+
+
+async def test_rollups_on_a_reader_that_cannot_count_are_501(test_client: AsyncClient, monkeypatch):
+    engine, cache, _ = _make_scoped_engine_and_cache(_StubProvider())
+    resp = await _post_degrees(test_client, engine, monkeypatch, cache, includeRollups=True)
+    assert resp.status_code == 501
+
+
+# ── POST /trace/expand-batch ──────────────────────────────────────────
+
+class _ExpandEngine:
+    """Drills each pair by its source: ``shed`` sheds, ``broken`` fails,
+    ``failing_over`` and ``timeout`` cannot answer right now, ``slow`` answers
+    after 2 s unless cancelled first, ``capped`` and ``cut`` answer cut short
+    at a cap and at the deadline, anything else answers."""
+
+    provider = None
+
+    def __init__(self):
+        self.cancelled: List[str] = []
+
+    async def expand_aggregated_edge(self, req):
+        import asyncio
+        from backend.common.adapters import ProviderBusy, ProviderFailingOver
+        from backend.common.models.graph import TraceResult
+
+        if req.source_urn == "shed":
+            raise ProviderBusy("falkordb", "queue full", retry_after_seconds=7)
+        if req.source_urn == "broken":
+            raise ValueError("no such level")
+        if req.source_urn == "failing_over":
+            raise ProviderFailingOver("falkordb", "node restarting")
+        if req.source_urn == "timeout":
+            raise asyncio.TimeoutError()
+        if req.source_urn == "slow":
+            try:
+                await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                self.cancelled.append(req.source_urn)
+                raise
+        cut = {"capped": "max_nodes", "cut": "timeout"}.get(req.source_urn)
+        return TraceResult(
+            nodes=[GraphNode(urn=req.target_urn, displayName=req.target_urn, entityType="dataset")],
+            edges=[], focus=TraceFocus(urn=req.source_urn, level=0, entityType="dataset"),
+            effectiveLevel=1, truncated=cut is not None, truncationReason=cut)
+
+
+async def _post_expand_batch(test_client: AsyncClient, engine, sources):
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    async def _override():
+        return engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    try:
+        return await test_client.post(
+            "/api/v1/test-ws/graph/trace/expand-batch",
+            json={"pairs": [{"sourceUrn": s, "targetUrn": f"t-{s}", "nextLevel": 1} for s in sources]},
+        )
+    finally:
+        app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+
+async def test_a_shed_pair_sheds_the_batch(test_client: AsyncClient):
+    """The canvas drills through this route. A shed pair was swallowed with
+    every other failure: its lineage was dropped and the rest answered 200
+    as complete, cached for the full TTL; with every pair shed it was a 404.
+    A shed is "ask again in a moment": 429 + Retry-After for the batch, which
+    the client retries, and the pairs still out are stopped rather than left
+    running against a store that just said it is full."""
+    import asyncio
+
+    engine = _ExpandEngine()
+    resp = await _post_expand_batch(test_client, engine, ["ok", "slow", "shed"])
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == "7"
+    await asyncio.sleep(0)
+    assert engine.cancelled == ["slow"]
+
+    # Every pair shed: 429, not "no pair could be expanded".
+    resp = await _post_expand_batch(test_client, _ExpandEngine(), ["shed"])
+    assert resp.status_code == 429
+
+
+async def test_a_pair_that_fails_otherwise_leaves_the_rest_answered(test_client: AsyncClient):
+    resp = await _post_expand_batch(test_client, _ExpandEngine(), ["ok", "broken"])
+    assert resp.status_code == 200
+    assert [n["urn"] for n in resp.json()["nodes"]] == ["t-ok"]
+
+
+def _cached_as(body):
+    """Whether the response cache would hold this answer for the full TTL."""
+    from backend.app.services.graph_cache import _is_incomplete_result
+    from backend.common.models.graph import TraceResult
+
+    return "briefly" if _is_incomplete_result(TraceResult.model_validate(body)) else "full"
+
+
+@pytest.mark.parametrize("lost", ["failing_over", "timeout"])
+async def test_a_pair_that_could_not_answer_now_marks_the_batch_short(test_client: AsyncClient, lost):
+    """A pair the provider could not answer right now — its node failing
+    over, a deadline — was dropped from a 200 that read as complete, so the
+    response cache kept the batch for the full TTL and mirrored it as
+    last-known-good, and the pair's lines stayed missing that long. The
+    answer now says it is short, for a reason that may do better next time."""
+    resp = await _post_expand_batch(test_client, _ExpandEngine(), ["ok", lost])
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [n["urn"] for n in body["nodes"]] == ["t-ok"]
+    assert (body["truncated"], body["truncationReason"]) == (True, "failed")
+    assert _cached_as(body) == "briefly"
+
+
+async def test_a_batch_keeps_the_reason_a_pair_was_cut(test_client: AsyncClient):
+    """The merge kept that a pair was cut and dropped why, and with no
+    reason the cache reads a cut as a cap: a pair cut at its deadline was
+    kept as complete for the full TTL."""
+    body = (await _post_expand_batch(test_client, _ExpandEngine(), ["capped", "cut"])).json()
+    assert (body["truncated"], body["truncationReason"]) == (True, "timeout")
+    assert _cached_as(body) == "briefly"
+
+    body = (await _post_expand_batch(test_client, _ExpandEngine(), ["ok", "capped"])).json()
+    assert (body["truncated"], body["truncationReason"]) == (True, "max_nodes")
+    assert _cached_as(body) == "full"
+
+    # A pair that fails for good is dropped as before: asking again cannot help.
+    body = (await _post_expand_batch(test_client, _ExpandEngine(), ["ok", "broken"])).json()
+    assert (body["truncated"], body["truncationReason"]) == (False, None)
+
+
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────
 
 async def test_get_node_found(graph_client):

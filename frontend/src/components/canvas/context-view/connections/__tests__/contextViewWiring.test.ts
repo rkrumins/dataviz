@@ -63,6 +63,23 @@ describe('the Connections panel is wired into the Context View', () => {
     expect(source).toMatch(/\.sort\(bySignificance\)\.slice\(0, autoStubThreshold\)/)
   })
 
+  it('the budget, the hubs, the ribbons and the panel read one list of drawable lines', () => {
+    // A line that stands aside for its children's finer ones draws only
+    // while one of its ends is hovered. Counted in a budget, it took a slot
+    // it never filled; listed in the panel, it was a flow nobody could see.
+    expect(source).toMatch(/drawableLineageEdges = useMemo\(\s*\(\) => visibleLineageEdges\.filter\(e => !e\.isDelegated\)/)
+    expect(source).toMatch(/\[\.\.\.drawableLineageEdges\]\.sort\(bySignificance\)/)
+    expect(source).toMatch(/aggregateFlowRibbons\(\s*drawableLineageEdges,/)
+    expect(source).toMatch(/for \(const e of drawableLineageEdges\) \{/)
+    // The panel lists every drawable line, not the budgeted subset the
+    // overlay is handed — in On Hover that subset is empty until a hover.
+    expect(source).toContain('buildConnectionModel(drawableLineageEdges)')
+    expect(source).not.toContain('buildConnectionModel(effectiveLineageEdges)')
+    // The hover pool keeps everything: hovering an end brings a delegated
+    // line back.
+    expect(source).toContain('hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}')
+  })
+
   it('the panel highlight reaches the overlay only — cards keep their own highlight', () => {
     expect(source).toContain(
       'isHighlightActive={connectionHighlight !== null || isHighlightActive}'
@@ -112,5 +129,25 @@ describe('the Context View canvas names the kind of thing it is counting', () =>
     expect(source).toMatch(/entit\{framedContext\.count === 1 \? 'y' : 'ies'\}/)
     expect(source).not.toMatch(/connection\{framePill\.offCount/)
     expect(source).not.toMatch(/connection\{framedContext\.count/)
+  })
+})
+
+/**
+ * The edge banner reports a failed EDGE read, so its Retry refetches edges.
+ * It used to re-run the whole view (every node batch, every anchored page,
+ * /edges/between over everything) and drop every canvas's cached roll-ups,
+ * on every mounted canvas, whatever had failed. For the roll-ups it asks
+ * again about the rows still missing, not the whole V × V set.
+ */
+describe('the edge banner\'s Retry fetches the edges, not the whole view', () => {
+  it('refetches the edges, and the missing roll-ups only when those are what failed', () => {
+    const start = source.indexOf('Some relationships could not be loaded')
+    expect(start).toBeGreaterThan(-1)
+    const block = source.slice(start, source.indexOf('</button>', start))
+    expect(block).toContain('retryEdges()')
+    expect(block).toMatch(/if \(aggregationError\) void retryAggregated\(\)/)
+    expect(block).not.toContain('retryHydration()')
+    expect(block).not.toContain('invalidateAggregatedEdges()')
+    expect(block).not.toContain('invalidateAggregatedEdgesForScope(')
   })
 })

@@ -21,7 +21,7 @@ export interface UseLocateManyOnCanvasOptions {
   /** Expand a target's collapsed ancestors. Always called with
    *  `skipFocus: true` — N per-node scrolls would fight each other; this
    *  hook does its own scrolling, one target at a time. */
-  revealAndFocus: (nodeId: string, opts: RevealOptions) => Promise<void>
+  revealAndFocus: (nodeId: string, opts: RevealOptions) => Promise<unknown>
   /** The virtualizer-aware single-target reveal pulse (the same one a
    *  lone search hit uses). */
   scrollHitIntoView: (nodeId: string) => void
@@ -44,7 +44,7 @@ export interface UseLocateManyOnCanvasOptions {
 /** Resolve as soon as `check` passes, giving up after `budgetMs`. Polled on
  *  animation frames: the row is painted by React and the virtualizer, so a
  *  frame is the granularity at which the answer can change. */
-async function appearsWithin(check: () => boolean, budgetMs: number): Promise<boolean> {
+export async function appearsWithin(check: () => boolean, budgetMs: number): Promise<boolean> {
   const deadline = Date.now() + budgetMs
   for (;;) {
     await new Promise<void>((r) => requestAnimationFrame(() => r()))

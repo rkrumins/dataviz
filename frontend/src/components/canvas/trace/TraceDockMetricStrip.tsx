@@ -102,13 +102,13 @@ export function TraceDockMetricStrip({
           label="Upstream"
           value={upstreamCount}
           icon={<ArrowUp className="w-4 h-4" strokeWidth={2.4} />}
-          accent="blue"
+          accent="upstream"
         />
         <HeroMetric
           label="Downstream"
           value={downstreamCount}
           icon={<ArrowDown className="w-4 h-4" strokeWidth={2.4} />}
-          accent="emerald"
+          accent="downstream"
         />
         <HeroMetric
           label="Total Edges"
@@ -170,7 +170,7 @@ interface HeroMetricProps {
   label: string
   value: number
   icon: React.ReactNode
-  accent: 'lineage' | 'blue' | 'emerald'
+  accent: 'lineage' | 'upstream' | 'downstream'
 }
 
 const ACCENT = {
@@ -179,15 +179,16 @@ const ACCENT = {
     iconBorder: 'border-accent-lineage',
     accentLine: 'bg-accent-lineage',
   },
-  blue: {
-    iconBg: 'bg-blue-500',
-    iconBorder: 'border-blue-500',
-    accentLine: 'bg-blue-500',
+  // The lineage direction pair (lib/lineageDirectionColors.ts).
+  upstream: {
+    iconBg: 'bg-lineage-in',
+    iconBorder: 'border-lineage-in',
+    accentLine: 'bg-lineage-in',
   },
-  emerald: {
-    iconBg: 'bg-emerald-500',
-    iconBorder: 'border-emerald-500',
-    accentLine: 'bg-emerald-500',
+  downstream: {
+    iconBg: 'bg-lineage-out',
+    iconBorder: 'border-lineage-out',
+    accentLine: 'bg-lineage-out',
   },
 } as const
 

@@ -148,3 +148,15 @@ export function withJitter(baseMs: number, frac = 0.3): number {
   const spread = Number.isFinite(frac) ? Math.max(0, Math.min(1, frac)) : 0
   return Math.floor(baseMs + Math.random() * baseMs * spread)
 }
+
+/**
+ * How long a background lookup waits before asking again after its nth
+ * failure in a row (n ≥ 1): 2s, doubling, capped at a minute, and jittered
+ * so canvases that failed together do not come back together. For the
+ * lookups a card's lineage markers wait on (ancestor chains, degree totals):
+ * they retry on their own clock, not on the next canvas change, which may
+ * never come.
+ */
+export function lookupRetryDelayMs(failures: number): number {
+  return withJitter(Math.min(60_000, 2_000 * 2 ** Math.max(0, failures - 1)))
+}

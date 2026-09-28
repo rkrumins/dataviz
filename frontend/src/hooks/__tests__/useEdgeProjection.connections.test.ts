@@ -2,19 +2,20 @@
  * useEdgeProjection — connection visibility and the roll-up (ghost) rule.
  *
  * 1. `isGhost` means "this line stands for something other than the raw
- *    relationship between the two cards it touches": an AGGREGATED edge, a
- *    browse-meta-bundle, or an edge whose endpoint was resolved up to an
- *    ancestor. The old rule compared `originalSourceId`/`originalTargetId`,
+ *    relationship between the two cards it touches": an AGGREGATED edge, or
+ *    an edge whose endpoint was resolved up to an ancestor. The old rule compared `originalSourceId`/`originalTargetId`,
  *    fields nothing ever assigns, so EVERY bundle came back a ghost and every
  *    line on the board drew dashed.
  * 2. `hiddenEdgeTypes` is applied per GROUP MEMBER: a bundle whose members all
  *    carry only hidden types disappears; a mixed bundle keeps a reduced
  *    `edgeCount` and loses the hidden type from `types`. Grouping itself is
- *    untouched, and hiding never moves `unresolvedEdgeCount`.
+ *    untouched. A hidden type's flows that leave the view leave
+ *    `unresolvedEdgeCount` too, as they leave the stubs.
  */
 import { renderHook } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
 import { useEdgeProjection } from '../useEdgeProjection'
+import { bySignificance } from '@/components/canvas/context-view/lineDensity'
 import type { HierarchyNode } from '@/types/hierarchy'
 
 const hNode = (id: string, children: HierarchyNode[] = [], data: Record<string, unknown> = {}): HierarchyNode => ({
@@ -78,7 +79,6 @@ function run(opts: {
   aggregatedEdges?: Map<string, AggregatedEntry[1]>
   expandedNodes?: Set<string>
   parentMap?: Map<string, string>
-  browseBundleEnabled?: boolean
   hiddenEdgeTypes?: ReadonlySet<string>
 }) {
   const flat: HierarchyNode[] = []
@@ -103,7 +103,6 @@ function run(opts: {
       isTracing: false,
       traceContextSet: new Set(),
       isContainmentEdge: () => false,
-      browseBundleEnabled: opts.browseBundleEnabled,
       browseBundleParentMap: opts.parentMap,
       hiddenEdgeTypes: opts.hiddenEdgeTypes,
     }),
@@ -115,10 +114,11 @@ type Projected = {
   source: string
   target: string
   isGhost: boolean
-  isBrowseBundle: boolean
   isAggregated: boolean
   isBidirectional: boolean
   edgeCount: number
+  bundleSize: number
+  data: { bundleSize: number }
   types: string[]
 }
 
@@ -156,17 +156,26 @@ describe('useEdgeProjection — the roll-up (isGhost) rule', () => {
     expect(bundles(res)[0].isGhost).toBe(true)
   })
 
-  it('a browse-meta-bundled group is a roll-up', () => {
+  // Browse mode used to re-key the lines of rows sharing a parent onto that
+  // parent. In an anchored column the parent is the anchor, which is never a
+  // row, so the lines went somewhere no card is drawn and the rows lost them.
+  it("rows sharing a parent keep their own lines — the parent is not a row (an anchored column's anchor)", () => {
     const res = run({
       roots: [hNode('s1'), hNode('s2'), hNode('t')],
       edges: [edge('e1', 's1', 't'), edge('e2', 's2', 't')],
-      browseBundleEnabled: true,
       parentMap: new Map([['s1', 'sp'], ['s2', 'sp']]),
     })
-    const sp = bundles(res).find(e => e.source === 'sp' && e.target === 't')
-    expect(sp).toBeDefined()
-    expect(sp!.isBrowseBundle).toBe(true)
-    expect(sp!.isGhost).toBe(true)
+    expect(bundles(res).map(e => `${e.source}->${e.target}`).sort()).toEqual(['s1->t', 's2->t'])
+    expect(bundles(res).every(e => !e.isGhost)).toBe(true)
+  })
+
+  it('rows sharing a parent keep their own lines — even when the parent is a row too', () => {
+    const res = run({
+      roots: [hNode('sp'), hNode('s1'), hNode('s2'), hNode('t')],
+      edges: [edge('e1', 's1', 't'), edge('e2', 's2', 't')],
+      parentMap: new Map([['s1', 'sp'], ['s2', 'sp']]),
+    })
+    expect(bundles(res).map(e => `${e.source}->${e.target}`).sort()).toEqual(['s1->t', 's2->t'])
   })
 
   it('a bidirectional pair is a roll-up when either direction is', () => {
@@ -250,7 +259,7 @@ describe('useEdgeProjection — hidden connection types', () => {
     expect(bundles(res)[0].types).toEqual(['FLOWS_TO'])
   })
 
-  it('hiding a type does not change unresolvedEdgeCount', () => {
+  it('hiding a type takes its flows out of unresolvedEdgeCount, as out of the stubs', () => {
     const edges = [
       edge('e1', 'a', 'b', 'FLOWS_TO'),
       edge('e2', 'a', 'ghost', 'DERIVES_FROM'),  // target unresolved → counted
@@ -262,7 +271,7 @@ describe('useEdgeProjection — hidden connection types', () => {
       hiddenEdgeTypes: new Set(['FLOWS_TO', 'DERIVES_FROM']),
     })
     expect(before.unresolvedEdgeCount).toBe(1)
-    expect(after.unresolvedEdgeCount).toBe(1)
+    expect(after.unresolvedEdgeCount).toBe(0)
     expect(after.visibleLineageEdges).toHaveLength(0)
   })
 
@@ -286,9 +295,9 @@ describe('useEdgeProjection — hidden connection types', () => {
  * objects happened to land in its group. An AGGREGATED member arrives with
  * the real number of underlying relationships on `data.edgeCount`; counting
  * members threw it away, so the single most significant flow on the board
- * reported `1` and sorted below any pair carrying two raw edges — first out
- * when the adaptive budget culls (`bySignificance` in ContextViewCanvas
- * ranks on exactly this field).
+ * reported `1` and sorted below any pair carrying two raw edges. The line
+ * budgets do NOT rank on this field: `bySignificance` ranks on `bundleSize`,
+ * how many lines a line replaces, which the bundle carries beside it.
  */
 describe('useEdgeProjection — a bundle carries the weight it summarises', () => {
   it("an AGGREGATED bundle keeps the aggregate's own count, not its member count", () => {
@@ -328,7 +337,7 @@ describe('useEdgeProjection — a bundle carries the weight it summarises', () =
     expect(bundles(res)[0].edgeCount).toBe(8)
   })
 
-  it('a heavy rollup outranks a two-edge pair — the culling sort keeps it', () => {
+  it('a heavy rollup outweighs a two-edge pair', () => {
     const res = run({
       roots: [hNode('a'), hNode('b'), hNode('c'), hNode('d')],
       edges: [edge('e1', 'c', 'd'), edge('e2', 'c', 'd')],      // 2 raw edges
@@ -338,20 +347,40 @@ describe('useEdgeProjection — a bundle carries the weight it summarises', () =
     const pair = bundles(res).find(e => e.source === 'c')!
     expect(rollup.edgeCount).toBe(7)
     expect(pair.edgeCount).toBe(2)
-    // Descending edgeCount is the canvas's significance rank; before the fix
-    // the rollup came last at 1 and was the first thing dropped.
+    // Before the fix the rollup weighed 1, below the pair.
     expect(rollup.edgeCount).toBeGreaterThan(pair.edgeCount)
   })
 
-  it('raw members still weigh one apiece — a browse-meta-bundle counts its members', () => {
+  it('the budget ranks by lines replaced — at the top level, where bySignificance reads it', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b'), hNode('c'), hNode('d')],
+      edges: [edge('e1', 'c', 'd'), edge('e2', 'c', 'd')],      // two lines on one
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]),   // one line, weight 7
+    })
+    const pair = bundles(res).find(e => e.source === 'c')!
+    expect([...bundles(res)].sort(bySignificance)[0]).toBe(pair)
+    expect(pair.bundleSize).toBe(2)
+  })
+
+  it('a two-way pair replaces the lines of both directions', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'a', 'b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'b', 'a')]),
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].bundleSize).toBe(2)
+    expect(bundles(res)[0].data.bundleSize).toBe(2)
+  })
+
+  it('raw members still weigh one apiece — on the rows that hold them', () => {
     const res = run({
       roots: [hNode('s1'), hNode('s2'), hNode('t')],
-      edges: [edge('e1', 's1', 't'), edge('e2', 's2', 't')],
-      browseBundleEnabled: true,
+      edges: [edge('e1', 's1', 't'), edge('e2', 's1', 't'), edge('e3', 's2', 't')],
       parentMap: new Map([['s1', 'sp'], ['s2', 'sp']]),
     })
-    const sp = bundles(res).find(e => e.source === 'sp' && e.target === 't')!
-    expect(sp.edgeCount).toBe(2)
+    expect(bundles(res).find(e => e.source === 's1' && e.target === 't')!.edgeCount).toBe(2)
+    expect(bundles(res).find(e => e.source === 's2' && e.target === 't')!.edgeCount).toBe(1)
   })
 })
 

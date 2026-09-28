@@ -183,11 +183,16 @@ interface LayerColumnProps {
    *  drives the density gutter AND the per-row ambient hairlines. */
   lineageCounts?: Map<string, { in: number; out: number }>
   /** Per-node out-of-view lineage counts (curated views) — sky cue. */
-  externalCue?: Map<string, { in: number; out: number }>
+  externalCue?: ReadonlyMap<string, { in: number; out: number }>
   /** Lineage in/out per entity over the whole graph (`/nodes/degree`) —
    *  absent = not known. Lets a card's port say "lineage exists" even when
    *  none of it leads to anything on this canvas. */
   lineageTotals?: ReadonlyMap<string, { in: number; out: number }>
+  /** Entities whose total could not be counted (being asked again). */
+  lineageUnknown?: ReadonlySet<string>
+  /** Per row: flows the canvas placed outside this view (useEdgeProjection's
+   *  offCanvasByNode) — what makes a port hollow. */
+  lineageOutside?: ReadonlyMap<string, { in: number; out: number }>
   /** Where each card's lines plug in, by side and direction (lineagePorts.ts). */
   lineagePorts?: ReadonlyMap<string, NodePorts>
   /** Render the per-row ambient in/out hairlines (follows the lineage-
@@ -304,7 +309,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   isTracing = false,
   highlightedNodes,
   isHighlightActive = false,
-  onAnimationComplete: _onAnimationComplete,
+  onAnimationComplete,
   onLoadMore,
   onRevealSearchHit,
   loadingNodes,
@@ -347,6 +352,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   lineageCounts,
   externalCue,
   lineageTotals,
+  lineageUnknown,
+  lineageOutside,
   lineagePorts,
   showLineageIndicators = false,
   showDensityGutter = false,
@@ -1340,6 +1347,11 @@ export const LayerColumn = React.memo(function LayerColumn({
     setRailFocusSeen(railFocusId)
     setOpenRail(null)
   }
+  // A tray and its hint are different places for the focused entity's lines
+  // to dock, so opening one or switching trays draws those lines again.
+  useEffect(() => {
+    onAnimationComplete?.()
+  }, [openRail, showConnectedTrays, onAnimationComplete])
 
   // ── End-reached sentinel (roots auto-paging) ─────────────────────────
   // Fires when the user scrolls this column to its true end. Guards, in
@@ -1375,9 +1387,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   const lineageLogMax = useMemo(() => {
     if (!showLineageIndicators || !lineagePorts || lineagePorts.size === 0) return 0
     let maxCount = 0
-    for (const p of lineagePorts.values()) maxCount = Math.max(maxCount, sideVolume(p, 'left'), sideVolume(p, 'right'))
+    for (const item of flatTree) {
+      const p = lineagePorts.get(item.node.id)
+      maxCount = Math.max(maxCount, sideVolume(p, 'left'), sideVolume(p, 'right'))
+    }
     return Math.log2(1 + Math.max(1, maxCount))
-  }, [showLineageIndicators, lineagePorts])
+  }, [showLineageIndicators, lineagePorts, flatTree])
 
   // Where does flow mass live across the WHOLE column (not just the
   // viewport)? Bucket the flat tree by index; each bucket sums the in+out
@@ -2784,6 +2799,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                         portStrengthLeft={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'left')) / lineageLogMax : 0}
                         portStrengthRight={lineageLogMax > 0 ? Math.log2(1 + sideVolume(lineagePorts?.get(node.id), 'right')) / lineageLogMax : 0}
                         lineageTotals={showLineageIndicators ? lineageTotals?.get(node.id) : undefined}
+                        lineageUnknown={showLineageIndicators && (lineageUnknown?.has(node.id) ?? false)}
+                        lineageOutside={showLineageIndicators ? lineageOutside?.get(node.id) : undefined}
                         externalIn={showLineageIndicators ? (externalCue?.get(node.id)?.in ?? 0) : 0}
                         externalOut={showLineageIndicators ? (externalCue?.get(node.id)?.out ?? 0) : 0}
                       />

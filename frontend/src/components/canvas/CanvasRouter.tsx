@@ -65,10 +65,11 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // Single source of truth for initial graph data loading.
   // Only CanvasRouter passes hydrate=true — canvas components use the hook
   // without hydration (loadChildren/searchChildren only).
-  const { hydrationStatus, hydrationPhase, retryHydration, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
+  const { hydrationStatus, hydrationPhase, retryHydration, autoRetryStopped, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
-  // The three ways a load ends without (complete) data. Each keeps
-  // auto-retrying; what the user SEES depends on whether the canvas has
+  // The three ways a load ends without (complete) data. Each auto-retries
+  // (a partial load only for its fast attempts, then the pill's Retry asks
+  // again); what the user SEES depends on whether the canvas has
   // anything on it: an empty canvas gets the state card, a canvas with
   // data — a partial load, or a refresh of a view already open — keeps its
   // nodes interactive under a small pill. Never dim data the user has.
@@ -218,6 +219,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
             state={failedState}
             partial={nodeFetchFailures > 0}
             missingEntities={missingEntityCount}
+            retrying={!autoRetryStopped}
             onRetry={retryHydration}
           />
         )}
