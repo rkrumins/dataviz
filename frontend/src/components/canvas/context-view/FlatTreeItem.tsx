@@ -24,6 +24,8 @@ import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
 import { useReparentNode } from './useReparentNode'
+import { LineEndTag } from './LineEndTag'
+import type { LineEnd } from './lineEnd'
 
 /** Which modifier keys were held when a row was clicked. */
 export interface RowSelectModifiers {
@@ -66,6 +68,9 @@ interface FlatTreeItemProps {
    *  rows they have not chosen yet have to stay comfortably readable. */
   isDimmedBySelection?: boolean
   isFocused?: boolean
+  /** An end of the line the relationship drawer is open on: marked as the
+   *  drawer names it, and lit like a selection's neighbour. */
+  lineEnd?: LineEnd
   isTracing?: boolean
   /** A row click, with the modifiers that were held. `multi` toggles the
    *  row in the selection; `range` selects from the last-clicked row to
@@ -143,6 +148,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   isDimmedByHighlight = false,
   isDimmedBySelection = false,
   isFocused = false,
+  lineEnd,
   isTracing = false,
   onSelect,
   onToggle,
@@ -501,8 +507,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
         // Highlighted in trace
         (isHighlighted || isOnLineage) && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
-        // Click-highlight: subtle glow on connected nodes
-        isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
+        // Click-highlight: subtle glow on connected nodes — and on the ends of
+        // the line the drawer is open on
+        (isClickHighlighted || !!lineEnd) && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
         // Hover-highlight (the lighter glow on a hovered entity's connections,
         // and the dim on everything else) is the edge overlay's, applied as
         // CSS — `.nx-row-card` under `[data-row-spotlight]`, globals.css.
@@ -764,6 +771,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           "line-clamp-3 break-words"
         )}>
           {displayName}
+          {lineEnd && <LineEndTag end={lineEnd} className="ml-1.5 align-[1px]" />}
         </span>
         {/* Technical identity (Business/Technical toggle) — one truncated line,
             full value on hover.

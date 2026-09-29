@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { routeLine, SAME_COLUMN_LANE_BASE, SAME_COLUMN_LANE_START, type RowBox } from '../lineRoute'
+import { routeGutter, routeLine, SAME_COLUMN_LANE_BASE, SAME_COLUMN_LANE_START, SAME_COLUMN_LANE_STEP, type RowBox } from '../lineRoute'
 
 /** The five points of `M x y C x y, x y, x y` as [start, c1, c2, end]. */
 function points(pathD: string): Array<[number, number]> {
@@ -68,5 +68,61 @@ describe('routeLine — a line joins the sides that face each other', () => {
     expect(left[1][1]).toBeGreaterThan(left[0][1])
     expect(left[0][0]).toBe(694)
     expect(left[3][0]).toBe(308)
+  })
+})
+
+/** Every x a path passes through or bends toward, in order (M, C and H). */
+function pathXs(pathD: string): number[] {
+  const xs: number[] = []
+  for (const [, cmd, args] of pathD.matchAll(/([MCH])([^MCH]*)/g)) {
+    const n = args.match(/-?\d+(\.\d+)?/g)!.map(Number)
+    if (cmd === 'H') xs.push(...n)
+    else for (let i = 0; i < n.length; i += 2) xs.push(n[i])
+  }
+  return xs
+}
+
+describe('routeGutter — a line docked to the Anchor Rail runs down its column\'s gutter', () => {
+  const row: RowBox = { left: 108, right: 408, top: 100, height: 40 }
+  /** A hint pill's dock: its strip, as wide as a tray, a little inset from the rows. */
+  const pill: RowBox = { left: 110, right: 406, top: 600, height: 20 }
+
+  it('two boxes whose edges line up get routeLine\'s own same-column curve', () => {
+    const s = card(400, 100)
+    const t = card(400, 600)
+    expect(routeGutter(s, t, 'left', 2).pathD).toBe(routeLine(s, t, 2).pathD)
+  })
+
+  it('left: from the pill into the row, bowing through the lane and never entering either', () => {
+    const r = routeGutter(pill, row, 'left', 0)
+    const xs = pathXs(r.pathD)
+    expect([xs[0], r.sx]).toEqual([pill.left - SAME_COLUMN_LANE_START, pill.left - SAME_COLUMN_LANE_START])
+    expect([xs.at(-1), r.tx]).toEqual([row.left - SAME_COLUMN_LANE_START, row.left - SAME_COLUMN_LANE_START])
+    expect(Math.min(...xs)).toBe(row.left - SAME_COLUMN_LANE_START - SAME_COLUMN_LANE_BASE)
+    expect(Math.max(...xs)).toBeLessThan(row.left)
+    expect([r.sy, r.ty]).toEqual([610, 120])
+  })
+
+  it('right: mirrored through the right gutter, ending just outside the dock — never over the rows', () => {
+    const r = routeGutter(row, pill, 'right', 0)
+    const xs = pathXs(r.pathD)
+    expect(xs[0]).toBe(row.right + SAME_COLUMN_LANE_START)
+    expect(Math.max(...xs)).toBe(row.right + SAME_COLUMN_LANE_START + SAME_COLUMN_LANE_BASE)
+    expect(xs.every(x => x > row.right)).toBe(true)
+    // A dock inset from the rows is reached by a short level run, to just outside it.
+    expect(r.pathD.endsWith(`${row.right + SAME_COLUMN_LANE_START} 610 H ${pill.right + SAME_COLUMN_LANE_START}`)).toBe(true)
+    expect([r.tx, r.ty]).toEqual([pill.right + SAME_COLUMN_LANE_START, 610])
+  })
+
+  it('lanes step outward, one per line between the same two boxes', () => {
+    const lane0 = Math.min(...pathXs(routeGutter(row, pill, 'left', 0).pathD))
+    const lane1 = Math.min(...pathXs(routeGutter(row, pill, 'left', 1).pathD))
+    expect(lane0 - lane1).toBe(SAME_COLUMN_LANE_STEP)
+  })
+
+  it('level ends make a short loop out and back — no NaN', () => {
+    const r = routeGutter(row, { ...pill, top: row.top + 10 }, 'left', 0)
+    expect(r.pathD).not.toMatch(/NaN/)
+    expect(r.sy).toBe(r.ty)
   })
 })
