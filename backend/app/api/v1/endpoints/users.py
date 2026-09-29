@@ -924,7 +924,7 @@ async def revoke_user_sessions(
         event_type="user.sessions_ended_by_admin",
         payload={"user_id": user_id, "actor_id": admin.id},
     )
-    logger.info("Sessions of %s ended by %s", user_id, admin.id)
+    logger.info("Sessions of %s ended by %s", user.id, admin.id)
     return {"detail": "Sessions ended"}
 
 
