@@ -151,7 +151,7 @@ import {
 import { decodeLensShare } from './lens/shareCodec'
 import { useLensWalk } from '@/hooks/useLensWalk'
 import { selectionMembers, selectionFocusUrn, unionWalkModels, withSelectionFocus } from './lens/closure-adapter'
-import { useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
+import { MAX_TRACE_SEEDS, useCanvasTraceWalk } from '@/hooks/useCanvasTraceWalk'
 import { useTraceOverlay, type TraceOverlay } from '@/hooks/useTraceOverlay'
 import { lanesToRenderTrees } from '@/hooks/lib/traceViewModel'
 import { useBranchCreatedDelta } from '@/hooks/useBranchCreatedDelta'
@@ -159,6 +159,9 @@ import {
   emptyTraceHistory,
   pushTraceFocal,
   updateCurrentTraceView,
+  updateCurrentTraceSeeds,
+  traceEntrySeeds,
+  traceSeedKey,
   traceHistoryBack,
   traceHistoryForward,
   traceHistoryJump,
@@ -292,6 +295,7 @@ import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
+import type { TraceSeed } from '../trace/TraceSeedsPopover'
 import { TraceWalkIndicator } from './TraceWalkIndicator'
 
 // Re-export for backward compatibility
@@ -639,7 +643,7 @@ export function ContextViewCanvas({
   // down where granularityOptions is in scope. Used by hooks that fire
   // before that declaration (useCanvasInteractions options) so the
   // closure dereferences lazily.
-  const startTraceRef = useRef<(nodeId: string) => void>(() => {})
+  const startTraceRef = useRef<(nodeId: string | readonly string[]) => void>(() => {})
   const toggleTraceRef = useRef<(nodeId: string) => void>(() => {})
 
   // Exit-trace cleanup. Purges the edges the trace merged into the canvas
@@ -951,11 +955,19 @@ export function ContextViewCanvas({
     onFocusSearch: () => searchRef.current?.inputRef.current?.focus(),
     onToggleSearchPanel: () => searchRef.current?.togglePanel(),
   }), [setCanvasZoom])
+  // T traces the WHOLE selection, as one combined trace. The shared
+  // interactions hook traces a lone entity, which is all the other canvases
+  // can draw, so this canvas answers the key itself. Logical groups have no
+  // urn to walk and never seed a trace.
+  const onTraceSelection = () => {
+    const selection = useCanvasStore.getState().selectedNodeIds.filter(isSelectableNode)
+    if (selection.length > 0) startTraceRef.current(selection)
+  }
   useCanvasKeyboard({
     enabled: true,
     handlers: isDraft
-      ? { ...interactions.keyboardHandlers, ...zoomShortcutHandlers }
-      : { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
+      ? { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onTrace: onTraceSelection }
+      : { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onTrace: onTraceSelection, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
   })
 
   // ─── Canonical reference-layout persistence ─────────────────────────────────────────────────────
@@ -2001,8 +2013,13 @@ export function ContextViewCanvas({
   const bulkLinkPicked = useBulkLinkStore((s) => s.picked)
   const bulkLinkDirection = useBulkLinkStore((s) => s.direction)
   const bulkLinkPickingOnCanvas = useBulkLinkStore((s) => s.pickingOnCanvas)
+  // The selection a bulk action reads — trace included: a logical group has
+  // no urn to walk, so a lone one must not light up Trace.
   const bulkSelection = useMemo(() => selectedNodeIds.filter(isSelectableNode), [selectedNodeIds])
   const bulkSelectionCount = bulkSelection.length
+  // The server refuses trace requests when this is off; the header hides its
+  // Trace and Focus for it, and the SelectionBar follows suit.
+  const traceEnabled = useFeature('traceEnabled')
   // Closes itself when the canvas or the selection stops allowing it.
   useEffect(() => {
     if (bulkLinkSurface && (!canvasWritable || bulkSelectionCount < 2)) useBulkLinkStore.getState().close()
@@ -2097,6 +2114,8 @@ export function ContextViewCanvas({
   const overlay = useTraceOverlay({
     model: traceModel,
     focusUrn: canvasTrace.tracedUrn,
+    // A combined trace draws every seed as a focus, keyed by the first.
+    focusUrns: canvasTrace.tracedUrns,
     layers: sortedLayers,
     assignments: activeReferenceLayout.assignments,
     viewIsCurated,
@@ -2194,7 +2213,9 @@ export function ContextViewCanvas({
     const live = traceViewParamsRef.current
     setTraceHistory(h => {
       const cur = currentTraceEntry(h)
-      if (!cur || cur.urn !== canvasTraceRef.current.tracedUrn) return h
+      // The SAME trace is the same seed set: a combined trace sharing its
+      // first seed with this entry is a different trace.
+      if (!cur || traceSeedKey(traceEntrySeeds(cur)) !== traceSeedKey(canvasTraceRef.current.tracedUrns)) return h
       return updateCurrentTraceView(h, {
         showUpstream: partial.showUpstream ?? live.showUpstream,
         showDownstream: partial.showDownstream ?? live.showDownstream,
@@ -2215,7 +2236,7 @@ export function ContextViewCanvas({
   const flushExpansionRecord = useCallback(() => {
     const pending = expansionRecordRef.current
     cancelExpansionRecord()
-    if (pending && canvasTraceRef.current.tracedUrn === pending.forFocus) recordTraceView({})
+    if (pending && traceSeedKey(canvasTraceRef.current.tracedUrns) === pending.forFocus) recordTraceView({})
   }, [cancelExpansionRecord, recordTraceView])
 
   // Low-level entry shared by fresh traces and history restores. A trace
@@ -2239,6 +2260,14 @@ export function ContextViewCanvas({
     }
     canvasTrace.start(urn)
   }, [canvasTrace])
+  // The overlay's seed is keyed by the PRIMARY seed, so that dropping a seed
+  // keeps the reader's picture (`removeTraceSeed`). A different seed SET on
+  // the same primary is a different trace, though, and opens as one — not
+  // with whatever the last trace had open or shut.
+  const reseedForSeedSet = useCallback((urns: readonly string[]) => {
+    const onScreen = canvasTraceRef.current.tracedUrns
+    if (onScreen[0] === urns[0] && traceSeedKey(onScreen) !== traceSeedKey(urns)) overlayRef.current?.exit()
+  }, [])
 
   // `direction` presets the VIEW (the dock's ↑/⇅/↓ mode — Root Cause /
   // Impact / Full Lineage); the walk itself always fetches both ways, so
@@ -2253,11 +2282,20 @@ export function ContextViewCanvas({
     // the drawer has edits not staged yet.
     useCanvasStore.getState().requestDrawerMove(() => {
       // A bulk trace walks every selected entity and the overlay draws their
-      // UNION. History, re-centre and the "already tracing this" check are all
-      // about a single focal, so they follow the FIRST seed — which for an
-      // ordinary one-entity trace is the only one, and nothing changes.
-      const nodeIds = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
-      if (nodeIds.length === 0) return
+      // UNION. The history entry and the "already tracing this" check are
+      // about that whole SEED SET; re-centring follows the FIRST seed — which
+      // for an ordinary one-entity trace is the only one, and nothing changes.
+      const selected = typeof nodeId === 'string' ? [nodeId] : [...nodeId]
+      if (selected.length === 0) return
+      // The walk takes the first MAX_TRACE_SEEDS; say so rather than let the
+      // rest silently fall off the picture.
+      const nodeIds = selected.slice(0, MAX_TRACE_SEEDS)
+      if (selected.length > nodeIds.length) {
+        useNotificationStore.getState().add({
+          type: 'warning',
+          message: `Tracing the first ${MAX_TRACE_SEEDS} of ${selected.length.toLocaleString()} selected entities.`,
+        })
+      }
       const urns = nodeIds.map(id => displayMap.get(id)?.urn ?? id)
       const urn = urns[0]!
       const view = {
@@ -2269,7 +2307,7 @@ export function ContextViewCanvas({
         // overlay, so recording an empty picture here would leave the entry
         // describing a trace nobody is looking at. A genuinely new focal has no
         // picture yet: empty means "as it opens", and the seed decides.
-        traceExpansion: canvasTraceRef.current.tracedUrn === urn
+        traceExpansion: traceSeedKey(canvasTraceRef.current.tracedUrns) === traceSeedKey(urns)
           ? [...(overlayRef.current?.traceExpansion ?? [])]
           : [],
       }
@@ -2279,10 +2317,13 @@ export function ContextViewCanvas({
       setTraceDepthDown(view.depthDown)
       // Same reason as `traceHistoryGo`: the entry being left keeps its picture.
       flushExpansionRecord()
-      setTraceHistory(h => pushTraceFocal(h, { urn, focusId: nodeIds[0]!, view, timestamp: Date.now() }))
+      setTraceHistory(h => pushTraceFocal(h, {
+        urn, ...(urns.length > 1 ? { urns } : {}), focusId: nodeIds[0]!, view, timestamp: Date.now(),
+      }))
+      reseedForSeedSet(urns)
       beginTrace(urns)
     })
-  }, [displayMap, beginTrace, flushExpansionRecord])
+  }, [displayMap, beginTrace, flushExpansionRecord, reseedForSeedSet])
 
   // History restore: the entry's own view params, no push (back/forward
   // move the cursor, they never rewrite the trail).
@@ -2296,14 +2337,17 @@ export function ContextViewCanvas({
     // ONE DEPTH RULE, even for history written under the old 100-hop control.
     setTraceDepthUp(Math.min(entry.view.depthUp, FULL_WALK_INITIAL_DEPTH))
     setTraceDepthDown(Math.min(entry.view.depthDown, FULL_WALK_INITIAL_DEPTH))
+    // Before the restore below, which a re-seed would otherwise wipe.
+    reseedForSeedSet(traceEntrySeeds(entry))
     // THE PICTURE, not just the focus. Empty means "as the trace opened", so
     // the overlay's own seed is the right answer and restoring nothing is how
     // it gets to run — see traceHistoryStack's note on the empty expansion.
     if (entry.view.traceExpansion.length > 0) {
       overlayRef.current?.restoreExpansion(entry.urn, entry.view.traceExpansion)
     }
-    beginTrace(entry.urn)
-  }, [beginTrace])
+    // A combined entry re-traces its whole seed set.
+    beginTrace(traceEntrySeeds(entry))
+  }, [beginTrace, reseedForSeedSet])
   // OPENING A SHARED TRACE. Everything the link carries is already in place
   // — the direction, the depths and the history entry all START there — so
   // what is left is to actually run it, once, and to restore the picture the
@@ -2339,7 +2383,8 @@ export function ContextViewCanvas({
   // expansion at FIRE time, so it records where the reader ended up rather
   // than every level they passed through on the way.
   const recordTraceExpansionSoon = useCallback(() => {
-    const forFocus = canvasTraceRef.current.tracedUrn
+    // Keyed on the seed SET, like the history entry it writes to.
+    const forFocus = traceSeedKey(canvasTraceRef.current.tracedUrns)
     if (!forFocus) return
     cancelExpansionRecord()
     expansionRecordRef.current = {
@@ -2349,7 +2394,7 @@ export function ContextViewCanvas({
         // Back pressed between the toggle and the flush: the picture on
         // screen now belongs to the entry the reader moved TO, and writing
         // it here would overwrite the one they just came back to.
-        if (canvasTraceRef.current.tracedUrn === forFocus) recordTraceView({})
+        if (traceSeedKey(canvasTraceRef.current.tracedUrns) === forFocus) recordTraceView({})
       }, TRACE_EXPANSION_RECORD_MS),
     }
   }, [cancelExpansionRecord, recordTraceView])
@@ -2361,6 +2406,26 @@ export function ContextViewCanvas({
     canvasTraceRef.current.exit()
     resetAllCircuitBreakers()
   }, [])
+  // DROP ONE SEED of a combined trace. Narrowing is not a new trace: no
+  // re-walk (the other seeds' walks are in hand), and the history entry on
+  // screen is rewritten in place — after the reader's pending picture has
+  // been recorded against the seed set it was taken of. The last seed out is
+  // leaving the trace.
+  const removeTraceSeed = useCallback((urn: string) => {
+    const seeds = canvasTraceRef.current.tracedUrns
+    const remaining = seeds.filter(u => u !== urn)
+    if (remaining.length === seeds.length) return
+    if (remaining.length === 0) { exitCanvasTrace(); return }
+    flushExpansionRecord()
+    const onScreen = traceSeedKey(seeds)
+    setTraceHistory(h => {
+      const cur = currentTraceEntry(h)
+      return cur && traceSeedKey(traceEntrySeeds(cur)) === onScreen
+        ? updateCurrentTraceSeeds(h, remaining, u => urnToIdMap.get(u) ?? u)
+        : h
+    })
+    canvasTraceRef.current.removeSeed(urn)
+  }, [exitCanvasTrace, flushExpansionRecord, urnToIdMap])
   // Forward-declared refs, for hooks that fire earlier in render order.
   // Assigned in an effect (not render) — the interaction callbacks that
   // read them only fire after commit, and a render-time ref write blocks
@@ -2418,8 +2483,10 @@ export function ContextViewCanvas({
       upstreamNodes: toIds(traceModel.upstreamUrns),
       downstreamNodes: toIds(traceModel.downstreamUrns),
       focusId: canvasTrace.tracedUrn ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn) : null,
+      // Every seed's wires read as focus wires, not just the first's.
+      focusIds: traceFocusIdSet,
     }
-  }, [overlay.active, traceModel, canvasTrace.tracedUrn, urnToIdMap])
+  }, [overlay.active, traceModel, canvasTrace.tracedUrn, urnToIdMap, traceFocusIdSet])
 
   const traceParticipants = useMemo(() => {
     const upstream: Array<{ urn: string; label: string }> = []
@@ -2468,16 +2535,25 @@ export function ContextViewCanvas({
         || entry.urn,
     ]),
   ), [traceHistory, displayMap, urnToIdMap, historyNames])
+  /** A combined entry is named by its first seed and how many ride with it —
+   *  it restores all of them, and must not read as the first one alone. */
+  const historyEntryLabel = useCallback((e: TraceHistoryEntryRecord) => {
+    const name = historyLabels.get(e.urn) ?? e.urn
+    const seeds = traceEntrySeeds(e).length
+    return seeds > 1 ? `${name} + ${seeds - 1} more` : name
+  }, [historyLabels])
   // Launcher entries for the header's "pick up where you left off"
   // panel: resolved labels, direction mode, STACK index (newest first).
   const headerTraceHistory = useMemo(() => (
     traceHistory.entries.map((e, i) => ({
       index: i,
-      label: historyLabels.get(e.urn) ?? e.urn,
+      label: historyEntryLabel(e),
       mode: (e.view.showUpstream && e.view.showDownstream ? 'both' : e.view.showUpstream ? 'up' : 'down') as 'up' | 'down' | 'both',
       timestamp: e.timestamp,
+      // `traceHistoryLink` has no link to give a combined entry.
+      shareable: traceEntrySeeds(e).length === 1,
     })).reverse()
-  ), [traceHistory, historyLabels])
+  ), [traceHistory, historyEntryLabel])
   // PICKING AN ENTRY IS NOT BACK/FORWARD. `traceHistoryGo` is the cursor
   // walk, where "the cursor is already there" rightly means there is nothing
   // to do — but a click on a row is a request to be looking at that trace,
@@ -2499,7 +2575,8 @@ export function ContextViewCanvas({
   // right to refuse, and the link would quietly do nothing.
   const traceHistoryLink = useCallback((index: number): string | null => {
     const entry = traceHistory.entries[index]
-    if (!entry) return null
+    // A link carries one urn: a combined entry has no honest one to give.
+    if (!entry || traceEntrySeeds(entry).length > 1) return null
     const token = encodeTraceShare({
       urn: entry.urn,
       label: historyLabels.get(entry.urn),
@@ -2522,33 +2599,43 @@ export function ContextViewCanvas({
     focusUrn: e.urn,
     // Same name the launcher shows, resolved the same way — the dock's
     // Recent list printed the whole urn when the canvas could not name it.
-    label: historyLabels.get(e.urn) ?? e.urn,
+    label: historyEntryLabel(e),
     timestamp: e.timestamp,
     config: { ...trace.config, upstreamDepth: e.view.depthUp, downstreamDepth: e.view.depthDown },
-  })), [traceHistory, trace.config, historyLabels])
+  })), [traceHistory, trace.config, historyEntryLabel])
   // THE TRACED ENTITY'S NAME, resolved once for everything that says it.
   // The canvas can only name what it has loaded, and a trace opened from a
   // shared link is routinely on something the recipient has never expanded —
   // so the walk model answers next, then the link's own label (all anyone
   // has during the seconds the walk is out), then the urn tail.
-  const tracedLabel = useMemo(() => {
-    const urn = canvasTrace.tracedUrn
-    if (!urn) return null
-    return displayMap.get(urnToIdMap.get(urn) ?? urn)?.name
-      || (traceNodeIndex?.get(urn)?.data as { label?: string } | undefined)?.label
-      || (initialTraceShare?.urn === urn ? initialTraceShare.label : undefined)
-      || urn.split(/[:/]/).pop()
-      || urn
-  }, [canvasTrace.tracedUrn, displayMap, urnToIdMap, traceNodeIndex, initialTraceShare])
+  // Every seed of a combined trace is named the same way, for the dock's list.
+  const traceSeeds = useMemo<TraceSeed[]>(() => canvasTrace.tracedUrns.map((urn) => {
+    const node = displayMap.get(urnToIdMap.get(urn) ?? urn)
+    const walked = traceNodeIndex?.get(urn)?.data as { label?: string; type?: string } | undefined
+    return {
+      urn,
+      label: node?.name
+        || walked?.label
+        || (initialTraceShare?.urn === urn ? initialTraceShare.label : undefined)
+        || urn.split(/[:/]/).pop()
+        || urn,
+      typeId: node?.typeId || walked?.type || undefined,
+    }
+  }), [canvasTrace.tracedUrns, displayMap, urnToIdMap, traceNodeIndex, initialTraceShare])
+  // A COMBINED trace has no one name: it is "N entities".
+  const combinedTrace = traceSeeds.length > 1
+  const tracedLabel = combinedTrace ? `${traceSeeds.length} entities` : (traceSeeds[0]?.label ?? null)
 
   // WHAT THE SHARE CONTROL OFFERS. Built from what is on screen right now:
   // the focus and its name, the sides being read, the hop limits, and the
   // cards that are open. `buildLink` is called on click, so the link is
   // always the trace as it stands rather than as it stood when the popover
   // opened. `lens` is dropped from the URL — one link, one thing to open.
+  // None for a combined trace: a link carries ONE urn, and offering it would
+  // quietly hand over the first seed's trace as if it were the whole picture.
   const traceShare = useMemo<TraceShareSummary | undefined>(() => {
     const urn = canvasTrace.tracedUrn
-    if (!traceActive || !urn || !tracedLabel) return undefined
+    if (!traceActive || !urn || !tracedLabel || combinedTrace) return undefined
     const label = tracedLabel
     const open = [...(overlay.traceExpansion ?? [])] as string[]
     return {
@@ -2573,7 +2660,7 @@ export function ContextViewCanvas({
         return url.toString()
       },
     }
-  }, [traceActive, canvasTrace.tracedUrn, tracedLabel, overlay.traceExpansion, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
+  }, [traceActive, canvasTrace.tracedUrn, tracedLabel, combinedTrace, overlay.traceExpansion, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
 
   const dockTrace = useMemo<UseUnifiedTraceResult>(() => {
     if (!traceActive || !traceModel || !tracedNodeId) return trace
@@ -4666,7 +4753,8 @@ export function ContextViewCanvas({
     const ambient = rankedAmbientEdges ?? []
     const ambientTotal = lineageRenderMode === 'auto' ? drawableLineageEdges.length : 0
     const focusIds = new Set<string>(selectedNodeIds)
-    if (overlay.active && canvasTrace.tracedUrn) focusIds.add(urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn)
+    // Every seed of a combined trace anchors its lines, not just the first.
+    if (overlay.active) for (const id of traceFocusIdSet) focusIds.add(id)
     if (focusIds.size === 0) {
       return { edges: ambient, ambientShown: ambient.length, ambientTotal, focusShown: 0, focusTotal: 0 }
     }
@@ -4687,7 +4775,7 @@ export function ContextViewCanvas({
       focusShown: focus.length,
       focusTotal: focusAll.length,
     }
-  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeIds, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
+  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeIds, overlay.active, traceFocusIdSet])
   // The open line is drawn whatever the mode would otherwise show.
   const effectiveLineageEdges = useMemo(() => (
     openLine && !edgePresentation.edges.some(e => e.id === openLine.id)
@@ -5277,10 +5365,13 @@ export function ContextViewCanvas({
   const { loadAllChildren: loadLensAllChildren, loadChildrenOf: loadLensChildrenOf } = lensChildren
   useEffect(() => {
     focusLensRef.current = () => {
+      // F, like T, takes the whole selection: several entities open the Lens
+      // on all of them, as the header's Focus Lens does.
+      if (bulkSelection.length > 1) { openLensForSelection(bulkSelection); return }
       const target = selectedNodeId ?? drawerNodeId
       if (target) setLensHistory({ entries: [target], cursor: 0 })
     }
-  }, [selectedNodeId, drawerNodeId])
+  }, [selectedNodeId, drawerNodeId, bulkSelection, openLensForSelection])
   // Finish consuming the share link: strip the param, so refreshes and
   // copied URLs stay clean. The link's `mode` field is no longer applied
   // — the Lens has one body since 2026-08-23, and a link written when it
@@ -5529,8 +5620,10 @@ export function ContextViewCanvas({
     return () => cancelAnimationFrame(raf)
   }, [selectedNodeId, visibleLineageEdgesFingerprint])
 
-  // Highlight state: connected nodes/edges for selected node
-  const { highlightState, isHighlightActive: isClickHighlightActive } = useHighlightState({
+  // Highlight state: connected nodes/edges for selected node. With several
+  // selected, `selectionLineage` is the SelectionBar's "↑ N in · ↓ M out",
+  // counted off the same lines.
+  const { highlightState, isHighlightActive: isClickHighlightActive, selectionLineage } = useHighlightState({
     selectedNodeId, selectedNodeIds, visibleLineageEdges: effectiveLineageEdges,
     isTracing: traceActive, displayMap, childMap,
   })
@@ -5743,12 +5836,12 @@ export function ContextViewCanvas({
         lineageRenderMode={lineageRenderMode}
         onSetLineageRenderMode={setLineageRenderMode}
         traceActive={traceActive}
-        canTrace={selectedNodeIds.length > 0}
-        traceSeedCount={selectedNodeIds.length}
+        canTrace={bulkSelectionCount > 0}
+        traceSeedCount={bulkSelectionCount}
         canOpenLens={selectedNodeIds.length > 0}
         multiSelectArmed={multiSelectArmed}
         onToggleMultiSelect={() => setMultiSelectArmed(!multiSelectArmed)}
-        onStartTrace={() => { if (selectedNodeIds.length > 0) startCanvasTrace(selectedNodeIds) }}
+        onStartTrace={() => { if (bulkSelectionCount > 0) startCanvasTrace(bulkSelection) }}
         onExitTrace={exitCanvasTrace}
         lineageReady={hydrationPhase === 'complete'}
         traceUpstreamDepth={traceDepthUp}
@@ -5824,6 +5917,8 @@ export function ContextViewCanvas({
               nativeMode={traceActive}
               share={traceShare}
               focusLabel={tracedLabel ?? undefined}
+              seeds={traceSeeds}
+              onRemoveSeed={removeTraceSeed}
               outsideView={overlay.view?.outsideView ?? 0}
             />
         )}
@@ -5838,7 +5933,9 @@ export function ContextViewCanvas({
             re-arms the finished beat. */}
         {traceActive && canvasTrace.progress && (
           <TraceWalkIndicator
-            key={tracedNodeId ?? ''}
+            key={traceSeedKey(canvasTrace.tracedUrns)}
+            // A combined trace is known before anything lands: say what it is.
+            subject={combinedTrace ? tracedLabel ?? undefined : undefined}
             phase={canvasTrace.progress.phase}
             nodes={canvasTrace.progress.nodes}
             flows={canvasTrace.progress.flows}
@@ -6201,13 +6298,14 @@ export function ContextViewCanvas({
             and the selection has already been spent on it. */}
         {!traceActive && bulkLinkSurface !== 'panel' && (
           <SelectionBar
-            nodeIds={selectedNodeIds}
+            nodeIds={bulkSelection}
             labelFor={(id) => displayMap.get(id)?.name || id}
             onRemove={(id) => selectNode(id, true)}
             onClear={clearSelection}
-            onTrace={() => startCanvasTrace(selectedNodeIds)}
-            onOpenLens={() => openLensForSelection(selectedNodeIds)}
+            onTrace={traceEnabled ? () => startCanvasTrace(bulkSelection) : undefined}
+            onOpenLens={traceEnabled ? () => openLensForSelection(bulkSelection) : undefined}
             onLink={canvasWritable ? () => useBulkLinkStore.getState().openPanel() : undefined}
+            lineage={selectionLineage}
           />
         )}
         {/* Link the selection to other entities in one go — a draft being

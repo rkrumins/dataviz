@@ -24,12 +24,15 @@ import * as LucideIcons from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
+import { Kbd } from '@/components/ui/Kbd'
 import { useBandReservation } from './useBandReservation'
 
 /** Entities named in full before the rest are summarised. Four fits the bar
  *  at a narrow canvas width without wrapping; beyond that the count carries
  *  the meaning and the names stop earning their room. */
 const NAMED_LIMIT = 4
+
+const LINEAGE_PILL = 'inline-flex items-center gap-1 pl-1 pr-1.5 py-0.5 rounded-md text-[11px] font-medium tabular-nums whitespace-nowrap'
 
 export interface SelectionBarProps {
   /** The held entities, in selection order. */
@@ -38,13 +41,17 @@ export interface SelectionBarProps {
   labelFor: (id: string) => string
   onRemove: (id: string) => void
   onClear: () => void
-  /** Trace every held entity (the union of their lineage). */
-  onTrace: () => void
-  /** Open the Focus Lens on the selection as a whole. */
-  onOpenLens: () => void
+  /** Trace every held entity (the union of their lineage). Absent — trace
+   *  switched off for this deployment — the action is not offered. */
+  onTrace?: () => void
+  /** Open the Focus Lens on the selection as a whole. Absent, not offered. */
+  onOpenLens?: () => void
   /** Link the selection to other entities in one go. Only in a draft being
    *  edited — absent, the action is not offered. */
   onLink?: () => void
+  /** The selection's combined lineage on the canvas: how many entities feed
+   *  it and how many it feeds. Absent, or none either way, nothing is said. */
+  lineage?: { upstream: number; downstream: number }
 }
 
 export function SelectionBar({
@@ -55,6 +62,7 @@ export function SelectionBar({
   onTrace,
   onOpenLens,
   onLink,
+  lineage,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
   useBandReservation(ref, '--selection-bar-height')
@@ -62,6 +70,7 @@ export function SelectionBar({
   const count = nodeIds.length
   const named = nodeIds.slice(0, NAMED_LIMIT)
   const rest = count - named.length
+  const showLineage = !!lineage && lineage.upstream + lineage.downstream > 0
 
   return (
     <AnimatePresence>
@@ -105,14 +114,32 @@ export function SelectionBar({
               <span className="text-xs text-ink-muted">entities</span>
             </span>
 
+            {/* What they touch, together — in the colours the lines wear. */}
+            {showLineage && (
+              <span
+                className="flex items-center gap-1 shrink-0"
+                title="Entities on the canvas that feed the selection, and that it feeds"
+              >
+                <span className={cn(LINEAGE_PILL, 'text-lineage-in bg-lineage-in/10 border border-lineage-in/25')}>
+                  <LucideIcons.ArrowUpLeft className="w-3 h-3" strokeWidth={2.4} aria-hidden />
+                  {lineage.upstream} in
+                </span>
+                <span className="text-ink-muted/60 text-[11px]" aria-hidden>·</span>
+                <span className={cn(LINEAGE_PILL, 'text-lineage-out bg-lineage-out/10 border border-lineage-out/25')}>
+                  <LucideIcons.ArrowDownRight className="w-3 h-3" strokeWidth={2.4} aria-hidden />
+                  {lineage.downstream} out
+                </span>
+              </span>
+            )}
+
             <span className="h-4 w-px bg-glass-border shrink-0" aria-hidden />
 
             <ul className="flex items-center gap-1.5 min-w-0 overflow-hidden">
               {named.map((id) => (
-                <li key={id} className="min-w-0">
+                <li key={id} className="min-w-0 max-w-[11rem]">
                   <span
                     className={cn(
-                      'group inline-flex items-center gap-1 max-w-[11rem]',
+                      'group inline-flex items-center gap-1 max-w-full',
                       'pl-2 pr-1 py-1 rounded-lg',
                       'bg-accent-lineage/10 border border-accent-lineage/25',
                     )}
@@ -144,6 +171,19 @@ export function SelectionBar({
             </ul>
           </div>
 
+          {/* How to change it, for the reader who found the bar before the
+              gestures — in the room the names and actions leave, and only
+              there: with too little, it wraps onto a clipped second line (the
+              zero-width span holds the first) and is gone whole. */}
+          <div className="flex flex-wrap items-center h-[18px] basis-0 grow min-w-0 overflow-hidden">
+            <span className="w-0 h-[18px]" aria-hidden />
+            <span className="flex items-center gap-1 text-[11px] text-ink-muted whitespace-nowrap">
+              <Kbd shortcut="mod" /> click adds one
+              <span className="mx-0.5 text-ink-muted/60" aria-hidden>·</span>
+              <Kbd shortcut="shift" /> click adds a range
+            </span>
+          </div>
+
           {/* What will happen. */}
           <div className="flex items-center gap-2 ml-auto shrink-0">
             {onLink && (
@@ -163,35 +203,39 @@ export function SelectionBar({
                 Link…
               </button>
             )}
-            <button
-              type="button"
-              onClick={onOpenLens}
-              className={cn(
-                'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
-                'text-teal-700 dark:text-teal-300',
-                'bg-teal-500/10 border border-teal-500/35',
-                'hover:bg-teal-500/20 hover:border-teal-400/55',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400/40',
-                'transition-colors duration-150',
-              )}
-            >
-              <LucideIcons.Focus className="w-3.5 h-3.5" strokeWidth={2.2} />
-              Focus all {count}
-            </button>
-            <button
-              type="button"
-              onClick={onTrace}
-              className={cn(
-                'flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12.5px] font-medium',
-                'text-accent-lineage bg-accent-lineage/15 border border-accent-lineage/45',
-                'hover:bg-accent-lineage/25 hover:border-accent-lineage/65',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
-                'transition-colors duration-150',
-              )}
-            >
-              <LucideIcons.Workflow className="w-3.5 h-3.5" strokeWidth={2.2} />
-              Trace all {count}
-            </button>
+            {onOpenLens && (
+              <button
+                type="button"
+                onClick={onOpenLens}
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
+                  'text-teal-700 dark:text-teal-300',
+                  'bg-teal-500/10 border border-teal-500/35',
+                  'hover:bg-teal-500/20 hover:border-teal-400/55',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400/40',
+                  'transition-colors duration-150',
+                )}
+              >
+                <LucideIcons.Focus className="w-3.5 h-3.5" strokeWidth={2.2} />
+                Focus all {count}
+              </button>
+            )}
+            {onTrace && (
+              <button
+                type="button"
+                onClick={onTrace}
+                className={cn(
+                  'flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12.5px] font-medium',
+                  'text-accent-lineage bg-accent-lineage/15 border border-accent-lineage/45',
+                  'hover:bg-accent-lineage/25 hover:border-accent-lineage/65',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+                  'transition-colors duration-150',
+                )}
+              >
+                <LucideIcons.Workflow className="w-3.5 h-3.5" strokeWidth={2.2} />
+                Trace all {count}
+              </button>
+            )}
             <button
               type="button"
               onClick={onClear}

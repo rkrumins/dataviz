@@ -135,8 +135,9 @@ export function TraceRecentPopover({
           const node = displayMap.get(entry.focusId) ?? displayMap.get(entry.focusUrn)
           // The host's resolved name first: the canvas can only name what it
           // has loaded, and this list outlives any one page — it printed raw
-          // urns for everything else.
-          const name = node?.name ?? entry.label ?? entry.focusUrn.split(/[:/]/).pop() ?? entry.focusUrn
+          // urns for everything else. It also names a COMBINED trace ("A + 1
+          // more"), which the canvas node alone would call just "A".
+          const name = entry.label ?? node?.name ?? entry.focusUrn.split(/[:/]/).pop() ?? entry.focusUrn
           const typeId = node?.typeId
           const isActive = entry.focusId === activeFocusId
           return (

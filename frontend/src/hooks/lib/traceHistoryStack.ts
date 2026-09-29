@@ -121,10 +121,15 @@ export function updateCurrentTraceView(h: TraceHistoryStack, view: TraceViewPara
 
 /** A seed dropped from the combined trace on screen: the current entry now
  *  describes what is left, in place — narrowing a trace is not a new one. A
- *  new primary names itself (its urn is what the dock falls back to), and
- *  one seed left is an ordinary one-entity entry. Nothing left is an exit,
- *  which leaves history alone. */
-export function updateCurrentTraceSeeds(h: TraceHistoryStack, urns: readonly string[]): TraceHistoryStack {
+ *  new primary takes its own canvas node id (`focusIdOf`, the caller's
+ *  urn → node id map — the dock matches the active row and its type pill on
+ *  it), and one seed left is an ordinary one-entity entry. Nothing left is
+ *  an exit, which leaves history alone. */
+export function updateCurrentTraceSeeds(
+    h: TraceHistoryStack,
+    urns: readonly string[],
+    focusIdOf: (urn: string) => string,
+): TraceHistoryStack {
     const current = currentTraceEntry(h)
     const seeds = [...new Set(urns)]
     if (!current || seeds.length === 0) return h
@@ -132,7 +137,7 @@ export function updateCurrentTraceSeeds(h: TraceHistoryStack, urns: readonly str
     const entries = [...h.entries]
     entries[h.cursor] = {
         urn,
-        focusId: urn === current.urn ? current.focusId : urn,
+        focusId: urn === current.urn ? current.focusId : focusIdOf(urn),
         ...(seeds.length > 1 ? { urns: seeds } : {}),
         view: current.view,
         timestamp: current.timestamp,

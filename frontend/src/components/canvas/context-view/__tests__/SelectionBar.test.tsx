@@ -6,9 +6,9 @@
  * multi-selection the bar SAYS so, rather than leaving a dead button and the
  * question it always raises.
  */
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { SelectionBar } from '../SelectionBar'
 
@@ -98,5 +98,48 @@ describe('SelectionBar', () => {
     renderBar(['a', 'b'], { onLink })
     await user.click(screen.getByRole('button', { name: /link/i }))
     expect(onLink).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers Trace and Focus only where they are wired — trace switched off, neither', () => {
+    renderBar(['a', 'b'], { onTrace: undefined, onOpenLens: undefined })
+    expect(screen.queryByRole('button', { name: /trace all/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /focus all/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /clear/i })).toBeInTheDocument()
+  })
+
+  it('says what the selection touches, upstream and downstream, in the direction colours', () => {
+    renderBar(['a', 'b'], { lineage: { upstream: 3, downstream: 1 } })
+    const into = screen.getByText(/^3 in$/)
+    const out = screen.getByText(/^1 out$/)
+    expect(into.className).toContain('text-lineage-in')
+    expect(out.className).toContain('text-lineage-out')
+  })
+
+  it('says nothing about lineage the selection does not have', () => {
+    renderBar(['a', 'b'], { lineage: { upstream: 0, downstream: 0 } })
+    expect(screen.queryByText(/^0 in$/)).not.toBeInTheDocument()
+    renderBar(['a', 'b'])
+    expect(screen.queryByText(/ in$/)).not.toBeInTheDocument()
+  })
+
+  describe('the gesture hint', () => {
+    afterEach(() => { vi.restoreAllMocks() })
+
+    it('writes the modifier the Ctrl way off a Mac', () => {
+      renderBar(['a', 'b'])
+      const bar = screen.getByRole('region', { name: /selected entities/i })
+      expect(within(bar).getByText('Ctrl').tagName).toBe('KBD')
+      expect(within(bar).getByText('Shift').tagName).toBe('KBD')
+      expect(bar.textContent).toContain('click adds one')
+      expect(bar.textContent).toContain('click adds a range')
+    })
+
+    it('and the ⌘ way on one', () => {
+      vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel')
+      renderBar(['a', 'b'])
+      const bar = screen.getByRole('region', { name: /selected entities/i })
+      expect(within(bar).getByText('⌘').tagName).toBe('KBD')
+      expect(within(bar).getByText('⇧').tagName).toBe('KBD')
+    })
   })
 })

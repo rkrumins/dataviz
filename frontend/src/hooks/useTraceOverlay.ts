@@ -42,7 +42,8 @@
  *
  * A COMBINED TRACE (`focusUrns`, a multi-selection) seeds every seed by these
  * same rules, but stays keyed by the PRIMARY: dropping any other seed is an
- * input change like the rest, never a re-seed.
+ * input change like the rest, never a re-seed. A NEW seed set on the same
+ * primary is a new trace, which the caller starts fresh with `exit`.
  *
  * AND IT WAITS FOR A MODEL THAT HOLDS THE FOCUS. The canvas sets `focusUrn`
  * the instant the reader presses Trace, while the walk hook hands back a

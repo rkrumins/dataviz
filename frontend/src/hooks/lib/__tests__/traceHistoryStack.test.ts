@@ -217,17 +217,19 @@ describe('traceHistoryStack — combined traces', () => {
     let h = pushMany(emptyTraceHistory(), ['X', 'Y', 'Z'], 7)
     h = updateCurrentTraceView(h, view({ traceExpansion: ['a'] }))
 
-    h = updateCurrentTraceSeeds(h, ['X', 'Z'])
+    const idOf = (urn: string) => `id:${urn}`
+    h = updateCurrentTraceSeeds(h, ['X', 'Z'], idOf)
     expect(currentTraceEntry(h)).toEqual({ urn: 'X', urns: ['X', 'Z'], focusId: 'id:X', view: view({ traceExpansion: ['a'] }), timestamp: 7 })
 
-    // The primary goes: the next seed names the entry.
-    h = updateCurrentTraceSeeds(h, ['Z'])
-    expect(currentTraceEntry(h)).toEqual({ urn: 'Z', focusId: 'Z', view: view({ traceExpansion: ['a'] }), timestamp: 7 })
+    // The primary goes: the next seed names the entry, by its node id — the
+    // id the dock matches its active row and type pill on, not the urn.
+    h = updateCurrentTraceSeeds(h, ['Z'], idOf)
+    expect(currentTraceEntry(h)).toEqual({ urn: 'Z', focusId: 'id:Z', view: view({ traceExpansion: ['a'] }), timestamp: 7 })
     expect(h.entries).toHaveLength(1)
 
     // Nothing left is an exit, not a history edit.
-    expect(updateCurrentTraceSeeds(h, [])).toBe(h)
-    expect(updateCurrentTraceSeeds(emptyTraceHistory(), ['X']).entries).toEqual([])
+    expect(updateCurrentTraceSeeds(h, [], idOf)).toBe(h)
+    expect(updateCurrentTraceSeeds(emptyTraceHistory(), ['X'], idOf).entries).toEqual([])
   })
 
   it('round-trips seeds through storage, and hydrate rejects a malformed seed list', () => {
