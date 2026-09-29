@@ -19,7 +19,7 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
-import { useCanvasStore } from '@/store/canvas'
+import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import {
   useAncestorMatchCounts,
   useCanvasFilterMode,
@@ -38,9 +38,12 @@ import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights, TECHNICAL_LINE_HEIGHT } from './density'
 import { SPINE_MAX_WIDTH_PX } from './layerFold'
 import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
-import { unitMeaning, unitNoun } from './connections/connectionUnits'
+import { formatUnitCount, unitMeaning, unitNoun } from './connections/connectionUnits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { useAnchorRailStore } from '@/store/anchorRail'
+import { useEndpoints } from '@/components/panels/relationship/useEndpoints'
+import { LineEndTag } from './LineEndTag'
+import { lineEndOf, type LineEnds } from './lineEnd'
 import { sideVolume, type NodePorts } from './lineagePorts'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
@@ -200,8 +203,21 @@ interface LayerColumnProps {
   showLineageIndicators?: boolean
   /** Show the flow-density gutter (summarized edge modes only). */
   showDensityGutter?: boolean
-  /** Chip click — scroll the real row into view (per-partner Frame). */
+  /** Entry click — reveal the entity on the canvas (the drawer's reveal:
+   *  its ancestors open, it scrolls into view and pulses). */
   onProxyReveal?: (nodeId: string) => void
+  /** Entry click for one that stands for several entities: open the card
+   *  down to them, and scroll to them. */
+  onProxyRevealMany?: (nodeIds: string[]) => void
+  /** An entity's containment ancestors, nearest first — where an entry's
+   *  partner sits. */
+  railPathOf?: (id: string) => readonly string[]
+  /** A node the canvas draws but its store does not hold (a trace's), so an
+   *  entry can name it. */
+  resolveNode?: (id: string) => LineageNode | null
+  /** The ends of the line the relationship drawer is open on: their rows, and
+   *  the rail entry for an end scrolled away, say which end they are. */
+  lineEnds?: LineEnds | null
   /** "+N more" overflow — open the Lineage Lens for the full list. */
   onProxyMore?: () => void
   /** The user scrolled this column to its true end (only fires on
@@ -247,6 +263,9 @@ const FOLD_LIST_TOP_PX = 74
 const NARROW_SPINE_PX = 36
 
 const compactCount = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
+
+/** No Anchor Rail in a column: no one to name. */
+const NO_RAIL_IDS: readonly string[] = []
 
 /** A pin: where lines meet a folded layer's spine, half outside its edge. */
 const FOLD_PIN =
@@ -358,6 +377,10 @@ export const LayerColumn = React.memo(function LayerColumn({
   showLineageIndicators = false,
   showDensityGutter = false,
   onProxyReveal,
+  onProxyRevealMany,
+  railPathOf,
+  resolveNode,
+  lineEnds = null,
   onProxyMore,
   onEndReached,
   onResizeLayer,
@@ -1337,21 +1360,67 @@ export const LayerColumn = React.memo(function LayerColumn({
   // so the rail following the pointer re-renders only the columns it moves in.
   const anchorProxies = useAnchorRailStore(s => s.groups.get(layer.id))
   // Trays, or a hint that opens one (Display > Lineage). A tray opened from
-  // its hint stays open for the entity it lists, and folds back when the
-  // focus moves on — adjusted as the change arrives, not in an effect.
+  // its hint, or folded into it (× or Esc), stays so for the entity it
+  // lists, and follows the setting again when the focus moves on to another
+  // — adjusted as the change arrives, not in an effect. A moment with no
+  // rail at all (its partners on screen) is not the focus moving on.
   const showConnectedTrays = usePreferencesStore(s => s.showConnectedTrays) ?? true
   const railFocusId = useAnchorRailStore(s => s.focusId)
-  const [openRail, setOpenRail] = useState<'up' | 'down' | null>(null)
+  const [railOverride, setRailOverride] = useState<{ up?: boolean; down?: boolean }>({})
   const [railFocusSeen, setRailFocusSeen] = useState(railFocusId)
-  if (railFocusSeen !== railFocusId) {
+  if (railFocusId !== null && railFocusSeen !== railFocusId) {
     setRailFocusSeen(railFocusId)
-    setOpenRail(null)
+    if (railOverride.up !== undefined || railOverride.down !== undefined) setRailOverride({})
+  }
+  const trayOpen = (direction: 'up' | 'down') => railOverride[direction] ?? showConnectedTrays
+  // Folding or opening hands keyboard focus to what took the tray's place:
+  // the hint, or the tray's first entry.
+  const railHandoffRef = useRef<{ direction: 'up' | 'down'; open: boolean } | null>(null)
+  const setTrayOpen = (direction: 'up' | 'down', open: boolean) => {
+    railHandoffRef.current = { direction, open }
+    setRailOverride(prev => ({ ...prev, [direction]: open }))
   }
   // A tray and its hint are different places for the focused entity's lines
   // to dock, so opening one or switching trays draws those lines again.
   useEffect(() => {
     onAnimationComplete?.()
-  }, [openRail, showConnectedTrays, onAnimationComplete])
+  }, [railOverride, showConnectedTrays, onAnimationComplete])
+  useEffect(() => {
+    const handoff = railHandoffRef.current
+    if (!handoff) return
+    railHandoffRef.current = null
+    const to = handoff.open
+      ? document.getElementById(`anchor-tray-${layer.id}-${handoff.direction}`)
+        ?.querySelector<HTMLElement>('[id^="anchor-proxy-"]')
+      : document.getElementById(`anchor-rail-${layer.id}-${handoff.direction}`)
+    to?.focus()
+  }, [railOverride, layer.id])
+  // A reveal brings an entry's partner on screen, so the rail drops the
+  // entry the reader pressed — or, with it the last, is on its way out:
+  // keyboard focus goes to this column, not back to the page.
+  const railRevealFromRef = useRef<Element | null>(null)
+  useEffect(() => {
+    const from = railRevealFromRef.current
+    if (!from || (from.isConnected && anchorProxies)) return
+    railRevealFromRef.current = null
+    const active = document.activeElement
+    if (!active || active === from || active === document.body) scrollContainerRef.current?.focus({ preventScroll: true })
+  }, [anchorProxies])
+  // Who the entries stand for, by name: the focused entity, and each entity
+  // a line really reaches with what holds it — from the canvas, else one
+  // batched lookup (a partner inside a collapsed card is not loaded).
+  const railIds = useMemo(() => {
+    if (!anchorProxies || !railFocusId) return NO_RAIL_IDS
+    const ids = [railFocusId]
+    for (const p of anchorProxies.proxies) {
+      if (!p.realId) continue
+      ids.push(p.realId)
+      const parent = railPathOf?.(p.realId)[0]
+      if (parent && parent !== p.nodeId) ids.push(parent)
+    }
+    return ids
+  }, [anchorProxies, railFocusId, railPathOf])
+  const railNames = useEndpoints(railIds, resolveNode)
 
   // ── End-reached sentinel (roots auto-paging) ─────────────────────────
   // Fires when the user scrolls this column to its true end. Guards, in
@@ -2235,8 +2304,8 @@ export const LayerColumn = React.memo(function LayerColumn({
               off-screen partners that live in this column. Real DOM
               chips: the edge overlay anchors focus edges to these rects,
               so "where does this go" always has a visible, named
-              destination — never an estimated position. Click = scroll
-              the real row into view (per-partner Frame); "+N more"
+              destination — never an estimated position. Click = reveal
+              the partner on the canvas (the drawer's reveal); "+N more"
               routes to the Lineage Lens for the complete searchable
               list. Offset below/above the count chips so the two
               surfaces never collide. ── */}
@@ -2250,21 +2319,86 @@ export const LayerColumn = React.memo(function LayerColumn({
               // through and their names ran into the chips' own.
               const upProxies = anchorProxies.proxies.filter(p => p.direction === 'up')
               const downProxies = anchorProxies.proxies.filter(p => p.direction === 'down')
-              const renderEntry = (p: typeof anchorProxies.proxies[number]) => (
-                <button
-                  key={p.nodeId}
-                  id={`anchor-proxy-${p.nodeId}`}
-                  type="button"
-                  data-canvas-interactive
-                  onClick={(e) => { e.stopPropagation(); onProxyReveal?.(p.nodeId) }}
-                  title={`${proxyLabel(p.nodeId)} — ${p.count.toLocaleString()} ${p.count === 1 ? 'line' : 'lines'}, off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
-                  className="pointer-events-auto w-full flex items-center gap-2 pl-2 pr-1.5 py-1 rounded-lg text-[11px] font-medium text-ink hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors min-w-0"
-                >
-                  <span className="w-1 h-3.5 rounded-full flex-shrink-0" style={{ backgroundColor: p.color }} />
-                  <span className="truncate">{proxyLabel(p.nodeId)}</span>
-                  <span className="ml-auto flex-shrink-0 tabular-nums text-ink-muted">{p.count.toLocaleString()}</span>
-                </button>
-              )
+              // Each entry says who (the entity the line really reaches, or
+              // how many), which way (the drawer's words, in its colours) and
+              // where it sits; a click reveals it — the card it sits in
+              // opens down to it — and the selection stays.
+              const focusEnd = railFocusId ? railNames.get(railFocusId) : undefined
+              // A row here by its label; anywhere else by name, or what the
+              // lookup shows while it answers — never a raw id.
+              const focusName = railFocusId === null ? ''
+                : !focusEnd?.known && nodeToFlatIndexMap.has(railFocusId) ? proxyLabel(railFocusId)
+                : focusEnd?.name ?? ''
+              const focusIsSelection = railFocusId !== null && railFocusId === selectedNodeId
+              const revealProxy = (p: typeof anchorProxies.proxies[number]) => {
+                const active = document.activeElement
+                railRevealFromRef.current = active?.closest('[data-anchor-dock]') ? active : null
+                if (p.realIds && onProxyRevealMany) onProxyRevealMany(p.realIds)
+                else onProxyReveal?.(p.realId ?? p.nodeId)
+              }
+              const renderEntry = (p: typeof anchorProxies.proxies[number]) => {
+                const many = (p.partners ?? 1) > 1
+                const noun = p.flow === 'in' ? 'source' : p.flow === 'out' ? 'consumer' : 'partner'
+                const real = p.realId ? railNames.get(p.realId) : undefined
+                const who = p.isFocus ? focusName
+                  : many ? `${p.partners!.toLocaleString()} ${noun}s`
+                  : p.realId ? (real?.known ? real.name : `1 ${noun}`)
+                  : proxyLabel(p.nodeId)
+                const verb = p.flow === 'in' ? (many ? 'feed' : 'feeds')
+                  : p.flow === 'out' ? 'fed by'
+                  : many ? 'feed & fed by' : 'feeds & fed by'
+                // Where: the card the entities sit in, down to the real one's
+                // parent; a drawn partner's parent when it is a row here (two
+                // base_pays, told apart by their tables).
+                let place: string | null = null
+                if (many) {
+                  place = proxyLabel(p.nodeId)
+                } else if (p.realId) {
+                  const path = railPathOf?.(p.realId) ?? []
+                  const k = path.indexOf(p.nodeId)
+                  const parent = k > 0 ? railNames.get(path[0]) : undefined
+                  place = proxyLabel(p.nodeId) + (parent?.known ? `${k === 1 ? ' › ' : ' › … › '}${parent.name}` : '')
+                } else if (!p.isFocus) {
+                  const parent = railPathOf?.(p.nodeId)[0]
+                  if (parent && nodeToFlatIndexMap.has(parent)) place = proxyLabel(parent)
+                }
+                const flows = `${p.count.toLocaleString()} ${p.count === 1 ? 'flow' : 'flows'}`
+                const end = lineEndOf(lineEnds, p.nodeId)
+                const endSaid = end === 'from' ? ', from end' : end === 'to' ? ', to end' : end ? ', an end' : ''
+                return (
+                  <button
+                    key={p.nodeId}
+                    id={`anchor-proxy-${p.nodeId}`}
+                    type="button"
+                    data-canvas-interactive
+                    onClick={(e) => { e.stopPropagation(); revealProxy(p) }}
+                    aria-label={p.isFocus
+                      ? `${focusName}${focusIsSelection ? ', selected' : ''}${endSaid}, ${formatUnitCount(p.count, 'flows')}. Back to it on canvas`
+                      : `${who}${endSaid}, ${verb} ${focusName}${place ? `, in ${place}` : ''}, ${formatUnitCount(p.count, 'flows')}. Reveal on canvas`}
+                    className="group/entry pointer-events-auto w-full flex items-stretch gap-2 pl-2 pr-1.5 py-1 rounded-lg text-left hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors min-w-0"
+                  >
+                    <span className="w-1 self-stretch rounded-full flex-shrink-0" style={{ backgroundColor: p.color }} />
+                    <span className="flex-1 min-w-0">
+                      <span className="flex items-center gap-2 text-[11px] font-medium text-ink">
+                        <span className="truncate">{who}</span>
+                        {end && <LineEndTag end={end} className="flex-shrink-0" />}
+                        <span className="ml-auto flex-shrink-0 tabular-nums text-ink-muted group-hover/entry:hidden group-focus-visible/entry:hidden">{flows}</span>
+                        <span className="ml-auto flex-shrink-0 hidden text-accent-lineage group-hover/entry:inline group-focus-visible/entry:inline">Reveal</span>
+                      </span>
+                      <span className="block truncate text-[10px] text-ink-muted">
+                        {p.isFocus
+                          ? (focusIsSelection ? 'Selected · back to it' : 'Back to it')
+                          : (
+                            <>
+                              <span className={p.flow === 'in' ? 'text-lineage-in' : p.flow === 'out' ? 'text-lineage-out' : 'text-accent-lineage'}>{verb}</span>
+                              {' '}{focusName}{place && ` · in ${place}`}
+                            </>
+                          )}
+                      </span>
+                    </span>
+                  </button>
+                )
+              }
               const moreEntry = anchorProxies.moreCount > 0 && onProxyMore && (
                 <button
                   key="anchor-more"
@@ -2279,38 +2413,71 @@ export const LayerColumn = React.memo(function LayerColumn({
                 </button>
               )
               const tray = (direction: 'up' | 'down', entries: typeof upProxies, withMore: boolean) => {
-                // Hint mode (Display > Lineage): one small pill at the edge,
-                // which the focused entity's lines dock to, until a click
-                // opens the tray. The tray itself is the default.
-                if (!showConnectedTrays && openRail !== direction) {
-                  const count = entries.length + (withMore ? anchorProxies.moreCount : 0)
+                const where = direction === 'up' ? 'above' : 'below'
+                // The selection itself, scrolled out of this column: its
+                // partners still on screen dock to it here.
+                const focusEntry = entries.find(p => p.isFocus)
+                // Hint mode (Display > Lineage), or a tray folded by × or Esc:
+                // one small pill at the edge, which the focused entity's lines
+                // dock to, until a click opens the tray. The tray itself is the
+                // default. The selection's own pill takes the reader back to it.
+                if (!trayOpen(direction)) {
+                  const count = entries.reduce((n, p) => n + (p.partners ?? 1), 0) + (withMore ? anchorProxies.moreCount : 0)
+                  const label = focusEntry
+                    ? `${focusName}${focusIsSelection ? ', selected' : ''}, off-screen ${where} — back to it`
+                    : `${count.toLocaleString()} connected to ${focusName}, ${where} — show them`
+                  // Its lines dock to the tray's width, not the pill's: they
+                  // end in the column's gutter level with it, on the side
+                  // they run down, never across the rows to the pill.
                   return (
-                    <button
-                      id={`anchor-rail-${layer.id}-${direction}`}
-                      type="button"
-                      data-canvas-interactive
-                      onClick={(e) => { e.stopPropagation(); setOpenRail(direction) }}
-                      title={`${count.toLocaleString()} connected ${direction === 'up' ? 'above' : 'below'} — click to list them`}
-                      className={cn(
-                        'absolute left-2.5 z-30 pointer-events-auto inline-flex items-center gap-1 pl-1.5 pr-2 py-0.5 rounded-full',
-                        'bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-md',
-                        'text-[10.5px] font-medium text-ink-muted hover:text-ink',
-                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors',
-                        direction === 'up' ? 'top-12' : 'bottom-12',
-                      )}
+                    <div
+                      data-anchor-dock
+                      className={cn('absolute left-2.5 right-2.5 z-30 flex pointer-events-none', direction === 'up' ? 'top-12' : 'bottom-12')}
                     >
-                      {direction === 'up'
-                        ? <LucideIcons.ArrowUp className="w-3 h-3" />
-                        : <LucideIcons.ArrowDown className="w-3 h-3" />}
-                      <span className="tabular-nums">{count.toLocaleString()}</span> connected
-                    </button>
+                      <button
+                        id={`anchor-rail-${layer.id}-${direction}`}
+                        type="button"
+                        data-canvas-interactive
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          if (focusEntry) revealProxy(focusEntry)
+                          else setTrayOpen(direction, true)
+                        }}
+                        title={label}
+                        aria-label={label}
+                        aria-expanded={focusEntry ? undefined : false}
+                        className={cn(
+                          'pointer-events-auto inline-flex items-center gap-1 pl-1.5 pr-2 py-0.5 rounded-full min-w-0',
+                          'bg-canvas-elevated border border-accent-lineage/25 shadow-md',
+                          'text-[10.5px] font-medium text-accent-lineage hover:bg-accent-lineage/10',
+                          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors',
+                        )}
+                      >
+                        {direction === 'up'
+                          ? <LucideIcons.ArrowUp className="w-3 h-3 flex-shrink-0" />
+                          : <LucideIcons.ArrowDown className="w-3 h-3 flex-shrink-0" />}
+                        {focusEntry
+                          ? <><span className="truncate">{focusName}</span>{focusIsSelection && <span className="flex-shrink-0">(selected)</span>}</>
+                          : <><span className="tabular-nums">{count.toLocaleString()}</span> connected</>}
+                      </button>
+                    </div>
                   )
                 }
                 return (
                   <div
+                    id={`anchor-tray-${layer.id}-${direction}`}
+                    data-anchor-dock
+                    role="group"
+                    aria-label={focusEntry ? `${focusName}, off-screen ${where}` : `${focusName}'s lineage, off-screen ${where}`}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Escape') return
+                      // The tray's, not the canvas's: the selection stays.
+                      e.stopPropagation()
+                      setTrayOpen(direction, false)
+                    }}
                     className={cn(
                       'absolute left-2.5 right-2.5 z-30 pointer-events-auto p-1 rounded-xl',
-                      'bg-canvas-elevated border border-black/10 dark:border-white/10',
+                      'bg-canvas-elevated border border-accent-lineage/25',
                       'shadow-lg shadow-black/10 dark:shadow-black/40',
                       direction === 'up' ? 'top-12' : 'bottom-12',
                     )}
@@ -2319,18 +2486,16 @@ export const LayerColumn = React.memo(function LayerColumn({
                       {direction === 'up'
                         ? <LucideIcons.ArrowUp className="w-3 h-3" />
                         : <LucideIcons.ArrowDown className="w-3 h-3" />}
-                      {direction === 'up' ? 'Connected, above' : 'Connected, below'}
-                      {!showConnectedTrays && (
-                        <button
-                          type="button"
-                          data-canvas-interactive
-                          onClick={(e) => { e.stopPropagation(); setOpenRail(null) }}
-                          aria-label="Fold back to the hint"
-                          className="ml-auto p-0.5 rounded-md hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                        >
-                          <LucideIcons.X className="w-3 h-3" />
-                        </button>
-                      )}
+                      {direction === 'up' ? 'Off-screen above' : 'Off-screen below'}
+                      <button
+                        type="button"
+                        data-canvas-interactive
+                        onClick={(e) => { e.stopPropagation(); setTrayOpen(direction, false) }}
+                        aria-label="Fold into the hint"
+                        className="ml-auto p-0.5 rounded-md hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                      >
+                        <LucideIcons.X className="w-3 h-3" />
+                      </button>
                     </p>
                     {entries.map(renderEntry)}
                     {withMore && moreEntry}
@@ -2784,6 +2949,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
                         isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
                         isFocused={focusIndex >= 0 && navIdx === focusIndex}
+                        lineEnd={lineEndOf(lineEnds, node.id)}
                         onSelect={handleRowSelect}
                         onToggle={onToggle}
                         onContextMenu={onContextMenu}

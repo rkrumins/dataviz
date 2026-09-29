@@ -170,7 +170,7 @@ interface PreferencesState {
    */
   frostedCards: boolean
   toggleFrostedCards: () => void
-  /** The Anchor Rail's "Connected, above / below" trays — the focused
+  /** The Anchor Rail's "Off-screen above / below" trays — the focused
    *  entity's partners scrolled out of each column, listed at its edge. Off:
    *  a small hint in their place, which opens the tray on a click. */
   showConnectedTrays: boolean

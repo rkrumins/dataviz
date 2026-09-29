@@ -47,6 +47,19 @@ relationships on the published graph are read-only, and say why.
   changed in a draft. They are read from the data source (a draft sees its own), up to 1,000;
   when there may be more it says so. New: `POST /graph/edges/beneath` (`{sourceUrn, targetUrn}` →
   `{edges, total, truncated}`).
+- **The selected entity's partners scrolled out of a column are named, with which way they
+  flow.** The tray at the column's edge now reads "Off-screen above" or "Off-screen below", and
+  each entry names the entity the line really reaches, not the card it lands on: "order_key —
+  feeds order_count · in GOLD › fact_orders". A line that stands for several entities reads "3
+  consumers · in SILVER". A click opens the card down to the partner, scrolls to it and pulses
+  it; the selection stays. Lines to the tray or its pill are drawn like any other line, with
+  their arrowheads and motion, and leave the row on the side Marker sides says. × and Esc fold
+  the tray into its pill whether trays are on or off. A selection scrolled away shows as
+  "order_count (selected)", and a click goes back to it. The Display switch is now "Off-screen
+  partners". While the relationship drawer is open on a line, its two end cards are lit and tagged
+  **From** and **To** as the drawer names them (**Two-way** for a line both ways); nothing else
+  dims, and the tags go when the drawer closes. An end scrolled out of view keeps the line drawn,
+  docked to that end's entry on the rail, which carries its tag too.
 - **One export can be 50 GB** (`GRAPH_EXPORT_MAX_BYTES`, was 20 GiB).
 - **A running export says how far it has got.** Its job's `summary` holds the records read or written
   so far, the passes (a spreadsheet reads everything once for its columns, then writes it), and the
@@ -100,10 +113,10 @@ relationships on the published graph are read-only, and say why.
 ### Fixed
 
 - **Some of a selected entity's lines could not be clicked.** A line to a partner scrolled out of
-  the same column runs to its "Connected" tray entry or "↓ N connected" pill. It was drawn but
+  the same column runs to its "Off-screen" tray entry or "↓ N connected" pill. It was drawn but
   took no clicks, and on the pill it ran diagonally across the rows. It now opens the relationship
-  drawer like any other line, and it leaves through the column's gutter to reach the pill instead
-  of crossing the rows. In "On Hover" density, a hovered entity's lines vanished as soon as the
+  drawer like any other line, and it runs down the column's gutter to the pill instead of crossing
+  the rows. In "On Hover" density, a hovered entity's lines vanished as soon as the
   pointer left the entity to reach one. They now stay while the pointer crosses over, and for as
   long as it rests on a line.
 - **The line you clicked disappeared while you read about it.** In the default "On Hover" density a

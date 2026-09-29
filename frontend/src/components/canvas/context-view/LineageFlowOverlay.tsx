@@ -4,7 +4,7 @@ import type { ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection 
 import { sameRow, sameRows } from './rowEquality'
 import { edgeDashArray } from './edgeDash'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
-import { routeLine } from './lineRoute'
+import { routeGutter, routeLine, type LineRoute, type RowBox } from './lineRoute'
 import { bySignificance, lineDash, nextRenderTier, type RenderTier } from './lineDensity'
 import { delegatedLineState, hoverSpotlight, type Spotlight } from './hoverSpotlight'
 import type { LineMotion } from './lineMotion'
@@ -30,8 +30,8 @@ function nextViewport(
     ? prev
     : { scrollTop, clientHeight }
 }
-import { groupAnchorProxies, anchorRailFingerprint } from './anchorRail'
-import type { AnchorProxyCandidate } from './anchorRail'
+import { groupAnchorProxies, anchorRailFingerprint, railPartner } from './anchorRail'
+import type { AnchorProxyCandidate, RailPartner } from './anchorRail'
 import { useColumnPeripheryStore, PERIPHERY_PARTNER_CAP } from '@/store/columnPeriphery'
 import { useAnchorRailStore } from '@/store/anchorRail'
 import type { ColumnPeripherySummary } from '@/store/columnPeriphery'
@@ -44,6 +44,7 @@ import { OFF_CANVAS_STUB_WIDTH, portalLabel } from './ghostCues'
 import { OffCanvasStub } from './OffCanvasStub'
 import { unitNoun } from './connections/connectionUnits'
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
+import type { LineagePortSides } from '@/store/preferences'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -65,6 +66,10 @@ const VISIBLE_MARGIN_PX = 100
 /** ...and ANY distance sideways (see the visibility observer): past every
  *  canvas a view could be laid out on. */
 const SIDEWAYS_REACH_PX = 100_000
+
+/** Lanes a row's lines docked to one Anchor Rail dock spread over — as many
+ *  as the canvas's side gutters keep clear (EXTREMITY_EDGE_GUTTER_PX). */
+const DOCK_LANES = 4
 
 /** The rail follows a hovered entity after this long on it... */
 const RAIL_DWELL_MS = 250
@@ -88,6 +93,19 @@ type PoolLine = {
   confidence?: number
 }
 
+/** A projected line as updateFlow styles it: what `pushLine` reads. */
+type StyledLine = PoolLine & {
+  types?: string[]
+  originalType?: string
+  isGhost?: boolean
+  isBundled?: boolean
+  isAggregated?: boolean
+  edgeCount: number
+  isReverseFlow?: boolean
+  isDelegated?: boolean
+  isResidual?: boolean
+}
+
 export function LineageFlowOverlay({
   nodes,
   edges,
@@ -103,12 +121,14 @@ export function LineageFlowOverlay({
   resolveEdgeStrokeStyle,
   onEdgeDoubleClick,
   showDirection = true,
+  portSides = 'direction',
   motion = 'focus',
   expandingEdgeIds,
   geometryRegistry,
   onRevealNode,
   flowRibbons,
   focusNodeId,
+  railLineId = null,
   childMap,
   hoverPool,
   hoverBudget = 500,
@@ -137,6 +157,9 @@ export function LineageFlowOverlay({
   onEdgeDoubleClick?: (edgeId: string) => void,
   /** When true, render arrowheads. */
   showDirection?: boolean,
+  /** Display › Marker sides (lineagePorts.ts): which side of its row a line
+   *  docked to the Anchor Rail in the row's own column leaves by. */
+  portSides?: LineagePortSides,
   /** Which lines move (lineMotion.ts) — already resolved against calm mode
    *  and the system's reduce-motion setting by the caller. */
   motion?: LineMotion,
@@ -157,6 +180,10 @@ export function LineageFlowOverlay({
    *  drives it after a short dwell, which this overlay times itself; the
    *  chips reach the columns through the anchor-rail store. */
   focusNodeId?: string | null,
+  /** The one line the rail docks for `focusNodeId`, when it stands in for a
+   *  selection: the line the relationship drawer is open on, whose ends are
+   *  the focus. Null: every focus line docks. */
+  railLineId?: string | null,
   /** Loaded containment children by parent — what a hover on an open
    *  container lights up (hoverSpotlight). */
   childMap?: ReadonlyMap<string, readonly string[]>,
@@ -202,12 +229,6 @@ export function LineageFlowOverlay({
     /** Y at both band ends (pre-sag) — anchors the dock ports. */
     ey: number
   }>>([])
-  // Proxy edges — focus edges docked to Anchor Rail chips. The chip is a
-  // real rendered element, so this is measured geometry (unlike the
-  // removed pass-through layer, which drew to estimates).
-  const [proxyEdges, setProxyEdges] = useState<Array<{
-    id: string; lineId: string; source: string; target: string; pathD: string; color: string
-  }>>([])
   // Ghost lines — from a row to the PORTAL chip at the viewport edge for its
   // partners scrolled out of sight sideways. One per row and side, level with
   // the row, ending under a chip that is really rendered: measured geometry.
@@ -226,6 +247,7 @@ export function LineageFlowOverlay({
   // dwell (`railTimerRef`) — `focusNodeIdRef` is whichever holds.
   const focusNodeIdRef = useRef<string | null>(null)
   const selectedFocusRef = useRef<string | null>(null)
+  const railLineIdRef = useRef<string | null>(null)
   const dwellFocusRef = useRef<string | null>(null)
   const railTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastHoveredRef = useRef<string | null>(null)
@@ -233,6 +255,10 @@ export function LineageFlowOverlay({
   const lingerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const railFingerprintRef = useRef('')
   const dockedProxyIdsRef = useRef<Set<string>>(new Set())
+  // Who each focus line really reaches (railPartner), per projected line —
+  // projection and delegation are memoised, so a line keeps its identity
+  // from frame to frame and its members are walked once, not per scroll frame.
+  const railPartnerCacheRef = useRef(new WeakMap<object, { focusId: string; partnerId: string; rail: RailPartner }>())
   // Column periphery emission gate (see the summary block in updateFlow).
   const peripheryFpRef = useRef('')
   // Viewport tracking for virtualization
@@ -325,8 +351,9 @@ export function LineageFlowOverlay({
   useEffect(() => {
     selectedFocusRef.current = focusNodeId ?? null
     focusNodeIdRef.current = focusNodeId ?? dwellFocusRef.current
+    railLineIdRef.current = railLineId
     scheduleUpdate()
-  }, [focusNodeId, scheduleUpdate])
+  }, [focusNodeId, railLineId, scheduleUpdate])
 
   // A hovered entity's lines, in On Hover / Adaptive — indexed by end once
   // per pool, ranked and capped once per hovered entity.
@@ -500,7 +527,9 @@ export function LineageFlowOverlay({
     const focusId = focusNodeIdRef.current
     const focusDomId = focusId ? `layer-node-${focusId}` : null
     const proxyCandidates = new Map<string, AnchorProxyCandidate>()
-    const proxyEdgesNext: Array<{ id: string; lineId: string; source: string; target: string; pathD: string; color: string }> = []
+    const railPartnerCache = railPartnerCacheRef.current
+    const dockLanes = new Map<string, number>()
+    const docks = new Map<string, { id: string; chip: DOMRect; dock: RowBox } | null>()
     const owningLayerCache = new Map<string, string | null>()
     const findOwningLayer = (nodeId: string): string | null => {
       if (!geometryRegistry) return null
@@ -512,6 +541,119 @@ export function LineageFlowOverlay({
       }
       owningLayerCache.set(nodeId, hit)
       return hit
+    }
+
+    const box = (r: DOMRect) => ({
+      left: r.left - containerRect.left,
+      right: r.right - containerRect.left,
+      top: r.top - containerRect.top,
+      height: r.height,
+    })
+    // A line's look — colour, dash, weight, a trace's or the highlight's
+    // emphasis — is the same wherever it is routed: between two rows, or
+    // from a row to the Anchor Rail (see the docking below).
+    const pushLine = (edge: StyledLine, { pathD, sx, sy, tx, ty }: LineRoute) => {
+      const minY = Math.min(sy, ty)
+      const maxY = Math.max(sy, ty)
+
+      const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
+      const typeColor = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
+      const dashArray = edgeDashArray(edge.isGhost || false, resolveEdgeStrokeStyle?.(primaryType))
+
+      let color = typeColor
+      let edgeOpacity = 0.6 + (edge.confidence || 0.4) * 0.4
+
+      let baseStrokeWidth = 1.8
+      if (edge.isBundled) {
+        baseStrokeWidth = Math.min(2 + Math.log2(edge.edgeCount) * 0.6, 4)
+      } else if (edge.isAggregated) {
+        baseStrokeWidth = 2.2
+      }
+
+      let dynamicStrokeWidth = baseStrokeWidth
+
+      const isEdgeHighlighted = isHighlightActive && highlightedEdges?.has(edge.id)
+      const isEdgeDimmed = isHighlightActive && !highlightedEdges?.has(edge.id)
+
+      let isTraceEdge = false
+      let isFocusIncident = false
+      if (isTracing && traceResult) {
+        edgeOpacity = edge.isGhost ? 0.4 : 0.8
+        dynamicStrokeWidth = baseStrokeWidth + 1
+        const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
+        const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
+        const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
+        const tgtInDownstream = traceResult.downstreamNodes?.has(edge.target)
+
+        // The product's lineage direction pair (useLineageDirectionColors):
+        // a trace's upstream and downstream wear the same colours as the
+        // ports, the drawer and the Focus Lens.
+        if (srcInUpstream || tgtInUpstream) {
+          color = tints.in
+        } else if (srcInDownstream || tgtInDownstream) {
+          color = tints.out
+        } else if (!edge.isGhost) {
+          color = '#a78bfa'
+        }
+
+        const focusId = traceResult.focusId
+        isFocusIncident = !!focusId && (
+          edge.source === focusId || edge.target === focusId
+        )
+
+        if (!srcInUpstream && !tgtInUpstream && !srcInDownstream && !tgtInDownstream && !isFocusIncident) {
+          edgeOpacity = edge.isGhost ? 0.05 : 0.1
+          dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
+        } else {
+          // Trace participants — including focus-incident — get the soft
+          // outer drop-shadow glow via the `nx-edge-trace` class. The
+          // stroke itself stays at the regular trace width so the focus
+          // edges read as part of the same set rather than as bolded
+          // emphasis lines.
+          isTraceEdge = true
+        }
+      } else {
+        if (isEdgeHighlighted) {
+          edgeOpacity = 0.9
+          dynamicStrokeWidth = baseStrokeWidth + 1
+        } else if (isEdgeDimmed) {
+          edgeOpacity = edge.isGhost ? 0.05 : 0.1
+          dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
+        } else {
+          edgeOpacity = edgeOpacity * 0.5
+          dynamicStrokeWidth = baseStrokeWidth * 0.75
+        }
+      }
+
+      if (edge.isGhost) edgeOpacity = Math.min(0.7, edgeOpacity)
+
+      const delegation = edge.id === hoveredEdgeId ? 'full' : delegatedLineState(edge, hovered)
+      if (delegation === 'hidden') return
+      if (delegation === 'faint') {
+        edgeOpacity = 0.15
+        dynamicStrokeWidth = Math.max(1, baseStrokeWidth * 0.7)
+      }
+
+      newComputedEdges.push({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        minY, maxY, pathD, color, dynamicStrokeWidth, edgeOpacity,
+        isGhost: edge.isGhost || false,
+        isBundled: edge.isBundled || false,
+        isAggregated: edge.isAggregated || false,
+        edgeCount: edge.edgeCount || 0,
+        dashArray,
+        sx, sy, tx, ty,
+        types: Array.isArray(edge.types) && edge.types.length > 0
+          ? edge.types
+          : edge.originalType ? [edge.originalType] : [],
+        confidence: edge.confidence || 0,
+        isTraceEdge,
+        isFocusIncident,
+        isReverseFlow: !!edge.isReverseFlow,
+        isBidirectional: !!(edge as any).isBidirectional,
+      })
     }
 
     // Collect only edges with at least one endpoint currently in the
@@ -564,116 +706,7 @@ export function LineageFlowOverlay({
           if ((sRect.right < viewportRect.left && tRect.right < viewportRect.left)
             || (sRect.left > viewportRect.right && tRect.left > viewportRect.right)) return
 
-          const box = (r: DOMRect) => ({
-            left: r.left - containerRect.left,
-            right: r.right - containerRect.left,
-            top: r.top - containerRect.top,
-            height: r.height,
-          })
-          const { pathD, sx, sy, tx, ty } = routeLine(
-            box(sRect), box(tRect), edge.groupIndex || 0, edge.source === edge.target,
-          )
-          const minY = Math.min(sy, ty)
-          const maxY = Math.max(sy, ty)
-
-          const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
-          const typeColor = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
-          const dashArray = edgeDashArray(edge.isGhost || false, resolveEdgeStrokeStyle?.(primaryType))
-
-          let color = typeColor
-          let edgeOpacity = 0.6 + (edge.confidence || 0.4) * 0.4
-
-          let baseStrokeWidth = 1.8
-          if (edge.isBundled) {
-            baseStrokeWidth = Math.min(2 + Math.log2(edge.edgeCount) * 0.6, 4)
-          } else if (edge.isAggregated) {
-            baseStrokeWidth = 2.2
-          }
-
-          let dynamicStrokeWidth = baseStrokeWidth
-
-          const isEdgeHighlighted = isHighlightActive && highlightedEdges?.has(edge.id)
-          const isEdgeDimmed = isHighlightActive && !highlightedEdges?.has(edge.id)
-
-          let isTraceEdge = false
-          let isFocusIncident = false
-          if (isTracing && traceResult) {
-            edgeOpacity = edge.isGhost ? 0.4 : 0.8
-            dynamicStrokeWidth = baseStrokeWidth + 1
-            const srcInUpstream = traceResult.upstreamNodes?.has(edge.source)
-            const tgtInUpstream = traceResult.upstreamNodes?.has(edge.target)
-            const srcInDownstream = traceResult.downstreamNodes?.has(edge.source)
-            const tgtInDownstream = traceResult.downstreamNodes?.has(edge.target)
-
-            // The product's lineage direction pair (useLineageDirectionColors):
-            // a trace's upstream and downstream wear the same colours as the
-            // ports, the drawer and the Focus Lens.
-            if (srcInUpstream || tgtInUpstream) {
-              color = tints.in
-            } else if (srcInDownstream || tgtInDownstream) {
-              color = tints.out
-            } else if (!edge.isGhost) {
-              color = '#a78bfa'
-            }
-
-            const focusId = traceResult.focusId
-            isFocusIncident = !!focusId && (
-              edge.source === focusId || edge.target === focusId
-            )
-
-            if (!srcInUpstream && !tgtInUpstream && !srcInDownstream && !tgtInDownstream && !isFocusIncident) {
-              edgeOpacity = edge.isGhost ? 0.05 : 0.1
-              dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
-            } else {
-              // Trace participants — including focus-incident — get the soft
-              // outer drop-shadow glow via the `nx-edge-trace` class. The
-              // stroke itself stays at the regular trace width so the focus
-              // edges read as part of the same set rather than as bolded
-              // emphasis lines.
-              isTraceEdge = true
-            }
-          } else {
-            if (isEdgeHighlighted) {
-              edgeOpacity = 0.9
-              dynamicStrokeWidth = baseStrokeWidth + 1
-            } else if (isEdgeDimmed) {
-              edgeOpacity = edge.isGhost ? 0.05 : 0.1
-              dynamicStrokeWidth = Math.max(1, baseStrokeWidth - 1)
-            } else {
-              edgeOpacity = edgeOpacity * 0.5
-              dynamicStrokeWidth = baseStrokeWidth * 0.75
-            }
-          }
-
-          if (edge.isGhost) edgeOpacity = Math.min(0.7, edgeOpacity)
-
-          const delegation = edge.id === hoveredEdgeId ? 'full' : delegatedLineState(edge, hovered)
-          if (delegation === 'hidden') return
-          if (delegation === 'faint') {
-            edgeOpacity = 0.15
-            dynamicStrokeWidth = Math.max(1, baseStrokeWidth * 0.7)
-          }
-
-          newComputedEdges.push({
-            id: edge.id,
-            source: edge.source,
-            target: edge.target,
-            minY, maxY, pathD, color, dynamicStrokeWidth, edgeOpacity,
-            isGhost: edge.isGhost || false,
-            isBundled: edge.isBundled || false,
-            isAggregated: edge.isAggregated || false,
-            edgeCount: edge.edgeCount || 0,
-            dashArray,
-            sx, sy, tx, ty,
-            types: Array.isArray(edge.types) && edge.types.length > 0
-              ? edge.types
-              : edge.originalType ? [edge.originalType] : [],
-            confidence: edge.confidence || 0,
-            isTraceEdge,
-            isFocusIncident,
-            isReverseFlow: !!edge.isReverseFlow,
-            isBidirectional: !!(edge as any).isBidirectional,
-          })
+          pushLine(edge, routeLine(box(sRect), box(tRect), edge.groupIndex || 0, edge.source === edge.target))
         }
         return
       }
@@ -753,47 +786,82 @@ export function LineageFlowOverlay({
       if (
         focusDomId &&
         (sourceId === focusDomId || targetId === focusDomId) &&
+        (railLineIdRef.current === null || edge.id === railLineIdRef.current) &&
         (direction === 'up' || direction === 'down')
       ) {
         const owningLayer = findOwningLayer(partnerId)
         if (owningLayer) {
           const bundleCount = (edge.edgeCount as number) || 1
+          // When the FOCUSED row is the one scrolled away, the partner here
+          // is the focus itself: its partners still on screen dock their
+          // lines to a proxy that stands for the selection. Flow is always
+          // the focus's.
+          let who = railPartnerCache.get(edge)
+          if (!who || who.focusId !== focusId || who.partnerId !== partnerId) {
+            who = { focusId: focusId!, partnerId, rail: railPartner(edge, focusId!, partnerId) }
+            railPartnerCache.set(edge, who)
+          }
           const prev = proxyCandidates.get(partnerId)
-          if (prev) prev.count += bundleCount
-          else proxyCandidates.set(partnerId, { nodeId: partnerId, layerId: owningLayer, count: bundleCount, color, direction })
+          if (prev) {
+            prev.count += bundleCount
+            if (prev.flow !== who.rail.flow) prev.flow = 'both'
+          } else {
+            proxyCandidates.set(partnerId, partnerId === focusId
+              ? { nodeId: partnerId, layerId: owningLayer, count: bundleCount, color, direction, flow: who.rail.flow, isFocus: true }
+              : { nodeId: partnerId, layerId: owningLayer, count: bundleCount, color, direction, ...who.rail })
+          }
           if (dockedProxyIdsRef.current.has(partnerId)) {
             // The partner's own tray entry — or, in hint mode (no tray open
             // in that column), the column's hint pill, where all of its
-            // lines that way dock together.
-            const chipEl = document.getElementById(`anchor-proxy-${partnerId}`)
-              ?? document.getElementById(`anchor-rail-${owningLayer}-${direction}`)
-            if (chipEl) {
-              const cRect = chipEl.getBoundingClientRect()
-              const chipCy = (cRect.top + cRect.bottom) / 2 - containerRect.top
-              const chipCx = (cRect.left + cRect.right) / 2 - containerRect.left
-              const focusCx = (vRect.left + vRect.right) / 2 - containerRect.left
-              let pathD: string
-              if (cRect.left < vRect.right && cRect.right > vRect.left) {
-                // Same column — bow out through the left lane.
-                const px = vRect.left - containerRect.left - 8
-                const ex2 = cRect.left - containerRect.left - 4
-                const bow = Math.min(px, ex2) - 36
-                pathD = `M ${px} ${sy} C ${bow} ${sy}, ${bow} ${chipCy}, ${ex2} ${chipCy}`
-              } else if (chipCx > focusCx) {
-                const px = vRect.right - containerRect.left + 6
-                const ex2 = cRect.left - containerRect.left - 4
-                pathD = `M ${px} ${sy} C ${px + (ex2 - px) * 0.4} ${sy}, ${ex2 - (ex2 - px) * 0.15} ${chipCy}, ${ex2} ${chipCy}`
-              } else {
-                const px = vRect.left - containerRect.left - 8
-                const ex2 = cRect.right - containerRect.left + 4
-                pathD = `M ${px} ${sy} C ${px + (ex2 - px) * 0.4} ${sy}, ${ex2 - (ex2 - px) * 0.15} ${chipCy}, ${ex2} ${chipCy}`
+            // lines that way dock together. Measured once a pass, however
+            // many lines reach it.
+            let docked = docks.get(partnerId)
+            if (docked === undefined) {
+              const chipEl = document.getElementById(`anchor-proxy-${partnerId}`)
+                ?? document.getElementById(`anchor-rail-${owningLayer}-${direction}`)
+              docked = null
+              if (chipEl) {
+                // Just outside the dock — the tray the entry sits in, or the
+                // pill's own strip of the same width — level with the entry.
+                const cRect = chipEl.getBoundingClientRect()
+                const dRect = chipEl.closest('[data-anchor-dock]')?.getBoundingClientRect() ?? cRect
+                docked = {
+                  id: chipEl.id,
+                  chip: cRect,
+                  dock: {
+                    left: dRect.left - containerRect.left,
+                    right: dRect.right - containerRect.left,
+                    top: cRect.top - containerRect.top,
+                    height: cRect.height,
+                  },
+                }
               }
-              proxyEdgesNext.push({
-                id: `proxy-edge-${edge.source}-${edge.target}`,
-                lineId: edge.id,
-                source: sourceId, target: targetId, pathD, color,
-              })
-              return // the docked edge replaces the stub/badge for this connection
+              docks.set(partnerId, docked)
+            }
+            if (docked) {
+              // The real line, drawn as every line is (its look, arrowheads,
+              // motion, hover card and hit path), from its row to the dock.
+              // Source to target, so the arrowhead points the way the data
+              // flows.
+              const { chip: cRect, dock } = docked
+              const row = box(vRect)
+              const rowIsSource = visibleNodeId === sourceId
+              const from = rowIsSource ? row : dock
+              const to = rowIsSource ? dock : row
+              // A row's lines to one dock (a hint pill takes all of them that
+              // way) spread over lanes, as parallel lines do, so each can be
+              // told apart and clicked.
+              const laneKey = `${visibleNodeId}>${docked.id}`
+              const lane = Math.min(dockLanes.get(laneKey) ?? 0, DOCK_LANES - 1)
+              dockLanes.set(laneKey, lane + 1)
+              pushLine(edge, cRect.left < vRect.right && cRect.right > vRect.left
+                // In the row's own column: down the column's gutter on the
+                // side the row marks this end on (Display › Marker sides) —
+                // out on the right, in on the left; the left for a two-way
+                // line, and for every line where lines attach.
+                ? routeGutter(from, to, portSides === 'direction' && rowIsSource && !edge.isBidirectional ? 'right' : 'left', lane)
+                : routeLine(from, to, lane))
+              return // the docked line replaces the stub/badge for this connection
             }
           }
         }
@@ -996,7 +1064,6 @@ export function LineageFlowOverlay({
       })
     }
     setOffCanvasStubs(prev => (sameRows(prev, stubsNext) ? prev : stubsNext))
-    setProxyEdges(prev => (sameRows(prev, proxyEdgesNext) ? prev : proxyEdgesNext))
 
     // Periphery emission — through the dedicated store so only the
     // columns whose numbers changed re-render (never the canvas), and
@@ -1015,16 +1082,21 @@ export function LineageFlowOverlay({
     // lockstep so next frame's edges anchor to the freshly-mounted chips.
     //
     // TRANSIENT-EMPTY GUARD: an empty candidate frame while the SAME node
-    // stays focused is visibility flicker (observer rebuild, resize
-    // churn), not user intent — emitting it would unmount the chips and,
-    // worse, feed an emit → canvas re-render → observer churn → emit
-    // oscillation. Keep the existing rail through those frames; the rail
-    // clears when focus changes or ends.
+    // stays focused, its row on screen but out of the visibility set (an
+    // observer rebuild clears the set), is visibility flicker, not user
+    // intent — emitting it would unmount the chips and, worse, feed an
+    // emit → canvas re-render → observer churn → emit oscillation. Keep the
+    // existing rail through those frames. With the focus row in the set the
+    // empty frame is real — its partners came into view (a reveal) or
+    // collapsed away — and with the row off screen or unmounted nothing on
+    // screen docks to it any more: the rail clears, as it does when focus
+    // changes or ends.
     const railGroups = groupAnchorProxies(proxyCandidates.values())
     const railFp = anchorRailFingerprint(focusId, railGroups)
     const prevFp = railFingerprintRef.current
     const prevFocusId = prevFp === '' ? null : prevFp.split('|', 1)[0]
     const transientEmpty = railFp === '' && focusId !== null && prevFocusId === focusId
+      && !globalVisibleNodes.has(focusDomId!) && overflowAnchor(focusDomId!) !== null
     if (railFp !== prevFp && !transientEmpty) {
       railFingerprintRef.current = railFp
       dockedProxyIdsRef.current = new Set(
@@ -1079,7 +1151,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints])
+  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -1612,7 +1684,6 @@ export function LineageFlowOverlay({
     setHoveredEdgeId(null)
     setHoverMousePos(null)
   }, [])
-  const dockedHits = useMemo(() => proxyEdges.map(pe => ({ id: pe.lineId, pathD: pe.pathD })), [proxyEdges])
   const handleHitClick = useCallback((edgeId: string, e: React.MouseEvent) => {
     e.stopPropagation()
     onEdgeClick(edgeId)
@@ -1816,10 +1887,6 @@ export function LineageFlowOverlay({
         {/* Per-node lineage hairlines now render inside each FlatTreeItem
             (anchored to the row box) — see FlatTreeItem. */}
 
-        {/* ── Proxy edges — the selected node's connections docked to
-            Anchor Rail chips. The chip is real rendered DOM, so this is
-            measured geometry. Solid and near-full opacity: these ARE the
-            focused node's flows, each with a named destination. ── */}
         {/* Ghost lines to the portal chips — dashed and faint: they say
             where lineage goes, not what it is. Under the columns like every
             line, so a row they pass reads above them. */}
@@ -1836,19 +1903,6 @@ export function LineageFlowOverlay({
             strokeLinecap="round"
             className="pointer-events-none"
           />
-        ))}
-        {proxyEdges.map(pe => (
-          <g key={pe.id} data-edge-id={pe.id} data-edge-src={pe.source} data-edge-tgt={pe.target}>
-            <path
-              d={pe.pathD}
-              stroke={pe.color}
-              strokeWidth={1.6}
-              fill="none"
-              opacity={0.85}
-              strokeLinecap="round"
-              className="pointer-events-none"
-            />
-          </g>
         ))}
       </svg>
       <LineMotionLayer
@@ -2179,7 +2233,7 @@ export function LineageFlowOverlay({
      */}
     {visibleEdges.length <= HIT_DENSITY_LIMIT ? (
       <HitLayer
-        edges={dockedHits.length === 0 ? visibleEdges : [...visibleEdges, ...dockedHits]}
+        edges={visibleEdges}
         onEnter={handleHitEnter}
         onMove={handleHitMove}
         onLeave={handleHitLeave}
@@ -2189,7 +2243,7 @@ export function LineageFlowOverlay({
     ) : (
       <FocusHitLayer
         visibleEdges={visibleEdges}
-        docked={dockedHits}
+        focusNodeId={focusNodeId ?? null}
         hoveredEdgeId={hoveredEdgeId}
         highlightedEdges={highlightedEdges}
         isHighlightActive={isHighlightActive}
@@ -2364,7 +2418,7 @@ type HitLayerHandlers = {
 }
 
 function HitLayer({ edges, onEnter, onMove, onLeave, onClickEdge, onDoubleClickEdge }: {
-  edges: ReadonlyArray<Pick<ComputedEdge, 'id' | 'pathD'>>
+  edges: ComputedEdge[]
 } & HitLayerHandlers) {
   return (
     <div className="absolute inset-0 pointer-events-none z-20">
@@ -2410,12 +2464,14 @@ function useLingering(value: string | null, ms: number): string | null {
 }
 
 /** Focus-scoped hit layer for above-HIT_DENSITY_LIMIT density: only edges
- *  incident to the hovered node, the selection-highlighted set, or the
- *  currently hovered edge get hit paths. Mounts useHoveredNodeId in this
- *  child so its rAF-driven re-renders never touch the main overlay. */
-function FocusHitLayer({ visibleEdges, docked, hoveredEdgeId, highlightedEdges, isHighlightActive, ...handlers }: {
+ *  incident to the hovered or selected node, the selection-highlighted set,
+ *  or the currently hovered edge get hit paths — a selected entity's lines
+ *  can all be clicked, those docked to the Anchor Rail too. Mounts
+ *  useHoveredNodeId in this child so its rAF-driven re-renders never touch
+ *  the main overlay. */
+function FocusHitLayer({ visibleEdges, focusNodeId, hoveredEdgeId, highlightedEdges, isHighlightActive, ...handlers }: {
   visibleEdges: ComputedEdge[]
-  docked: ReadonlyArray<Pick<ComputedEdge, 'id' | 'pathD'>>
+  focusNodeId: string | null
   hoveredEdgeId: string | null
   highlightedEdges?: Set<string>
   isHighlightActive?: boolean
@@ -2424,9 +2480,10 @@ function FocusHitLayer({ visibleEdges, docked, hoveredEdgeId, highlightedEdges, 
   const effectiveNode = useLingering(hoveredNodeId, 400)
   const focus = useMemo(() => visibleEdges.filter(e =>
     (effectiveNode !== null && (e.source === effectiveNode || e.target === effectiveNode)) ||
+    (focusNodeId !== null && (e.source === focusNodeId || e.target === focusNodeId)) ||
     (isHighlightActive && highlightedEdges?.has(e.id)) ||
     e.id === hoveredEdgeId
-  ), [visibleEdges, effectiveNode, isHighlightActive, highlightedEdges, hoveredEdgeId])
-  if (focus.length === 0 && docked.length === 0) return null
-  return <HitLayer edges={docked.length === 0 ? focus : [...focus, ...docked]} {...handlers} />
+  ), [visibleEdges, effectiveNode, focusNodeId, isHighlightActive, highlightedEdges, hoveredEdgeId])
+  if (focus.length === 0) return null
+  return <HitLayer edges={focus} {...handlers} />
 }

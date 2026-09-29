@@ -56,6 +56,21 @@ export type AnchorProxy = {
   color: string
   /** Where the real row sits relative to the canvas viewport. */
   direction: 'up' | 'down'
+  /** Which way the lines flow, relative to the focused node: 'in' — the
+   *  partner feeds it; 'out' — it feeds the partner. */
+  flow: 'in' | 'out' | 'both'
+  /** The one entity the lines really reach, when it is not the card drawn
+   *  here — order_key inside the collapsed GOLD. */
+  realId?: string
+  /** How many entities the lines reach, set only when more than one. */
+  partners?: number
+  /** With `partners`: the first of those entities (RAIL_REVEAL_CAP), which
+   *  a click opens the card down to. */
+  realIds?: string[]
+  /** The focused node ITSELF, scrolled out of its column: the lines are
+   *  those of its partners still on screen, and `flow` is still relative to
+   *  it. `nodeId` is the focused node's id. */
+  isFocus?: boolean
 }
 
 export type AnchorProxyGroup = {

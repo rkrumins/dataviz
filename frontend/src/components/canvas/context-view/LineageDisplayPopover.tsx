@@ -598,7 +598,7 @@ function AppearanceSection({ disabled }: { disabled: boolean }) {
         on={trays}
         disabled={disabled}
         onToggle={toggleTrays}
-        label="Connected above & below"
+        label="Off-screen partners"
         detail={trays
           ? 'Lists the selected entity\'s partners scrolled out of each column'
           : 'A small hint instead — click it for the list'}

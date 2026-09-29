@@ -1,14 +1,14 @@
 /**
  * Value-equality for the flow overlay's computed arrays.
  *
- * `updateFlow` rebuilds `computedEdges` / `overflowBadges` / `proxyEdges` from
+ * `updateFlow` rebuilds `computedEdges` / `overflowBadges` from
  * scratch on every measure pass, and a measure pass runs on scroll (per frame),
  * window resize, ResizeObserver, IntersectionObserver, MutationObserver and
  * selection change. Writing the fresh array unconditionally re-rendered EVERY
  * edge even when nothing had moved — O(edges) of wasted render per scroll frame,
  * which is why the canvas flickered harder the more was loaded onto it.
  * `setComputedRibbons` in the same file already guarded itself this way; the
- * three expensive writes never got the same treatment.
+ * expensive writes never got the same treatment.
  *
  * A shallow per-row comparison is EXACT for these types, not an approximation:
  * every entry is a flat record of primitives plus a couple of string arrays
