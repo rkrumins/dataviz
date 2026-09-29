@@ -209,7 +209,31 @@ the others from the same file with **View only**.
 
 ---
 
+## View libraries: rules and saved searches
+
+A View's [display rules](/guide/display-rules) and the
+[searches saved for everyone](/guide/advanced-search#saving-and-sharing-searches)
+on it make up its **library**, which travels on its own as a small file,
+`<view name>.library.json` — from one View to another, in this environment or
+the next. A View file carries the display rules but not the saved searches, so
+this is how those move.
+
+- **Export** it from the bottom of the Property Manager's **Display rules** tab,
+  or with **Export library** at the bottom of Advanced Search's **Library**.
+  Anyone who can open the View can.
+- **Import** it the same way (**Import…** / **Import library…**) into a View you
+  can edit. Choose **Add what's new**, **Add everything** or **Replace**, and
+  check the item-by-item preview before anything changes.
+
+There is no library for a whole data source: every View keeps its own. To give
+every View of a data source the same rules and searches, someone who can edit
+those Views can run the publish script in the
+[Search & Display Rules Reference](/docs/feature-search-and-rules-reference#publish-a-pack-to-every-view-of-a-data-source).
+
+---
+
 ## Where to next
 
 - Understand what happens after you upload — drafts, review, and publishing → [Versioning & Change Control](/guide/versioning-change-control)
 - Day-to-day data source management → [Workspace Admin](/guide/workspace-admin)
+- Display rules and saved searches, and their library file → [Display Rules](/guide/display-rules)

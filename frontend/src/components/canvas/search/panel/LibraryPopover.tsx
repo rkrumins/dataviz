@@ -19,19 +19,30 @@
  * the user can ask "do I have anything saved about PII?" without
  * remembering whether they saved it themselves, a teammate did, or
  * it's a built-in template.
+ *
+ * A footer takes the view's whole library — its saved queries and its
+ * display rules — to a file, and (for someone who can edit the view)
+ * brings one in: the same pack and import dialog as the Property
+ * Manager's, so neither surface is the only way there.
  */
 import * as Popover from '@radix-ui/react-popover'
 import { motion } from 'framer-motion'
 import {
-    BookmarkPlus, Loader2, Pin, PinOff, Search as SearchIcon,
-    Star, Trash2, Users, X,
+    BookmarkPlus, Download, Loader2, Package, Pin, PinOff, Search as SearchIcon,
+    Star, Trash2, Upload, Users, X,
 } from 'lucide-react'
-import { type FC, type ReactNode, useMemo, useState } from 'react'
+import { type FC, type KeyboardEvent, type ReactNode, useMemo, useState } from 'react'
 
+import { LibraryImportDialog } from '@/components/canvas/property-manager/LibraryImportDialog'
+import { saveLibraryFile } from '@/components/canvas/property-manager/libraryFile'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
-import type { SavedViewQuery } from '@/services/viewLibraryService'
+import {
+    exportViewLibrary,
+    type LibraryImportResult,
+    type SavedViewQuery,
+} from '@/services/viewLibraryService'
 import type { RecentQueryEntry } from '@/store/searchStore'
 import { useLibraryCanEdit, useSavedViewQueries, useViewLibraryStore } from '@/store/viewLibraryStore'
 
@@ -44,6 +55,12 @@ import {
 
 
 type LibraryTab = 'mine' | 'shared' | 'templates'
+
+// The popover and the import dialog are portals, and React bubbles a
+// portal's key presses through its React parents — up to SearchMapPanel,
+// which takes Enter, the arrows and J/K to step through and reveal matches.
+// A key pressed on this layer's buttons is theirs.
+const keepKeysHere = (e: KeyboardEvent) => e.stopPropagation()
 
 
 export interface LibraryPopoverProps {
@@ -94,7 +111,35 @@ export const LibraryPopover: FC<LibraryPopoverProps> = ({
 
     const featured = useMemo(() => featuredTemplates(), [])
 
+    // The view's library as a file — the pack the Property Manager
+    // exports and imports. The import dialog lives outside the popover,
+    // so it survives the popover closing as it opens.
+    const libraryViewId = useViewLibraryStore((s) => s.viewId)
+    const branchId = useViewLibraryStore((s) => s.branchId)
+    const canEdit = useLibraryCanEdit()
+    const [importOpen, setImportOpen] = useState(false)
+    const [exporting, setExporting] = useState(false)
+    const { notify } = useAppNotifications()
+
+    const handleExport = async () => {
+        if (!libraryViewId) return
+        setExporting(true)
+        try {
+            saveLibraryFile(await exportViewLibrary(libraryViewId, branchId))
+        } catch (e) {
+            notify('error', `Couldn't export the library — ${(e as Error).message}`)
+        } finally {
+            setExporting(false)
+        }
+    }
+
+    const handleImported = (result: LibraryImportResult) => {
+        setImportOpen(false)
+        notify('success', `Imported ${result.added.toLocaleString()} ${result.added === 1 ? 'item' : 'items'} into this view`)
+    }
+
     return (
+        <>
         <Popover.Root open={open} onOpenChange={onOpenChange}>
             {/* Anchor instead of Trigger: the popover is controlled
                 externally (by the toolbar's Library chip), so clicking
@@ -105,6 +150,7 @@ export const LibraryPopover: FC<LibraryPopoverProps> = ({
                 <Popover.Content
                     align="end"
                     sideOffset={8}
+                    onKeyDown={keepKeysHere}
                     className={cn(
                         'w-[420px] max-h-[70vh] rounded-xl overflow-hidden',
                         'bg-canvas-elevated/98 backdrop-blur-2xl',
@@ -158,9 +204,91 @@ export const LibraryPopover: FC<LibraryPopoverProps> = ({
                             />
                         )}
                     </div>
+                    {libraryViewId && (
+                        <LibraryFileActions
+                            canImport={canEdit}
+                            exporting={exporting}
+                            onExport={() => void handleExport()}
+                            onImport={() => {
+                                // Close first so the dialog is the only
+                                // modal layer visible (as Save as… does).
+                                onOpenChange(false)
+                                setImportOpen(true)
+                            }}
+                        />
+                    )}
                 </Popover.Content>
             </Popover.Portal>
         </Popover.Root>
+        {importOpen && libraryViewId && (
+            <div className="contents" onKeyDown={keepKeysHere}>
+                <LibraryImportDialog
+                    viewId={libraryViewId}
+                    branchId={branchId}
+                    onClose={() => setImportOpen(false)}
+                    onImported={handleImported}
+                />
+            </div>
+        )}
+        </>
+    )
+}
+
+
+// ---------------------------------------------------------------------------
+// Footer — the view's library to a file, or a file into it
+// ---------------------------------------------------------------------------
+
+function LibraryFileActions({
+    canImport, exporting, onExport, onImport,
+}: {
+    canImport: boolean
+    exporting: boolean
+    onExport: () => void
+    onImport: () => void
+}) {
+    const button = cn(
+        'inline-flex items-center gap-1.5 px-2.5 h-7 rounded-lg',
+        'text-[11px] font-medium text-ink-muted transition-colors',
+        'hover:text-accent-lineage hover:bg-accent-lineage/10',
+        'disabled:opacity-60 disabled:pointer-events-none',
+    )
+    return (
+        <div className={cn(
+            'flex items-center gap-1 px-3 py-2 shrink-0',
+            'border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.03]',
+        )}>
+            <span
+                className="mr-auto inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-muted"
+                title="The library file holds this view's saved queries and its display rules"
+            >
+                <Package className="w-3 h-3 text-accent-lineage" />
+                Queries &amp; rules
+            </span>
+            <button
+                type="button"
+                onClick={onExport}
+                disabled={exporting}
+                className={button}
+                title="Download this view's saved queries and display rules as a file"
+            >
+                {exporting
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <Download className="w-3.5 h-3.5" />}
+                Export library
+            </button>
+            {canImport && (
+                <button
+                    type="button"
+                    onClick={onImport}
+                    className={button}
+                    title="Add saved queries and display rules from a library file"
+                >
+                    <Upload className="w-3.5 h-3.5" />
+                    Import library…
+                </button>
+            )}
+        </div>
     )
 }
 

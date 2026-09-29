@@ -47,6 +47,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   'versioning-api-reference': 'reference',
   'versioning-deep-dives': 'reference',
   changelog: 'reference',
+  'feature-search-and-rules-reference': 'reference',
   // How-to — task-oriented
   setup: 'how-to',
   'integration-testing': 'how-to',
@@ -54,6 +55,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   'falkordb-dr': 'how-to',
   sso: 'how-to',
   'versioning-e2e': 'how-to',
+  'scaling-concurrent-users': 'how-to',
 }
 
 export function getDocType(slug: string): DocType | undefined {

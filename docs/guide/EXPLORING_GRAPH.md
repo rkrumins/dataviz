@@ -203,5 +203,6 @@ A real example, start to finish:
 - Turn your investigation into a shareable artefact → [Creating Views](/guide/creating-views)
 - Understand the colours and edge types → [Reading Lineage](/guide/reading-lineage)
 - Spotlight the context around one node → [The Lineage Lens](/guide/lineage-lens)
+- Find every match in a view by name, tag or property → [Advanced Search](/guide/advanced-search)
 - Move through a graph layer by layer → [Navigating Layers](/guide/navigating-layers)
 - Adopt good habits for naming and sharing → [Ways of Working](/guide/ways-of-working)

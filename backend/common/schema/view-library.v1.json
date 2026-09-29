@@ -1,0 +1,1368 @@
+{
+  "$defs": {
+    "DegreePredicate": {
+      "description": "Match nodes by their edge degree.\n\nPowers structural questions like \"find datasets with zero incoming\nlineage edges\" (UC-1 orphan finder), \"find tables with > 5 children\",\nor \"find views that produce >= 1 downstream artifact\".\n\nThe edge type set is resolved from the live ontology at compile time\nvia the provider's ``_get_lineage_edge_types`` /\n``_get_containment_edge_types`` helpers, so no hardcoded names ever\nleak into Cypher. ``edge_types`` lets a caller pin a specific subset\n(e.g. ``['PRODUCES']`` only); when omitted, the ``edge_class`` chooses\nthe default set.",
+      "properties": {
+        "direction": {
+          "default": "both",
+          "enum": [
+            "in",
+            "out",
+            "both"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "edgeClass": {
+          "default": "lineage",
+          "enum": [
+            "lineage",
+            "containment",
+            "any"
+          ],
+          "title": "Edgeclass",
+          "type": "string"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional explicit edge-type list. When provided, overrides the default set resolved from ``edge_class``.",
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "degree",
+          "default": "degree",
+          "title": "Kind",
+          "type": "string"
+        },
+        "op": {
+          "default": "eq",
+          "enum": [
+            "eq",
+            "neq",
+            "gt",
+            "gte",
+            "lt",
+            "lte"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Value",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "DegreePredicate",
+      "type": "object"
+    },
+    "DescendantOfPredicate": {
+      "description": "Clamp matches to the subtree(s) rooted at ``urns``.\n\nLives as a predicate (not on ``SearchScope``) so it can sit inside\nOR groups — e.g. ``(under Customers OR under Orders) AND tag=PII``.\nThe single-subtree case is also expressible via ``scope.root_urns``,\nwhich the provider may push down as a tighter Cypher anchor.",
+      "properties": {
+        "kind": {
+          "const": "descendantOf",
+          "default": "descendantOf",
+          "title": "Kind",
+          "type": "string"
+        },
+        "maxDepth": {
+          "anyOf": [
+            {
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maxdepth"
+        },
+        "urns": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Urns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "urns"
+      ],
+      "title": "DescendantOfPredicate",
+      "type": "object"
+    },
+    "DisplayRule": {
+      "description": "One display rule, as the Property Manager edits it.",
+      "properties": {
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{3,8}$",
+          "title": "Color",
+          "type": "string"
+        },
+        "createdAt": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Createdat"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "icon": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon"
+        },
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "predicate": {
+          "$ref": "#/$defs/Predicate"
+        }
+      },
+      "required": [
+        "name",
+        "color",
+        "predicate"
+      ],
+      "title": "DisplayRule",
+      "type": "object"
+    },
+    "EdgeGroupPredicate": {
+      "description": "Boolean composition of edge predicates.\n\nSame shape as ``GroupPredicate`` but scoped to a traversed edge.\nService-layer validator enforces depth / leaf caps mirroring the\nnode-predicate tree.",
+      "properties": {
+        "children": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "edgeGroup": "#/$defs/EdgeGroupPredicate",
+                "edgeHasProperty": "#/$defs/EdgeHasPropertyPredicate",
+                "edgeProperty": "#/$defs/EdgePropertyPredicate"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/EdgePropertyPredicate"
+              },
+              {
+                "$ref": "#/$defs/EdgeHasPropertyPredicate"
+              },
+              {
+                "$ref": "#/$defs/EdgeGroupPredicate"
+              }
+            ]
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Children",
+          "type": "array"
+        },
+        "kind": {
+          "const": "edgeGroup",
+          "default": "edgeGroup",
+          "title": "Kind",
+          "type": "string"
+        },
+        "op": {
+          "default": "and",
+          "enum": [
+            "and",
+            "or",
+            "not"
+          ],
+          "title": "Op",
+          "type": "string"
+        }
+      },
+      "required": [
+        "children"
+      ],
+      "title": "EdgeGroupPredicate",
+      "type": "object"
+    },
+    "EdgeHasPropertyPredicate": {
+      "description": "Key-presence predicate against an edge. Compiles to\n``EXISTS(rel.<key>)`` (or ``NOT EXISTS`` when ``negate``).",
+      "properties": {
+        "key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "const": "edgeHasProperty",
+          "default": "edgeHasProperty",
+          "title": "Kind",
+          "type": "string"
+        },
+        "negate": {
+          "default": false,
+          "title": "Negate",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "EdgeHasPropertyPredicate",
+      "type": "object"
+    },
+    "EdgePropertyPredicate": {
+      "description": "Typed comparison against a single edge property.\n\nEvaluated against each traversed relationship inside a\n``PathPredicate`` or ``WithinHopsPredicate``, inside an\n``ALL(rel IN relationships(p) …)`` block. The comparison itself is\n``PropertyPredicate``'s — same operators, value shapes and types.",
+      "properties": {
+        "caseSensitive": {
+          "default": false,
+          "title": "Casesensitive",
+          "type": "boolean"
+        },
+        "includeMissing": {
+          "default": false,
+          "title": "Includemissing",
+          "type": "boolean"
+        },
+        "key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "const": "edgeProperty",
+          "default": "edgeProperty",
+          "title": "Kind",
+          "type": "string"
+        },
+        "op": {
+          "default": "eq",
+          "enum": [
+            "eq",
+            "neq",
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "in",
+            "notIn",
+            "contains",
+            "startsWith",
+            "endsWith",
+            "between",
+            "notContains",
+            "containsAll",
+            "withinLast",
+            "isSet",
+            "isNotSet",
+            "isEmpty",
+            "isNotEmpty"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "valueType": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "string",
+            "number",
+            "boolean",
+            "date"
+          ],
+          "title": "Valuetype",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "EdgePropertyPredicate",
+      "type": "object"
+    },
+    "EntityTypePredicate": {
+      "description": "Restrict matches to (or away from) specific entity types.\n\nEquivalent expressivity to ``scope.entity_types``, but composable\ninside OR groups.",
+      "properties": {
+        "kind": {
+          "const": "entityType",
+          "default": "entityType",
+          "title": "Kind",
+          "type": "string"
+        },
+        "op": {
+          "default": "in",
+          "enum": [
+            "in",
+            "notIn"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "values"
+      ],
+      "title": "EntityTypePredicate",
+      "type": "object"
+    },
+    "GroupPredicate": {
+      "description": "Boolean composition of child predicates.\n\n``op='not'`` must have exactly one child — the service-layer validator\nenforces that (the model accepts ≥1 to keep the schema simple). The\nsame validator enforces ``max_depth ≤ 6`` and ``leaf_count ≤ 64``.",
+      "properties": {
+        "children": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "all": "#/$defs/MatchAllPredicate",
+                "degree": "#/$defs/DegreePredicate",
+                "descendantOf": "#/$defs/DescendantOfPredicate",
+                "entityType": "#/$defs/EntityTypePredicate",
+                "group": "#/$defs/GroupPredicate",
+                "hasIncoming": "#/$defs/HasIncomingPredicate",
+                "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+                "hasProperty": "#/$defs/HasPropertyPredicate",
+                "isLeaf": "#/$defs/IsLeafPredicate",
+                "isOrphan": "#/$defs/IsOrphanPredicate",
+                "isRoot": "#/$defs/IsRootPredicate",
+                "layer": "#/$defs/LayerPredicate",
+                "path": "#/$defs/PathPredicate",
+                "property": "#/$defs/PropertyPredicate",
+                "tag": "#/$defs/TagPredicate",
+                "text": "#/$defs/TextPredicate",
+                "withinHops": "#/$defs/WithinHopsPredicate"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/TextPredicate"
+              },
+              {
+                "$ref": "#/$defs/PropertyPredicate"
+              },
+              {
+                "$ref": "#/$defs/TagPredicate"
+              },
+              {
+                "$ref": "#/$defs/HasPropertyPredicate"
+              },
+              {
+                "$ref": "#/$defs/DescendantOfPredicate"
+              },
+              {
+                "$ref": "#/$defs/WithinHopsPredicate"
+              },
+              {
+                "$ref": "#/$defs/EntityTypePredicate"
+              },
+              {
+                "$ref": "#/$defs/LayerPredicate"
+              },
+              {
+                "$ref": "#/$defs/DegreePredicate"
+              },
+              {
+                "$ref": "#/$defs/IsOrphanPredicate"
+              },
+              {
+                "$ref": "#/$defs/IsLeafPredicate"
+              },
+              {
+                "$ref": "#/$defs/IsRootPredicate"
+              },
+              {
+                "$ref": "#/$defs/HasIncomingPredicate"
+              },
+              {
+                "$ref": "#/$defs/HasOutgoingPredicate"
+              },
+              {
+                "$ref": "#/$defs/PathPredicate"
+              },
+              {
+                "$ref": "#/$defs/MatchAllPredicate"
+              },
+              {
+                "$ref": "#/$defs/GroupPredicate"
+              }
+            ]
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "title": "Children",
+          "type": "array"
+        },
+        "kind": {
+          "const": "group",
+          "default": "group",
+          "title": "Kind",
+          "type": "string"
+        },
+        "op": {
+          "default": "and",
+          "enum": [
+            "and",
+            "or",
+            "not"
+          ],
+          "title": "Op",
+          "type": "string"
+        }
+      },
+      "required": [
+        "children"
+      ],
+      "title": "GroupPredicate",
+      "type": "object"
+    },
+    "HasIncomingPredicate": {
+      "description": "Sugar: nodes with at least one incoming edge of the given class.\nNormalises to ``DegreePredicate(direction='in', op='gt', value=0)``.",
+      "properties": {
+        "edgeClass": {
+          "default": "lineage",
+          "enum": [
+            "lineage",
+            "containment",
+            "any"
+          ],
+          "title": "Edgeclass",
+          "type": "string"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "hasIncoming",
+          "default": "hasIncoming",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "HasIncomingPredicate",
+      "type": "object"
+    },
+    "HasOutgoingPredicate": {
+      "description": "Sugar: nodes with at least one outgoing edge of the given class.\nNormalises to ``DegreePredicate(direction='out', op='gt', value=0)``.",
+      "properties": {
+        "edgeClass": {
+          "default": "lineage",
+          "enum": [
+            "lineage",
+            "containment",
+            "any"
+          ],
+          "title": "Edgeclass",
+          "type": "string"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "hasOutgoing",
+          "default": "hasOutgoing",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "HasOutgoingPredicate",
+      "type": "object"
+    },
+    "HasPropertyPredicate": {
+      "description": "\"Does this node have a property named X\" — key presence only.\n\nCompiles to ``EXISTS(n.<key>)`` (or ``NOT EXISTS`` when ``negate``).\nNative-property storage makes this cheap; pre-refactor this required\nparsing the blob in Python for every node.\n\n``key_match`` searches by the NAME instead: ``prefix`` / ``contains``\nmatch any user property whose name starts with / contains ``key``,\ncase-insensitively (\"a property whose name contains 'owner'\").",
+      "properties": {
+        "key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "keyMatch": {
+          "default": "exact",
+          "enum": [
+            "exact",
+            "prefix",
+            "contains"
+          ],
+          "title": "Keymatch",
+          "type": "string"
+        },
+        "kind": {
+          "const": "hasProperty",
+          "default": "hasProperty",
+          "title": "Kind",
+          "type": "string"
+        },
+        "negate": {
+          "default": false,
+          "title": "Negate",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "HasPropertyPredicate",
+      "type": "object"
+    },
+    "IsLeafPredicate": {
+      "description": "Sugar: nodes with zero outgoing edges of the given class\n(\"dead ends\"). Normalises to\n``DegreePredicate(direction='out', op='eq', value=0)``.",
+      "properties": {
+        "edgeClass": {
+          "default": "lineage",
+          "enum": [
+            "lineage",
+            "containment",
+            "any"
+          ],
+          "title": "Edgeclass",
+          "type": "string"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "isLeaf",
+          "default": "isLeaf",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "IsLeafPredicate",
+      "type": "object"
+    },
+    "IsOrphanPredicate": {
+      "description": "Sugar: nodes with zero edges of the given class. Normalises to\n``DegreePredicate(direction='both', op='eq', value=0)``.",
+      "properties": {
+        "edgeClass": {
+          "default": "lineage",
+          "enum": [
+            "lineage",
+            "containment",
+            "any"
+          ],
+          "title": "Edgeclass",
+          "type": "string"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "isOrphan",
+          "default": "isOrphan",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "IsOrphanPredicate",
+      "type": "object"
+    },
+    "IsRootPredicate": {
+      "description": "Sugar: nodes with zero incoming edges of the given class\n(\"nobody produces this\"). Normalises to\n``DegreePredicate(direction='in', op='eq', value=0)``.",
+      "properties": {
+        "edgeClass": {
+          "default": "lineage",
+          "enum": [
+            "lineage",
+            "containment",
+            "any"
+          ],
+          "title": "Edgeclass",
+          "type": "string"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "isRoot",
+          "default": "isRoot",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "IsRootPredicate",
+      "type": "object"
+    },
+    "LayerPredicate": {
+      "description": "Match the view's layer assignment (Source / Staging / Refinery / …).",
+      "properties": {
+        "kind": {
+          "const": "layer",
+          "default": "layer",
+          "title": "Kind",
+          "type": "string"
+        },
+        "layerAssignment": {
+          "minLength": 1,
+          "title": "Layerassignment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "layerAssignment"
+      ],
+      "title": "LayerPredicate",
+      "type": "object"
+    },
+    "LibraryPackSource": {
+      "properties": {
+        "branchId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Branchid"
+        },
+        "viewId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Viewid"
+        },
+        "viewName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Viewname"
+        }
+      },
+      "title": "LibraryPackSource",
+      "type": "object"
+    },
+    "MatchAllPredicate": {
+      "description": "Every entity in scope — \"all in this view\", \"count everything\".\n\nAn ``and`` group with no children would mean the same, and the model\nrefuses one on purpose: a client bug that dropped every condition must\nnot quietly match the whole view. Asking for everything is spelled out.",
+      "properties": {
+        "kind": {
+          "const": "all",
+          "default": "all",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "MatchAllPredicate",
+      "type": "object"
+    },
+    "PathPredicate": {
+      "description": "Find paths between source and target nodes.\n\nTop-level AND only — the compiler raises CompileError if it\nappears inside an OR or NOT group. When present, ``options.results``\nmust be ``'paths'``; the response carries ordered node→edge→node\nsequences instead of (or in addition to) flat hits / aggregates.\n\nPowers UC3: \"find all paths from dataset:orders to dataset:reporting\ngoing through ≤4 lineage hops\".",
+      "properties": {
+        "direction": {
+          "default": "outgoing",
+          "description": "``outgoing`` walks source → target along edge direction; ``incoming`` walks against direction; ``any`` is undirected.",
+          "enum": [
+            "outgoing",
+            "incoming",
+            "any"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "edgeClass": {
+          "default": "lineage",
+          "enum": [
+            "lineage",
+            "containment",
+            "any"
+          ],
+          "title": "Edgeclass",
+          "type": "string"
+        },
+        "edgePredicate": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "edgeGroup": "#/$defs/EdgeGroupPredicate",
+                  "edgeHasProperty": "#/$defs/EdgeHasPropertyPredicate",
+                  "edgeProperty": "#/$defs/EdgePropertyPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/EdgePropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeHasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeGroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional predicate evaluated against every edge in the returned paths. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.",
+          "title": "Edgepredicate"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional explicit edge-type list; overrides ``edge_class``'s resolved set.",
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "path",
+          "default": "path",
+          "title": "Kind",
+          "type": "string"
+        },
+        "maxHops": {
+          "default": 4,
+          "description": "Maximum path length in edge hops.",
+          "maximum": 6,
+          "minimum": 1,
+          "title": "Maxhops",
+          "type": "integer"
+        },
+        "maxPaths": {
+          "default": 32,
+          "description": "Hard cap on the number of paths returned.",
+          "maximum": 128,
+          "minimum": 1,
+          "title": "Maxpaths",
+          "type": "integer"
+        },
+        "sourceUrns": {
+          "description": "Starting nodes. The provider runs a variable-length match outward (or inward) from each.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Sourceurns",
+          "type": "array"
+        },
+        "targetUrns": {
+          "description": "Endpoint nodes. Paths terminate here.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Targeturns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sourceUrns",
+        "targetUrns"
+      ],
+      "title": "PathPredicate",
+      "type": "object"
+    },
+    "Predicate": {
+      "discriminator": {
+        "mapping": {
+          "all": "#/$defs/MatchAllPredicate",
+          "degree": "#/$defs/DegreePredicate",
+          "descendantOf": "#/$defs/DescendantOfPredicate",
+          "entityType": "#/$defs/EntityTypePredicate",
+          "group": "#/$defs/GroupPredicate",
+          "hasIncoming": "#/$defs/HasIncomingPredicate",
+          "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+          "hasProperty": "#/$defs/HasPropertyPredicate",
+          "isLeaf": "#/$defs/IsLeafPredicate",
+          "isOrphan": "#/$defs/IsOrphanPredicate",
+          "isRoot": "#/$defs/IsRootPredicate",
+          "layer": "#/$defs/LayerPredicate",
+          "path": "#/$defs/PathPredicate",
+          "property": "#/$defs/PropertyPredicate",
+          "tag": "#/$defs/TagPredicate",
+          "text": "#/$defs/TextPredicate",
+          "withinHops": "#/$defs/WithinHopsPredicate"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TextPredicate"
+        },
+        {
+          "$ref": "#/$defs/PropertyPredicate"
+        },
+        {
+          "$ref": "#/$defs/TagPredicate"
+        },
+        {
+          "$ref": "#/$defs/HasPropertyPredicate"
+        },
+        {
+          "$ref": "#/$defs/DescendantOfPredicate"
+        },
+        {
+          "$ref": "#/$defs/WithinHopsPredicate"
+        },
+        {
+          "$ref": "#/$defs/EntityTypePredicate"
+        },
+        {
+          "$ref": "#/$defs/LayerPredicate"
+        },
+        {
+          "$ref": "#/$defs/DegreePredicate"
+        },
+        {
+          "$ref": "#/$defs/IsOrphanPredicate"
+        },
+        {
+          "$ref": "#/$defs/IsLeafPredicate"
+        },
+        {
+          "$ref": "#/$defs/IsRootPredicate"
+        },
+        {
+          "$ref": "#/$defs/HasIncomingPredicate"
+        },
+        {
+          "$ref": "#/$defs/HasOutgoingPredicate"
+        },
+        {
+          "$ref": "#/$defs/PathPredicate"
+        },
+        {
+          "$ref": "#/$defs/MatchAllPredicate"
+        },
+        {
+          "$ref": "#/$defs/GroupPredicate"
+        }
+      ]
+    },
+    "PropertyPredicate": {
+      "description": "Typed comparison against a single user-property.\n\n``value_type`` says how stored values are read — under ``number`` a\nstored \"15\" is 15, under ``string`` a stored 15 is \"15\" — and the\ncomparison holds for any stored kind, a list included (it matches when\nan element does). ``value`` is shaped by ``op``: one value, a list\n(``in`` / ``notIn`` / ``containsAll``), ``[lo, hi]`` (``between``), an\nISO duration such as ``\"P30D\"`` (``withinLast``) or nothing (``isSet``,\n``isEmpty`` and their negations). An integer beyond 2^53 is best sent\nas its digits in a string with ``value_type='number'``: it is compared\nexactly. Text comparisons are case-insensitive unless\n``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /\n``notContains`` match entities without the key. The full contract is\n``backend/common/search_semantics``.",
+      "properties": {
+        "caseSensitive": {
+          "default": false,
+          "title": "Casesensitive",
+          "type": "boolean"
+        },
+        "includeMissing": {
+          "default": false,
+          "title": "Includemissing",
+          "type": "boolean"
+        },
+        "key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "const": "property",
+          "default": "property",
+          "title": "Kind",
+          "type": "string"
+        },
+        "op": {
+          "default": "eq",
+          "enum": [
+            "eq",
+            "neq",
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "in",
+            "notIn",
+            "contains",
+            "startsWith",
+            "endsWith",
+            "between",
+            "notContains",
+            "containsAll",
+            "withinLast",
+            "isSet",
+            "isNotSet",
+            "isEmpty",
+            "isNotEmpty"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "valueType": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "string",
+            "number",
+            "boolean",
+            "date"
+          ],
+          "title": "Valuetype",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "PropertyPredicate",
+      "type": "object"
+    },
+    "SavedQuery": {
+      "description": "What a client writes: the rest is the server's to stamp.",
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "id": {
+          "description": "Written by an export; an import gives the query a new id.",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "predicate": {
+          "$ref": "#/$defs/Predicate"
+        }
+      },
+      "required": [
+        "name",
+        "predicate"
+      ],
+      "title": "SavedQuery",
+      "type": "object"
+    },
+    "TagPredicate": {
+      "description": "Match against the (currently JSON-stringified) ``n.tags`` field.\n\nTags remain stringified in this workstream — see the storage-refactor\ncommit. Server-side this maps to ``n.tags CONTAINS $tag`` per value,\ncomposed by ``op``.",
+      "properties": {
+        "kind": {
+          "const": "tag",
+          "default": "tag",
+          "title": "Kind",
+          "type": "string"
+        },
+        "op": {
+          "default": "has",
+          "enum": [
+            "has",
+            "hasAll",
+            "hasAny",
+            "notHas"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "values"
+      ],
+      "title": "TagPredicate",
+      "type": "object"
+    },
+    "TextPredicate": {
+      "description": "Free-form text match against a single field (or ``any``).",
+      "properties": {
+        "boost": {
+          "default": 1.0,
+          "description": "Relevance multiplier when match='fulltext'.",
+          "maximum": 10.0,
+          "minimum": 0.0,
+          "title": "Boost",
+          "type": "number"
+        },
+        "caseSensitive": {
+          "default": false,
+          "title": "Casesensitive",
+          "type": "boolean"
+        },
+        "kind": {
+          "const": "text",
+          "default": "text",
+          "title": "Kind",
+          "type": "string"
+        },
+        "match": {
+          "default": "substring",
+          "enum": [
+            "exact",
+            "prefix",
+            "suffix",
+            "substring",
+            "fulltext",
+            "regex"
+          ],
+          "title": "Match",
+          "type": "string"
+        },
+        "propertyKey": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required when ``target='property'``; ignored otherwise.",
+          "title": "Propertykey"
+        },
+        "target": {
+          "default": "any",
+          "enum": [
+            "name",
+            "qualifiedName",
+            "description",
+            "tags",
+            "property",
+            "any"
+          ],
+          "title": "Target",
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "TextPredicate",
+      "type": "object"
+    },
+    "WithinHopsPredicate": {
+      "description": "Match nodes within N relationship hops of any anchor URN.\n\nPowers lineage-aware questions (\"any column 2 hops downstream of\n``orders.id``\"). ``edge_types`` restricts the traversal to specific\nrelationship types; omitted means all. ``direction='out'`` walks\nout-edges only, ``'in'`` walks in-edges, ``'both'`` is undirected.",
+      "properties": {
+        "direction": {
+          "default": "both",
+          "enum": [
+            "out",
+            "in",
+            "both"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "edgeClass": {
+          "default": "lineage",
+          "description": "Default edge-class when ``edge_types`` is omitted. Mirrors DegreePredicate / PathPredicate.",
+          "enum": [
+            "lineage",
+            "containment",
+            "any"
+          ],
+          "title": "Edgeclass",
+          "type": "string"
+        },
+        "edgePredicate": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "edgeGroup": "#/$defs/EdgeGroupPredicate",
+                  "edgeHasProperty": "#/$defs/EdgeHasPropertyPredicate",
+                  "edgeProperty": "#/$defs/EdgePropertyPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/EdgePropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeHasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeGroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional predicate evaluated against every traversed edge. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.",
+          "title": "Edgepredicate"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edgetypes"
+        },
+        "hops": {
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Hops",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "withinHops",
+          "default": "withinHops",
+          "title": "Kind",
+          "type": "string"
+        },
+        "urns": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Urns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "urns",
+        "hops"
+      ],
+      "title": "WithinHopsPredicate",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "A view's display rules and saved queries, exported to be imported into another view (POST /api/v1/views/{view_id}/library/import). Each item is checked as it is when saved; one that fails is refused and the rest still import. Keys this schema doesn't list are ignored. See docs/features/search-and-rules-reference.md.",
+  "properties": {
+    "displayRules": {
+      "items": {
+        "$ref": "#/$defs/DisplayRule"
+      },
+      "maxItems": 200,
+      "title": "Displayrules",
+      "type": "array"
+    },
+    "exportedAt": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Exportedat"
+    },
+    "format": {
+      "const": "synodic.view-library",
+      "title": "Format"
+    },
+    "savedQueries": {
+      "items": {
+        "$ref": "#/$defs/SavedQuery"
+      },
+      "maxItems": 500,
+      "title": "Savedqueries",
+      "type": "array"
+    },
+    "source": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LibraryPackSource"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "version": {
+      "const": 1,
+      "title": "Version"
+    }
+  },
+  "required": [
+    "format",
+    "version"
+  ],
+  "title": "View Library Pack v1",
+  "type": "object"
+}
