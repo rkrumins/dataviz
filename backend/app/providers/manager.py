@@ -134,9 +134,10 @@ _SLOT_MAX_WAITERS = int(os.getenv("PROVIDER_SLOT_MAX_WAITERS", "16"))
 # Sized from the node's own THREAD_COUNT where one has been read, because a
 # node cannot execute more queries at once than it has query threads and
 # admitting past that only lengthens everybody's queue. Set
-# ``PROVIDER_FLEET_MAX_CONCURRENCY`` to override — a workload of short
-# queries tolerates some queueing, and 0 turns the fleet counter off
-# entirely (back to per-process caps only).
+# ``PROVIDER_FLEET_MAX_CONCURRENCY`` to a positive number to override — a
+# workload of short queries tolerates some queueing. 0 (the default) sizes
+# from THREAD_COUNT; a negative value turns the fleet counter off entirely
+# (back to per-process caps only).
 _FLEET_MAX_CONCURRENCY = int(os.getenv("PROVIDER_FLEET_MAX_CONCURRENCY", "0"))
 # Never let a misread or tiny THREAD_COUNT shed a store down to a trickle.
 _FLEET_MIN_CONCURRENCY = 4

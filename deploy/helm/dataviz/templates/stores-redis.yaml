@@ -41,9 +41,9 @@ spec:
             - "--appendonly"
             - "yes"
             - "--maxmemory"
-            - "256mb"
+            - {{ .Values.stores.redis.maxmemory | quote }}
             - "--maxmemory-policy"
-            - "noeviction"
+            - {{ .Values.stores.redis.maxmemoryPolicy | quote }}
           ports:
             - name: redis
               containerPort: 6379

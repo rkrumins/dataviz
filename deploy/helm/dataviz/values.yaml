@@ -193,13 +193,26 @@ stores:
   redis:
     enabled: false
     image: redis:7-alpine
+    # volatile-lru: only keys with a TTL are evicted, so cache entries go
+    # first under memory pressure and the job streams (no TTL) are kept.
+    # noeviction on an instance shared by streams and cache fails every
+    # write once it fills. Parity with compose and the k8s base; the memory
+    # request/limit below leave room for maxmemory plus overhead.
+    maxmemory: 2gb
+    maxmemoryPolicy: volatile-lru
     storage: 5Gi
     resources:
-      requests: { cpu: 100m, memory: 256Mi }
-      limits: { cpu: 500m, memory: 512Mi }
+      requests: { cpu: 100m, memory: 2Gi }
+      limits: { cpu: 500m, memory: 2560Mi }
   postgres:
     enabled: false
     image: postgres:16.14-alpine
+    # Must cover every backend process's SQLAlchemy pool ceilings (up to 85
+    # per process, db/engine.py) x gunicorn workers x replicas. The server
+    # default of 100 is exhausted by one warm viz pod. Parity with compose
+    # and the k8s base; at HPA scale front Postgres with a transaction
+    # pooler instead of raising this (docs/SCALING_CONCURRENT_USERS.md).
+    maxConnections: 400
     storage: 20Gi
     resources:
       requests: { cpu: 250m, memory: 512Mi }
