@@ -40,6 +40,10 @@
  * effect. Any other input changing — a direction toggle, a depth, a layer
  * edit — leaves the reader's expansion exactly as they left it.
  *
+ * A COMBINED TRACE (`focusUrns`, a multi-selection) seeds every seed by these
+ * same rules, but stays keyed by the PRIMARY: dropping any other seed is an
+ * input change like the rest, never a re-seed.
+ *
  * AND IT WAITS FOR A MODEL THAT HOLDS THE FOCUS. The canvas sets `focusUrn`
  * the instant the reader presses Trace, while the walk hook hands back a
  * LOADING entry carrying an EMPTY model — non-null, so a seed keyed on the
@@ -72,7 +76,13 @@ import type { ViewLayerConfig } from '@/types/schema'
 
 export interface UseTraceOverlayArgs {
   model: LensWalkModel | null
+  /** The PRIMARY seed: what the seed state, a restore and a re-seed are
+   *  keyed by. */
   focusUrn: string | null
+  /** Every seed of a combined trace, `focusUrn` first. Omitted =
+   *  `[focusUrn]`. Removing a seed other than the primary keeps the reader's
+   *  expansion: only a new primary re-seeds. */
+  focusUrns?: readonly string[]
   layers: ViewLayerConfig[]
   assignments: Record<string, { layerId: string }>
   viewIsCurated: boolean
@@ -141,6 +151,7 @@ function viewInputs(a: UseTraceOverlayArgs, traceExpansion: ReadonlySet<string>)
   return {
     model: a.model,
     focusUrn: a.focusUrn,
+    focusUrns: a.focusUrns?.length ? a.focusUrns : undefined,
     layers: a.layers,
     assignments: a.assignments,
     viewIsCurated: a.viewIsCurated,
@@ -182,9 +193,9 @@ function withHosts(a: UseTraceOverlayArgs, ids: ReadonlySet<string>): ReadonlySe
   // The FOCUS's own hosts are walked too, without opening the focus itself:
   // a trace that does not show the entity it is about is not a picture worth
   // restoring, and whether the focus opens is `seedExpansion`'s call (a
-  // container with a hundred children lands closed).
+  // container with a hundred children lands closed). Every seed's hosts.
   const out = new Set(ids)
-  for (const id of [...ids, inputs.focusUrn]) {
+  for (const id of [...ids, ...(inputs.focusUrns ?? [inputs.focusUrn])]) {
     let cursor = parents.get(id) ?? null
     while (cursor && !out.has(cursor)) {
       out.add(cursor)
@@ -198,6 +209,8 @@ function seedExpansion(a: UseTraceOverlayArgs): ReadonlySet<string> {
   const inputs = viewInputs(a, EMPTY_EXPANSION)
   if (!inputs) return EMPTY_EXPANSION
   const focusUrn = inputs.focusUrn
+  // A combined trace opens the way to EVERY seed, each by the rules below.
+  const seeds = inputs.focusUrns ?? [focusUrn]
 
   const sg = buildLensSubgraph({
     focusUrn,
@@ -207,7 +220,12 @@ function seedExpansion(a: UseTraceOverlayArgs): ReadonlySet<string> {
     frontierUp: [],
     frontierDown: [],
   })
-  const seed = new Set<string>([...focusAncestorChain(sg), focusUrn])
+  const chains = new Map(seeds.map(f => [f, focusAncestorChain({ ...sg, focusUrn: f })] as const))
+  const seed = new Set<string>()
+  for (const f of seeds) {
+    for (const id of chains.get(f)!) seed.add(id)
+    seed.add(f)
+  }
 
   // Where the VIEW anchors each card is `buildTraceView`'s decision (the
   // canvas's own placement chain), so ask it rather than re-deriving it here.
@@ -223,14 +241,20 @@ function seedExpansion(a: UseTraceOverlayArgs): ReadonlySet<string> {
   // lineage-bearing children lands CLOSED — its pill says "N on this
   // lineage", its wires roll up to it, and one click opens it — instead of
   // a wall of rows. Decided BEFORE the partner walk: a table whose edges
-  // touch its columns has no direct partners of its own.
-  let focusKids = 0
-  for (const card of cards.values()) if (card.parentId === focusUrn) focusKids += 1
-  if (focusKids > FOCUS_AUTO_OPEN_MAX) seed.delete(focusUrn)
+  // touch its columns has no direct partners of its own. Judged per seed —
+  // and never for a seed another seed sits inside, whose way in it is.
+  const kidsOf = new Map<string, number>()
+  for (const card of cards.values()) {
+    if (card.parentId !== null) kidsOf.set(card.parentId, (kidsOf.get(card.parentId) ?? 0) + 1)
+  }
+  for (const f of seeds) {
+    const holdsASeed = seeds.some(o => o !== f && chains.get(o)!.has(f))
+    if ((kidsOf.get(f) ?? 0) > FOCUS_AUTO_OPEN_MAX && !holdsASeed) seed.delete(f)
+  }
 
   // The focus SIDE: the focus and everything inside it (see the header).
-  const focusSide = new Set<string>([focusUrn])
-  const stack = [...(sg.nodes.get(focusUrn)?.children ?? [])]
+  const focusSide = new Set<string>(seeds)
+  const stack = seeds.flatMap(f => sg.nodes.get(f)?.children ?? [])
   while (stack.length > 0) {
     const urn = stack.pop()!
     if (focusSide.has(urn)) continue
@@ -270,13 +294,19 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   const { model, focusUrn, layers, assignments, viewIsCurated } = a
   const { showUpstream, showDownstream, depthUp, depthDown } = a
   const { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns } = a.placement ?? {}
+  // The seeds by VALUE, for the same reason: a list equal to the last one
+  // must not rebuild anything.
+  const seedKey = a.focusUrns?.length ? a.focusUrns.join('\u0000') : null
+  const focusUrns = useMemo(() => seedKey?.split('\u0000'), [seedKey])
 
-  // O(n) over the walk's nodes, but only when the model or the focus changes
-  // — which is exactly when the answer can change.
-  const focusInModel = useMemo(
-    () => !!focusUrn && !!model && model.nodes.some(n => n.urn === focusUrn),
-    [model, focusUrn],
-  )
+  // O(n) over the walk's nodes, but only when the model or the seeds change
+  // — which is exactly when the answer can change. A combined trace is live
+  // as soon as ANY of its seeds has landed.
+  const focusInModel = useMemo(() => {
+    if (!focusUrn || !model) return false
+    const seeds = new Set(focusUrns ?? [focusUrn])
+    return model.nodes.some(n => seeds.has(n.urn))
+  }, [model, focusUrn, focusUrns])
 
   const [seed, setSeed] = useState<SeedState>(() => ({
     forFocus: focusUrn, set: seedExpansion(a), seeded: focusInModel, closed: EMPTY_EXPANSION, restored: null, pending: null,
@@ -324,10 +354,10 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // on the model, so the O(model) seed runs once per wave.
   const seedNow = useMemo(() => (
     focusInModel
-      ? seedExpansion({ model, focusUrn, layers, assignments, viewIsCurated, showUpstream, showDownstream, depthUp, depthDown,
+      ? seedExpansion({ model, focusUrn, focusUrns, layers, assignments, viewIsCurated, showUpstream, showDownstream, depthUp, depthDown,
         placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns } })
       : EMPTY_EXPANSION
-  ), [model, focusUrn, layers, assignments, viewIsCurated, showUpstream, showDownstream, depthUp, depthDown,
+  ), [model, focusUrn, focusUrns, layers, assignments, viewIsCurated, showUpstream, showDownstream, depthUp, depthDown,
     backendAssignments, unassignedFallbackLayerId, branchCreatedUrns, focusInModel])
   const closed = seed.closed
   const traceExpansion = useMemo(() => {
@@ -352,12 +382,12 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   const view = useMemo<TraceView | null>(() => (
     active && model && focusUrn
       ? buildTraceView({
-        model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
+        model, focusUrn, focusUrns, layers, assignments, viewIsCurated, traceExpansion,
         showUpstream, showDownstream, depthUp, depthDown,
         placement: { backendAssignments, unassignedFallbackLayerId, branchCreatedUrns },
       })
       : null
-  ), [active, model, focusUrn, layers, assignments, viewIsCurated, traceExpansion,
+  ), [active, model, focusUrn, focusUrns, layers, assignments, viewIsCurated, traceExpansion,
     showUpstream, showDownstream, depthUp, depthDown,
     backendAssignments, unassignedFallbackLayerId, branchCreatedUrns])
 

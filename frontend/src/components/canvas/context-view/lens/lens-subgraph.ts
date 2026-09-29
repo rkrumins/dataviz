@@ -80,6 +80,11 @@ export interface LensFrontierEntry {
 
 export interface LensSubgraphInput<N extends LensNodeLike = LensNodeLike> {
     focusUrn: string
+    /** Every seed of a COMBINED trace (the canvas's multi-selection), the
+     *  primary `focusUrn` among them. Each one and its descendants sit at
+     *  hop 0, so a partner's hop is its distance to the NEAREST seed.
+     *  Omitted = `[focusUrn]`, which is all the Focus Lens ever passes. */
+    focusUrns?: ReadonlyArray<string>
     nodes: ReadonlyArray<N>
     /** Raw lineage hops — the ONLY edges rendered as lineage. */
     lineageEdges: ReadonlyArray<LensEdgeLike>
@@ -206,10 +211,14 @@ export function buildLensSubgraph<N extends LensNodeLike>(
     // containment descendant of it. A container focus has no lineage edges
     // of its own — only its descendants do — so without seeding the whole
     // subtree, a descendant one containment-level down would wrongly read
-    // as hop 1 instead of hop 0.
+    // as hop 1 instead of hop 0. A combined trace seeds every seed's side.
+    const focusSet = new Set(input.focusUrns ?? [input.focusUrn])
     const hopSeed = new Set<string>()
-    if (member.has(input.focusUrn)) hopSeed.add(input.focusUrn)
-    const descStack = [...(childrenOf.get(input.focusUrn) ?? [])]
+    const descStack: string[] = []
+    for (const focus of focusSet) {
+        if (member.has(focus)) hopSeed.add(focus)
+        descStack.push(...(childrenOf.get(focus) ?? []))
+    }
     while (descStack.length > 0) {
         const urn = descStack.pop()!
         if (hopSeed.has(urn)) continue
@@ -282,7 +291,7 @@ export function buildLensSubgraph<N extends LensNodeLike>(
             isLeaf: children.length === 0,
             up: up.has(urn),
             down: down.has(urn),
-            isFocus: urn === input.focusUrn,
+            isFocus: focusSet.has(urn),
             hopDown: hopDownOf.get(urn) ?? null,
             hopUp: hopUpOf.get(urn) ?? null,
             degreeUp: degreeUpOf.get(urn) ?? 0,

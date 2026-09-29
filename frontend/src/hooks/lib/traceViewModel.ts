@@ -76,6 +76,10 @@ export interface TraceLane {
 export interface TraceViewInputs {
   model: LensWalkModel
   focusUrn: string
+  /** Every seed of a COMBINED trace, `focusUrn` (the primary) among them.
+   *  Each is a focus in its own right: its side is role 'focus', and every
+   *  partner's hop is measured to the NEAREST seed. Omitted = `[focusUrn]`. */
+  focusUrns?: readonly string[]
   layers: ViewLayerConfig[]
   assignments: Record<string, { layerId: string }>
   viewIsCurated: boolean
@@ -125,8 +129,10 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
   // RAW edges only: rollups are a summary OF the raw hops, so counting them
   // as hops would double-count and put container-grain distances on the same
   // ruler as column-grain ones.
+  const seeds = i.focusUrns ?? [i.focusUrn]
   const sg = buildLensSubgraph<LensWalkNode>({
     focusUrn: i.focusUrn,
+    focusUrns: i.focusUrns,
     nodes: i.model.nodes,
     lineageEdges: i.model.lineageEdges.filter(e => e.kind !== 'rollup'),
     containmentEdges: i.model.containmentEdges,
@@ -138,9 +144,10 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
   // seeds that whole subtree at hop 0 in BOTH directions, which would read as
   // role 'both' — as if the focus's own columns were partners of themselves.
   // They are what the reader is looking at, so they are 'focus': never
-  // counted as a partner, never scoped away by a direction toggle.
+  // counted as a partner, never scoped away by a direction toggle. In a
+  // combined trace that is every seed's side.
   const focusSide = new Set<string>()
-  const focusStack = [i.focusUrn]
+  const focusStack = [...seeds]
   while (focusStack.length > 0) {
     const urn = focusStack.pop()!
     if (focusSide.has(urn) || !sg.nodes.has(urn)) continue
@@ -159,13 +166,28 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
   // leaves a residual only on the levels with flows of their own. A
   // database whose cell is fully stated by its tables' cells is a HOST the
   // picture passes through on the way to them, never a partner beside them.
-  const residuals = rollupResiduals(i.model, i.completePairs)
+  // A combined trace accounts each seed's cells against that seed alone —
+  // exactly as tracing it by itself would — and sums them, so a partner two
+  // seeds reach carries both seeds' flows. Another seed's side is never a
+  // partner, here any more than in the roles below.
+  const seedSet = new Set(seeds)
+  let residuals: Map<string, number>
+  if (seedSet.size > 1) {
+    residuals = new Map()
+    for (const seed of seedSet) {
+      for (const [far, n] of rollupResiduals({ ...i.model, focusUrn: seed }, i.completePairs)) {
+        if (!focusSide.has(far)) residuals.set(far, (residuals.get(far) ?? 0) + n)
+      }
+    }
+  } else {
+    residuals = rollupResiduals(i.model, i.completePairs)
+  }
   const rollupUp = new Set<string>()
   const rollupDown = new Set<string>()
   for (const e of i.model.lineageEdges) {
     if (e.kind !== 'rollup') continue
-    if (e.targetUrn === i.focusUrn && (residuals.get(e.sourceUrn) ?? 0) > 0) rollupUp.add(e.sourceUrn)
-    if (e.sourceUrn === i.focusUrn && (residuals.get(e.targetUrn) ?? 0) > 0) rollupDown.add(e.targetUrn)
+    if (seedSet.has(e.targetUrn) && (residuals.get(e.sourceUrn) ?? 0) > 0) rollupUp.add(e.sourceUrn)
+    if (seedSet.has(e.sourceUrn) && (residuals.get(e.targetUrn) ?? 0) > 0) rollupDown.add(e.targetUrn)
   }
 
   const roleBy = new Map<string, TraceCard['role']>()
