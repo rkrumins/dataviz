@@ -141,7 +141,7 @@ _FLEET_MAX_CONCURRENCY = int(os.getenv("PROVIDER_FLEET_MAX_CONCURRENCY", "0"))
 # Never let a misread or tiny THREAD_COUNT shed a store down to a trickle.
 _FLEET_MIN_CONCURRENCY = 4
 # How long a slot survives a holder that never released it. A provider call
-# is bounded by the request tier above it (60s graph / 120s versioning), so a
+# is bounded by the request tier above it (120s graph/trace/versioning), so a
 # holder still counted past this is a process that died mid-call, and its
 # slot must come back without one. NOT the aggregation 660s: that bounds a
 # write batch, and 660s of a phantom holder against a cap of 6 would be an

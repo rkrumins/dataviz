@@ -2197,6 +2197,34 @@ async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
     )
 
 
+# A search stopped on a read it could not recover from (a walk unit that ran
+# out of budget cannot be split). It is a breaker logical exception, not an
+# outage, so it no longer arrives as PROVIDER_UNAVAILABLE — and the catch-all
+# above would log it as an ERROR with a traceback and answer a reason-less
+# 500. Still a 500: the client treats that as a rejected query, neither
+# counted by its breaker nor retried (a retry replans the same search and
+# fails the same way).
+from backend.app.services.deep_search import SearchFailed as _SearchFailed  # noqa: E402
+
+
+@app.exception_handler(_SearchFailed)
+async def _search_failed_handler(request, exc: _SearchFailed):
+    logger.warning("Search failed on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": "SEARCH_FAILED",
+                "reason": (
+                    "the search could not finish on part of the graph; "
+                    "narrow the scope or the conditions and run it again"
+                ),
+                "technical": str(exc),
+            }
+        },
+    )
+
+
 # A write reached a feature an admin turned off (e.g. the versioned write-through
 # path when ``versioningEnabled`` is disabled) — same typed 403 shape as the
 # API-layer gate in ``versioning_gate.py`` so the frontend handles one contract.
@@ -2469,11 +2497,14 @@ class _TimeoutMiddleware:
 
     Tiers (P1.8 — anchored prefix match, ordered most-specific first):
         ANY path in SSE_PATHS                exempt entirely (long-lived)
-        prefix /api/v1/health        ->  5s  (probes must be fast)
-        prefix /api/v1/graph         -> 60s  (read queries inc. advanced search;
-                                              per-query bounded by soft deadline)
-        prefix /api/v1/aggregation/  -> 45s  (write-heavy operations)
-        everything else              -> 30s  (default)
+        prefix /api/v1/health        ->   5s  (probes must be fast)
+        prefix /api/v1/graph/edges/{aggregated,between}
+                                     ->  90s  (edge scans; 72s / 80s budgets inside)
+        prefix /api/v1/graph/trace   -> 120s  (the trace engine stops 20s under it)
+        prefix /api/v1/graph         -> 120s  (read queries inc. advanced search;
+                                               per-query bounded by soft deadline)
+        prefix /api/v1/aggregation/  ->  90s  (write-heavy operations)
+        everything else              ->  30s  (default)
 
     Why anchored prefixes (vs. substring): substring matching meant
     ``"/health" in path`` matched ``/api/v1/internal/health-metrics``,
@@ -2547,13 +2578,13 @@ class _TimeoutMiddleware:
         self._tiers: list[tuple[str, float]] = [
             ("/api/v1/health",        float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))),
             ("/health",               float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))),
-            ("/api/v1/graph/edges/aggregated", float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
-            ("/api/v1/graph/edges/between",    float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
-            ("/api/v1/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))),
-            ("/api/v2/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))),
-            ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
-            ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
-            ("/api/v1/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
+            ("/api/v1/graph/edges/aggregated", float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90"))),
+            ("/api/v1/graph/edges/between",    float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90"))),
+            ("/api/v1/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "120"))),
+            ("/api/v2/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "120"))),
+            ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "120"))),
+            ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "120"))),
+            ("/api/v1/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90"))),
             # Versioning carries request-scoped full-graph work (projection
             # reconcile drift reports, rebuild catch-up) that legitimately
             # runs past the 30s default on large graphs; the ws-segment

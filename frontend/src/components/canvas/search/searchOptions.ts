@@ -49,9 +49,9 @@ const SEARCH_PAGE_SIZE = 1000
  *
  * `candidateCap` is raised over the deployment default (10 000) so a broad
  * word in a large view still counts every match rather than reporting a
- * capped scan; `softDeadlineMs` sits below the client's 45 s fetch timeout
- * (`TIMEOUTS.SEARCH_ADVANCED_MS`) so a slow query comes back as partial rows
- * the user can read, not as an abort.
+ * capped scan; `softDeadlineMs` sits well below the client's 150 s fetch
+ * timeout (`TIMEOUTS.SEARCH_ADVANCED_MS`) so a slow query comes back as
+ * partial rows the user can read, not as an abort.
  */
 export const SEARCH_OPTIONS: SearchQuery['options'] = {
     results: 'both',
@@ -59,5 +59,5 @@ export const SEARCH_OPTIONS: SearchQuery['options'] = {
     aggregations: [{ by: 'ancestor', maxBuckets: 20000, sampleHitsPerBucket: 0 }],
     includeAncestorPath: true,
     candidateCap: 50000,
-    softDeadlineMs: 20000,
+    softDeadlineMs: 45000,
 }

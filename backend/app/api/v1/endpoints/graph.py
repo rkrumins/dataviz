@@ -1069,7 +1069,7 @@ async def trace_v2(
     the database — never explodes a Domain-level trace down to Columns.
 
     Hard caps: ``TRACE_MAX_NODES`` (default 2000) nodes,
-    ``TRACE_TIMEOUT_SECS`` (default 60 s) outer budget — both server
+    ``TRACE_TIMEOUT_SECS`` (default 120 s) outer budget — both server
     config, not per-request. See ``app/config/resilience.py``. On trip,
     returns ``truncated: true`` with ``truncationReason``. Always HTTP
     200 unless input is malformed.

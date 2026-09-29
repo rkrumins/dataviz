@@ -106,7 +106,8 @@ settings object. Defaults:
 | `DEEP_SEARCH_MAX_OR_BRANCH` | `24` | Max branches in an OR group. |
 | `DEEP_SEARCH_CANDIDATE_CAP` | `10000` | Default per-query candidate cap. |
 | `DEEP_SEARCH_CANDIDATE_CAP_MAX` | `100000` | Hard ceiling on the candidate cap. |
-| `DEEP_SEARCH_SOFT_DEADLINE_MS` | `30000` | Default soft execution deadline. |
+| `DEEP_SEARCH_SOFT_DEADLINE_MS` | `60000` | Not read: the default soft deadline is `options.softDeadlineMs` (`60000`), set per request. |
+| `DEEP_SEARCH_CHUNK_TIMEOUT_MS` | `45000` | Budget for one scan unit of the uncapped engine. A range unit that runs out is split and retried; a single-root walk unit cannot be, so the search fails. |
 | `DEEP_SEARCH_DISCOVER_SAMPLES` | `200` | Nodes sampled per label in discovery. |
 | `DEEP_SEARCH_SCOPE_ROOT_URNS_CAP` | `5000` | Max root URNs accepted on `scope.rootUrns`. |
 | `DEEP_SEARCH_SEARCHABLE_TEXT_CAP` | `8192` | Byte cap on stored searchable text. |
@@ -115,6 +116,17 @@ settings object. Defaults:
 
 (Additional `DEEP_SEARCH_DISCOVER_*` and `DEEP_SEARCH_SUBAGG_*` caps exist for
 discovery sampling and sub-aggregation fan-out.)
+
+**Timeouts.** One search request runs at most 100 s server-side (the engine's
+request cap). That fits inside the 120 s `/graph/` HTTP tier
+(`HTTP_TIMEOUT_GRAPH_SECS`) and the browser's 150 s budget
+(`VITE_TIMEOUT_SEARCH_ADVANCED_MS`). A scan that needs longer is not cut off:
+the request answers with what it has found so far (`status: 'running'`, plus
+`deadlineExceeded: true` outside progressive mode) and a `sessionId` that the
+next request continues from. A unit is still cut at 94 s (the request cap minus
+grace); a `DEEP_SEARCH_CHUNK_TIMEOUT_MS` above that only lets the abandoned
+server-side statement run on, holding a FalkorDB thread, so keep it at or below
+94 000.
 
 ## How it appears in the product
 

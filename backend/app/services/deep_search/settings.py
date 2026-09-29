@@ -69,7 +69,10 @@ class DeepSearchSettings:
     chunk_width: int
     # Chunks in flight per search, each under its own fleet slot.
     chunk_concurrency: int
-    # One chunk statement's budget. A chunk that runs out is split in half.
+    # One chunk statement's budget. A chunk that runs out is split in half;
+    # a single-root walk cannot be, so the search fails. Sized so a 10-40 s
+    # unit on a very large graph finishes, and kept under the request cap
+    # (``_REQUEST_S``) and the server's ``TIMEOUT_MAX``.
     chunk_timeout_ms: int
     # Rows a session keeps in order — the pages served without a rescan.
     session_rows: int
@@ -98,7 +101,7 @@ class DeepSearchSettings:
             candidate_cap=_read_int("DEEP_SEARCH_CANDIDATE_CAP", 10000),
             candidate_cap_max=_read_int("DEEP_SEARCH_CANDIDATE_CAP_MAX", 100000),
             default_soft_deadline_ms=_read_int(
-                "DEEP_SEARCH_SOFT_DEADLINE_MS", 30000,
+                "DEEP_SEARCH_SOFT_DEADLINE_MS", 60000,
             ),
             discover_samples_per_label=_read_int(
                 "DEEP_SEARCH_DISCOVER_SAMPLES", 200,
@@ -134,7 +137,7 @@ class DeepSearchSettings:
             engine=_read_choice("DEEP_SEARCH_ENGINE", ("v2", "legacy"), "v2"),
             chunk_width=max(1000, _read_int("DEEP_SEARCH_CHUNK_WIDTH", 50_000)),
             chunk_concurrency=max(1, _read_int("DEEP_SEARCH_CHUNK_CONCURRENCY", 2)),
-            chunk_timeout_ms=max(1000, _read_int("DEEP_SEARCH_CHUNK_TIMEOUT_MS", 15_000)),
+            chunk_timeout_ms=max(1000, _read_int("DEEP_SEARCH_CHUNK_TIMEOUT_MS", 45_000)),
             session_rows=max(50, _read_int("DEEP_SEARCH_SESSION_ROWS", 1000)),
             session_ttl_seconds=max(60, _read_int("DEEP_SEARCH_SESSION_TTL", 900)),
             walk_max=max(0, _read_int("DEEP_SEARCH_WALK_MAX", 300_000)),

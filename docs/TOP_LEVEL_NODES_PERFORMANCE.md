@@ -42,7 +42,7 @@ ever pay O(page).
 4. **Live FalkorDB** (`get_top_level_or_orphan_nodes`) — the fallback for
    branch reads, truncated-payload filters, and cold starts. Two queries:
    - **Page query**: keyset-paginated, budget
-     `FALKORDB_TOP_LEVEL_QUERY_TIMEOUT` (default 30s). A timeout here is
+     `FALKORDB_TOP_LEVEL_QUERY_TIMEOUT` (default 60s). A timeout here is
      fatal for the request (GraphCache's stale fallback catches it) and the
      error names the budget that fired.
    - **Count query**: full-scan, **best-effort**, budget
@@ -58,16 +58,18 @@ accurate error always wins the race:
 | Layer | Knob | Default |
 |---|---|---|
 | nginx proxy read | `proxy_read_timeout` | 180s |
-| gunicorn worker | `GUNICORN_TIMEOUT` | 120s |
-| ASGI graph tier | `HTTP_TIMEOUT_GRAPH_SECS` | 60s |
-| Frontend abort | `VITE_TIMEOUT_TOP_LEVEL_MS` | 45s |
-| FalkorDB page query | `FALKORDB_TOP_LEVEL_QUERY_TIMEOUT` | 30s |
+| Frontend abort | `VITE_TIMEOUT_TOP_LEVEL_MS` | 150s |
+| ASGI graph tier | `HTTP_TIMEOUT_GRAPH_SECS` | 120s |
+| FalkorDB page query | `FALKORDB_TOP_LEVEL_QUERY_TIMEOUT` | 60s |
 | FalkorDB count query | `FALKORDB_TOP_LEVEL_COUNT_TIMEOUT` | 5s (best-effort) |
 
-Backend worst case ≈ 35s + overhead < the 45s client abort — the backend
-always loses the race and surfaces its own, accurate error. The frontend
-abort message states the actual client budget; the backend page-timeout
-error states the provider budget and graph.
+`GUNICORN_TIMEOUT` (120s) is not a layer here: under the uvicorn worker it is
+the worker's heartbeat deadline, not a per-request one.
+
+Backend worst case ≈ 65s + overhead < the 120s ASGI tier < the 150s client
+abort — the backend always loses the race and surfaces its own, accurate
+error. The frontend abort message states the actual client budget; the
+backend page-timeout error states the provider budget and graph.
 
 ### The server-side cap: `FALKORDB_SERVER_TIMEOUT_MAX_MS`
 

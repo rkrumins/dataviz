@@ -424,12 +424,12 @@ def test_workspace_scoped_graph_routes_get_their_tier(monkeypatch, path, expecte
     """Every graph route the canvas hits is mounted as
     ``/api/v1/{ws_id}/graph/...``; the tier table lists the prefixes without
     the workspace segment. This pins the collapse: an edge scan budgeted at
-    40s on the provider must land in the 45s aggregation tier, not the 30s
+    80s on the provider must land in the 90s aggregation tier, not the 30s
     default, or the middleware's 504 fires before the provider's own
     structured timeout (and its stale-snapshot fallback) can."""
     tiers = {
-        "health": "5", "aggregation": "45", "trace": "60",
-        "graph": "60", "versioning": "120", "default": "30",
+        "health": "5", "aggregation": "90", "trace": "120",
+        "graph": "120", "versioning": "120", "default": "30",
     }
     monkeypatch.setenv("HTTP_TIMEOUT_HEALTH_SECS", tiers["health"])
     monkeypatch.setenv("HTTP_TIMEOUT_AGGREGATION_SECS", tiers["aggregation"])

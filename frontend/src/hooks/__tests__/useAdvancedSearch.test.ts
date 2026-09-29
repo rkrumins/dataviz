@@ -337,7 +337,7 @@ describe('useAdvancedSearch — the shared search options reach the wire', () =>
             aggregations: [{ by: 'ancestor', maxBuckets: 20000, sampleHitsPerBucket: 0 }],
             includeAncestorPath: true,
             candidateCap: 50000,
-            softDeadlineMs: 20000,
+            softDeadlineMs: 45000,
         })
     })
 })

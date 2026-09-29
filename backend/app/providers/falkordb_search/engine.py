@@ -102,15 +102,20 @@ ENGINE_VERSION = "4"
 #: (the budget ends a unit first), and in the request's lease.
 _GRACE_S = 3.0
 
-#: The longest a request runs: inside the browser's 45 s and the 60 s timeout
-#: of ``/graph/`` routes. A unit a request starts is never given up for the
+#: The longest a request runs: inside the 120 s timeout of ``/graph/`` routes
+#: and the browser's 150 s. A unit a request starts is never given up for the
 #: request's sake — only by its own budget (``unit_budget``) — so the wait a
 #: request may spend starting units is cut to leave room for the last one's.
-_REQUEST_S = 40.0
+_REQUEST_S = 100.0
 
 #: The least time a page's hits get to learn where they sit (their ancestor
 #: paths) — a progressive wait may have been spent on the scan by then.
 _PATHS_FLOOR_S = 1.5
+
+#: The least time a page's hits (up to a session's 1000 rows) get to be
+#: read — after a long scan the request's deadline is usually spent, and
+#: half a second turned a finished search into a 504.
+_HYDRATE_FLOOR_S = 5.0
 
 #: Facets computed in this process, by session, while they run.
 _FACET_TASKS: Dict[str, "asyncio.Task[None]"] = {}
@@ -730,7 +735,7 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
                   facets, wants_facets: bool) -> SearchResultPage:
     options = query.options
     rows = session.rows[pos:pos + options.page_size]
-    remaining = max(0.5, deadline - time.monotonic())
+    remaining = max(_HYDRATE_FLOOR_S, deadline - time.monotonic())
     hits = await _hydrate_hits(provider, query, [r[-1] for r in rows], timeout_s=remaining)
     path_notes: List[str] = []
     if hits and options.include_ancestor_path:

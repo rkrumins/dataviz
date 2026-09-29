@@ -538,7 +538,7 @@ export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
  */
 export type Sessionid6 = string | null
 /**
- * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.
+ * Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 60s (was 30s, and 3s before that) so deep queries on very large graphs complete; user can override per-request up to 120s.
  */
 export type Softdeadlinems = number
 export type Sort = 'relevance' | 'displayName' | 'qualifiedName' | 'depth' | 'matchCount'

@@ -3098,7 +3098,8 @@ class TestExactTotalCount:
         # The aggregation is issued second now: it opens as soon as the
         # candidate scan yields, rather than after the whole hits branch.
         candidate_t, agg_t, count_t = (c[2] for c in prov.calls)
-        assert candidate_t == 30.0, "the candidate scan gets the full deadline"
+        assert candidate_t == q.options.soft_deadline_ms / 1000.0, (
+            "the candidate scan gets the full deadline")
         assert len(waits) == 2, (
             "the page hydration and the ancestor hydration both run under "
             "wait_for"
