@@ -15,7 +15,7 @@ import {
     RefreshCw, Search, UserPlus, Ban, X, Loader2, Mail,
     ChevronDown, ChevronUp,
     KeyRound, UserCog,
-    RotateCcw, Lock, Copy, Check, Link2, Pencil, ScrollText, ListChecks, AtSign, Fingerprint,
+    RotateCcw, Lock, Copy, Check, Link2, Pencil, ScrollText, ListChecks, AtSign, Fingerprint, LogOut,
 } from 'lucide-react'
 import {
     adminUserService,
@@ -61,6 +61,7 @@ type ModalType =
     | { kind: 'reject'; userId: string; name: string }
     | { kind: 'role'; userId: string; name: string; currentRole: string }
     | { kind: 'suspend'; userId: string; name: string }
+    | { kind: 'endSessions'; userId: string; name: string }
     | { kind: 'systemAccount'; userId: string; name: string; makeSystem: boolean }
     | { kind: 'resetPassword'; userId: string; name: string }
     | { kind: 'invite' }
@@ -560,6 +561,15 @@ export function AdminUsers() {
             adminUserService.suspendUser(modal.userId),
             `${nameOf(modal.userId)} is suspended — they are signed out and cannot sign back in.`,
             `Could not suspend ${nameOf(modal.userId)}.`)
+        closeModal()
+    }
+
+    const handleEndSessionsConfirm = async () => {
+        if (modal?.kind !== 'endSessions') return
+        await withAction(modal.userId, () =>
+            adminUserService.endSessions(modal.userId),
+            `${nameOf(modal.userId)} is signed out everywhere — they can sign back in.`,
+            `Could not end ${nameOf(modal.userId)}'s sessions.`)
         closeModal()
     }
 
@@ -1192,6 +1202,16 @@ export function AdminUsers() {
                                                             Reset password
                                                         </button>
 
+                                                        {/* End sessions: a lost laptop, a copied
+                                                            cookie — without touching the account. */}
+                                                        {user.status === 'active' && (
+                                                            <button onClick={() => setModal({ kind: 'endSessions', userId: user.id, name: user.displayName })}
+                                                                disabled={isActing} title="End sessions"
+                                                                className="p-2 rounded-lg text-ink-muted hover:text-amber-500 hover:bg-amber-500/5 transition-colors disabled:opacity-50">
+                                                                <LogOut className="w-4 h-4" />
+                                                            </button>
+                                                        )}
+
                                                         {/* Suspend / Reactivate */}
                                                         {user.status === 'active' && (
                                                             <button onClick={() => setModal({ kind: 'suspend', userId: user.id, name: user.displayName })}
@@ -1285,6 +1305,24 @@ export function AdminUsers() {
                                     </p>
                                     <ModalFooter onCancel={closeModal} onConfirm={handleSuspendConfirm}
                                         confirmLabel="Suspend User" confirmIcon={Ban} confirmClass="bg-red-500 hover:bg-red-600 shadow-red-500/20"
+                                        loading={!!actionLoading} />
+                                </>
+                            )}
+
+                            {/* ── End sessions modal ── */}
+                            {modal.kind === 'endSessions' && (
+                                <>
+                                    <ModalHeader icon={LogOut} iconBg="bg-amber-500/10 border-amber-500/20" iconColor="text-amber-500"
+                                        title="End sessions" subtitle="Signed out everywhere, now" onClose={closeModal} />
+                                    <UserPill name={modal.name} userId={modal.userId} />
+                                    <p className="text-sm text-ink-secondary mb-5">
+                                        Every browser and device this person is signed in on is
+                                        signed out on its next request. Their account is unchanged,
+                                        and they can sign straight back in — for a lost laptop or a
+                                        session you do not trust.
+                                    </p>
+                                    <ModalFooter onCancel={closeModal} onConfirm={handleEndSessionsConfirm}
+                                        confirmLabel="End their sessions" confirmIcon={LogOut} confirmClass="bg-amber-500 hover:bg-amber-600 shadow-amber-500/20"
                                         loading={!!actionLoading} />
                                 </>
                             )}

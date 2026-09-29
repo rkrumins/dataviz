@@ -353,6 +353,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.identity.admin_linked": ("critical", _summary_identity("linked")),
     "user.identity.admin_unlinked": ("critical", _summary_identity("unlinked")),
     "user.session_revoked": ("critical", _summary_session_revoked),
+    "user.sessions_ended_by_admin": (
+        "critical",
+        lambda p: f"Every session of {p.get('user_id') or '?'} ended by an admin",
+    ),
     "auth.config.updated": ("critical", lambda p: "SSO / login config changed"),
     "rbac.role.cascade_revoked": ("critical", _summary_cascade),
     "rbac.workspace.roles_cascaded": ("critical", _summary_ws_roles_cascaded),

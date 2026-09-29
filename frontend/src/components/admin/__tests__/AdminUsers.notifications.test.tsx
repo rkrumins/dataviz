@@ -22,6 +22,7 @@ vi.mock('@/services/adminUserService', () => ({
         getStats: vi.fn(),
         approveUser: vi.fn(),
         suspendUser: vi.fn(),
+        endSessions: vi.fn(),
         reactivateUser: vi.fn(),
         changeRole: vi.fn(),
         updateUser: vi.fn(),
@@ -70,6 +71,7 @@ beforeEach(() => {
     })
     vi.mocked(adminUserService.approveUser).mockResolvedValue(undefined as never)
     vi.mocked(adminUserService.suspendUser).mockResolvedValue(undefined as never)
+    vi.mocked(adminUserService.endSessions).mockResolvedValue(undefined as never)
     vi.mocked(adminUserService.changeRole).mockResolvedValue(undefined as never)
     vi.mocked(adminUserService.updateUser).mockResolvedValue(undefined as never)
 })
@@ -98,6 +100,19 @@ describe('AdminUsers — the bespoke banners are gone', () => {
         await waitFor(() => expect(messages()).toEqual([
             'Ada Lovelace is suspended — they are signed out and cannot sign back in.',
         ]))
+    })
+
+    it('ending sessions signs them out without touching the account', async () => {
+        const u = userEvent.setup()
+        render(<AdminUsers />)
+        await u.click(await screen.findByTitle('End sessions'))
+        await u.click(await screen.findByRole('button', { name: 'End their sessions' }))
+
+        await waitFor(() => expect(messages()).toEqual([
+            'Ada Lovelace is signed out everywhere — they can sign back in.',
+        ]))
+        expect(adminUserService.endSessions).toHaveBeenCalledTimes(1)
+        expect(adminUserService.suspendUser).not.toHaveBeenCalled()
     })
 
     it('a role change reads as a sentence, not as a role id', async () => {

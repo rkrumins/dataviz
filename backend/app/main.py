@@ -243,6 +243,24 @@ def _assert_session_config_coherent() -> None:
             "first renewal. Raise the ceiling (the default is 24) or lower "
             "the access TTL."
         )
+    # The absolute ceiling is measured from the oldest refresh record the
+    # session still has, and records are purged once they expire — one
+    # refresh lifetime after they were minted. A ceiling longer than that
+    # lifetime is measured from a start that keeps moving, so it never
+    # fires: a stolen cookie on an active session stays good indefinitely.
+    refresh_ttl = JWT_REFRESH_EXPIRY_DAYS * 24 * 3600
+    if SESSION_ABSOLUTE_MAX_SECONDS > refresh_ttl:
+        msg = (
+            f"SESSION_ABSOLUTE_MAX_HOURS gives {SESSION_ABSOLUTE_MAX_SECONDS}s, "
+            f"longer than the refresh-token lifetime "
+            f"(JWT_REFRESH_EXPIRY_DAYS={JWT_REFRESH_EXPIRY_DAYS} = "
+            f"{refresh_ttl}s). The session's start is purged before the "
+            "ceiling is reached, so it never ends a session. Lower the "
+            "ceiling or raise the refresh lifetime."
+        )
+        if _is_production():
+            raise RuntimeError(msg)
+        logger.warning("%s", msg)
     if (
         0 < SESSION_ABSOLUTE_MAX_SECONDS
         and SESSION_IDLE_MAX_SECONDS > SESSION_ABSOLUTE_MAX_SECONDS

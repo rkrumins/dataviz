@@ -23,9 +23,12 @@
  * yet, and the operator wants to know who is failing and why. That list
  * is per person, and opens a person straight into the lookup.
  *
- * The problem list and the activity log need ``system:audit:read`` on top
- * of the page's own ``system:admin``. Without it they are simply absent — a
- * locked panel advertises a capability the operator can neither use nor
+ * The full activity log is its own tab; a quoted reference opens it with
+ * the reference searched.
+ *
+ * The problem list and the reference lookup need ``system:audit:read`` on
+ * top of the page's own ``system:admin``. Without it they are simply absent
+ * — a locked panel advertises a capability the operator can neither use nor
  * grant themselves.
  */
 import { useEffect, useRef, useState } from 'react'
@@ -34,7 +37,6 @@ import { AtSign, Hash, Loader2, Search, SearchX, Tag, UserSearch } from 'lucide-
 import { ssoAdminService, type UserSummary } from '@/services/ssoAdminService'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
-import { SsoActivityTab } from '../../SsoActivityTab'
 import { SsoCard, SsoEmpty } from '../ui/SsoCard'
 import { ErrorBanner } from './ErrorBanner'
 import { SignInProblems } from './diagnostics/SignInProblems'
@@ -196,7 +198,7 @@ function LookupSection({ email }: { email?: string }) {
                 <SsoCard>
                     <SsoEmpty icon={SearchX}>
                         Nobody matched. If they have never signed in successfully
-                        there is no account yet — the activity log below still
+                        there is no account yet — the Activity tab still
                         shows the attempt.
                     </SsoEmpty>
                 </SsoCard>
@@ -218,7 +220,49 @@ function LookupSection({ email }: { email?: string }) {
     )
 }
 
-export function DiagnosticsTab() {
+/** Look a quoted reference up in the activity log. */
+function ReferenceCard({ onOpen }: { onOpen: (ref: string) => void }) {
+    const [ref, setRef] = useState('')
+    return (
+        <SsoCard
+            icon={Hash}
+            tone="info"
+            title="Given a reference?"
+            blurb={<>
+                Someone who could not sign in saw a short code like{' '}
+                <code className="font-mono text-ink">a1b2c3d4</code>. The real
+                reason is recorded against it, and deliberately not shown to
+                them — it would describe your configuration to anyone who can
+                reach the sign-in page.
+            </>}
+        >
+            <form
+                onSubmit={e => { e.preventDefault(); if (ref.trim()) onOpen(ref.trim()) }}
+                className="flex gap-2"
+            >
+                <input
+                    value={ref}
+                    onChange={e => setRef(e.target.value)}
+                    aria-label="Reference"
+                    placeholder="a1b2c3d4"
+                    className="flex-1 min-w-0 h-9 px-3 rounded-lg border border-glass-border bg-canvas font-mono text-sm outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
+                />
+                <button
+                    type="submit"
+                    disabled={!ref.trim()}
+                    className="h-9 px-3 rounded-lg bg-accent-lineage text-white text-xs font-medium disabled:opacity-40"
+                >
+                    Look up
+                </button>
+            </form>
+        </SsoCard>
+    )
+}
+
+export function DiagnosticsTab({ onOpenActivity }: {
+    /** Open the activity log with this search applied. */
+    onOpenActivity?: (query: string) => void
+}) {
     const canReadAudit = usePermission('system:audit:read')
     // Each "Open account" remounts the lookup with that person in it.
     const [inspect, setInspect] = useState<{ email: string; n: number } | null>(null)
@@ -236,22 +280,10 @@ export function DiagnosticsTab() {
                 </div>
 
                 <aside className="space-y-4 xl:sticky xl:top-6">
-                    {canReadAudit && (
+                    {canReadAudit && onOpenActivity && (
                         // The operator's opening move: a person who could not
                         // sign in is holding a code and was told to quote it.
-                        <SsoCard
-                            icon={Hash}
-                            tone="info"
-                            title="Given a reference?"
-                            blurb={<>
-                                Someone who could not sign in saw a short code like{' '}
-                                <code className="font-mono text-ink">a1b2c3d4</code>.
-                                Paste it into the activity search below — the real
-                                reason is recorded there, and deliberately not shown
-                                to them, because it would describe your configuration
-                                to anyone who can reach the sign-in page.
-                            </>}
-                        />
+                        <ReferenceCard onOpen={onOpenActivity} />
                     )}
 
                     <SsoCard icon={Search} title="Which search to use">
@@ -271,14 +303,6 @@ export function DiagnosticsTab() {
                     </SsoCard>
                 </aside>
             </div>
-
-            {/* Full width, below both columns: it is a table, and tables
-                want the room a 320px rail would otherwise take from it. */}
-            {canReadAudit && (
-                <div className="pt-6 border-t border-glass-border">
-                    <SsoActivityTab />
-                </div>
-            )}
         </div>
     )
 }

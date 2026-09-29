@@ -116,6 +116,14 @@ try again — which it does, at once and after a minute — instead of a bare fo
   and underlying error, and the password attempt says `no_local_password`.
 - **The "Failed sign-ins (24h)" tile counted every warning in the log**, sign-outs and configuration
   changes included. It now counts failed sign-in attempts.
+- **A revoked session kept working on some routes until its token expired.** Signing out, a password
+  change or reset, and a role change are refused on the next request by routes that authenticate
+  through the user — but the view, graph and view-version routes authorise on the token's claims
+  alone and never checked, so a signed-out or demoted session kept its old access there for up to
+  one access-token lifetime. Every route now refuses a revoked session.
+- **Unlinking an SSO identity ended none of the sessions it had started**, including an admin's
+  unlink of an identity believed compromised. It now ends the sessions that identity minted; the
+  person's other sessions carry on.
 
 ### Added
 
@@ -126,8 +134,20 @@ can use and whether it has a password, why their session ended before it, and ea
 address, browser, reference and underlying error. Failures that happened before anyone could be named
 — no corporate session on the request, a gateway that could not be reached — are shown beside the
 person whose attempt followed from the same browser. Filter by reason or connection, or find a person;
-built on the server from a bounded read (`GET /api/v1/admin/sso/failures`, `system:audit:read`). A row
-of the sign-in activity log beneath it now opens onto the record behind it.
+built on the server from a bounded read (`GET /api/v1/admin/sso/failures`, `system:audit:read`).
+
+**An Activity tab in Admin → SSO.** Every sign-in, failure, session ending, sign-out, identity link
+and SSO configuration change as a table: when, person, connection, outcome, reason and the error
+behind it, reference, and network address and browser, each its own column. Outcome chips carry their
+counts; filter by connection and window; one search finds a person, an email, a reference or an
+address; click a person or a connection to narrow to them; open a row for the whole record. Every
+filter runs on the server (`GET /api/v1/admin/sso/activity`), so pages are full and paging continues
+where it left off. Diagnostics keeps the problem list and the person lookup, and its *Given a
+reference?* card opens Activity with the reference searched.
+
+**End one person's sessions, in Admin → Users**, without suspending them — a lost laptop, a session
+you do not trust. They are signed out everywhere and can sign straight back in
+(`POST /api/v1/admin/users/{id}/sessions/revoke`, recorded as `user.sessions_ended_by_admin`).
 
 **When each person last used the platform, in Admin → Users.** A sortable **Last seen** column, and an
 **Activity** block in the user drawer: Joined, Last signed in (any kind of sign-in), Last seen (had
@@ -174,12 +194,24 @@ recorded to five minutes, one conditional row update per person per window.
   upgrade in a quiet window.
 - Audit rows for failed sign-ins now hold the network address and browser of the attempt. They are
   readable only with `system:audit:read`, like the rest of the audit log.
+- **The server refuses to start with an SSO session limit that ends every SSO session**:
+  `SSO_SESSION_MAX_AGE_HOURS` at or under one access token (`JWT_EXPIRY_MINUTES`). Unlike the idle and
+  absolute limits, `0` does not switch it off. The shipped value is 24.
+- **In production, the server refuses to start with `SESSION_ABSOLUTE_MAX_HOURS` longer than the
+  refresh-token lifetime** (`JWT_REFRESH_EXPIRY_DAYS` × 24), a limit that could never fire; elsewhere
+  it logs a warning. The shipped values (168 and 7) are equal and start normally.
 - Size `RATELIMIT_LOGIN_PER_IP` for your largest corporate egress address: the gateway's sign-in and
   silent re-sign-in share that bucket.
 
 ### Known limitations
 
 - A 403 for a missing permission still shows on the canvas as slow.
+- Disabling or deleting a connection stops new sign-ins through it but ends no existing session;
+  use the connection's **End sessions**. A disabled back-channel connection also stops re-checking
+  its sessions with the gateway, so they run to their time limits.
+- A role or workspace-access change ends the access token only; the session renews with the new
+  access, by design. There is no receiver for an identity provider's own logout notifications
+  (OIDC back-channel logout); an IdP sign-out reaches us at the next re-check or time limit.
 - The Helm chart's `expiryMinutes` default is 60; the other deploy configs use 15. Against 60-minute
   tokens, a gateway connection's default 15-minute outage grace ends sessions at the first renewal
   that finds the gateway down: set it to at least twice the token lifetime.

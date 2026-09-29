@@ -845,6 +845,68 @@ export const ssoAdminService = {
         const suffix = qs.toString() ? `?${qs.toString()}` : ''
         return request<FailureDigest>(`${ADMIN}/sso/failures${suffix}`)
     },
+
+    /** One page of the SSO activity log, filtered on the server. Needs
+     *  ``system:audit:read``. */
+    activity(params: ActivityParams = {}): Promise<ActivityPage> {
+        const qs = new URLSearchParams()
+        for (const [k, v] of Object.entries(params)) {
+            if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+        }
+        const suffix = qs.toString() ? `?${qs.toString()}` : ''
+        return request<ActivityPage>(`${ADMIN}/sso/activity${suffix}`)
+    },
+}
+
+/** What an SSO activity row means to the reader. */
+export type ActivityOutcome =
+    | 'signed_in' | 'failed' | 'session_ended' | 'signed_out'
+    | 'account' | 'trust' | 'config'
+
+export interface ActivityParams {
+    fromTs?: string
+    outcome?: ActivityOutcome
+    /** A connection's slug, or ``password``. */
+    connection?: string
+    /** A person (name, email, id) or any text in the record — a
+     *  reference, an address, an IdP subject. */
+    q?: string
+    cursor?: string
+    limit?: number
+}
+
+export interface ActivityPerson {
+    userId?: string | null
+    name?: string | null
+    email?: string | null
+    avatarId?: string | null
+    deleted: boolean
+}
+
+export interface ActivityRow {
+    id: string
+    at: string
+    eventType: string
+    outcome: ActivityOutcome
+    severity: 'critical' | 'warning' | 'info'
+    summary: string
+    person?: ActivityPerson | null
+    /** Who did it, when that is not the person it concerns. */
+    actor?: ActivityPerson | null
+    connection?: { slug: string; name?: string | null } | null
+    reason?: string | null
+    detail?: string | null
+    ref?: string | null
+    clientIp?: string | null
+    userAgent?: string | null
+    payload: Record<string, unknown>
+}
+
+export interface ActivityPage {
+    rows: ActivityRow[]
+    nextCursor?: string | null
+    /** Events per outcome under the window, connection and search. */
+    counts: Record<ActivityOutcome, number>
 }
 
 export interface FailureDigestParams {

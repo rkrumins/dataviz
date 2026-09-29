@@ -267,10 +267,20 @@ connection in the editor's **Identity** section.
 
 The person is shown a short reference like `a1b2c3d4` and nothing else — telling
 them the real reason would describe your configuration to anyone who can reach
-the sign-in page. Ask them for it, then **Admin → SSO → Diagnostics** and search.
+the sign-in page. Ask them for it, then **Admin → SSO → Diagnostics → Given a
+reference?** — **Look up** opens the Activity tab with it searched.
 
-Nobody has quoted anything yet? **Sign-in problems**, at the top of the same
-tab, lists everyone who failed to sign in over the last day, week or month —
+**Activity** is the full log: every sign-in, failure, session ending, sign-out,
+identity link and SSO configuration change, one row per event with the person,
+the connection, the outcome, the reason and the error behind it, the reference,
+and the network address and browser as columns. Filter by outcome (each chip
+shows its count), by connection, by window, and search by person, email,
+reference or address; click a person or a connection in the table to narrow to
+them, and open a row for the whole record. Every filter runs on the server, so
+pages are full and "Load more" continues where the last page ended.
+
+Nobody has quoted anything yet? **Sign-in problems**, at the top of
+Diagnostics, lists everyone who failed to sign in over the last day, week or month —
 one row per person, the people **still failing** first. Filter by reason, by
 connection, or find a person by name, email or id. Open a row for:
 
@@ -321,6 +331,25 @@ usually why they were signing in at all.
 | `sessions_revoked` | All their sessions were ended at once — "sign out everywhere", or an access change |
 | `user_inactive` | The account stopped being active while signed in |
 | `no_record`, `family_revoked` | The server had no record of the session, or it had already ended |
+
+### Ending sessions
+
+| To end | Do this | What happens |
+|---|---|---|
+| One person's sessions, keeping the account | Admin → Users → **End sessions** on their row | Every browser they are signed in on is refused at its next request; they can sign straight back in |
+| One person, for good | **Suspend** | As above, and they cannot sign back in until reactivated |
+| What one identity minted | Unlink the identity (theirs, or an admin's unlink) | Only the sessions that identity started end; their others carry on |
+| What one connection minted | The connection's **End sessions** | Every session that connection started ends. Disabling a connection alone stops new sign-ins but ends nothing |
+| Everyone | Settings → **Sign everyone out now** | Every session except the system accounts' |
+
+Signing out, a password change or reset, a suspension and a role change take
+effect on the next request, on every route. Sessions also end on their own at
+the limits set in the deployment: `SSO_SESSION_MAX_AGE_HOURS` (default 24, the
+daily re-authentication), `SESSION_IDLE_MAX_HOURS` (12) and
+`SESSION_ABSOLUTE_MAX_HOURS` (168). The server refuses to start with an SSO
+limit no longer than one access token (`JWT_EXPIRY_MINUTES`), and — in
+production — with an absolute limit longer than the refresh-token lifetime
+(`JWT_REFRESH_EXPIRY_DAYS`), which could never fire.
 
 ### Codes
 

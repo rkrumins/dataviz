@@ -182,9 +182,11 @@ async def revoke_all_tokens(
 
 async def revoke_provider_tokens(
     session: AsyncSession, *, provider_id: Optional[str],
+    user_id: Optional[str] = None,
 ) -> tuple[set[str], int]:
     """Stamp ``revoked_at`` on every un-revoked refresh row minted by
     this provider (None = every SSO row), and report who was touched.
+    ``user_id`` narrows it to one person's sessions through that provider.
 
     Multi-pass for the same reason ``revoke_family`` is: a rotation in
     flight when the sweep starts can commit its successor after a
@@ -201,21 +203,19 @@ async def revoke_provider_tokens(
     users: set[str] = set()
     rows_marked = 0
     for _ in range(_REVOKE_FAMILY_PASSES):
+        scope = [_provider_predicate(provider_id),
+                 RefreshTokenORM.revoked_at.is_(None)]
+        if user_id is not None:
+            scope.append(RefreshTokenORM.user_id == user_id)
         touched = (
             await session.execute(
-                select(func.distinct(RefreshTokenORM.user_id)).where(
-                    _provider_predicate(provider_id),
-                    RefreshTokenORM.revoked_at.is_(None),
-                )
+                select(func.distinct(RefreshTokenORM.user_id)).where(*scope)
             )
         ).scalars().all()
         users.update(u for u in touched if u)
         result = await session.execute(
             update(RefreshTokenORM)
-            .where(
-                _provider_predicate(provider_id),
-                RefreshTokenORM.revoked_at.is_(None),
-            )
+            .where(*scope)
             .values(revoked_at=_now_iso())
         )
         marked = int(result.rowcount or 0)

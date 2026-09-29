@@ -23,7 +23,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-    History, KeyRound, Plus, Power, RefreshCw, Settings, Waypoints,
+    History, KeyRound, Plus, Power, RefreshCw, ScrollText, Settings, Waypoints,
 } from 'lucide-react'
 
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -35,14 +35,16 @@ import { ProvidersTab } from './sso/tabs/ProvidersTab'
 import { MappingsTab } from './sso/tabs/MappingsTab'
 import { SettingsTab } from './sso/tabs/SettingsTab'
 import { DiagnosticsTab } from './sso/tabs/DiagnosticsTab'
+import { SsoActivityTab } from './SsoActivityTab'
 import { SsoStatTiles, type SsoStats } from './sso/SsoStatTiles'
 
-type Tab = 'providers' | 'mappings' | 'diagnostics' | 'settings'
+type Tab = 'providers' | 'mappings' | 'diagnostics' | 'activity' | 'settings'
 
 const TABS: { id: Tab; label: string; icon: typeof Power }[] = [
     { id: 'providers', label: 'Providers', icon: Power },
     { id: 'mappings', label: 'Access mapping', icon: Waypoints },
     { id: 'diagnostics', label: 'Diagnostics', icon: History },
+    { id: 'activity', label: 'Activity', icon: ScrollText },
     { id: 'settings', label: 'Settings', icon: Settings },
 ]
 
@@ -63,6 +65,9 @@ export function AdminSso() {
     const [refreshing, setRefreshing] = useState(false)
     const [wizardSignal, setWizardSignal] = useState(0)
     const [providerFilter, setProviderFilter] = useState<'drafts' | null>(null)
+    // Opening Activity from elsewhere with a search in hand remounts it
+    // with that search applied.
+    const [activityQuery, setActivityQuery] = useState({ q: '', n: 0 })
 
     const loadStats = useCallback(async () => {
         setRefreshing(true)
@@ -151,7 +156,7 @@ export function AdminSso() {
             <SsoStatTiles stats={stats} onSelect={jump} />
 
             <nav className="flex items-center gap-1 border-b border-glass-border mb-6">
-                {TABS.map(({ id, label, icon: Icon }) => {
+                {TABS.filter(t => t.id !== 'activity' || canReadAudit).map(({ id, label, icon: Icon }) => {
                     const active = tab === id
                     return (
                         <button
@@ -184,7 +189,21 @@ export function AdminSso() {
                 />
             )}
             {tab === 'mappings' && <MappingsTab onChanged={refresh} />}
-            {tab === 'diagnostics' && <DiagnosticsTab />}
+            {tab === 'diagnostics' && (
+                <DiagnosticsTab
+                    onOpenActivity={q => {
+                        setActivityQuery(prev => ({ q, n: prev.n + 1 }))
+                        setTab('activity')
+                    }}
+                />
+            )}
+            {tab === 'activity' && (
+                <SsoActivityTab
+                    key={activityQuery.n}
+                    initialQuery={activityQuery.q}
+                    connections={providers.map(p => ({ slug: p.slug, displayName: p.displayName }))}
+                />
+            )}
             {tab === 'settings' && <SettingsTab providers={providers} />}
         </PageContainer>
     )

@@ -480,7 +480,7 @@ class FailureDigest(_Model):
     people: list[PersonFailures]
 
 
-def _decode(raw: Optional[str]) -> dict:
+def decode_payload(raw: Optional[str]) -> dict:
     try:
         value = json.loads(raw) if raw else {}
     except (TypeError, ValueError):
@@ -488,7 +488,7 @@ def _decode(raw: Optional[str]) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-async def _search_predicate(session: AsyncSession, term: str):
+async def search_predicate(session: AsyncSession, term: str):
     """Narrow the read to rows that can belong to the person searched for:
     those naming one of their account ids, or containing the text itself
     (an email, an IdP subject). ``digest`` then keeps only the people who
@@ -540,12 +540,12 @@ async def sign_in_failures(
     term = (q or "").strip()
     search_ids: frozenset[str] = frozenset()
     if term:
-        predicate, search_ids = await _search_predicate(session, term)
+        predicate, search_ids = await search_predicate(session, term)
         stmt = stmt.where(predicate)
 
     raw = (await session.execute(stmt)).all()
     truncated = len(raw) > SCAN_CAP
-    rows = [Row(t, c, _decode(p)) for t, c, p in raw[:SCAN_CAP]]
+    rows = [Row(t, c, decode_payload(p)) for t, c, p in raw[:SCAN_CAP]]
 
     # A search reads only rows naming the person; the unnamed failures from
     # their browsers are read separately, as context for ``related``.
@@ -575,7 +575,7 @@ async def sign_in_failures(
                 .order_by(OutboxEventORM.created_at.desc())
                 .limit(SCAN_CAP)
             )
-            context_rows = [Row(t, c, _decode(p)) for t, c, p in found.all()]
+            context_rows = [Row(t, c, decode_payload(p)) for t, c, p in found.all()]
 
     # Everyone the window names, resolved in a fixed number of queries.
     emails = [

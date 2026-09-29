@@ -859,7 +859,8 @@ Every SSO failure redirects to `/login?ref=<8 hex chars>&sso_error=1`. The
 reason is deliberately withheld from that page — it is admin-only by
 construction and lives in the audit log instead.
 
-Admin → SSO → **Diagnostics** → paste the ref into the activity search. The
+Admin → SSO → **Diagnostics** → *Given a reference?* → **Look up**, which opens
+the **Activity** tab with the ref searched (`GET /api/v1/admin/sso/activity`). The
 `user.sso_login_failed` event carries the provider, the precise reason
 (`state_mismatch`, `token_or_idtoken`, `saml_validate`,
 `sso_login_rejected:jit_disabled`, …) and, in its own `detail` field, the

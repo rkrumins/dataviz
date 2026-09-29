@@ -33,6 +33,7 @@ from backend.app.db.repositories import (
     user_repo,
 )
 from backend.app.db.repositories.user_identity_repo import IdentityNotFound
+from backend.app.services.revocation_service import revoke_provider_sessions
 from backend.auth_service.interface import User
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,12 @@ async def admin_unlink_identity(
     # name-lock this provider held would be read-only forever.
     await user_repo.clear_idp_managed_snapshot(
         session, user_id, provider_id=ident.provider_id,
+    )
+    # Unlinking is how a compromised identity is cut off, so the sessions
+    # minted through it end with the link; the person's others survive.
+    await revoke_provider_sessions(
+        ident.provider_id, user_id=user_id, session=session,
+        reason="identity_unlinked",
     )
     await user_repo.create_outbox_event(
         session, event_type="user.identity.admin_unlinked",

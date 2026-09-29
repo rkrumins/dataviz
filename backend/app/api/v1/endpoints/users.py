@@ -889,6 +889,45 @@ async def suspend_user(
     return {"detail": "User suspended"}
 
 
+@admin_router.post("/{user_id}/sessions/revoke", status_code=status.HTTP_200_OK)
+async def revoke_user_sessions(
+    user_id: str,
+    admin=Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """End every session a person holds, everywhere, and change nothing
+    else about the account — a lost laptop, a cookie that may have been
+    copied. They sign in again as normal.
+
+    The same two halves a suspension uses: the cutoff refuses each refresh
+    family at its next renewal, and the tombstones end the access tokens
+    live right now. Your own sessions go through "sign out everywhere",
+    which also clears this browser's cookies.
+    """
+    user = await user_repo.get_user_by_id(session, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.id == admin.id:
+        raise HTTPException(
+            status_code=409,
+            detail="Use sign out everywhere to end your own sessions",
+        )
+
+    from backend.app.services.revocation_service import (
+        revoke_every_session_for_user,
+    )
+    await revoke_every_session_for_user(
+        user_id, session=session, reason="admin_ended_sessions",
+    )
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.sessions_ended_by_admin",
+        payload={"user_id": user_id, "actor_id": admin.id},
+    )
+    logger.info("Sessions of %s ended by %s", user_id, admin.id)
+    return {"detail": "Sessions ended"}
+
+
 # ── System account (break-glass) ──────────────────────────────────────
 
 @admin_router.post("/{user_id}/system-account", response_model=AdminUserResponse)

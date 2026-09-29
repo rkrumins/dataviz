@@ -234,6 +234,14 @@ export const adminUserService = {
         })
     },
 
+    /** Sign someone out of every browser and device, leaving the account
+     *  as it is — they can sign straight back in. */
+    endSessions(userId: string): Promise<{ detail: string }> {
+        return authFetch<{ detail: string }>(`${ADMIN_USERS_API}/${userId}/sessions/revoke`, {
+            method: 'POST',
+        })
+    },
+
     suspendUser(userId: string): Promise<{ detail: string }> {
         return authFetch<{ detail: string }>(`${ADMIN_USERS_API}/${userId}/suspend`, {
             method: 'POST',

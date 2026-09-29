@@ -171,3 +171,27 @@ def test_a_working_sso_ceiling_boots(monkeypatch):
     monkeypatch.setattr(config, "SSO_SESSION_MAX_AGE_HOURS", 8)
     monkeypatch.setattr(config, "SSO_SESSION_MAX_AGE_SECONDS", 8 * 3600)
     _assert_session_config_coherent()
+
+
+def test_an_absolute_ceiling_past_the_refresh_lifetime_refuses_in_production(
+    monkeypatch,
+):
+    """Measured from a record that is purged first, it never fires."""
+    import backend.app.main as main
+    from backend.auth_service.core import config
+
+    monkeypatch.setattr(config, "JWT_REFRESH_EXPIRY_DAYS", 7)
+    monkeypatch.setattr(config, "SESSION_ABSOLUTE_MAX_SECONDS", 30 * 86400)
+    monkeypatch.setattr(main, "_is_production", lambda: True)
+    with pytest.raises(RuntimeError, match="SESSION_ABSOLUTE_MAX_HOURS"):
+        main._assert_session_config_coherent()
+
+
+def test_the_default_absolute_ceiling_matches_the_refresh_lifetime(monkeypatch):
+    import backend.app.main as main
+    from backend.auth_service.core import config
+
+    monkeypatch.setattr(config, "JWT_REFRESH_EXPIRY_DAYS", 7)
+    monkeypatch.setattr(config, "SESSION_ABSOLUTE_MAX_SECONDS", 7 * 86400)
+    monkeypatch.setattr(main, "_is_production", lambda: True)
+    main._assert_session_config_coherent()

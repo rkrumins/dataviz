@@ -23,6 +23,7 @@ from .endpoints import (
     admin_sso_config,
     me_identities,
     audit,
+    sso_activity,
     sso_failures,
     branding,
     telemetry,
@@ -227,6 +228,13 @@ api_router.include_router(
 api_router.include_router(
     sso_failures.router,
     prefix="/admin/sso/failures",
+    tags=["admin:sso:diagnostics"],
+)
+
+# Every SSO event as a row with its fields as columns, filtered in SQL.
+api_router.include_router(
+    sso_activity.router,
+    prefix="/admin/sso/activity",
     tags=["admin:sso:diagnostics"],
 )
 

@@ -405,3 +405,67 @@ async def test_end_all_sessions_endpoint_counts_sweeps_and_audits(
         )
     )).scalars().all()
     assert len(events) == 1
+
+
+# ── unlinking an identity ends what it minted ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_person_scoped_sweep_spares_everyone_else(db_session):
+    for uid in ("usr_a", "usr_b"):
+        await _seed_user(db_session, uid)
+    await _mint(db_session, user_id="usr_a", provider_id=PROVIDER_X)
+    await _mint(db_session, user_id="usr_a", provider_id=PROVIDER_Y)
+    await _mint(db_session, user_id="usr_a", provider_id=None)
+    await _mint(db_session, user_id="usr_b", provider_id=PROVIDER_X)
+
+    users, rows = await revoke_provider_tokens(
+        db_session, provider_id=PROVIDER_X, user_id="usr_a",
+    )
+
+    assert (users, rows) == ({"usr_a"}, 1)
+    revoked = {
+        (r.user_id, r.idp_provider_id)
+        for uid in ("usr_a", "usr_b") for r in await _rows_for(db_session, uid)
+        if r.revoked_at
+    }
+    assert revoked == {("usr_a", PROVIDER_X)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("who", ["self", "admin"])
+async def test_unlinking_an_identity_ends_the_sessions_it_minted(
+    test_client, db_session, who,
+):
+    from backend.app.db.repositories import idp_provider_repo, user_identity_repo
+    from backend.auth_service.core.password import hash_password
+
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug=f"unlink-{who}", display_name="Corp", kind="oidc",
+        settings={},
+    )
+    if who == "self":
+        # The test client's own user, so the self-service route applies;
+        # a password keeps the unlink from being its last way in.
+        user_id = "usr_test000000"
+        user = await user_repo.get_user_by_id(db_session, user_id)
+        user.password_hash = hash_password("Still-Has-1-Password")
+    else:
+        await _seed_user(db_session, "usr_unlinked")
+        user_id = "usr_unlinked"
+    ident = await user_identity_repo.create_identity(
+        db_session, user_id=user_id, provider_id=provider.id,
+        external_id=f"e-{who}",
+    )
+    await _mint(db_session, user_id=user_id, provider_id=provider.id)
+    await _mint(db_session, user_id=user_id, provider_id=None)
+    await db_session.commit()
+
+    url = (f"/api/v1/me/identities/{ident.id}" if who == "self"
+           else f"/api/v1/admin/users/{user_id}/identities/{ident.id}")
+    resp = await test_client.delete(url)
+    assert resp.status_code == 204, resp.text
+
+    rows = await _rows_for(db_session, user_id)
+    by_provider = {r.idp_provider_id: bool(r.revoked_at) for r in rows}
+    assert by_provider == {provider.id: True, None: False}

@@ -769,10 +769,12 @@ async def revoke_every_session_for_user(
 
 async def revoke_provider_sessions(
     provider_id: Optional[str], *, session, reason: str,
+    user_id: Optional[str] = None,
 ) -> dict:
     """End every session minted through one identity provider — or, when
     ``provider_id`` is None, through any SSO provider at all (the master
-    switch's sweep).
+    switch's sweep). ``user_id`` narrows it to one person: what unlinking
+    their identity with that provider has to end.
 
     Two halves, the same pairing the liveness path uses when it ends a
     session: the refresh families die at the row
@@ -795,7 +797,7 @@ async def revoke_provider_sessions(
     from backend.app.db.repositories import refresh_token_repo
 
     user_ids, rows_marked = await refresh_token_repo.revoke_provider_tokens(
-        session, provider_id=provider_id,
+        session, provider_id=provider_id, user_id=user_id,
     )
     svc = get_revocation_service()
     for uid in user_ids:
