@@ -143,3 +143,31 @@ def test_the_lifespan_never_fails_on_a_missing_name():
     assert "OK" in result.stdout, (
         f"the lifespan did not run at all:\n{result.stderr[-3000:]}"
     )
+
+
+@pytest.mark.parametrize("hours", [0, 0.05])
+def test_an_sso_ceiling_no_longer_than_an_access_token_refuses_to_boot(
+    monkeypatch, hours,
+):
+    """``0`` disables the idle and absolute limits, but not this one: a
+    ceiling at or under one access lifetime ends every SSO session at its
+    first renewal. That has to stop the process, not surface as users
+    signed out minutes after signing in."""
+    from backend.app.main import _assert_session_config_coherent
+    from backend.auth_service.core import config
+
+    monkeypatch.setattr(config, "JWT_EXPIRY_MINUTES", 5)
+    monkeypatch.setattr(config, "SSO_SESSION_MAX_AGE_HOURS", hours)
+    monkeypatch.setattr(config, "SSO_SESSION_MAX_AGE_SECONDS", int(hours * 3600))
+    with pytest.raises(RuntimeError, match="SSO_SESSION_MAX_AGE_HOURS"):
+        _assert_session_config_coherent()
+
+
+def test_a_working_sso_ceiling_boots(monkeypatch):
+    from backend.app.main import _assert_session_config_coherent
+    from backend.auth_service.core import config
+
+    monkeypatch.setattr(config, "JWT_EXPIRY_MINUTES", 5)
+    monkeypatch.setattr(config, "SSO_SESSION_MAX_AGE_HOURS", 8)
+    monkeypatch.setattr(config, "SSO_SESSION_MAX_AGE_SECONDS", 8 * 3600)
+    _assert_session_config_coherent()

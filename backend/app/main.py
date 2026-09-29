@@ -199,6 +199,7 @@ def _assert_session_config_coherent() -> None:
         SESSION_ABSOLUTE_MAX_SECONDS,
         SESSION_IDLE_MAX_SECONDS,
         SSO_SESSION_MAX_AGE_HOURS,
+        SSO_SESSION_MAX_AGE_SECONDS,
     )
 
     access_ttl = JWT_EXPIRY_MINUTES * 60
@@ -228,6 +229,19 @@ def _assert_session_config_coherent() -> None:
             f"(JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} = {access_ttl}s). "
             "Every session would be refused at its first rotation. "
             "Raise the idle ceiling or lower the access TTL."
+        )
+    # The SSO re-authentication ceiling has no "off" — unlike the two
+    # above, 0 is not a way to disable it. A ceiling no longer than one
+    # access-token lifetime refuses every SSO session at its first
+    # renewal, and every sign-in is judged stale before it starts.
+    if SSO_SESSION_MAX_AGE_SECONDS <= access_ttl:
+        raise RuntimeError(
+            f"SSO_SESSION_MAX_AGE_HOURS={SSO_SESSION_MAX_AGE_HOURS} gives "
+            f"{SSO_SESSION_MAX_AGE_SECONDS}s, not longer than one "
+            f"access-token lifetime (JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} "
+            f"= {access_ttl}s). Every SSO session would be refused at its "
+            "first renewal. Raise the ceiling (the default is 24) or lower "
+            "the access TTL."
         )
     if (
         0 < SESSION_ABSOLUTE_MAX_SECONDS

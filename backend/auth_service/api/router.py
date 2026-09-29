@@ -2490,7 +2490,7 @@ async def backchannel_handle_login(
         ref = _failure_ref()
         logger.info(
             "Back-channel handle login failed (slug=%s, ref=%s): %s [%s]",
-            slug, ref, exc, exc.code,
+            snap.slug, ref, exc, exc.code,
         )
         await _record_sso_failure(
             _identity_service(request), ref=ref, slug=snap.slug,
@@ -2555,7 +2555,7 @@ async def backchannel_handle_login(
     except SSOAuthError as exc:
         ref = _failure_ref()
         logger.info("Back-channel login rejected (slug=%s, ref=%s): %s",
-                    slug, ref, exc)
+                    snap.slug, ref, exc)
         await _record_sso_failure(
             svc, ref=ref, slug=snap.slug, provider_id=snap.id,
             reason=f"sso_login_rejected:{exc}", request=request,
@@ -2620,7 +2620,7 @@ async def custom_profile_browser_login(
         # at this endpoint shouldn't learn why their payload failed.
         ref = _failure_ref()
         logger.info("Custom profile login failed (slug=%s, ref=%s): %s",
-                    slug, ref, exc)
+                    snap.slug, ref, exc)
         await _record_sso_failure(
             _identity_service(request), ref=ref, slug=snap.slug,
             provider_id=snap.id, reason="payload_rejected", request=request,
@@ -2647,7 +2647,7 @@ async def custom_profile_browser_login(
     except SSOAuthError as exc:
         ref = _failure_ref()
         logger.info("Custom profile login rejected (slug=%s, ref=%s): %s",
-                    slug, ref, exc)
+                    snap.slug, ref, exc)
         await _record_sso_failure(
             _identity_service(request), ref=ref, slug=snap.slug,
             provider_id=snap.id, reason=f"sso_login_rejected:{exc}",
