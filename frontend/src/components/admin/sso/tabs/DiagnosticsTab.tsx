@@ -19,12 +19,16 @@
  * screen can do that nothing else in the product can — hiding it was
  * backwards.
  *
- * The activity log needs ``system:audit:read`` on top of the page's own
- * ``system:admin``. Without it the section is simply absent — a locked
- * panel advertises a capability the operator can neither use nor grant
- * themselves.
+ * Above both sits the other way the job starts: nobody has quoted anything
+ * yet, and the operator wants to know who is failing and why. That list
+ * is per person, and opens a person straight into the lookup.
+ *
+ * The problem list and the activity log need ``system:audit:read`` on top
+ * of the page's own ``system:admin``. Without it they are simply absent — a
+ * locked panel advertises a capability the operator can neither use nor
+ * grant themselves.
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AtSign, Hash, Loader2, Search, SearchX, Tag, UserSearch } from 'lucide-react'
 
 import { ssoAdminService, type UserSummary } from '@/services/ssoAdminService'
@@ -33,6 +37,7 @@ import { cn } from '@/lib/utils'
 import { SsoActivityTab } from '../../SsoActivityTab'
 import { SsoCard, SsoEmpty } from '../ui/SsoCard'
 import { ErrorBanner } from './ErrorBanner'
+import { SignInProblems } from './diagnostics/SignInProblems'
 import { UserResultCard } from './diagnostics/UserResultCard'
 
 type Mode = 'anything' | 'email' | 'attribute'
@@ -52,41 +57,52 @@ const MODES: { id: Mode; label: string; icon: typeof Search; hint: string }[] = 
     },
 ]
 
-function LookupSection() {
-    const [mode, setMode] = useState<Mode>('anything')
-    const [query, setQuery] = useState('')
+function lookup(mode: Mode, attrKey: string, q: string): Promise<UserSummary[]> {
+    if (mode === 'email') {
+        return ssoAdminService.lookupUserByEmail(q).then(u => [u])
+    }
+    if (mode === 'attribute') {
+        return ssoAdminService.lookupUserByAttribute(attrKey.trim(), q).then(u => [u])
+    }
+    return ssoAdminService.searchUsers(q)
+}
+
+/** ``email`` arrives when another section asks to open a person: the
+ *  lookup starts in email mode and runs it straight away. */
+function LookupSection({ email }: { email?: string }) {
+    const [mode, setMode] = useState<Mode>(email ? 'email' : 'anything')
+    const [query, setQuery] = useState(email ?? '')
     const [attrKey, setAttrKey] = useState('staff_id')
     const [results, setResults] = useState<UserSummary[] | null>(null)
     const [error, setError] = useState<string | null>(null)
-    const [busy, setBusy] = useState(false)
+    const [busy, setBusy] = useState(Boolean(email))
+    const ref = useRef<HTMLElement>(null)
 
     const active = MODES.find(m => m.id === mode)!
+
+    function settle(p: Promise<UserSummary[]>) {
+        return p
+            .then(r => { setResults(r); setError(null) })
+            .catch((err: Error) => { setResults([]); setError(err.message) })
+            .finally(() => setBusy(false))
+    }
+
+    useEffect(() => {
+        if (!email) return
+        ref.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+        void settle(lookup('email', '', email))
+    }, [email])
 
     async function runSearch(e: React.FormEvent) {
         e.preventDefault()
         if (!query.trim()) return
         setError(null)
         setBusy(true)
-        try {
-            if (mode === 'email') {
-                setResults([await ssoAdminService.lookupUserByEmail(query.trim())])
-            } else if (mode === 'attribute') {
-                setResults([await ssoAdminService.lookupUserByAttribute(
-                    attrKey.trim(), query.trim(),
-                )])
-            } else {
-                setResults(await ssoAdminService.searchUsers(query.trim()))
-            }
-        } catch (err) {
-            setResults([])
-            setError((err as Error).message)
-        } finally {
-            setBusy(false)
-        }
+        await settle(lookup(mode, attrKey, query.trim()))
     }
 
     return (
-        <section className="space-y-4">
+        <section ref={ref} className="space-y-4 scroll-mt-6">
             <SsoCard
                 icon={UserSearch}
                 title="Find a person"
@@ -204,11 +220,19 @@ function LookupSection() {
 
 export function DiagnosticsTab() {
     const canReadAudit = usePermission('system:audit:read')
+    // Each "Open account" remounts the lookup with that person in it.
+    const [inspect, setInspect] = useState<{ email: string; n: number } | null>(null)
     return (
         <div className="space-y-6">
+            {canReadAudit && (
+                <SignInProblems
+                    onInspect={email => setInspect(prev => ({ email, n: (prev?.n ?? 0) + 1 }))}
+                />
+            )}
+
             <div className="grid xl:grid-cols-[minmax(0,1fr)_320px] gap-6 items-start">
                 <div className="min-w-0">
-                    <LookupSection />
+                    <LookupSection key={inspect?.n ?? 0} email={inspect?.email} />
                 </div>
 
                 <aside className="space-y-4 xl:sticky xl:top-6">

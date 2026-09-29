@@ -145,6 +145,136 @@ const REASONS: Record<string, Reason> = {
         what: 'A password sign-in for an address with no account.',
         next: 'Nothing to fix here unless it repeats — this is not an SSO failure.',
     },
+    // ── password sign-in, for accounts that exist ────────────────────
+    no_local_password: {
+        what: 'A password sign-in for an account that has no password — '
+            + 'it signs in only through single sign-on.',
+        next: 'They typed into the password form, usually after their SSO '
+            + 'sign-in did not work: the failure just before this one says '
+            + 'why. Email-first sign-in, or switching passwords off, stops '
+            + 'the form being offered to them.',
+    },
+    account_inactive: {
+        what: 'A sign-in for an account that is pending or suspended — it '
+            + 'cannot sign in by any route.',
+        next: 'Approve or reinstate it under Admin → Users.',
+    },
+    throttled: {
+        what: 'Too many failed attempts for this address in a short time, '
+            + 'so further attempts were refused for a while.',
+        next: 'It clears by itself. A burst across many addresses at once '
+            + 'is a password spray.',
+    },
+    local_login_disabled: {
+        what: 'A password sign-in while passwords are switched off.',
+        next: 'Expected — only system accounts keep a password. Point them '
+            + 'at their single sign-on button.',
+    },
+    // ── the redirect sign-in flows ───────────────────────────────────
+    idp_error: {
+        what: 'The identity provider answered with an error instead of '
+            + 'signing them in.',
+        next: 'The detail carries its error code — access_denied usually '
+            + 'means they are not assigned to the application there.',
+    },
+    missing_flow_cookie: {
+        what: 'The sign-in came back without the short-lived cookie set '
+            + 'when it started.',
+        next: 'A browser blocking the cookie, or a sign-in started on a '
+            + 'different hostname from the one it returned to.',
+    },
+    bad_flow_cookie: {
+        what: 'That cookie had expired or did not verify.',
+        next: 'Usually they took too long at the provider. Trying again '
+            + 'from the sign-in page fixes it.',
+    },
+    state_mismatch: {
+        what: 'The response did not belong to the sign-in this browser '
+            + 'started.',
+        next: 'A second tab, a bookmarked provider page, or a replay. '
+            + 'Starting again from the sign-in page fixes the first two.',
+    },
+    relay_state_mismatch: {
+        what: 'The response did not belong to the sign-in this browser '
+            + 'started.',
+        next: 'A second tab, a bookmarked provider page, or a replay. '
+            + 'Starting again from the sign-in page fixes the first two.',
+    },
+    flow_provider_mismatch: {
+        what: 'The response arrived for a different connection than the '
+            + 'one the sign-in started with.',
+        next: 'Check the callback address registered at the provider.',
+    },
+    token_or_idtoken: {
+        what: 'Exchanging the provider’s code for tokens, or checking '
+            + 'the ID token, failed.',
+        next: 'The detail names the step — typically the client secret, '
+            + 'the redirect address, or clock skew.',
+    },
+    saml_validate: {
+        what: 'The SAML response did not validate.',
+        next: 'The detail names why — certificate, audience or clock skew.',
+    },
+    envelope_invalid: {
+        what: 'The signed sign-in envelope could not be verified.',
+        next: 'Check the shared secret, and that the sender’s clock is '
+            + 'right.',
+    },
+    payload_rejected: {
+        what: 'The profile supplied for the sign-in could not be accepted.',
+        next: 'The detail names why — usually the signing material or the '
+            + 'format the connection expects.',
+    },
+    // ── why a session stopped renewing ───────────────────────────────
+    reuse_detected: {
+        what: 'A renewal token was used twice, so the whole session was '
+            + 'ended.',
+        next: 'Once is usually two tabs or a restored browser racing. '
+            + 'Repeatedly for one person, suspect a copied cookie.',
+    },
+    no_record: {
+        what: 'The server has no record of the session being renewed.',
+        next: 'A database restore, or a session from another environment. '
+            + 'They sign in again.',
+    },
+    family_revoked: {
+        what: 'The session had already been ended.',
+        next: 'A sign-out or an earlier refusal — nothing to fix.',
+    },
+    user_inactive: {
+        what: 'The account stopped being active while signed in.',
+        next: 'Check the account under Admin → Users.',
+    },
+    sessions_revoked: {
+        what: 'All of their sessions were ended at once.',
+        next: 'Expected after “sign out everywhere” or an access change.',
+    },
+    session_idle: {
+        what: 'The session sat unused past the idle limit.',
+        next: 'Expected. The limit is a deployment setting.',
+    },
+    session_expired: {
+        what: 'The session reached its maximum age.',
+        next: 'Expected. The limit is a deployment setting.',
+    },
+    idle: {
+        what: 'The single sign-on session sat unused past the idle limit.',
+        next: 'Expected — they are sent back through their provider.',
+    },
+    absolute: {
+        what: 'The single sign-on session reached its maximum age.',
+        next: 'Expected — they are sent back through their provider.',
+    },
+    reauth_ceiling: {
+        what: 'The daily re-authentication limit was reached.',
+        next: 'Expected — they are sent back through their provider.',
+    },
+    ambient_token_absent: {
+        what: 'The corporate session the connection re-checks was no '
+            + 'longer present.',
+        next: 'Usually they signed out of the portal, or its session '
+            + 'ended overnight.',
+    },
 }
 
 const PREFIXED: { prefix: string; build: (rest: string) => Reason }[] = [
@@ -180,6 +310,39 @@ const PREFIXED: { prefix: string; build: (rest: string) => Reason }[] = [
             next: rest === 'pending'
                 ? 'Approve it under Admin → Users.'
                 : 'Reinstate it under Admin → Users, if that is what you want.',
+        }),
+    },
+    {
+        // The wrapper names the stage; the code inside it is the reason.
+        prefix: 'sso_login_rejected:',
+        build: rest => explainReason(rest) ?? {
+            what: `The sign-in was refused (${rest}).`,
+            next: 'The server log carries the detail under the same reference.',
+        },
+    },
+    {
+        prefix: 'payload_missing_from_',
+        build: rest => ({
+            what: `The sign-in carried no profile in the ${rest} the `
+                + 'connection reads it from.',
+            next: 'They are not signed in to the portal that writes it, or '
+                + 'it does not reach this app’s address.',
+        }),
+    },
+    {
+        prefix: 'idp_rejected:',
+        build: rest => ({
+            what: `Their provider answered ${rest.replace(/^idp_rejected:/, '')} `
+                + 'when the session was re-checked.',
+            next: 'Usually they signed out there, or their session there ended.',
+        }),
+    },
+    {
+        prefix: 'idp_unconfirmed:',
+        build: () => ({
+            what: 'The session could not be re-confirmed with their provider '
+                + 'for longer than the grace period allows.',
+            next: 'An outage or a network path problem on the way to it.',
         }),
     },
 ]

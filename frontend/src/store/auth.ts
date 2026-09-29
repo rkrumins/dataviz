@@ -234,7 +234,9 @@ interface AuthState {
      *  it. ``unsafe_auto_link`` suppresses the generic ``error`` — the
      *  collision modal carries that case, and a second banner saying
      *  "did not work" underneath it would just compete. */
-    lastSsoDenial: { code: string; email?: string; reasons?: string[] } | null
+    lastSsoDenial: {
+        code: string; email?: string; reasons?: string[]; ref?: string
+    } | null
     signup: (req: SignUpRequest) => Promise<{
         ok: boolean
         message: string
@@ -443,7 +445,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             return true
         } catch (err: unknown) {
             const denial = err instanceof BackchannelLoginError
-                ? { code: err.code, email: err.email, reasons: err.reasons }
+                ? {
+                    code: err.code, email: err.email, reasons: err.reasons,
+                    ref: err.ref,
+                }
                 : null
             const message = err instanceof Error
                 ? err.message

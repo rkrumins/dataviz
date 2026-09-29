@@ -364,7 +364,9 @@ class LocalIdentityService:
         posture without waiting out the TTL."""
         await self._auth_config_provider.invalidate()
 
-    async def login(self, email: str, password: str) -> tuple[User, SessionTokens]:
+    async def login(
+        self, email: str, password: str, *, client: Optional[dict] = None,
+    ) -> tuple[User, SessionTokens]:
         # Phase 4: respect the platform kill-switch BEFORE invoking
         # the local provider — refuse the request explicitly so the
         # FE can redirect to the dynamic providers list instead of
@@ -402,10 +404,17 @@ class LocalIdentityService:
                 # would roll back the main session and drop the event.
                 # Best-effort throughout — an audit failure must never
                 # block the 401 (wrapped below).
+                #
+                # The caller gets one answer whatever went wrong; the
+                # record says which it was, so an admin can tell a typo
+                # from an account that has no password to type. The
+                # lookup runs for every refusal alike, so the refusal's
+                # timing still says nothing about the account.
                 try:
+                    account = await _get_user_by_email(email)
                     await self._emit_audit(
                         "user.login_failed",
-                        {"email": email, "reason": "invalid_credentials"},
+                        _password_refusal(email, account, client),
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -416,7 +425,8 @@ class LocalIdentityService:
                 try:
                     await self._emit_audit(
                         "user.login_failed",
-                        {"email": email, "reason": "user_not_found"},
+                        {"email": _normal_email(email),
+                         "reason": "user_not_found", **(client or {})},
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -558,9 +568,16 @@ class LocalIdentityService:
             user, tokens, liveness = await self._refresh_within_session(claims)
         except _RefreshRejected as rejection:
             await self._revoke_family_committed(claims.family_id)
-            if rejection.audit is not None:
-                await self._emit_audit(*rejection.audit)
+            await self._emit_audit(
+                *(rejection.audit or _session_refused(claims, rejection.error))
+            )
             raise rejection.error from None
+        except InvalidRefreshToken as exc:
+            # Refused with nothing left to revoke — no record of the token,
+            # or a family already ended. Still the moment this person's
+            # session stopped working, so it is recorded like the rest.
+            await self._emit_audit(*_session_refused(claims, exc))
+            raise
 
         # Deliberately AFTER the session scope has closed. This makes an
         # outbound HTTP call, and holding a DB connection across one
@@ -1139,6 +1156,7 @@ class LocalIdentityService:
                 raise SSOAuthError(
                     decision.error or "sso_rejected",
                     deny_reasons=decision.deny_reasons,
+                    user_id=orm.id if orm else None,
                 )
 
             if decision.action == "sign_in_existing":
@@ -2264,6 +2282,42 @@ def _has_password(orm) -> bool:
     disabled-sentinel detection."""
     from .core.password import is_password_set
     return is_password_set(getattr(orm, "password_hash", None) or "")
+
+
+def _session_refused(claims, error: Exception) -> tuple[str, dict]:
+    """The record of a renewal refused for a reason no other event names."""
+    return ("user.session_refused", {
+        "user_id": claims.sub,
+        "reason": str(error),
+    })
+
+
+def _normal_email(email: Optional[str]) -> str:
+    return (email or "").strip().lower()
+
+
+def _password_refusal(email: str, account, client: Optional[dict]) -> dict:
+    """The record of a refused password sign-in, naming which refusal.
+
+    Checked in the order an admin can act on: an account that is not
+    active cannot sign in by any route, so that is the answer whatever
+    was typed; an account with no password has only its SSO connections;
+    otherwise the password was wrong.
+    """
+    payload: dict = {"email": _normal_email(email)}
+    if account is None:
+        payload["reason"] = "user_not_found"
+    else:
+        payload["user_id"] = account.id
+        if account.status != "active":
+            payload["reason"] = "account_inactive"
+            payload["status"] = account.status
+        elif not _has_password(account):
+            payload["reason"] = "no_local_password"
+        else:
+            payload["reason"] = "invalid_credentials"
+    payload.update(client or {})
+    return payload
 
 
 def _load_cached_idp_groups(orm) -> list[str]:

@@ -832,4 +832,96 @@ export const ssoAdminService = {
         const qs = new URLSearchParams({ q, limit: String(limit) })
         return request<UserSummary[]>(`${ADMIN}/users/search?${qs.toString()}`)
     },
+
+    // ── Sign-in diagnostics ──────────────────────────────────────────
+
+    /** Failed sign-ins in a window, one entry per person. Needs
+     *  ``system:audit:read``. */
+    failureDigest(params: FailureDigestParams = {}): Promise<FailureDigest> {
+        const qs = new URLSearchParams()
+        for (const [k, v] of Object.entries(params)) {
+            if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+        }
+        const suffix = qs.toString() ? `?${qs.toString()}` : ''
+        return request<FailureDigest>(`${ADMIN}/sso/failures${suffix}`)
+    },
+}
+
+export interface FailureDigestParams {
+    fromTs?: string
+    reason?: string
+    /** A connection's slug, or ``password``. */
+    provider?: string
+    /** A person: name, email, user id or IdP subject. */
+    q?: string
+    limit?: number
+}
+
+export interface FailureAttempt {
+    at: string
+    code: string
+    detail?: string | null
+    provider: string
+    providerName?: string | null
+    ref?: string | null
+    clientIp?: string | null
+    userAgent?: string | null
+}
+
+export interface PersonFailures {
+    /** Stable per person for the window. */
+    key: string
+    /** ``account`` — resolved to a user; ``no_account`` — an address with no
+     *  account behind it; ``unidentified`` — attempts that never got far
+     *  enough to say who. */
+    kind: 'account' | 'no_account' | 'unidentified'
+    userId?: string | null
+    email?: string | null
+    externalId?: string | null
+    name?: string | null
+    avatarId?: string | null
+    status?: string | null
+    deleted: boolean
+    passwordSet?: boolean | null
+    waysIn: { slug: string; name?: string | null; lastUsedAt?: string | null }[]
+    lastSignInAt?: string | null
+    attempts: number
+    firstAt: string
+    lastAt: string
+    /** ``null`` when there is no account to have signed in to. */
+    stillFailing?: boolean | null
+    latest: {
+        code: string
+        detail?: string | null
+        provider: string
+        providerName?: string | null
+        ref?: string | null
+    }
+    reasons: { code: string; count: number }[]
+    /** Distinct network addresses the attempts came from. */
+    clients: number
+    sessionEnds: {
+        at: string
+        eventType: string
+        reason: string
+        provider?: string | null
+    }[]
+    recent: FailureAttempt[]
+    /** Failures nobody could be named for, from the same network address
+     *  and browser shortly before this person's attempts. Likely theirs,
+     *  not certainly — an office can share an address. */
+    related: FailureAttempt[]
+}
+
+export interface FailureDigest {
+    window: { from: string; scanned: number; truncated: boolean }
+    totals: {
+        attempts: number
+        people: number
+        stillFailing: number
+        unidentified: number
+    }
+    reasons: { code: string; count: number }[]
+    providers: { slug: string; name?: string | null; count: number }[]
+    people: PersonFailures[]
 }

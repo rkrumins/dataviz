@@ -804,7 +804,11 @@ export function LoginPage() {
                 })
                 return
             }
-            setPortalError(`Could not sign in with ${p.displayName}.`)
+            // The reference is what an administrator looks the reason up by.
+            setPortalError(
+                `Could not sign in with ${p.displayName}`
+                + (denial?.ref ? ` (reference ${denial.ref}).` : '.'),
+            )
         } catch (err) {
             // Say which step failed rather than navigating into a
             // sign-in that was never going to work. The likeliest causes

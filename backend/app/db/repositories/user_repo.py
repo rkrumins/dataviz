@@ -1182,6 +1182,67 @@ async def get_identities_by_ids(
     }
 
 
+async def get_user_ids_by_emails(
+    session: AsyncSession, emails: list[str],
+) -> dict[str, str]:
+    """Current account id for each of a batch of emails, keyed by the
+    lower-cased email. An email with no current account is absent."""
+    wanted = [e for e in dict.fromkeys(
+        (e or "").strip().lower() for e in emails
+    ) if e]
+    if not wanted:
+        return {}
+    rows = (await session.execute(
+        select(UserORM.email, UserORM.id).where(
+            UserORM.email.in_(wanted), UserORM.deleted_at.is_(None),
+        )
+    )).all()
+    return {r[0]: r[1] for r in rows}
+
+
+async def get_sign_in_state_by_ids(
+    session: AsyncSession, user_ids: list[str],
+) -> dict[str, dict]:
+    """What a sign-in diagnosis needs to know about each of a batch of
+    accounts, keyed by id: who they are, whether the account can be used,
+    whether it has a password, and when it last signed in successfully.
+
+    Soft-deleted accounts are included and marked, as in
+    :func:`get_identities_by_ids`; an id that resolves to nothing is absent.
+    """
+    from backend.auth_service.core.password import is_password_set
+
+    ids = [i for i in dict.fromkeys(user_ids) if i]
+    if not ids:
+        return {}
+    rows = (await session.execute(
+        select(
+            UserORM.id,
+            UserORM.display_name,
+            UserORM.first_name,
+            UserORM.last_name,
+            UserORM.email,
+            UserORM.status,
+            UserORM.deleted_at,
+            UserORM.avatar_id,
+            UserORM.last_login_at,
+            UserORM.password_hash,
+        ).where(UserORM.id.in_(ids))
+    )).all()
+    return {
+        r[0]: {
+            "name": resolve_display_name(r[1], r[2], r[3]),
+            "email": r[4],
+            "status": r[5],
+            "deleted": r[6] is not None,
+            "avatar_id": r[7],
+            "last_login_at": r[8],
+            "password_set": is_password_set(r[9]),
+        }
+        for r in rows
+    }
+
+
 async def get_workspace_names_by_ids(
     session: AsyncSession, workspace_ids: list[str],
 ) -> dict[str, str]:

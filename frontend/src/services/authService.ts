@@ -436,15 +436,19 @@ export class BackchannelLoginError extends Error {
     code: string
     email?: string
     reasons?: string[]
+    /** The handle the refusal was recorded under, for the person to quote. */
+    ref?: string
 
     constructor(
-        code: string, opts: { email?: string; reasons?: string[] } = {},
+        code: string,
+        opts: { email?: string; reasons?: string[]; ref?: string } = {},
     ) {
         super('Signing in with that session did not work.')
         this.name = 'BackchannelLoginError'
         this.code = code
         this.email = opts.email
         this.reasons = opts.reasons
+        this.ref = opts.ref
     }
 }
 
@@ -471,7 +475,9 @@ export async function loginWithBackchannel(
         },
     )
     if (!res.ok) {
-        type DenialDetail = { error?: string; email?: string; reasons?: string[] }
+        type DenialDetail = {
+            error?: string; email?: string; reasons?: string[]; ref?: string
+        }
         let detail: DenialDetail | null = null
         try {
             const parsed = (await res.json()) as { detail?: DenialDetail }
@@ -486,6 +492,7 @@ export async function loginWithBackchannel(
                 reasons: Array.isArray(detail?.reasons)
                     ? detail.reasons.map(String)
                     : undefined,
+                ref: typeof detail?.ref === 'string' ? detail.ref : undefined,
             },
         )
     }

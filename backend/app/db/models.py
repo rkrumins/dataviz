@@ -3221,6 +3221,9 @@ class OutboxEventORM(Base):
         Index("idx_outbox_processed_created", "processed", "created_at"),
         Index("idx_outbox_aggregate", "aggregate_type", "aggregate_id"),
         Index("idx_outbox_event_type", "event_type"),
+        # "These kinds of event, newest first, since then" — the shape of
+        # every per-kind read of this table, which only grows.
+        Index("idx_outbox_event_type_created", "event_type", "created_at"),
     )
 
     def __repr__(self) -> str:

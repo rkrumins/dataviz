@@ -753,6 +753,16 @@ describe('a refused link', () => {
         expect(screen.queryByText(/already exists/i)).not.toBeInTheDocument()
     })
 
+    it('gives the reference an administrator looks the refusal up by', async () => {
+        lastDenialRef.current = { code: 'backchannel_no_session', ref: 'ab12cd34' }
+        renderLogin()
+        await userEvent.click(
+            await screen.findByRole('button', { name: /Corporate Gateway/i }),
+        )
+
+        expect(await screen.findByText(/reference ab12cd34/i)).toBeInTheDocument()
+    })
+
     it('never opens the modal from the silent attempt', async () => {
         // Nobody asked; a modal about an account they did not try to use
         // is an ambush. The button tells them when they press it.

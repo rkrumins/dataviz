@@ -15,8 +15,8 @@
  * already exist there. Mirrors AdminAudit's hand-rolled useCallback + effect,
  * which is the house pattern for audit tables.
  */
-import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, RefreshCw, Search, ShieldAlert } from 'lucide-react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import { AlertCircle, ChevronDown, ChevronRight, RefreshCw, Search, ShieldAlert } from 'lucide-react'
 
 import { auditService, type AuditEvent } from '@/services/auditService'
 import { ReasonHint } from './sso/tabs/diagnostics/ReasonHint'
@@ -56,6 +56,58 @@ const SEVERITY_PILL: Record<string, { label: string; cls: string }> = {
     },
 }
 
+/** The payload fields that answer "who, and from where" — shown by name,
+ *  in this order, above the raw record. */
+const DETAIL_FIELDS: { key: string; label: string }[] = [
+    { key: 'email', label: 'Email' },
+    { key: 'external_id', label: 'Provider subject' },
+    { key: 'reason', label: 'Reason' },
+    { key: 'detail', label: 'Detail' },
+    { key: 'status', label: 'Account status' },
+    { key: 'client_ip', label: 'Network address' },
+    { key: 'user_agent', label: 'Browser' },
+    { key: 'path', label: 'Endpoint' },
+]
+
+function EventDetail({ event }: { event: AuditEvent }) {
+    const p = event.payload ?? {}
+    const person = event.targetUserName || event.targetUserEmail || event.targetUserId
+    const rows = DETAIL_FIELDS
+        .map(f => ({ ...f, value: p[f.key] }))
+        .filter(f => f.value !== undefined && f.value !== null && f.value !== '')
+    return (
+        <div className="px-4 py-3 space-y-3 bg-black/[0.015] dark:bg-white/[0.02]">
+            <dl className="grid sm:grid-cols-[10rem_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
+                {person && (
+                    <>
+                        <dt className="text-ink-muted">Account</dt>
+                        <dd className="text-ink">
+                            {person}
+                            {event.targetUserEmail && event.targetUserName && (
+                                <span className="text-ink-muted"> · {event.targetUserEmail}</span>
+                            )}
+                        </dd>
+                    </>
+                )}
+                {rows.map(f => (
+                    <Fragment key={f.key}>
+                        <dt className="text-ink-muted">{f.label}</dt>
+                        <dd className="font-mono text-[11px] text-ink break-all">{String(f.value)}</dd>
+                    </Fragment>
+                ))}
+                <dt className="text-ink-muted">Event</dt>
+                <dd className="font-mono text-[11px] text-ink-secondary">{event.eventType} · {event.eventId}</dd>
+            </dl>
+            <details>
+                <summary className="text-[11px] text-ink-muted cursor-pointer">Raw event payload</summary>
+                <pre className="mt-2 p-3 rounded-lg bg-canvas border border-glass-border text-[11px] overflow-x-auto">
+                    {JSON.stringify(p, null, 2)}
+                </pre>
+            </details>
+        </div>
+    )
+}
+
 export function SsoActivityTab() {
     // AdminSso as a page is gated on system:admin, which does NOT imply
     // audit access — the two are separate grants, so this tab checks its own.
@@ -71,6 +123,7 @@ export function SsoActivityTab() {
     const [win, setWin] = useState<Window>('7d')
     const [refQuery, setRefQuery] = useState('')
     const [appliedRef, setAppliedRef] = useState('')
+    const [openId, setOpenId] = useState<string | null>(null)
 
     const filters = useMemo(() => ({
         category: 'sso' as const,
@@ -228,6 +281,7 @@ export function SsoActivityTab() {
                     <table className="w-full text-sm">
                         <thead>
                             <tr className="text-left text-[10px] font-semibold uppercase tracking-wider text-ink-muted bg-black/[0.02] dark:bg-white/[0.03]">
+                                <th className="w-8" />
                                 <th className="px-4 py-2.5 w-44 font-semibold">When</th>
                                 <th className="px-4 py-2.5 w-24 font-semibold">Ref</th>
                                 <th className="px-4 py-2.5 w-24 font-semibold">Severity</th>
@@ -237,11 +291,26 @@ export function SsoActivityTab() {
                         <tbody className="divide-y divide-glass-border">
                             {visible.map((e) => {
                                 const pill = SEVERITY_PILL[e.severity] ?? SEVERITY_PILL.info
+                                const expanded = openId === e.eventId
                                 return (
+                                    <Fragment key={e.eventId}>
                                     <tr
-                                        key={e.eventId}
-                                        className="align-top hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
+                                        onClick={() => setOpenId(expanded ? null : e.eventId)}
+                                        className="align-top cursor-pointer hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
                                     >
+                                        <td className="pl-3 py-3">
+                                            <button
+                                                type="button"
+                                                aria-expanded={expanded}
+                                                aria-label={expanded ? 'Hide details' : 'Show details'}
+                                                onClick={(ev) => { ev.stopPropagation(); setOpenId(expanded ? null : e.eventId) }}
+                                                className="text-ink-muted hover:text-ink"
+                                            >
+                                                {expanded
+                                                    ? <ChevronDown className="w-4 h-4" />
+                                                    : <ChevronRight className="w-4 h-4" />}
+                                            </button>
+                                        </td>
                                         <td className="px-4 py-3 text-xs text-ink-muted whitespace-nowrap">
                                             {new Date(e.createdAt).toLocaleString()}
                                         </td>
@@ -265,6 +334,14 @@ export function SsoActivityTab() {
                                             <ReasonHint summary={e.summary} />
                                         </td>
                                     </tr>
+                                    {expanded && (
+                                        <tr>
+                                            <td colSpan={5} className="p-0">
+                                                <EventDetail event={e} />
+                                            </td>
+                                        </tr>
+                                    )}
+                                    </Fragment>
                                 )
                             })}
                         </tbody>

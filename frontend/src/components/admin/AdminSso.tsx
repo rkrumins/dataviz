@@ -30,7 +30,6 @@ import { PageContainer } from '@/components/layout/PageContainer'
 import { DocsLink } from '@/components/help/DocsLink'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
-import { auditService } from '@/services/auditService'
 import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
 import { ProvidersTab } from './sso/tabs/ProvidersTab'
 import { MappingsTab } from './sso/tabs/MappingsTab'
@@ -72,14 +71,13 @@ export function AdminSso() {
         await Promise.allSettled([
             ssoAdminService.listProviders().then(setProviders),
             ssoAdminService.listGroupMappings().then(r => setRuleCount(r.length)),
+            // Failed sign-in attempts only — counting every warning row
+            // also counted sign-outs and configuration changes.
             canReadAudit
-                ? auditService.list({
-                    category: 'sso',
+                ? ssoAdminService.failureDigest({
                     fromTs: new Date(Date.now() - 24 * 3600_000).toISOString(),
-                    limit: 100,
-                }).then(r => setFailures(r.events.filter(
-                    e => e.severity === 'critical' || e.severity === 'warning',
-                ).length))
+                    limit: 1,
+                }).then(d => setFailures(d.totals.attempts))
                 : Promise.resolve(setFailures(null)),
         ])
         setRefreshing(false)

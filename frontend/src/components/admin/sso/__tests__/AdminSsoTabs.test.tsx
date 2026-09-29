@@ -23,16 +23,18 @@ vi.mock('@/store/auth', async () => {
     return { ...actual, usePermission: () => perms.value }
 })
 
-const { listProviders, listGroupMappings, auditList } = vi.hoisted(() => ({
+const { listProviders, listGroupMappings, auditList, failureDigest } = vi.hoisted(() => ({
     listProviders: vi.fn(),
     listGroupMappings: vi.fn(),
     auditList: vi.fn(),
+    failureDigest: vi.fn(),
 }))
 
 vi.mock('@/services/ssoAdminService', () => ({
     ssoAdminService: {
         listProviders,
         listGroupMappings,
+        failureDigest,
         providerStatus: vi.fn().mockResolvedValue({ providers: [] }),
     },
 }))
@@ -50,7 +52,16 @@ beforeEach(() => {
     listProviders.mockResolvedValue([])
     listGroupMappings.mockResolvedValue([])
     auditList.mockResolvedValue({ events: [], nextCursor: null })
+    failureDigest.mockResolvedValue(digest())
 })
+
+function digest(attempts = 0) {
+    return {
+        window: { from: '', scanned: attempts, truncated: false },
+        totals: { attempts, people: 0, stillFailing: 0, unidentified: 0 },
+        reasons: [], providers: [], people: [],
+    }
+}
 
 function provider(over: Record<string, unknown> = {}) {
     return {
@@ -108,6 +119,16 @@ describe('stat tiles', () => {
 
         const fails = await screen.findByText(/failed sign-ins/i)
         expect(within(fails.closest('div')!.parentElement!).getByText('—'))
+            .toBeInTheDocument()
+        expect(failureDigest).not.toHaveBeenCalled()
+    })
+
+    it('counts failed sign-in attempts, not every warning in the log', async () => {
+        failureDigest.mockResolvedValue(digest(7))
+        render(<MemoryRouter><AdminSso /></MemoryRouter>)
+
+        const fails = await screen.findByText(/failed sign-ins/i)
+        expect(await within(fails.closest('div')!.parentElement!).findByText('7'))
             .toBeInTheDocument()
         expect(auditList).not.toHaveBeenCalled()
     })
@@ -194,6 +215,14 @@ describe('diagnostics', () => {
         // The lookup half survives — only the audit-backed half goes away.
         expect(screen.getByText(/find a person/i)).toBeInTheDocument()
         expect(screen.queryByText(/system:audit:read/i)).not.toBeInTheDocument()
+        expect(screen.queryByText(/sign-in problems/i)).not.toBeInTheDocument()
+        expect(failureDigest).not.toHaveBeenCalled()
+    })
+
+    it('leads with who is failing when the operator can read the log', async () => {
+        render(<DiagnosticsTab />)
+        expect(await screen.findByText('Sign-in problems')).toBeInTheDocument()
+        expect(failureDigest).toHaveBeenCalled()
     })
 
     it('drops the reference prompt along with the log it points at', () => {

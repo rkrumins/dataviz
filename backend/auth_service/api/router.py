@@ -515,10 +515,44 @@ def _failure_ref() -> str:
     return secrets.token_hex(4)
 
 
+#: Caps on the free text a failure record carries. The detail is an
+#: exception message or an upstream status line — enough to act on, and
+#: bounded so a hostile or runaway upstream cannot bloat the audit table.
+_FAILURE_DETAIL_MAX = 300
+_USER_AGENT_MAX = 200
+
+
+def _client_context(request: Optional[Request]) -> dict:
+    """Where a sign-in attempt came from, for the admin tracing it.
+
+    ``request.client`` is the peer the ASGI server trusted — behind the
+    shipped proxy that is the browser's address, because
+    ``--forwarded-allow-ips`` names the proxy.
+    """
+    if request is None:
+        return {}
+    out = {"path": request.url.path}
+    if request.client and request.client.host:
+        out["client_ip"] = request.client.host
+    agent = request.headers.get("user-agent")
+    if agent:
+        out["user_agent"] = agent[:_USER_AGENT_MAX]
+    return out
+
+
 async def _record_sso_failure(
     svc, *, ref: str, slug: str, provider_id: Optional[str], reason: str,
+    request: Optional[Request] = None,
+    detail: Optional[str] = None,
+    who: Optional[dict] = None,
 ) -> None:
     """Write the failure to the audit log keyed by ``ref``.
+
+    ``reason`` is the code a parser groups and explains; ``detail`` is the
+    free text behind it (an exception message, an upstream status), kept
+    in its own field so the code stays a closed vocabulary. ``who`` names
+    the person when the attempt got far enough to know: ``email``,
+    ``user_id``, ``external_id``.
 
     Best-effort: a login that already failed must not also 500 because the
     audit write did. Uses the standalone-transaction emitter so the record
@@ -527,15 +561,25 @@ async def _record_sso_failure(
     emit = getattr(svc, "emit_audit", None)
     if emit is None:
         return
+    payload = {
+        "ref": ref,
+        "provider_slug": slug,
+        "provider_id": provider_id,
+        # The precise reason is admin-only by construction: it lives
+        # here, never in the redirect the user sees.
+        "reason": reason,
+    }
+    who = who or {}
+    extra = {
+        "detail": detail[:_FAILURE_DETAIL_MAX] if detail else None,
+        "email": (who.get("email") or "").strip().lower() or None,
+        "user_id": who.get("user_id"),
+        "external_id": who.get("external_id"),
+        **_client_context(request),
+    }
+    payload.update({k: v for k, v in extra.items() if v})
     try:
-        await emit("user.sso_login_failed", {
-            "ref": ref,
-            "provider_slug": slug,
-            "provider_id": provider_id,
-            # The precise reason is admin-only by construction: it lives
-            # here, never in the redirect the user sees.
-            "reason": reason,
-        })
+        await emit("user.sso_login_failed", payload)
     except Exception as exc:  # noqa: BLE001 — audit is best-effort
         logger.warning("SSO failure audit failed (slug=%s): %s", slug, exc)
 
@@ -865,6 +909,7 @@ async def _dry_run_or_none(
 def _sso_failure_handler(
     svc, *, slug: str, snap, log_label: str,
     clear_flow: Optional[Callable[[Response], None]] = None,
+    request: Optional[Request] = None,
 ):
     """Build the ``_fail`` closure each redirect-based flow needs.
 
@@ -875,18 +920,20 @@ def _sso_failure_handler(
     """
     async def _fail(reason: str, *, error_code: Optional[str] = None,
                     email: Optional[str] = None,
-                    detail: Optional[str] = None) -> RedirectResponse:
-        # ``detail`` is logged and NOT audited. The audit row's reason is
-        # read by a parser and rendered into a summary, so it has to stay
-        # a closed vocabulary; the detail behind it is free text that can
-        # quote a URL or an exception class and belongs in the log, under
-        # the same ref so the two still join up.
+                    detail: Optional[str] = None,
+                    who: Optional[dict] = None) -> RedirectResponse:
+        # ``reason`` stays a closed vocabulary — a parser groups and
+        # explains it. ``detail`` is the free text behind it and is
+        # recorded in its own field. ``email`` is the one value that goes
+        # back to the browser (the collision modal needs it); ``who`` is
+        # for the record only.
         ref = _failure_ref()
         logger.info("%s failed (slug=%s, ref=%s): %s%s",
                     log_label, slug, ref, reason,
                     f" — {detail}" if detail else "")
         await _record_sso_failure(
             svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
+            request=request, detail=detail, who=who,
         )
         resp = RedirectResponse(
             _failure_redirect(ref, error_code=error_code, email=email),
@@ -897,6 +944,15 @@ def _sso_failure_handler(
         return resp
 
     return _fail
+
+
+def _rejected_who(identity, exc: SSOAuthError) -> dict:
+    """The person a refused SSO sign-in was for, as the record names them."""
+    return {
+        "email": getattr(identity, "email", None),
+        "external_id": getattr(identity, "external_id", None),
+        "user_id": exc.user_id,
+    }
 
 
 async def _finish_sso_login(
@@ -976,11 +1032,12 @@ async def _finish_sso_login(
             assurance=assurance_for(snap.kind, snap.settings),
         )
     except SSOAuthError as exc:
+        who = _rejected_who(identity, exc)
         if str(exc) == "unsafe_auto_link":
             # The login page renders its collision modal off these params.
             return await fail(str(exc), error_code="unsafe_auto_link",
-                              email=identity.email)
-        return await fail(f"sso_login_rejected:{exc}")
+                              email=identity.email, who=who)
+        return await fail(f"sso_login_rejected:{exc}", who=who)
 
     logger.info("SSO login succeeded (kind=%s, slug=%s, user=%s)",
                 snap.kind, slug, user.id)
@@ -1123,6 +1180,25 @@ async def _provider_snapshot(slug: str, *, request: Request | None = None):
 # ── POST /auth/login ──────────────────────────────────────────────────
 
 
+async def _record_password_refusal(
+    svc, email: str, reason: str, client: dict,
+) -> None:
+    """Record a password sign-in refused before the password was checked.
+
+    The refusals decided after it are recorded by ``svc.login`` itself.
+    Best-effort: the caller is already answering with a refusal.
+    """
+    emit = getattr(svc, "emit_audit", None)
+    if emit is None:
+        return
+    try:
+        await emit("user.login_failed", {
+            "email": (email or "").strip().lower(), "reason": reason, **client,
+        })
+    except Exception as exc:  # noqa: BLE001 — audit is best-effort
+        logger.warning("Password refusal audit failed: %s", exc)
+
+
 @router.post(
     "/login",
     response_model=SessionResponse,
@@ -1142,11 +1218,13 @@ async def login(
     # control that stops one: it keys on the account under attack, so it
     # holds however many addresses the attempts arrive from.
     accounts = get_account_limiter()
+    client = _client_context(request)
     if not await accounts.check("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT):
         retry_after = await accounts.retry_after_seconds(
             "login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT,
         )
         logger.warning("Login throttled for account (too many failures)")
+        await _record_password_refusal(svc, body.email, "throttled", client)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed sign-in attempts. Try again shortly.",
@@ -1154,7 +1232,7 @@ async def login(
         )
 
     try:
-        user, tokens = await svc.login(body.email, body.password)
+        user, tokens = await svc.login(body.email, body.password, client=client)
     except LocalLoginDisabled:
         # Phase 4: SSO-only mode. Don't leak the existence of any
         # account; respond with a structured 403 so the FE can
@@ -1162,6 +1240,9 @@ async def login(
         # one carve-out, resolved inside ``svc.login`` — reaching this
         # branch means the account is not one, or does not exist, and
         # the two are deliberately indistinguishable.)
+        await _record_password_refusal(
+            svc, body.email, "local_login_disabled", client,
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
@@ -1845,10 +1926,11 @@ async def oidc_callback(
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="OIDC callback",
         clear_flow=clear_oidc_cookie,
+        request=request,
     )
 
     if error or not code or not state:
-        return await _fail(f"idp_error={error or 'missing_code_or_state'}")
+        return await _fail("idp_error", detail=error or "missing_code_or_state")
 
     raw_cookie = read_oidc_cookie(request)
     if not raw_cookie:
@@ -1856,7 +1938,7 @@ async def oidc_callback(
     try:
         flow = decode_oidc_state_token(raw_cookie)
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
-        return await _fail(f"bad_flow_cookie:{exc}")
+        return await _fail("bad_flow_cookie", detail=str(exc))
 
     if not hmac.compare_digest(str(flow.get("state", "")), state):
         return await _fail("state_mismatch")
@@ -1875,7 +1957,7 @@ async def oidc_callback(
             nonce=flow["nonce"],
         )
     except Exception as exc:  # noqa: BLE001 — OidcError etc.
-        return await _fail(f"token_or_idtoken:{exc}")
+        return await _fail("token_or_idtoken", detail=str(exc))
 
     return await _finish_sso_login(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
@@ -1918,6 +2000,7 @@ async def saml_acs(slug: str, request: Request):
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="SAML ACS",
         clear_flow=clear_saml_cookie,
+        request=request,
     )
 
     form = await request.form()
@@ -1932,7 +2015,7 @@ async def saml_acs(slug: str, request: Request):
     try:
         flow = decode_saml_state_token(raw_cookie)
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
-        return await _fail(f"bad_flow_cookie:{exc}")
+        return await _fail("bad_flow_cookie", detail=str(exc))
     if not hmac.compare_digest(str(flow.get("rs", "")), str(relay_state or "")):
         return await _fail("relay_state_mismatch")
     if not _flow_belongs_to(flow, provider):
@@ -1950,7 +2033,7 @@ async def saml_acs(slug: str, request: Request):
             expected_request_id=flow.get("rid"),
         )
     except Exception as exc:  # noqa: BLE001
-        return await _fail(f"saml_validate:{exc}")
+        return await _fail("saml_validate", detail=str(exc))
 
     return await _finish_sso_login(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
@@ -2057,12 +2140,13 @@ async def _custom_login_flow(
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="Custom IdP login",
         clear_flow=clear_mock_identity_cookie,
+        request=request,
     )
 
     try:
         identity = provider.fetch_identity(raw)
     except CustomIdentityError as exc:
-        return await _fail(f"envelope_invalid:{exc}")
+        return await _fail("envelope_invalid", detail=str(exc))
 
     return await _finish_sso_login(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
@@ -2173,6 +2257,7 @@ async def _custom_profile_login_flow(
     svc = _identity_service(request)
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="Custom profile login",
+        request=request,
     )
 
     if not raw:
@@ -2181,7 +2266,7 @@ async def _custom_profile_login_flow(
     try:
         identity = await provider.fetch_identity(raw)
     except CustomProfileError as exc:
-        return await _fail(f"payload_rejected:{exc}")
+        return await _fail("payload_rejected", detail=str(exc))
 
     # The degraded-trust audit is this kind's own step; everything after
     # it is the shared tail.
@@ -2239,6 +2324,7 @@ async def _backchannel_login_flow(
     svc = _identity_service(request)
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="Back-channel login",
+        request=request,
     )
 
     if provider.settings.exchange_mode == "browser":
@@ -2398,15 +2484,22 @@ async def backchannel_handle_login(
                 read_ambient_token(request, provider) or "",
             )
     except BackchannelError as exc:
-        # Same split as the redirect flow: the code is audited, the
-        # message is logged, and neither reaches the caller.
+        # Same split as the redirect flow: the code and the message are
+        # recorded for the admin, and only the code and the ref reach the
+        # caller.
+        ref = _failure_ref()
         logger.info(
-            "Back-channel handle login failed (slug=%s): %s [%s]",
-            slug, exc, exc.code,
+            "Back-channel handle login failed (slug=%s, ref=%s): %s [%s]",
+            slug, ref, exc, exc.code,
+        )
+        await _record_sso_failure(
+            _identity_service(request), ref=ref, slug=snap.slug,
+            provider_id=snap.id, reason=exc.code, request=request,
+            detail=str(exc),
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": exc.code},
+            detail={"error": exc.code, "ref": ref},
         )
 
     # JSON rather than the HTML page the redirect flows get: this
@@ -2460,8 +2553,15 @@ async def backchannel_handle_login(
             assurance=assurance_for(snap.kind, snap.settings),
         )
     except SSOAuthError as exc:
-        logger.info("Back-channel login rejected (slug=%s): %s", slug, exc)
-        detail: dict = {"error": str(exc)}
+        ref = _failure_ref()
+        logger.info("Back-channel login rejected (slug=%s, ref=%s): %s",
+                    slug, ref, exc)
+        await _record_sso_failure(
+            svc, ref=ref, slug=snap.slug, provider_id=snap.id,
+            reason=f"sso_login_rejected:{exc}", request=request,
+            who=_rejected_who(identity, exc),
+        )
+        detail: dict = {"error": str(exc), "ref": ref}
         if str(exc) == "unsafe_auto_link":
             # The caller proved control of this email at the IdP — the
             # address and the rule that refused the link are theirs to
@@ -2518,10 +2618,17 @@ async def custom_profile_browser_login(
     except CustomProfileError as exc:
         # The precise reason is audited, not returned — a caller poking
         # at this endpoint shouldn't learn why their payload failed.
-        logger.info("Custom profile login failed (slug=%s): %s", slug, exc)
+        ref = _failure_ref()
+        logger.info("Custom profile login failed (slug=%s, ref=%s): %s",
+                    slug, ref, exc)
+        await _record_sso_failure(
+            _identity_service(request), ref=ref, slug=snap.slug,
+            provider_id=snap.id, reason="payload_rejected", request=request,
+            detail=str(exc),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": "profile_rejected"},
+            detail={"error": "profile_rejected", "ref": ref},
         )
 
     # JSON rather than the HTML page the redirect flows get: this endpoint
@@ -2538,8 +2645,15 @@ async def custom_profile_browser_login(
             request, identity=identity, provider=provider, snap=snap,
         )
     except SSOAuthError as exc:
-        logger.info("Custom profile login rejected (slug=%s): %s", slug, exc)
-        detail: dict = {"error": str(exc)}
+        ref = _failure_ref()
+        logger.info("Custom profile login rejected (slug=%s, ref=%s): %s",
+                    slug, ref, exc)
+        await _record_sso_failure(
+            _identity_service(request), ref=ref, slug=snap.slug,
+            provider_id=snap.id, reason=f"sso_login_rejected:{exc}",
+            request=request, who=_rejected_who(identity, exc),
+        )
+        detail: dict = {"error": str(exc), "ref": ref}
         if str(exc) == "unsafe_auto_link":
             # Same disclosure rule as the back-channel route above.
             detail["email"] = identity.email

@@ -859,10 +859,17 @@ Every SSO failure redirects to `/login?ref=<8 hex chars>&sso_error=1`. The
 reason is deliberately withheld from that page — it is admin-only by
 construction and lives in the audit log instead.
 
-Admin → SSO → **Activity** → paste the ref. The `user.sso_login_failed`
-event carries the provider and the precise reason
-(`state_mismatch`, `token_or_idtoken:…`, `saml_validate:…`,
-`sso_login_rejected:jit_disabled`, …).
+Admin → SSO → **Diagnostics** → paste the ref into the activity search. The
+`user.sso_login_failed` event carries the provider, the precise reason
+(`state_mismatch`, `token_or_idtoken`, `saml_validate`,
+`sso_login_rejected:jit_disabled`, …) and, in its own `detail` field, the
+error behind it. It also records the person when the attempt got far enough
+to know (`email`, `user_id`, `external_id`) and where it came from
+(`client_ip`, `user_agent`, `path`). Open the row to read them.
+
+The same tab's **Sign-in problems** list groups these per person
+(`GET /api/v1/admin/sso/failures`); see *When a sign-in fails* in
+`docs/guide/SSO_OPERATIONS.md`.
 
 The tab needs `system:audit:read` in addition to `system:admin` — the two
 do not imply each other.

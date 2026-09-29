@@ -133,6 +133,7 @@ _SSO_PREFIXES = (
     "user.logged_in",
     "user.login_failed",
     "user.logged_out",
+    "user.session_refused",
 )
 
 
@@ -271,9 +272,12 @@ def _summary_login(p: dict) -> str:
 
 
 def _summary_login_failed(p: dict) -> str:
-    reason = p.get("reason") or "invalid_credentials"
+    # ``: {reason}`` last, like every other failure line, so the reason
+    # parses out for the explanation beside it. A row without one says so
+    # rather than guessing which refusal it was.
+    reason = p.get("reason") or "unspecified"
     email = p.get("email") or "?"
-    return f"Failed login for {email} ({reason})"
+    return f"Failed password sign-in for {email}: {reason}"
 
 
 def _summary_session_revoked(p: dict) -> str:
@@ -296,7 +300,9 @@ def _summary_sso_failure(p: dict) -> str:
     slug = p.get("provider_slug") or "?"
     reason = p.get("reason") or "unknown"
     lead = f"[{ref}] " if ref else ""
-    return f"{lead}Sign-in via {slug} failed: {reason}"
+    who = p.get("email") or p.get("user_id")
+    for_who = f" for {who}" if who else ""
+    return f"{lead}Sign-in via {slug} failed{for_who}: {reason}"
 
 
 def _summary_sso_user(verb: str) -> callable:
@@ -323,6 +329,20 @@ _SSO_EXPIRY_REASONS = {
     "idle": ", idle",
     "absolute": ", maximum session age",
 }
+
+
+def _summary_session_refused(p: dict) -> str:
+    return (
+        f"Session renewal refused for {p.get('user_id') or '?'}: "
+        f"{p.get('reason') or 'unknown'}"
+    )
+
+
+def _summary_session_ended_upstream(p: dict) -> str:
+    return (
+        f"SSO session for {p.get('user_id') or '?'} ended by "
+        f"{p.get('provider_slug') or 'its IdP'}: {p.get('reason') or 'unknown'}"
+    )
 
 
 _EVENT_META: dict[str, tuple[str, callable]] = {
@@ -394,6 +414,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     ),
     # Degraded-trust logins. Warning, not info: each one is a login the
     # platform could not cryptographically verify.
+    # Why a session stopped renewing — context for the sign-in that
+    # usually follows, not a failure in itself.
+    "user.session_refused": ("info", _summary_session_refused),
+    "user.sso_session_ended_upstream": ("info", _summary_session_ended_upstream),
     "user.sso_unsigned_accepted": (
         "warning",
         lambda p: (

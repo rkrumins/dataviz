@@ -269,7 +269,62 @@ The person is shown a short reference like `a1b2c3d4` and nothing else — telli
 them the real reason would describe your configuration to anyone who can reach
 the sign-in page. Ask them for it, then **Admin → SSO → Diagnostics** and search.
 
-Each row explains its code in place. The full vocabulary:
+Nobody has quoted anything yet? **Sign-in problems**, at the top of the same
+tab, lists everyone who failed to sign in over the last day, week or month —
+one row per person, the people **still failing** first. Filter by reason, by
+connection, or find a person by name, email or id. Open a row for:
+
+- **The account.** Whether it has a password at all, the connections it can sign
+  in through, and when it last signed in successfully. Someone who has signed
+  in since their failures shows **Signed in**, and needs nothing.
+- **Why, in words.** Each reason code, how often, and what to do.
+- **Where each attempt came from.** Network address, browser, time, the
+  reference, and the underlying error — an upstream status, an exception
+  message — kept beside the code.
+- **Why their session ended before it**, when it did (below).
+- **Failures just before, from the same browser**, that happened before anyone
+  could be named — a connection that could not reach its gateway, no corporate
+  session on the request. Same address and browser is strong evidence, not
+  proof: an office can share an address.
+
+The list is built on the server from at most the 5,000 most recent records in
+the window; it says so when there were more. Finding a person reads that
+person's records directly, however many others there are.
+
+### Password failures for accounts that sign in with SSO
+
+A password attempt now records which refusal it was. The person still sees
+"Invalid email or password" whichever it is.
+
+| Code | What happened | What to do |
+|---|---|---|
+| `no_local_password` | The account has no password — it signs in only through single sign-on | They used the password form, usually because their SSO sign-in failed first: look at the failure just before it. **Ask for an email first**, or switching passwords off, stops the form being offered |
+| `invalid_credentials` | Wrong password for an account that has one | Nothing, unless it repeats |
+| `user_not_found` | No account uses that address | Nothing, unless it repeats |
+| `account_inactive` | The account is pending or suspended | Approve or reinstate it under Admin → Users |
+| `throttled` | Too many failures for that address in a short time | It clears by itself; a burst across many addresses is a password spray |
+| `local_login_disabled` | Passwords are switched off | Expected — point them at their SSO button |
+
+Rows written before this change say `invalid_credentials` for all of the first
+four.
+
+### Why a session ended
+
+Shown beside a person's failures, because a session that stopped renewing is
+usually why they were signing in at all.
+
+| Code | Meaning |
+|---|---|
+| `reauth_ceiling`, `idle`, `absolute` | An SSO session reached the daily re-authentication limit, its idle limit, or its maximum age — they are sent back through their provider |
+| `session_idle`, `session_expired` | The same limits, for a password session |
+| `reuse_detected` | A renewal token was used twice, so the session was ended. Once is two tabs racing; repeatedly for one person, suspect a copied cookie |
+| `sessions_revoked` | All their sessions were ended at once — "sign out everywhere", or an access change |
+| `user_inactive` | The account stopped being active while signed in |
+| `no_record`, `family_revoked` | The server had no record of the session, or it had already ended |
+
+### Codes
+
+Each row explains its code in place. The full vocabulary for linking:
 
 | Code | What happened | What to do |
 |---|---|---|

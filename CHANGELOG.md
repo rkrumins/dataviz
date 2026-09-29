@@ -108,8 +108,26 @@ try again — which it does, at once and after a minute — instead of a bare fo
   the corporate gateway. It also catches up after a laptop wakes or the network comes back.
 - **A gateway that reads the corporate cookie on the server signs people in automatically too**,
   like the other kinds, instead of waiting for the button.
+- **SSO diagnostics blamed passwords for gateway failures.** A refused gateway sign-in — the button,
+  the automatic attempt on the sign-in page, the silent re-sign-in — and a refused portal sign-in were
+  written only to the server log. What reached the audit log was what the person tried next: typing
+  their corporate password into the password form, recorded as `invalid_credentials` against an
+  account that has no password to type. Those refusals are now recorded with their reference, reason
+  and underlying error, and the password attempt says `no_local_password`.
+- **The "Failed sign-ins (24h)" tile counted every warning in the log**, sign-outs and configuration
+  changes included. It now counts failed sign-in attempts.
 
 ### Added
+
+**Sign-in problems, in Admin → SSO → Diagnostics.** Everyone who could not sign in over the last
+day, week or month, one row per person with the people still failing first: why (the reason code in
+words, and what to do), how often, whether they have signed in since, the connections their account
+can use and whether it has a password, why their session ended before it, and each attempt's network
+address, browser, reference and underlying error. Failures that happened before anyone could be named
+— no corporate session on the request, a gateway that could not be reached — are shown beside the
+person whose attempt followed from the same browser. Filter by reason or connection, or find a person;
+built on the server from a bounded read (`GET /api/v1/admin/sso/failures`, `system:audit:read`). A row
+of the sign-in activity log beneath it now opens onto the record behind it.
 
 **When each person last used the platform, in Admin → Users.** A sortable **Last seen** column, and an
 **Activity** block in the user drawer: Joined, Last signed in (any kind of sign-in), Last seen (had
@@ -125,6 +143,18 @@ recorded to five minutes, one conditional row update per person per window.
   setting is retired: one renamed field on the corporate side locked out everyone on the connection.
   The daily limit counts from each sign-in instead, and the gateway still governs the session.
 - **`user.sso_session_expired` carries a `reason`** — `reauth_ceiling`, `idle` or `absolute`.
+- **A failed sign-in says who, why and from where.** `user.sso_login_failed` adds `email`, `user_id`
+  and `external_id` when the attempt got far enough to know, the error behind the reason in its own
+  `detail` field, and `client_ip`, `user_agent` and `path`. The reason itself is a code again:
+  `bad_flow_cookie`, `token_or_idtoken`, `saml_validate`, `envelope_invalid`, `payload_rejected` and
+  `idp_error` no longer carry the error text after a `:` or `=`.
+- **`user.login_failed` says which refusal it was** — `user_not_found`, `no_local_password`,
+  `account_inactive` (with `status`), `invalid_credentials`, `throttled`, `local_login_disabled` —
+  with `user_id` and where the attempt came from. The person is told the same thing as before.
+- **A renewal refused for a reason nothing recorded is recorded**: `user.session_refused` with
+  `reuse_detected`, `no_record`, `family_revoked`, `user_inactive`, `sessions_revoked`,
+  `session_idle` or `session_expired`.
+- **A refused gateway sign-in shows the person a reference** to quote, as the redirect sign-ins do.
 
 ### Upgrading
 
@@ -139,6 +169,11 @@ recorded to five minutes, one conditional row update per person per window.
   `last_login_at` from each person's identity sign-ins. Password-only accounts fill in at their next
   sign-in; the other two as people use the platform.
 - `require_auth_time` on existing gateway connections is ignored from now on; nothing to do.
+- A migration indexes `outbox_events` on `(event_type, created_at)`. The build holds a write lock on
+  that table for its duration — seconds on most installs; on a very large audit trail, run the
+  upgrade in a quiet window.
+- Audit rows for failed sign-ins now hold the network address and browser of the attempt. They are
+  readable only with `system:audit:read`, like the rest of the audit log.
 - Size `RATELIMIT_LOGIN_PER_IP` for your largest corporate egress address: the gateway's sign-in and
   silent re-sign-in share that bucket.
 
