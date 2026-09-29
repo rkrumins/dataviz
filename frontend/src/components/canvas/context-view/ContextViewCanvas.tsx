@@ -5314,6 +5314,13 @@ export function ContextViewCanvas({
   const containerAskedRef = useRef<{ selection: string; asked: Set<string> }>({ selection: '', asked: new Set() })
   const containmentRef = useRef({ parentMap, ancestorChains })
   useEffect(() => { containmentRef.current = { parentMap, ancestorChains } })
+  // Where an Anchor Rail entry's partner sits (LayerColumn). Read through the
+  // ref, so its identity never changes and the memoised columns never
+  // re-render for it.
+  const railPathOf = useCallback((id: string) => {
+    const { parentMap: parents, ancestorChains: chains } = containmentRef.current
+    return containmentUpPath(id, parents, chains)
+  }, [])
   useEffect(() => {
     const selection = selectedNodeIds.join('\n')
     if (containerAskedRef.current.selection !== selection) {
@@ -5674,6 +5681,14 @@ export function ContextViewCanvas({
   const drawerTraceDown = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'down'), [startCanvasTrace])
   const drawerFullTrace = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'both'), [startCanvasTrace])
   const drawerLocateMany = useCallback((ids: string[]) => { void locateManyOnCanvas(ids) }, [locateManyOnCanvas])
+  // An Anchor Rail entry for several entities in one card: open the card
+  // down to each (every reveal pulses), then scroll to the first — the rest
+  // sit beside it. Not locateManyOnCanvas: it scrolls only to rows missing
+  // from the DOM, and these land mounted in the overscan, just out of view.
+  const railRevealMany = useCallback((ids: string[]) => {
+    void Promise.allSettled(ids.slice(1).map(id => revealOnCanvas(id, { skipFocus: true })))
+      .then(() => revealOnCanvas(ids[0]))
+  }, [revealOnCanvas])
   const drawerStartEditing = canManage && versioningEnabled && canEnterEdit && editModeEnabled && !traceActive ? handleEnterEdit : undefined
 
   return (
@@ -6552,6 +6567,7 @@ export function ContextViewCanvas({
               resolveEdgeStrokeStyle={resolveEdgeStrokeStyle}
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}
+              portSides={lineagePortSides}
               motion={lineageMotion}
               expandingEdgeIds={expandingEdgeIds}
               geometryRegistry={columnGeometryRegistry}
@@ -6761,7 +6777,10 @@ export function ContextViewCanvas({
                 lineagePorts={nodePorts}
                 showLineageIndicators={showLineageFlow}
                 showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
-                onProxyReveal={scrollHitIntoView}
+                onProxyReveal={revealOnCanvas}
+                onProxyRevealMany={railRevealMany}
+                railPathOf={railPathOf}
+                resolveNode={resolveTraceNode}
                 onProxyMore={handleProxyMore}
                 onEndReached={rootsHaveMore ? loadMoreRootsGuarded : undefined}
                 onResizeLayer={isDraft ? resizeLayer : undefined}

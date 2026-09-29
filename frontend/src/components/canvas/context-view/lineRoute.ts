@@ -99,3 +99,25 @@ export function routeLine(s: RowBox, t: RowBox, lane: number, isSelf = false): L
     sx, sy: sMid, tx, ty: tMid,
   }
 }
+
+/**
+ * A line between two boxes of ONE column through its gutter on `side`: the
+ * lane curve routeLine bows through on the left, or its mirror on the right.
+ * The curve turns at whichever end sits further out; an end that sits further
+ * in — an Anchor Rail tray is inset from the rows — is reached by a short
+ * straight run level with it, so the curve never cuts across the rows between.
+ * Two boxes whose edges line up get routeLine's own curve.
+ */
+export function routeGutter(s: RowBox, t: RowBox, side: 'left' | 'right', lane = 0): LineRoute {
+  const out = side === 'left' ? -1 : 1
+  const sx = (side === 'left' ? s.left : s.right) + out * SAME_COLUMN_LANE_START
+  const tx = (side === 'left' ? t.left : t.right) + out * SAME_COLUMN_LANE_START
+  const gx = side === 'left' ? Math.min(sx, tx) : Math.max(sx, tx)
+  const bow = gx + out * (SAME_COLUMN_LANE_BASE + lane * SAME_COLUMN_LANE_STEP)
+  const sy = s.top + s.height / 2
+  const ty = t.top + t.height / 2
+  return {
+    pathD: `M ${sx} ${sy}${sx === gx ? '' : ` H ${gx}`} C ${bow} ${sy}, ${bow} ${ty}, ${gx} ${ty}${tx === gx ? '' : ` H ${tx}`}`,
+    sx, sy, tx, ty,
+  }
+}
