@@ -44,9 +44,33 @@ async def test_update_creates_row_and_bumps_version(db_session: AsyncSession):
     row = await branding_repo.update_config(
         db_session, app_name="First", updated_by="admin_1",
     )
-    assert row.version == 2  # seeded inline at 1, bumped to 2
+    assert row.version == 1  # created inline at 0, bumped to 1
     assert row.app_name == "First"
     assert row.updated_by == "admin_1"
+
+
+async def test_first_write_with_snapshot_version_succeeds_on_missing_row(
+    db_session: AsyncSession,
+):
+    """The admin page sends the version it loaded. With no row that is
+    the snapshot's 0 sentinel, so the inline-created row must match it —
+    it used to be created at 1 and every save on an unseeded DB 409'd."""
+    snap = await branding_repo.get_snapshot(db_session)
+    assert snap.version == 0
+    row = await branding_repo.update_config(
+        db_session, app_name="First", expected_version=snap.version,
+    )
+    assert row.version == 1
+    assert (await branding_repo.get_snapshot(db_session)).version == 1
+
+
+async def test_stale_version_on_missing_row_still_conflicts(
+    db_session: AsyncSession,
+):
+    with pytest.raises(ConflictingVersion):
+        await branding_repo.update_config(
+            db_session, app_name="stale", expected_version=1,
+        )
 
 
 async def test_version_conflict_raises(db_session: AsyncSession):

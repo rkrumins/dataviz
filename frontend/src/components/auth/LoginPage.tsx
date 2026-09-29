@@ -928,6 +928,11 @@ export function LoginPage() {
                         <h1 className="text-3xl font-bold tracking-tight text-ink mb-2">
                             <span className="gradient-text">{brand.appName}</span>
                         </h1>
+                        {brand.description && (
+                            <p className="text-[13px] text-ink-muted text-center max-w-xs leading-snug mb-3">
+                                {brand.description}
+                            </p>
+                        )}
                         <p className="text-sm text-ink-secondary text-center">
                             {brand.loginTagline}
                         </p>

@@ -33,6 +33,8 @@ import {
   Sparkles,
   Check,
   Rocket,
+  LifeBuoy,
+  Mail,
 } from 'lucide-react'
 import { useFeature } from '@/store/features'
 import { useTourStore } from '@/features/tour/tourStore'
@@ -398,6 +400,23 @@ function HomeView({
               Browse the full user guide
               <ArrowUpRight className="w-4 h-4" />
             </Link>
+
+            {/* Set under Admin → Branding; hidden when blank. */}
+            {brand.supportEmail && (
+              <a
+                href={`mailto:${brand.supportEmail}`}
+                className="group mt-2 flex items-center gap-3 rounded-lg border border-glass-border bg-canvas-elevated px-3 py-2.5 text-left transition-colors hover:border-accent-lineage/40 hover:bg-accent-lineage/[0.04]"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-lineage/10 text-accent-lineage">
+                  <LifeBuoy className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-ink">Contact support</p>
+                  <p className="truncate text-xs text-ink-muted">{brand.supportEmail}</p>
+                </div>
+                <Mail className="h-4 w-4 shrink-0 text-ink-muted group-hover:text-accent-lineage" />
+              </a>
+            )}
           </div>
         )}
       </div>

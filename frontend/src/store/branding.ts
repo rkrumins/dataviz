@@ -127,6 +127,21 @@ export function applyBranding(b: Branding): void {
         meta.content = b.accentColor
     }
 
+    // Meta description — search results and link previews. Blank means no
+    // description, as on the sign-in screen, so the tag goes rather than
+    // keeping the previous (or the stock index.html) text.
+    let desc = document.querySelector<HTMLMetaElement>("meta[name='description']")
+    if (!b.description) {
+        desc?.remove()
+    } else {
+        if (!desc) {
+            desc = document.createElement('meta')
+            desc.name = 'description'
+            document.head.appendChild(desc)
+        }
+        desc.content = b.description
+    }
+
     // Persist a compact cache so the next load can paint the brand before
     // React boots (see the inline script in index.html). Best-effort.
     try {
