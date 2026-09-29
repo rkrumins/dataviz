@@ -42,6 +42,8 @@ import { formatUnitCount, unitMeaning, unitNoun } from './connections/connection
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { useAnchorRailStore } from '@/store/anchorRail'
 import { useEndpoints } from '@/components/panels/relationship/useEndpoints'
+import { LineEndTag } from './LineEndTag'
+import { lineEndOf, type LineEnds } from './lineEnd'
 import { sideVolume, type NodePorts } from './lineagePorts'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
@@ -213,6 +215,9 @@ interface LayerColumnProps {
   /** A node the canvas draws but its store does not hold (a trace's), so an
    *  entry can name it. */
   resolveNode?: (id: string) => LineageNode | null
+  /** The ends of the line the relationship drawer is open on: their rows, and
+   *  the rail entry for an end scrolled away, say which end they are. */
+  lineEnds?: LineEnds | null
   /** "+N more" overflow — open the Lineage Lens for the full list. */
   onProxyMore?: () => void
   /** The user scrolled this column to its true end (only fires on
@@ -375,6 +380,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onProxyRevealMany,
   railPathOf,
   resolveNode,
+  lineEnds = null,
   onProxyMore,
   onEndReached,
   onResizeLayer,
@@ -2357,6 +2363,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                   if (parent && nodeToFlatIndexMap.has(parent)) place = proxyLabel(parent)
                 }
                 const flows = `${p.count.toLocaleString()} ${p.count === 1 ? 'flow' : 'flows'}`
+                const end = lineEndOf(lineEnds, p.nodeId)
+                const endSaid = end === 'from' ? ', from end' : end === 'to' ? ', to end' : end ? ', an end' : ''
                 return (
                   <button
                     key={p.nodeId}
@@ -2365,14 +2373,15 @@ export const LayerColumn = React.memo(function LayerColumn({
                     data-canvas-interactive
                     onClick={(e) => { e.stopPropagation(); revealProxy(p) }}
                     aria-label={p.isFocus
-                      ? `${focusName}${focusIsSelection ? ', selected' : ''}, ${formatUnitCount(p.count, 'flows')}. Back to it on canvas`
-                      : `${who}, ${verb} ${focusName}${place ? `, in ${place}` : ''}, ${formatUnitCount(p.count, 'flows')}. Reveal on canvas`}
+                      ? `${focusName}${focusIsSelection ? ', selected' : ''}${endSaid}, ${formatUnitCount(p.count, 'flows')}. Back to it on canvas`
+                      : `${who}${endSaid}, ${verb} ${focusName}${place ? `, in ${place}` : ''}, ${formatUnitCount(p.count, 'flows')}. Reveal on canvas`}
                     className="group/entry pointer-events-auto w-full flex items-stretch gap-2 pl-2 pr-1.5 py-1 rounded-lg text-left hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors min-w-0"
                   >
                     <span className="w-1 self-stretch rounded-full flex-shrink-0" style={{ backgroundColor: p.color }} />
                     <span className="flex-1 min-w-0">
                       <span className="flex items-center gap-2 text-[11px] font-medium text-ink">
                         <span className="truncate">{who}</span>
+                        {end && <LineEndTag end={end} className="flex-shrink-0" />}
                         <span className="ml-auto flex-shrink-0 tabular-nums text-ink-muted group-hover/entry:hidden group-focus-visible/entry:hidden">{flows}</span>
                         <span className="ml-auto flex-shrink-0 hidden text-accent-lineage group-hover/entry:inline group-focus-visible/entry:inline">Reveal</span>
                       </span>
@@ -2940,6 +2949,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         isClickHighlighted={isHighlightActive && (highlightedNodes?.has(node.id) ?? false)}
                         isDimmedByHighlight={isHighlightActive && !(highlightedNodes?.has(node.id) ?? false)}
                         isFocused={focusIndex >= 0 && navIdx === focusIndex}
+                        lineEnd={lineEndOf(lineEnds, node.id)}
                         onSelect={handleRowSelect}
                         onToggle={onToggle}
                         onContextMenu={onContextMenu}

@@ -542,3 +542,80 @@ describe('the Anchor Rail', () => {
     expect(document.getElementById('anchor-proxy-SRC.c70')).toBeNull()
   }, 30000)
 })
+
+describe('the line the relationship drawer is open on marks its two ends', () => {
+  const tags = () => [...document.querySelectorAll<HTMLElement>('[data-line-end]')]
+  const tagOf = (id: string) => row(id)?.querySelector('[data-line-end]')?.getAttribute('data-line-end') ?? null
+
+  it('as From and To, only while the drawer is open on it — not for a selection, and nothing dims', async () => {
+    usePreferencesStore.setState({ lineageRenderMode: 'stubs' })
+    const h = await twoLinesAtTableau()
+    expect(tags()).toHaveLength(0)
+    // A selected card is not an open line: no end is marked.
+    await h.clickCard('tableau')
+    await settleLines(h)
+    expect(tags()).toHaveLength(0)
+
+    await act(async () => { fireEvent.click(hits()[0]) })
+    await settleLines(h)
+    const [from, to] = opened()!.split('>')
+    expect(tagOf(from)).toBe('from')
+    expect(tagOf(to)).toBe('to')
+    expect(row(from).textContent).toContain('From')
+    expect(tags()).toHaveLength(2)
+    // Lit, with nothing dimmed: every row on screen keeps its full opacity.
+    expect(row(from).className).toContain('ring-blue-400/40')
+    expect(h.visibleCardIds().filter(id => row(id).className.includes('opacity-40'))).toEqual([])
+
+    h.pressEscape()
+    await h.settle()
+    expect(useCanvasStore.getState().drawerEdge).toBeNull()
+    expect(tags()).toHaveLength(0)
+  }, 30000)
+
+  it('a two-way line marks both ends Two-way', async () => {
+    usePreferencesStore.setState({ lineageRenderMode: 'raw' })
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    act(() => {
+      useCanvasStore.getState().addEdges([
+        { id: 'fw', source: 'INTERMEDIATE_T2', target: 'tableau', data: { edgeType: 'FLOWS_TO' } },
+        { id: 'bw', source: 'tableau', target: 'INTERMEDIATE_T2', data: { edgeType: 'FLOWS_TO' } },
+      ] as LineageEdge[])
+    })
+    await settleLines(h)
+    await act(async () => { fireEvent.click(hits()[0]) })
+    await settleLines(h)
+    expect(tagOf('INTERMEDIATE_T2')).toBe('twoWay')
+    expect(tagOf('tableau')).toBe('twoWay')
+  }, 30000)
+
+  it('an end scrolled away: the line stays drawn, docked to that end\'s rail entry, which says which end it is — and only it docks', async () => {
+    usePreferencesStore.setState({ lineageRenderMode: 'stubs', showConnectedTrays: true } as never)
+    // SRC.c00 feeds SRC.c70 (off-screen below) and is fed by SRC.c75 (off-screen too).
+    const h = await dockedPartner([
+      { id: 'out', source: 'SRC.c00', target: 'SRC.c70' },
+      { id: 'in', source: 'SRC.c75', target: 'SRC.c00' },
+    ])
+    await h.clickCard('SRC.c00')
+    await settleLines(h)
+    await drawn(2)
+    const outLine = lineBetween('SRC.c00', 'SRC.c70')!
+    const outId = outLine.getAttribute('data-edge-id')!
+    const hit = hits().find(p => p.getAttribute('d') === outLine.querySelector('path')!.getAttribute('d'))!
+    await act(async () => { fireEvent.click(hit) })
+    await settleLines(h)
+
+    // The click took the selection; the drawer is open on the line.
+    expect(useCanvasStore.getState().selectedNodeIds).toEqual([])
+    expect(opened()).toBe('SRC.c00>SRC.c70')
+    // It is still drawn, to the far end's entry, which is marked To; the source's row is From.
+    await drawn(1)
+    expect(lineIds()).toEqual([outId])
+    const entry = document.getElementById('anchor-proxy-SRC.c70')!
+    expect(entry.querySelector('[data-line-end]')?.getAttribute('data-line-end')).toBe('to')
+    expect(entry.getAttribute('aria-label')).toContain('to end')
+    expect(tagOf('SRC.c00')).toBe('from')
+    // Only the open line docks: the source's other off-screen partner is not listed.
+    expect(document.getElementById('anchor-proxy-SRC.c75')).toBeNull()
+  }, 30000)
+})

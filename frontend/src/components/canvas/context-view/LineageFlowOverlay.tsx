@@ -128,6 +128,7 @@ export function LineageFlowOverlay({
   onRevealNode,
   flowRibbons,
   focusNodeId,
+  railLineId = null,
   childMap,
   hoverPool,
   hoverBudget = 500,
@@ -179,6 +180,10 @@ export function LineageFlowOverlay({
    *  drives it after a short dwell, which this overlay times itself; the
    *  chips reach the columns through the anchor-rail store. */
   focusNodeId?: string | null,
+  /** The one line the rail docks for `focusNodeId`, when it stands in for a
+   *  selection: the line the relationship drawer is open on, whose ends are
+   *  the focus. Null: every focus line docks. */
+  railLineId?: string | null,
   /** Loaded containment children by parent — what a hover on an open
    *  container lights up (hoverSpotlight). */
   childMap?: ReadonlyMap<string, readonly string[]>,
@@ -242,6 +247,7 @@ export function LineageFlowOverlay({
   // dwell (`railTimerRef`) — `focusNodeIdRef` is whichever holds.
   const focusNodeIdRef = useRef<string | null>(null)
   const selectedFocusRef = useRef<string | null>(null)
+  const railLineIdRef = useRef<string | null>(null)
   const dwellFocusRef = useRef<string | null>(null)
   const railTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastHoveredRef = useRef<string | null>(null)
@@ -345,8 +351,9 @@ export function LineageFlowOverlay({
   useEffect(() => {
     selectedFocusRef.current = focusNodeId ?? null
     focusNodeIdRef.current = focusNodeId ?? dwellFocusRef.current
+    railLineIdRef.current = railLineId
     scheduleUpdate()
-  }, [focusNodeId, scheduleUpdate])
+  }, [focusNodeId, railLineId, scheduleUpdate])
 
   // A hovered entity's lines, in On Hover / Adaptive — indexed by end once
   // per pool, ranked and capped once per hovered entity.
@@ -779,6 +786,7 @@ export function LineageFlowOverlay({
       if (
         focusDomId &&
         (sourceId === focusDomId || targetId === focusDomId) &&
+        (railLineIdRef.current === null || edge.id === railLineIdRef.current) &&
         (direction === 'up' || direction === 'down')
       ) {
         const owningLayer = findOwningLayer(partnerId)

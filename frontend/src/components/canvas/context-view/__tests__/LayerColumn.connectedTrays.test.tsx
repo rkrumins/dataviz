@@ -240,6 +240,25 @@ describe('LayerColumn — the selection itself scrolled out of its column', () =
     expect(onSelect).not.toHaveBeenCalled()
   })
 
+  it('an entry for an end of the line the drawer is open on says which end it is', () => {
+    seedNames({ a: 'order_count' })
+    publish([selection, { nodeId: 'b', flow: 'out', count: 1, color: '#888', direction: 'up' }])
+    renderColumn(vi.fn(), { nodes: [node('a', 'order_count'), node('b')], lineEnds: { from: 'a', to: 'b', twoWay: false } })
+    const from = document.getElementById('anchor-proxy-a')!
+    const to = document.getElementById('anchor-proxy-b')!
+    expect(from.querySelector('[data-line-end]')).toHaveTextContent('From')
+    expect(from.getAttribute('aria-label')).toMatch(/^order_count, from end,/)
+    expect(to.querySelector('[data-line-end]')).toHaveTextContent('To')
+    expect(to.getAttribute('aria-label')).toContain(', to end,')
+  })
+
+  it('with no line open, no entry is marked as an end', () => {
+    seedNames({ a: 'order_count' })
+    publish([selection])
+    renderColumn(vi.fn(), { nodes: [node('a', 'order_count'), node('b')] })
+    expect(document.querySelector('[data-line-end]')).toBeNull()
+  })
+
   it('its hint is the selection too, and a click goes straight back to it', () => {
     usePreferencesStore.setState({ showConnectedTrays: false })
     seedNames({ a: 'order_count' })

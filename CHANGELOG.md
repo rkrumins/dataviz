@@ -56,7 +56,10 @@ relationships on the published graph are read-only, and say why.
   their arrowheads and motion, and leave the row on the side Marker sides says. × and Esc fold
   the tray into its pill whether trays are on or off. A selection scrolled away shows as
   "order_count (selected)", and a click goes back to it. The Display switch is now "Off-screen
-  partners".
+  partners". While the relationship drawer is open on a line, its two end cards are lit and tagged
+  **From** and **To** as the drawer names them (**Two-way** for a line both ways); nothing else
+  dims, and the tags go when the drawer closes. An end scrolled out of view keeps the line drawn,
+  docked to that end's entry on the rail, which carries its tag too.
 - **One export can be 50 GB** (`GRAPH_EXPORT_MAX_BYTES`, was 20 GiB).
 - **A running export says how far it has got.** Its job's `summary` holds the records read or written
   so far, the passes (a spreadsheet reads everything once for its columns, then writes it), and the

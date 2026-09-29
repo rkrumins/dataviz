@@ -4579,6 +4579,14 @@ export function ContextViewCanvas({
     if (!openLineEnds || !container) return
     return keepClearOfDrawer(container, openLineEnds.split('\n'))
   }, [openLineEnds])
+  // Its two ends, marked on their cards as the drawer names them (From / To) — the click on the
+  // line took the selection, and nothing dims for it.
+  const openLineTwoWay = !!openLine?.isBidirectional
+  const lineEnds = useMemo(() => {
+    if (!openLineEnds) return null
+    const [from, to] = openLineEnds.split('\n')
+    return { from, to, twoWay: openLineTwoWay }
+  }, [openLineEnds, openLineTwoWay])
 
   // Publish the projected lineage edge set to the canvas store so panels
   // outside the canvas (EntityDrawer's Lineage section) can mirror exactly
@@ -6573,7 +6581,10 @@ export function ContextViewCanvas({
               geometryRegistry={columnGeometryRegistry}
               onRevealNode={scrollHitIntoView}
               flowRibbons={flowRibbons}
-              focusNodeId={selectedNodeId}
+              // With nothing selected, the open line stands in for the selection on the rail: an
+              // end scrolled away docks it, so it stays drawn — and only it docks.
+              focusNodeId={selectedNodeId ?? lineEnds?.from ?? null}
+              railLineId={selectedNodeId ? null : openLine?.id ?? null}
               childMap={childMap}
               // On Hover / Adaptive draw a hovered entity's lines from here.
               hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}
@@ -6780,6 +6791,7 @@ export function ContextViewCanvas({
                 onProxyReveal={revealOnCanvas}
                 onProxyRevealMany={railRevealMany}
                 railPathOf={railPathOf}
+                lineEnds={lineEnds}
                 resolveNode={resolveTraceNode}
                 onProxyMore={handleProxyMore}
                 onEndReached={rootsHaveMore ? loadMoreRootsGuarded : undefined}
