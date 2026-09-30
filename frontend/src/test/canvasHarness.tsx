@@ -58,6 +58,10 @@ export interface TraceEstate {
   model: LensWalkModel
   layers: ViewLayerConfig[]
   assignments: Record<string, { layerId: string }>
+  /** Each seed's OWN walk, for a combined trace: the closure for a urn named
+   *  here answers with that seed's model alone, as the server walks each
+   *  seed on its own. Any other urn is answered with the whole estate. */
+  seedModels?: Record<string, LensWalkModel>
 }
 
 export interface TraceCanvasHarness {
@@ -65,6 +69,9 @@ export interface TraceCanvasHarness {
    *  With `deferTrace`, returns as soon as the session is open — the closure
    *  is still pending until `resolveTrace()`. */
   startTrace(urn: string): Promise<void>
+  /** Select every urn — the first a plain click, the rest added to it — and
+   *  press the header's "Trace N Entities": one COMBINED trace. */
+  startTraceMany(urns: readonly string[]): Promise<void>
   /** `deferTrace` only: let the pending `traceClosure` resolve, then settle.
    *  Lets a test look at the canvas DURING the walk. */
   resolveTrace(): Promise<void>
@@ -346,6 +353,21 @@ function stubProvider(
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
+  // PER URN for a combined trace: each seed named in `seedModels` is walked
+  // on its own, so its answer is its own model — the union is the canvas's
+  // job, and the one thing a combined-trace test has to see it do.
+  const seedPages = new Map<string, { fine: ReturnType<typeof closureFor>; coarse: ReturnType<typeof closureFor> }>()
+  const pagesFor = (urn: string | undefined) => {
+    const seedModel = urn ? estate.seedModels?.[urn] : undefined
+    if (!urn || !seedModel) return { fine: closure, coarse: coarsePage }
+    let pages = seedPages.get(urn)
+    if (!pages) {
+      const seedEstate = { ...estate, model: seedModel }
+      pages = { fine: closureFor(seedEstate, urn, stall), coarse: closureFor(seedEstate, urn, stall, 'coarse') }
+      seedPages.set(urn, pages)
+    }
+    return pages
+  }
   const nodes = wireNodes(estate)
   const byUrn = new Map(nodes.map(n => [n.urn, n]))
   const kids = childrenOf(estate)
@@ -361,14 +383,15 @@ function stubProvider(
   ]))
   return {
     scopeKey: 'harness',
-    traceClosure: async (req?: { grain?: string }) => {
+    traceClosure: async (req?: { urn?: string; grain?: string }) => {
       calls.traceClosure += 1
+      const pages = pagesFor(req?.urn)
       // THE COARSE LEG (Part G) answers at once with the estate's cells —
       // the window in which a deferred fine page is still out is exactly
       // the coarse-first picture a test wants to read.
       if (req?.grain === 'coarse') {
         if (gate && !gateFineOnly) await gate.promise
-        return coarsePage
+        return pages.coarse
       }
       if (gate) await gate.promise
       // A STALLED WALK. The first answer reports a frontier, every frontier op
@@ -378,7 +401,7 @@ function stubProvider(
       // the canvas sits in the state where `continueWalk` is the ONLY thing
       // that would go back to the network.
       if (stall && calls.traceClosure > 1) throw new Error('frontier op refused (harness)')
-      return closure
+      return pages.fine
     },
     getChildren: async (parentUrn: string) => childrenFor(parentUrn),
     getChildrenWithEdges: async (parentUrn: string) => {
@@ -773,6 +796,20 @@ export async function renderCanvasWithTrace(
       }, { timeout: 4000 })
       await settle()
       assertQuiet('the trace')
+    },
+    async startTraceMany(urns: readonly string[]) {
+      act(() => {
+        urns.forEach((urn, i) => useCanvasStore.getState().selectNode(urn, i > 0))
+      })
+      await settle()
+      const button = await screen.findByRole('button', { name: new RegExp(`^trace ${urns.length} entities$`, 'i') })
+      writes.count = 0
+      await act(async () => { fireEvent.click(button) })
+      await waitFor(() => {
+        if (!isTracing()) throw new Error('the canvas did not enter trace mode')
+      }, { timeout: 4000 })
+      await settle()
+      assertQuiet('the combined trace')
     },
     async resolveTrace() {
       releaseTrace()

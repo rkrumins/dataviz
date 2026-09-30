@@ -34,6 +34,11 @@ import { unionWalkModels } from '@/components/canvas/context-view/lens/closure-a
 /** Stable empty seed list, so "not tracing" keeps one identity. */
 const EMPTY_SEEDS: readonly string[] = []
 
+/** The most seeds one trace walks. Each is its own full walk, and their union
+ *  is re-drawn on every wave of every one of them; a selection larger than
+ *  this traces its first `MAX_TRACE_SEEDS` (the canvas says so). */
+export const MAX_TRACE_SEEDS = 25
+
 export interface CanvasTraceWalk {
     isTracing: boolean
     /** The FIRST seed. Kept for every consumer that reasons about one focal
@@ -42,8 +47,11 @@ export interface CanvasTraceWalk {
     /** Every seed being traced. One entry for a normal trace; several for a
      *  bulk trace of a multi-selection. */
     tracedUrns: readonly string[]
-    /** Trace one urn, or a selection of them. */
+    /** Trace one urn, or a selection of them — the first `MAX_TRACE_SEEDS`. */
     start: (urn: string | readonly string[]) => void
+    /** Drop one seed from the trace. No re-walk: the other seeds' walks are
+     *  already in hand. Dropping the last one is leaving the trace. */
+    removeSeed: (urn: string) => void
     /** Back to browse. */
     exit: () => void
     /** Status/error/model for the trace bar and counts. */
@@ -65,15 +73,22 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
     // while the other trace path records every press. Two surfaces counting
     // the same action differently is worse than either convention alone.
     const [attempt, setAttempt] = useState(0)
-    const walk = useLensWalk(tracedUrns, provider, FULL_WALK_INITIAL_DEPTH, true)
+    // The METHODS, never the object: `useLensWalk` hands back a fresh object
+    // every render, and a memo keyed on it re-ran the union and every
+    // consumer's view build on every render of the canvas. Each method keeps
+    // its identity until the walk state it reads actually moves.
+    const {
+        walkFor, walkProgressFor, retry,
+        continuePastCheckpoint: continueSeedPastCheckpoint, retryWalk: retrySeedWalk,
+    } = useLensWalk(tracedUrns, provider, FULL_WALK_INITIAL_DEPTH, true)
 
     // ONE picture from however many seeds. With a single seed these collapse
     // to exactly what they always were: `unionWalkModels` of one model
     // returns that model by identity, and the aggregates below are that
     // seed's own values.
     const entries = useMemo(
-        () => tracedUrns.map(u => walk.walkFor(u)).filter((e): e is WalkEntry => e !== null),
-        [tracedUrns, walk],
+        () => tracedUrns.map(u => walkFor(u)).filter((e): e is WalkEntry => e !== null),
+        [tracedUrns, walkFor],
     )
     const walkEntry = useMemo<WalkEntry | null>(() => {
         if (entries.length === 0) return null
@@ -100,7 +115,7 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
 
     const progress = useMemo<WalkProgress | null>(() => {
         if (tracedUrns.length === 0) return null
-        const all = tracedUrns.map(u => walk.walkProgressFor(u)).filter((p): p is WalkProgress => p !== null)
+        const all = tracedUrns.map(u => walkProgressFor(u)).filter((p): p is WalkProgress => p !== null)
         if (all.length === 0) return null
         if (all.length === 1) return all[0]!
         // The phase the READER is waiting on: any seed still working keeps
@@ -120,7 +135,7 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
             unbounded: all.every(p => p.unbounded),
             error: all.find(p => p.error)?.error ?? null,
         }
-    }, [tracedUrns, walk])
+    }, [tracedUrns, walkProgressFor])
 
     // ── Telemetry ────────────────────────────────────────────────────
     // Tracing lineage is the product's value moment, and this is the SECOND
@@ -170,21 +185,32 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         // the reader wanted lineage twice, and the walk cache making the second
         // one instant does not mean it did not happen.
         setAttempt((n) => n + 1)
+        const capped = seeds.slice(0, MAX_TRACE_SEEDS)
         setTracedUrns(prev =>
-            prev.length === seeds.length && prev.every((u, i) => u === seeds[i]) ? prev : seeds)
+            prev.length === capped.length && prev.every((u, i) => u === capped[i]) ? prev : capped)
+    }, [])
+
+    // Not a new ask, so no `attempt`: the trace narrows, and every seed left
+    // is a walk already in hand (the walk cache never refetches one).
+    const removeSeed = useCallback((urn: string) => {
+        setTracedUrns(prev => {
+            if (!prev.includes(urn)) return prev
+            const next = prev.filter(u => u !== urn)
+            return next.length > 0 ? next : EMPTY_SEEDS
+        })
     }, [])
 
     // Both act on EVERY seed: a checkpoint or a failure belongs to one seed's
     // walk, and the reader is looking at one picture.
     const continuePastCheckpoint = useCallback(() => {
-        for (const u of tracedUrns) walk.continuePastCheckpoint(u)
-    }, [walk, tracedUrns])
+        for (const u of tracedUrns) continueSeedPastCheckpoint(u)
+    }, [continueSeedPastCheckpoint, tracedUrns])
     const retryWalk = useCallback(() => {
         for (const u of tracedUrns) {
-            if (walk.walkFor(u)?.status === 'error') walk.retry(u)
-            else walk.retryWalk(u)
+            if (walkFor(u)?.status === 'error') retry(u)
+            else retrySeedWalk(u)
         }
-    }, [walk, tracedUrns])
+    }, [walkFor, retry, retrySeedWalk, tracedUrns])
 
     // Memoized: see `useUnifiedTrace`'s return. A fresh literal here re-triggered
     // every consumer memo that depends on the walk.
@@ -193,10 +219,11 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         tracedUrn,
         tracedUrns,
         start,
+        removeSeed,
         exit,
         walkEntry,
         progress,
         continuePastCheckpoint,
         retryWalk,
-    }), [tracedUrn, tracedUrns, start, exit, walkEntry, progress, continuePastCheckpoint, retryWalk])
+    }), [tracedUrn, tracedUrns, start, removeSeed, exit, walkEntry, progress, continuePastCheckpoint, retryWalk])
 }

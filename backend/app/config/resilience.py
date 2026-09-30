@@ -6,9 +6,9 @@ All values are configurable via environment variables with sensible defaults.
 
 Timeout layering (outermost to innermost):
     HTTP middleware                       →  CircuitBreakerProxy
-    (15-45s)                                 (no deadline; gate + observer)
+    (5-120s)                                 (no deadline; gate + observer)
                                           →  Provider per-operation deadline
-                                             (5-15s, owned by provider)
+                                             (5-80s, owned by provider)
 The innermost timeout fires first by design. The proxy does not impose
 a deadline because only the provider knows the right granularity (a
 single query vs. an orchestration of many).
@@ -52,37 +52,40 @@ BREAKER_RESET_TIMEOUT_SECS: int = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_
 # ── FalkorDB-specific query timeouts ────────────────────────────────
 # Read-only Cypher queries (MATCH ... RETURN).
 #
-# 15s, not the 5s this used to be. Five seconds was chosen for small graphs
-# and then every read path that met a real one was given an exception to it:
-# children 15s, the stats scans 30s, the aggregated ladder its own budget.
+# 30s, not the 5s (then 15s) this used to be. Five seconds was chosen for
+# small graphs and then every read path that met a real one was given an
+# exception to it: children 15s, the stats scans 30s, the aggregated ladder
+# its own budget. Raised again with the rest of the read ladder so a 10s+
+# query on a very large graph finishes instead of returning a 504.
 # A default that every serious caller has to override is not a default, it
 # is a trap for the ones that did not think to — and a read that runs out of
 # budget does not degrade, it returns an error to a canvas that was about to
 # draw. Reads cost a module thread, not the write lock, so the number that
 # bounds them is how long anyone will actually wait: still far under
-# HTTP_TIMEOUT_GRAPH_SECS (60s) above it, and under the server's own
-# TIMEOUT_MAX below it, so the deadline ladder still nests.
-FALKORDB_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "15"))
+# HTTP_TIMEOUT_GRAPH_SECS (120s) above it, and under the server's own
+# TIMEOUT_MAX (120s production-cluster) below it, so the deadline ladder
+# still nests.
+FALKORDB_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "30"))
 # get_children / get_children_with_edges per-query timeout. Wide containers
 # with many lineage cross-edges legitimately take longer than a small graph's
 # read; now the SAME as the generic default rather than an exception to it,
 # and kept as its own knob so it can be raised independently.
-FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_CHILDREN_QUERY_TIMEOUT", "15"))
+FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_CHILDREN_QUERY_TIMEOUT", "30"))
 # /nodes/query — the canvas hydration hot path (assigned entities by URN, or
 # every entity of a type for an open view). The type-shaped query sorts a
 # whole label before paging, which on a large graph legitimately runs past
 # the generic 5s read budget; at 5s a big view timed out on every open, and
-# the timeout was then counted as a provider failure. Sits under the
-# frontend's 30s client deadline and the 60s HTTP tier so the provider's own
+# the timeout was then counted as a provider failure. Sits under the 120s
+# HTTP tier and the frontend's 150s client deadline so the provider's own
 # structured timeout always surfaces first.
-FALKORDB_NODES_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_NODES_QUERY_TIMEOUT", "20"))
+FALKORDB_NODES_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_NODES_QUERY_TIMEOUT", "45"))
 # get_top_level_or_orphan_nodes per-query timeout. Larger than the generic
 # 5s read default because the structural top-level predicate scans wide
 # adjacency lists on large graphs (2-3M+ nodes legitimately need tens of
-# seconds when the materialized fast-path misses). Must stay below the
-# frontend's VITE_TIMEOUT_TOP_LEVEL_MS (45s) and HTTP_TIMEOUT_GRAPH_SECS
-# (60s) so this budget always fires first with an accurate error.
-FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_TOP_LEVEL_QUERY_TIMEOUT", "30"))
+# seconds when the materialized fast-path misses). Must stay below
+# HTTP_TIMEOUT_GRAPH_SECS (120s) and the frontend's VITE_TIMEOUT_TOP_LEVEL_MS
+# (150s) so this budget always fires first with an accurate error.
+FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_TOP_LEVEL_QUERY_TIMEOUT", "60"))
 # Budget for the top-level *count* query only. The count is display-only
 # and best-effort: on large graphs the full-scan count is expected to
 # miss this budget, in which case the endpoint degrades to
@@ -91,12 +94,13 @@ FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_TOP_LEV
 # materialization) overrides this for both queries.
 FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_TOP_LEVEL_COUNT_TIMEOUT", "5"))
 # /edges/between resolves edges among a (potentially large) URN set. The
-# generic 5s read default times out on big graphs; this sits just under
-# the 45s ASGI/client budgets so the DB cancels first with a clean error.
-FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_EDGES_BETWEEN_TIMEOUT", "40"))
+# generic 5s read default times out on big graphs; this sits under the 90s
+# ASGI tier (and the 105s client budget) so the DB cancels first with a clean
+# error.
+FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_EDGES_BETWEEN_TIMEOUT", "80"))
 # Aggregated-edge projection reads can scan large URN sets; the generic
 # 5s read timeout kills these on graphs with hundreds of containers.
-FALKORDB_AGGREGATED_READ_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_AGGREGATED_READ_TIMEOUT_SECS", "30"))
+FALKORDB_AGGREGATED_READ_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_AGGREGATED_READ_TIMEOUT_SECS", "60"))
 # WALL CLOCK for the whole aggregated-edge read, as opposed to the
 # per-query budget above. The read is a ladder — on per-query pressure it
 # halves the page and re-issues, twice, then takes one short floor retry —
@@ -109,10 +113,10 @@ FALKORDB_AGGREGATED_READ_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_AGGREGA
 # Sized under HTTP_TIMEOUT_AGGREGATION_SECS so the provider's own structured
 # answer always wins the race with the tier above it. Each rung gets
 # min(per-query budget, what is left of this), and the read degrades as soon
-# as too little remains to be worth spending.
+# as too little remains to be worth spending. 72s at the 90s default tier.
 FALKORDB_AGGREGATED_READ_BUDGET_SECS: float = float(
     os.getenv("FALKORDB_AGGREGATED_READ_BUDGET_SECS", "0")
-) or round(float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45")) * 0.8, 1)
+) or round(float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90")) * 0.8, 1)
 # Below this much remaining budget a further attempt cannot finish anything
 # useful, so the read degrades instead of starting one it cannot complete.
 FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS: float = float(
@@ -232,18 +236,21 @@ PROJECTION_SOCKET_TIMEOUT_MARGIN_SECS: float = float(
 # ── HTTP request timeouts (ASGI middleware, per-path) ───────────────
 # Health/readiness probes — must respond fast for K8s.
 HTTP_TIMEOUT_HEALTH_SECS: float = float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))
-# Read-only graph queries — bounded by per-query timeouts below.
-# Default 60 to match the tier list in main.py (_TimeoutMiddleware reads
-# the env var directly with default "60"); the two defaults MUST agree —
-# a 15 here would kill /edges/between mid-flight (40s query budget) for
+# Read-only graph queries — bounded by per-query timeouts above.
+# Default 120 to match the tier list in main.py (_TimeoutMiddleware reads
+# the env var directly with default "120"); the two defaults MUST agree —
+# a 15 here would kill /nodes/query mid-flight (45s query budget) for
 # any deployer who trusts this file. The env var is the single knob.
-HTTP_TIMEOUT_GRAPH_SECS: float = float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))
+# It also bounds a non-progressive advanced search, whose own request cap
+# (_REQUEST_S, 100s, in providers/falkordb_search/engine.py) sits under it.
+HTTP_TIMEOUT_GRAPH_SECS: float = float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "120"))
 # Trace routes (/trace/v2, /trace/expand on v1; /trace, /trace/expand on
-# v2). Deep BFS traversals legitimately exceed the 15s graph budget;
-# matches the frontend TRACE_MS default so neither side aborts first.
-HTTP_TIMEOUT_TRACE_SECS: float = float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))
-# Write-heavy aggregation operations.
-HTTP_TIMEOUT_AGGREGATION_SECS: float = float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))
+# v2). Deep BFS traversals legitimately exceed the per-query read budget;
+# the frontend TRACE_MS (150s) outlasts it so the server answers first.
+HTTP_TIMEOUT_TRACE_SECS: float = float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "120"))
+# Write-heavy aggregation operations, and the /edges/aggregated and
+# /edges/between reads (72s and 80s budgets beneath it).
+HTTP_TIMEOUT_AGGREGATION_SECS: float = float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90"))
 # Versioning routes — projection reconcile/rebuild do request-scoped
 # full-graph work that legitimately exceeds the 30s default on large
 # graphs. Mirrors the tier in main.py; keep below nginx proxy_read_timeout
@@ -272,12 +279,13 @@ NEO4J_REDIS_OP_TIMEOUT_SECS: float = float(os.getenv("NEO4J_REDIS_OP_TIMEOUT", "
 # share of this number, so bumping it gives genuinely deeper traces
 # more headroom. Was previously read directly as TRACE_TIMEOUT_MS in
 # context_engine.py — moved here for central visibility.
-TRACE_TIMEOUT_SECS: float = float(os.getenv("TRACE_TIMEOUT_SECS", "60"))
+TRACE_TIMEOUT_SECS: float = float(os.getenv("TRACE_TIMEOUT_SECS", "120"))
 # Headroom the trace ENGINE leaves under the HTTP middleware tier: the
 # engine budget is TRACE_TIMEOUT_SECS - TRACE_ENGINE_HEADROOM_SECS
-# (floor 5s). With engine == middleware the truncated-200 raced the 504
-# and usually lost — the whole point of graceful truncation defeated.
-TRACE_ENGINE_HEADROOM_SECS: float = float(os.getenv("TRACE_ENGINE_HEADROOM_SECS", "10"))
+# (floor 5s; 100s by default). With engine == middleware the truncated-200
+# raced the 504 and usually lost — the whole point of graceful truncation
+# defeated.
+TRACE_ENGINE_HEADROOM_SECS: float = float(os.getenv("TRACE_ENGINE_HEADROOM_SECS", "20"))
 
 # ── Ontology introspection ──────────────────────────────────────────
 # Outer timeout for the aggregate get_ontology_metadata() call (which

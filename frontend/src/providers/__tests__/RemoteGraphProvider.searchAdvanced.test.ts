@@ -61,7 +61,7 @@ describe('RemoteGraphProvider.searchAdvanced signal + timeout', () => {
     const [, init] = mockFetch.mock.calls[0]
     expect(init?.signal).toBe(controller.signal)
     expect(init?.timeoutMs).toBe(TIMEOUTS.SEARCH_ADVANCED_MS)
-    expect(TIMEOUTS.SEARCH_ADVANCED_MS).toBe(45_000)
+    expect(TIMEOUTS.SEARCH_ADVANCED_MS).toBe(150_000)
   })
 
   it('two identical signalled bodies produce two fetches, not one deduped promise', async () => {

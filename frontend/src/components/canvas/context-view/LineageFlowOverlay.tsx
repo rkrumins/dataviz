@@ -596,10 +596,12 @@ export function LineageFlowOverlay({
           color = '#a78bfa'
         }
 
+        // A combined trace names every seed in `focusIds`; each is a focus.
+        const focusIds: ReadonlySet<string> | undefined = traceResult.focusIds
         const focusId = traceResult.focusId
-        isFocusIncident = !!focusId && (
-          edge.source === focusId || edge.target === focusId
-        )
+        isFocusIncident = focusIds
+          ? focusIds.has(edge.source) || focusIds.has(edge.target)
+          : !!focusId && (edge.source === focusId || edge.target === focusId)
 
         if (!srcInUpstream && !tgtInUpstream && !srcInDownstream && !tgtInDownstream && !isFocusIncident) {
           edgeOpacity = edge.isGhost ? 0.05 : 0.1

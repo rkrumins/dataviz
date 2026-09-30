@@ -9,6 +9,94 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Branding that saves, combined traces, and time for very large graphs
+
+### Added
+
+**Select several entities and trace them together.** On the Context View canvas, ⌘/Ctrl-click
+adds an entity to the selection and Shift-click adds a range (also across columns); Space or
+⌘/Ctrl+Enter toggles the focused row. Every selected entity's incoming and outgoing lineage lights
+up at once, their upstream and downstream partners stay at full strength instead of dimming, and
+the selection bar counts how many entities feed the selection and how many it feeds. **Trace N
+entities** (or `T`) traces them as one picture: every selected entity is an origin, each partner is
+measured from its nearest origin, and the dock says "Tracing N entities" and lists them, each with
+a remove button that narrows the picture without fetching again. Up to 25 entities are traced at
+once. `F` opens the Lens on the whole selection.
+
+**A guide to scaling for hundreds to thousands of users** (`docs/SCALING_CONCURRENT_USERS.md`,
+in-app under Operations). It starts from the real ceiling (FalkorDB query threads on the shard that
+holds a data source) and works through every tier: replicas and workers per service, a Postgres
+connection worksheet for the per-process pools against `max_connections`, FalkorDB and Redis
+sizing, the timeout ladder, metrics and alert thresholds, a load-test procedure, and ready-to-apply
+profiles for ~100, ~500 and ~1000+ concurrent users.
+
+**Guides for Advanced Search and Display Rules, a developer reference, and examples.** Two user
+guides (in-app under Viewer and Builder), `docs/features/search-and-rules-reference.md` (every
+predicate, operator and endpoint, the library pack format, curl and Python recipes) and
+`docs/examples/search-and-rules/` (ready-made queries and two library packs).
+`backend/scripts/publish_view_library.py` publishes a library pack to one view, or to every view of
+a data source (a dry run unless `--apply`), and `backend/common/schema/view-library.v1.json` is a
+JSON Schema for the pack format. The Advanced Search **Library** menu can now export the view's
+library and import one.
+
+### Changed
+
+- **Loads and searches on very large graphs get the time they need.** Per-query budgets that cut
+  10-60 s queries off are raised: canvas reads 15→30 s, nodes 20→45 s, top-level 30→60 s,
+  edges-between 40→80 s, aggregated reads 30→60 s per step, an Advanced Search unit 15→45 s and its
+  request 40→100 s, the default soft deadline 30→60 s. The API's graph and trace tiers go 60→120 s
+  (aggregation 45→90 s), and the browser waits up to 150 s. Each layer still outlasts the one inside
+  it, and every per-query budget stays under the production cluster's `TIMEOUT_MAX` of 120 s. Env
+  overrides still apply.
+- **A failed search no longer counts as a graph outage.** Three in a row used to open the circuit
+  breaker for every graph read on that data source for 30 s; it is now answered as a
+  `SEARCH_FAILED` rejection. Hydrating a page of hits after a long scan gets 5 s instead of 0.5 s.
+- **The Branding page keeps what you type.** A save that loses a race opens a panel listing the
+  fields both sides changed, with **Keep my changes** or **Discard mine**, instead of asking you to
+  reload and type it again. A refresh in the background never overwrites a form you are editing,
+  and a save sends only the fields you changed, so the rest keep following the `APP_BRAND_*`
+  defaults. The description now reaches the page's meta description and the sign-in screen, and
+  the support email shows as **Contact support** in the Help panel.
+- **Helm:** Postgres `max_connections` (400) and Redis `maxmemory` / `maxmemory-policy` (2gb,
+  `volatile-lru`, with the pod's memory raised to fit) are values, matching compose and the k8s
+  manifests, instead of the server's 100 connections and 256mb `noeviction`.
+
+### Fixed
+
+- **Branding could not be saved.** On every database built by the installer or the baseline
+  migration the branding row was never seeded, so each save answered "Someone else updated branding
+  while you were editing" and nothing was stored. The first save now creates the row. The SSO
+  settings page had the same fault and the same fix.
+- **Tracing a multi-selection showed only the first entity**; the others and their lineage were
+  dropped from the picture.
+- **The production anti-affinity patch matched no pods**, so replicas could all land on one node.
+- **`kustomize build` panicked on the production and production-cluster overlays.** Each
+  `$patch: delete` is now its own patch; all four overlays build.
+
+### Upgrading
+
+**Full detail:** `docs/RELEASE_NOTES_2026-09-30_branding-traces-timeouts-scaling.md` — what was
+wrong behind each report, every value that moved and every knob that tunes it, rollout order,
+verification, and how to go back.
+
+No migration. The new timeouts are defaults: a deployment that pins `HTTP_TIMEOUT_*`,
+`FALKORDB_*_TIMEOUT` or `DEEP_SEARCH_CHUNK_TIMEOUT_MS` keeps its own values. `VITE_TIMEOUT_*` are
+baked in at build time, so rebuild the frontend image. A load balancer or gateway in front of the
+app with an idle timeout under 150 s (60 s is a common default) cuts the longest requests off
+before the app can answer: raise it.
+
+### Known limitations
+
+- **Searches and display rules are shared per view.** There is no data-source-level library;
+  publishing a pack to a data source means importing it into each of its views, which the publish
+  script does.
+- **Scripts sign in with a session cookie.** There are no API tokens or service accounts.
+- **A share link carries one entity**, so Share is not offered for a combined trace.
+- **Slow queries now hold a graph slot, a FalkorDB thread and a database connection longer** before
+  they give up; see the scaling guide's trade-offs.
+
+---
+
 ## [Unreleased] — SSO sessions that still work the next day
 
 ### Fixed

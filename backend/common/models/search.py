@@ -709,12 +709,12 @@ class SearchOptions(_Base):
     include_ancestor_path: bool = Field(False, alias="includeAncestorPath")
     highlights: bool = True
     soft_deadline_ms: int = Field(
-        30000, alias="softDeadlineMs", ge=200, le=120000,
+        60000, alias="softDeadlineMs", ge=200, le=120000,
         description="Provider returns partial rows + deadline_exceeded=true "
                     "on expiry. Service does not cache deadline-exceeded "
-                    "responses. Default 30s (was 3s) so deep queries on "
-                    "large graphs complete; user can override per-request "
-                    "up to 120s.",
+                    "responses. Default 60s (was 30s, and 3s before that) "
+                    "so deep queries on very large graphs complete; user "
+                    "can override per-request up to 120s.",
     )
     candidate_cap: Optional[int] = Field(
         None, alias="candidateCap", ge=100, le=100000,

@@ -20,6 +20,7 @@ import { useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { formatShortcut } from '@/lib/platform'
 import { useFeature } from '@/store/features'
 import { useAppNotifications } from '@/components/ui/notifications'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
@@ -248,7 +249,9 @@ export function ComprehensionTools({
           label={multiSelectArmed
             ? 'Clicking a row adds it to the selection'
             : 'Pick several entities, then trace or focus all of them'}
-          detail={multiSelectArmed ? 'Turn off to go back to single select' : 'Cmd-click does the same thing'}
+          detail={multiSelectArmed
+            ? 'Turn off to go back to single select'
+            : `${formatShortcut('mod')}-click adds one · Shift-click adds a range`}
         >
           <button
             type="button"

@@ -27,9 +27,17 @@ export interface HighlightSet {
   edges: Set<string>
 }
 
+/** How many entities feed a selection (upstream), and how many it feeds. */
+export interface SelectionLineage {
+  upstream: number
+  downstream: number
+}
+
 export interface UseHighlightStateResult {
   highlightState: HighlightSet
   isHighlightActive: boolean
+  /** With several selected: their partners on each side, off the same lines. */
+  selectionLineage?: SelectionLineage
 }
 
 // ============================================
@@ -77,6 +85,59 @@ function computeConnected(
   return { nodes: connectedNodes, edges: connectedEdges }
 }
 
+/** A line's two ends, as the highlight reads them. */
+type LineEnds = { id: string; source: string; target: string }
+
+/** Several focals in ONE pass over the edges — the union of each one's
+ *  `computeConnected`, without walking every edge once per focal. The same
+ *  pass counts the selection's partners on each side: the entities that feed
+ *  it and the ones it feeds. A line between two members of the selection is
+ *  its own, and counts on neither side. */
+function computeConnectedMany(
+  focalNodeIds: readonly string[],
+  visibleLineageEdges: readonly LineEnds[],
+  displayMap: Map<string, HierarchyNode>,
+  childMap: Map<string, string[]>,
+): { highlight: HighlightSet; lineage: SelectionLineage } {
+  // What an edge end must be to belong to the selection: a selected node,
+  // one of its containment descendants, or its urn — `computeConnected`'s
+  // test, for every focal at once.
+  const scope = new Set<string>(focalNodeIds)
+  const queue = [...focalNodeIds]
+  while (queue.length > 0) {
+    const curr = queue.pop()!
+    for (const child of childMap.get(curr) || []) {
+      if (!scope.has(child)) {
+        scope.add(child)
+        queue.push(child)
+      }
+    }
+  }
+  for (const id of focalNodeIds) {
+    const urn = displayMap.get(id)?.urn
+    if (urn) scope.add(urn)
+  }
+
+  const connectedNodes = new Set<string>(focalNodeIds)
+  const connectedEdges = new Set<string>()
+  const upstream = new Set<string>()
+  const downstream = new Set<string>()
+  for (const edge of visibleLineageEdges) {
+    const fromSelection = scope.has(edge.source)
+    const toSelection = scope.has(edge.target)
+    if (!fromSelection && !toSelection) continue
+    connectedEdges.add(edge.id)
+    connectedNodes.add(edge.source)
+    connectedNodes.add(edge.target)
+    if (!toSelection) downstream.add(edge.target)
+    else if (!fromSelection) upstream.add(edge.source)
+  }
+  return {
+    highlight: { nodes: connectedNodes, edges: connectedEdges },
+    lineage: { upstream: upstream.size, downstream: downstream.size },
+  }
+}
+
 // ============================================
 // Click highlight hook (existing behavior)
 // ============================================
@@ -90,23 +151,18 @@ export function useHighlightState({
   childMap,
 }: UseHighlightStateOptions): UseHighlightStateResult {
 
-  const highlightState = useMemo(() => {
-    if (isTracing || !selectedNodeId) return EMPTY
+  const { highlightState, selectionLineage } = useMemo((): Omit<UseHighlightStateResult, 'isHighlightActive'> => {
+    if (isTracing || !selectedNodeId) return { highlightState: EMPTY }
     if (!selectedNodeIds || selectedNodeIds.length < 2) {
-      return computeConnected(selectedNodeId, visibleLineageEdges, displayMap, childMap)
+      return { highlightState: computeConnected(selectedNodeId, visibleLineageEdges, displayMap, childMap) }
     }
-    const union: HighlightSet = { nodes: new Set(), edges: new Set() }
-    for (const id of selectedNodeIds) {
-      const { nodes, edges } = computeConnected(id, visibleLineageEdges, displayMap, childMap)
-      nodes.forEach(n => union.nodes.add(n))
-      edges.forEach(e => union.edges.add(e))
-    }
-    return union
+    const { highlight, lineage } = computeConnectedMany(selectedNodeIds, visibleLineageEdges, displayMap, childMap)
+    return { highlightState: highlight, selectionLineage: lineage }
   }, [selectedNodeId, selectedNodeIds, visibleLineageEdges, isTracing, displayMap, childMap])
 
   const isHighlightActive = highlightState.edges.size > 0
 
-  return { highlightState, isHighlightActive }
+  return { highlightState, isHighlightActive, selectionLineage }
 }
 
 // ============================================

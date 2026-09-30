@@ -2516,8 +2516,8 @@
           "title": "Sessionid"
         },
         "softDeadlineMs": {
-          "default": 30000,
-          "description": "Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 30s (was 3s) so deep queries on large graphs complete; user can override per-request up to 120s.",
+          "default": 60000,
+          "description": "Provider returns partial rows + deadline_exceeded=true on expiry. Service does not cache deadline-exceeded responses. Default 60s (was 30s, and 3s before that) so deep queries on very large graphs complete; user can override per-request up to 120s.",
           "maximum": 120000,
           "minimum": 200,
           "title": "Softdeadlinems",

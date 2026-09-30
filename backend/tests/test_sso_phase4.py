@@ -442,8 +442,33 @@ async def test_config_update_bumps_version(db_session):
         db_session, allow_jit_provisioning=False, updated_by="usr_test",
     )
     assert row.allow_jit_provisioning is False
-    assert row.version >= 2  # default is 1, bump goes to 2
+    assert row.version == 1  # created inline at 0, bumped to 1
     # Re-update with stale expected_version -> conflict.
+    from backend.app.db.repositories.app_auth_config_repo import (
+        ConflictingVersion,
+    )
+    with pytest.raises(ConflictingVersion):
+        await app_auth_config_repo.update_config(
+            db_session, expected_version=0, sso_enabled=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_config_first_write_with_snapshot_version_on_missing_row(db_session):
+    """The admin page sends the version it loaded — the snapshot's 0
+    sentinel when the row is missing — so the inline-created row must
+    match it rather than 409 every save on an unseeded DB."""
+    snap = await app_auth_config_repo.get_snapshot(db_session)
+    assert snap.version == 0
+    row = await app_auth_config_repo.update_config(
+        db_session, expected_version=snap.version, sso_enabled=False,
+    )
+    assert row.version == 1
+    assert row.sso_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_config_stale_version_on_missing_row_conflicts(db_session):
     from backend.app.db.repositories.app_auth_config_repo import (
         ConflictingVersion,
     )

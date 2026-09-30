@@ -25,6 +25,9 @@ import {
   currentTraceEntry,
   serializeTraceHistory,
   hydrateTraceHistory,
+  traceSeedKey,
+  traceEntrySeeds,
+  updateCurrentTraceSeeds,
   TRACE_HISTORY_CAP,
   type TraceHistoryStack,
   type TraceViewParams,
@@ -176,5 +179,70 @@ describe('traceHistoryStack — the expansion picture', () => {
       }],
     })
     expect(hydrateTraceHistory(junk).entries).toEqual([])
+  })
+})
+
+/**
+ * A COMBINED trace (a multi-selection) is one entry carrying every seed.
+ * "The same focal" is the same SEED SET, however it was ordered: tracing A
+ * and B is a different trace from tracing A alone, and history must be able
+ * to go back from one to the other.
+ */
+describe('traceHistoryStack — combined traces', () => {
+  const pushMany = (h: TraceHistoryStack, urns: string[], ts = 1000) =>
+    pushTraceFocal(h, { urn: urns[0]!, urns, focusId: `id:${urns[0]}`, view: view(), timestamp: ts })
+
+  it('the seed key ignores order and repeats; one seed’s key is its urn', () => {
+    expect(traceSeedKey(['B', 'A', 'B'])).toBe(traceSeedKey(['A', 'B']))
+    expect(traceSeedKey(['A', 'B'])).not.toBe(traceSeedKey(['A']))
+    expect(traceSeedKey(['X'])).toBe('X')
+    expect(traceEntrySeeds({ urn: 'X' })).toEqual(['X'])
+    expect(traceEntrySeeds({ urn: 'X', urns: ['X', 'Y'] })).toEqual(['X', 'Y'])
+  })
+
+  it('a multi-seed entry is distinct from the single-seed entry on its primary', () => {
+    let h = push(emptyTraceHistory(), 'X')
+    h = pushMany(h, ['X', 'Y'], 2000)
+    expect(h.entries.map(e => traceEntrySeeds(e))).toEqual([['X'], ['X', 'Y']])
+    expect(h.cursor).toBe(1)
+    // The same set again, however ordered, is the same trace: updated in place.
+    h = pushMany(h, ['Y', 'X'], 3000)
+    expect(h.entries).toHaveLength(2)
+    expect(currentTraceEntry(h)).toMatchObject({ urn: 'X', urns: ['X', 'Y'], timestamp: 3000 })
+    // …and back is the single-seed trace.
+    expect(traceEntrySeeds(currentTraceEntry(traceHistoryBack(h))!)).toEqual(['X'])
+  })
+
+  it('dropping seeds rewrites the current entry in place; one left is an ordinary entry', () => {
+    let h = pushMany(emptyTraceHistory(), ['X', 'Y', 'Z'], 7)
+    h = updateCurrentTraceView(h, view({ traceExpansion: ['a'] }))
+
+    const idOf = (urn: string) => `id:${urn}`
+    h = updateCurrentTraceSeeds(h, ['X', 'Z'], idOf)
+    expect(currentTraceEntry(h)).toEqual({ urn: 'X', urns: ['X', 'Z'], focusId: 'id:X', view: view({ traceExpansion: ['a'] }), timestamp: 7 })
+
+    // The primary goes: the next seed names the entry, by its node id — the
+    // id the dock matches its active row and type pill on, not the urn.
+    h = updateCurrentTraceSeeds(h, ['Z'], idOf)
+    expect(currentTraceEntry(h)).toEqual({ urn: 'Z', focusId: 'id:Z', view: view({ traceExpansion: ['a'] }), timestamp: 7 })
+    expect(h.entries).toHaveLength(1)
+
+    // Nothing left is an exit, not a history edit.
+    expect(updateCurrentTraceSeeds(h, [], idOf)).toBe(h)
+    expect(updateCurrentTraceSeeds(emptyTraceHistory(), ['X'], idOf).entries).toEqual([])
+  })
+
+  it('round-trips seeds through storage, and hydrate rejects a malformed seed list', () => {
+    const h = pushMany(push(emptyTraceHistory(), 'X'), ['X', 'Y'])
+    expect(hydrateTraceHistory(serializeTraceHistory(h))).toEqual(h)
+
+    const entry = (urns: unknown) => JSON.stringify({
+      v: 1, cursor: 0,
+      entries: [{ urn: 'X', urns, focusId: 'id:X', timestamp: 3, view: view() }],
+    })
+    expect(hydrateTraceHistory(entry(['X', 'Y'])).entries[0]!.urns).toEqual(['X', 'Y'])
+    expect(hydrateTraceHistory(entry('X')).entries).toEqual([])
+    expect(hydrateTraceHistory(entry([])).entries).toEqual([])
+    expect(hydrateTraceHistory(entry(['X', 7])).entries).toEqual([])
   })
 })

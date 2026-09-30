@@ -1,4 +1,4 @@
-import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
+import { unionWalkModels, type LensWalkModel, type LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
 
 const wn = (urn: string, type: string, childCount = 0): LensWalkNode => ({
@@ -99,6 +99,59 @@ export function tableEstate() {
   const layers: ViewLayerConfig[] = [{ id: 'warehouse', name: 'Warehouse', order: 0, entityTypes: ['container'] }]
   const assignments = { RAW: { layerId: 'warehouse' }, MART: { layerId: 'warehouse' }, FIN: { layerId: 'warehouse' } }
   return { model, layers, assignments }
+}
+
+/**
+ * A COMBINED trace of two tables whose lineage never meets, as the canvas
+ * hands it over: each seed walked on its own, then unioned.
+ *
+ *   RAW ⊃ orders ⊃ {orders.amt}      ← seed A
+ *   FIN ⊃ ledger ⊃ {ledger.amt}      ← A's upstream partner (hop 1)
+ *   FIN ⊃ audit ⊃ {audit.amt}        ← A's upstream, one further (hop 2)
+ *   MART ⊃ sales ⊃ {sales.amt}       ← seed B
+ *   BI ⊃ dash ⊃ {dash.amt}           ← B's downstream partner (hop 1)
+ *   CRM ⊃ crm                        ← B's downstream, known only by a rollup cell of 5
+ *   audit.amt → ledger.amt → orders.amt;  sales.amt → dash.amt;  sales ⇒ crm
+ *
+ * Lane: one warehouse lane anchored at the five containers.
+ */
+export function twoSeedEstate() {
+  const base = { frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null }
+  const modelA: LensWalkModel = {
+    ...base,
+    focusUrn: 'orders',
+    nodes: [
+      wn('RAW', 'container', 1), wn('orders', 'dataset', 1), wn('orders.amt', 'schemaField'),
+      wn('FIN', 'container', 2), wn('ledger', 'dataset', 1), wn('ledger.amt', 'schemaField'),
+      wn('audit', 'dataset', 1), wn('audit.amt', 'schemaField'),
+    ],
+    containmentEdges: [
+      has('RAW', 'orders'), has('orders', 'orders.amt'),
+      has('FIN', 'ledger'), has('ledger', 'ledger.amt'), has('FIN', 'audit'), has('audit', 'audit.amt'),
+    ],
+    lineageEdges: [raw('ledger.amt', 'orders.amt'), raw('audit.amt', 'ledger.amt')],
+    upstreamUrns: new Set(['ledger.amt', 'audit.amt']), downstreamUrns: new Set(),
+  }
+  const modelB: LensWalkModel = {
+    ...base,
+    focusUrn: 'sales',
+    nodes: [
+      wn('MART', 'container', 1), wn('sales', 'dataset', 1), wn('sales.amt', 'schemaField'),
+      wn('BI', 'container', 1), wn('dash', 'dashboard', 1), wn('dash.amt', 'schemaField'),
+      wn('CRM', 'container', 1), wn('crm', 'dataset', 4),
+    ],
+    containmentEdges: [
+      has('MART', 'sales'), has('sales', 'sales.amt'),
+      has('BI', 'dash'), has('dash', 'dash.amt'), has('CRM', 'crm'),
+    ],
+    lineageEdges: [raw('sales.amt', 'dash.amt'), roll('sales', 'crm', 5)],
+    upstreamUrns: new Set(), downstreamUrns: new Set(['dash.amt']),
+    coarseUpstreamUrns: new Set(), coarseDownstreamUrns: new Set(['crm']),
+  }
+  const model = unionWalkModels([modelA, modelB])!
+  const layers: ViewLayerConfig[] = [{ id: 'warehouse', name: 'Warehouse', order: 0, entityTypes: ['container'] }]
+  const assignments = Object.fromEntries(['RAW', 'FIN', 'MART', 'BI', 'CRM'].map(c => [c, { layerId: 'warehouse' }]))
+  return { model, modelA, modelB, layers, assignments }
 }
 
 /**

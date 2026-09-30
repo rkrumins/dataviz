@@ -3787,7 +3787,7 @@ def test_the_generic_read_default_matches_the_canvas_one(monkeypatch):
     was about to draw."""
     from backend.app.config import resilience
 
-    assert resilience.FALKORDB_QUERY_TIMEOUT_SECS == 15.0
+    assert resilience.FALKORDB_QUERY_TIMEOUT_SECS == 30.0
     assert (
         resilience.FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
         == resilience.FALKORDB_QUERY_TIMEOUT_SECS
@@ -3813,14 +3813,14 @@ def test_the_deadline_ladder_still_nests_around_the_read_budget():
 
 
 def test_the_canvas_children_read_keeps_its_own_budget(monkeypatch):
-    """The regression in one number. ``get_children`` is given 15s with a
+    """The regression in one number. ``get_children`` is given 30s with a
     comment saying why; the clamp made it 6s, so a wide container that
     legitimately takes 8s stopped returning data and started returning an
     error."""
     from backend.app.config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
 
     _with_node_timeout(monkeypatch, 15)
-    assert FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS == 15.0
+    assert FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS == 30.0
     assert FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS > mat_provider.cluster_write_ceiling_s()
 
 

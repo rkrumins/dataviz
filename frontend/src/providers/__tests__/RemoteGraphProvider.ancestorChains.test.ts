@@ -1,5 +1,5 @@
 /**
- * POST /nodes/ancestor-chains runs in the 60s graph tier. On the 30s default
+ * POST /nodes/ancestor-chains runs in the 120s graph tier. On the 30s default
  * the browser gave up on work the server was about to finish, and asked again:
  * the client must outlast the tier, so the server's own answer always lands.
  */
@@ -16,7 +16,7 @@ import { RemoteGraphProvider } from '../RemoteGraphProvider'
 const mockFetch = vi.mocked(fetchWithTimeout)
 
 /** HTTP_TIMEOUT_GRAPH_SECS, the tier around /api/v1/graph/ (main.py). */
-const GRAPH_TIER_MS = 60_000
+const GRAPH_TIER_MS = 120_000
 
 beforeEach(() => { mockFetch.mockReset() })
 

@@ -18,7 +18,7 @@
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 /** Hover a control and read the app's own tooltip off it.
  *
@@ -304,5 +304,22 @@ describe('ContextViewHeader — Focus Lens launcher', () => {
   it('hosts that do not wire the lens see no button', () => {
     renderHeader(baseProps())
     expect(screen.queryByRole('button', { name: /focus lens/i })).toBeNull()
+  })
+})
+
+describe('ContextViewHeader — Select teaches the gestures this platform uses', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('says Ctrl-click off a Mac, and names the Shift range', async () => {
+    renderHeader(baseProps({ onToggleMultiSelect: vi.fn() }))
+    const tip = await tipOf(screen.getByRole('button', { name: /^select$/i }))
+    expect(tip).toHaveTextContent('Ctrl-click adds one · Shift-click adds a range')
+  })
+
+  it('says ⌘-click on a Mac, where Cmd is the key', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel')
+    renderHeader(baseProps({ onToggleMultiSelect: vi.fn() }))
+    const tip = await tipOf(screen.getByRole('button', { name: /^select$/i }))
+    expect(tip).toHaveTextContent('⌘-click adds one · Shift-click adds a range')
   })
 })

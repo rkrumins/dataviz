@@ -1,0 +1,96 @@
+{
+  "format": "synodic.view-library",
+  "version": 1,
+  "source": { "viewName": "Governance starter pack" },
+  "displayRules": [
+    {
+      "name": "PII",
+      "color": "#ef4444",
+      "icon": "ShieldCheck",
+      "enabled": true,
+      "predicate": { "kind": "tag", "op": "hasAny", "values": ["PII", "GDPR-Sensitive"] }
+    },
+    {
+      "name": "Needs owner",
+      "color": "#f59e0b",
+      "icon": "AlertTriangle",
+      "enabled": true,
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "property", "key": "owner", "op": "isEmpty" }
+        ]
+      }
+    },
+    {
+      "name": "Certified",
+      "color": "#10b981",
+      "icon": "Star",
+      "enabled": true,
+      "predicate": {
+        "kind": "group",
+        "op": "or",
+        "children": [
+          { "kind": "tag", "op": "has", "values": ["Certified"] },
+          { "kind": "property", "key": "certified", "op": "eq", "value": true, "valueType": "boolean" }
+        ]
+      }
+    },
+    {
+      "name": "Classified, not tagged",
+      "color": "#8b5cf6",
+      "icon": "Lock",
+      "enabled": false,
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "hasProperty", "key": "pii_class" },
+          { "kind": "group", "op": "not", "children": [
+            { "kind": "tag", "op": "hasAny", "values": ["PII"] }
+          ] }
+        ]
+      }
+    }
+  ],
+  "savedQueries": [
+    {
+      "name": "PII datasets",
+      "description": "Datasets tagged PII or GDPR-Sensitive",
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "tag", "op": "hasAny", "values": ["PII", "GDPR-Sensitive"] }
+        ]
+      }
+    },
+    {
+      "name": "Datasets without an owner",
+      "description": "No owner property, or an empty one",
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "property", "key": "owner", "op": "isEmpty" }
+        ]
+      }
+    },
+    {
+      "name": "Uncertified datasets",
+      "description": "Datasets without the Certified tag",
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "tag", "op": "notHas", "values": ["Certified"] }
+        ]
+      }
+    }
+  ]
+}

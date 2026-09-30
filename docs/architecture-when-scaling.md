@@ -92,11 +92,11 @@ graph TB
 ## Mandatory infrastructure (when it's time)
 
 - **Postgres v16+** — already enforced today.
-- **Cache Redis (`REDIS_CACHE_URL`)** — vanilla Redis with
+- **Cache Redis (`REDIS_CACHE_*`, legacy `CACHE_REDIS_URL`)** — vanilla Redis with
   `maxmemory-policy=allkeys-lru`, persistence optional. Backs the
   shared cache abstraction that replaces the in-memory `_test_cache`,
   `_test_inflight`, and provider-registry caches.
-- **Coordination Redis (`REDIS_COORDINATION_URL`)** — vanilla Redis
+- **Coordination Redis (`REDIS_STREAMS_*`, legacy `REDIS_URL`)** — vanilla Redis
   with `maxmemory-policy=noeviction` and AOF. Backs distributed locks,
   the aggregation Streams broker, rate-limit counters, and replica
   health gossip.
@@ -168,7 +168,7 @@ Every module-level mutable state moves to Redis or is eliminated:
 
 ## New code we'd write (when scaling)
 
-- `backend/app/runtime/redis_clients.py` — sole owner of Redis client construction. Two singletons: `cache_client()` (against `REDIS_CACHE_URL`), `coordination_client()` (against `REDIS_COORDINATION_URL`).
+- `backend/common/adapters/redis_endpoint.py` (shipped) — sole owner of Redis client construction, one resolver per role: CACHE (`REDIS_CACHE_*`) and STREAMS (`REDIS_STREAMS_*`).
 - `backend/app/cache/shared.py` — `SharedCache` interface (`RedisSharedCache` for prod, `InProcessSharedCache` for `SYNODIC_ROLE=dev`).
 - `backend/app/locks/distributed.py` — `DistributedLock` async context manager. `SET NX EX` + TTL renewal in a background task; releases via Lua script for atomic check-and-del. Falls back to `asyncio.Lock` in dev.
 - `backend/app/runtime/role.py` — `SynodicRole` enum + `current_role()` + `validate_redis_topology()`. `lifespan()` consults at every gate point.
@@ -182,7 +182,7 @@ Every module-level mutable state moves to Redis or is eliminated:
   - Worker: `DB_POOL_SIZE=10`.
   - Control-plane: `DB_POOL_SIZE=5`.
 - Postgres budget: deployment doc reconciles `(N×80 + K×10 + 5)` against `max_connections`. Pgbouncer in front for any N>3.
-- Redis: two `aioredis` clients per process. `REDIS_CACHE_POOL_SIZE` (default 25), `REDIS_COORDINATION_POOL_SIZE` (default 25).
+- Redis: several clients per process, pooled per role — `REDIS_CACHE_MAX_CONNECTIONS` / `REDIS_STREAMS_MAX_CONNECTIONS` (default 20 each).
 
 ## Migrations and startup
 
@@ -210,7 +210,7 @@ Every module-level mutable state moves to Redis or is eliminated:
 When this work happens:
 
 1. `MANAGEMENT_DB_URL` already enforced as `postgresql+asyncpg://` — no change.
-2. `REDIS_CACHE_URL` and `REDIS_COORDINATION_URL` become mandatory for any non-`dev` role; must point at distinct Redis instances; validated at startup.
+2. The CACHE and STREAMS roles (`REDIS_CACHE_*`, `REDIS_STREAMS_*`) are configured independently; as shipped they may share one instance on `volatile-lru`, and splitting them is config-only.
 3. `SYNODIC_ROLE` env var must be set on every deployment.
 4. The aggregation in-process dispatcher is removed from the web image's runtime path. Calling `POST /aggregate/trigger` without a worker tier deployed yields 503 with a clear error.
 5. Provider registry's in-process credential cache is replaced — direct callers of `provider_registry._providers[...]` would break (none expected outside the registry module).

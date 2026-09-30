@@ -25,22 +25,22 @@ import { TIMEOUTS } from '../timeouts'
 
 /** Slowest the backend can spend inside a request, per endpoint (seconds). */
 const SERVER_BUDGET_S = {
-  'POST /nodes/query': 20,          // FALKORDB_NODES_QUERY_TIMEOUT
-  'POST /edges/between': 40,        // FALKORDB_EDGES_BETWEEN_TIMEOUT
-  'POST /edges/aggregated': 30,     // FALKORDB_AGGREGATED_READ_TIMEOUT_SECS
-  'GET /nodes/top-level': 35,       // TOP_LEVEL 30 + best-effort COUNT 5
-  'GET /children-with-edges': 30,   // the children page, then its edges, at 15 each
-  'POST /trace/v2': 60,             // TRACE_TIMEOUT_SECS
+  'POST /nodes/query': 45,          // FALKORDB_NODES_QUERY_TIMEOUT
+  'POST /edges/between': 80,        // FALKORDB_EDGES_BETWEEN_TIMEOUT
+  'POST /edges/aggregated': 72,     // 0.8 x HTTP_TIMEOUT_AGGREGATION_SECS (the whole read)
+  'GET /nodes/top-level': 65,       // TOP_LEVEL 60 + best-effort COUNT 5
+  'GET /children-with-edges': 60,   // the children page, then its edges, at 30 each
+  'POST /trace/v2': 120,            // TRACE_TIMEOUT_SECS
 } as const
 
 /** The ASGI tier wrapped around each (seconds). */
 const ASGI_TIER_S = {
-  'POST /nodes/query': 60,          // HTTP_TIMEOUT_GRAPH_SECS
-  'POST /edges/between': 45,        // HTTP_TIMEOUT_AGGREGATION_SECS
-  'POST /edges/aggregated': 45,
-  'GET /nodes/top-level': 60,
-  'GET /children-with-edges': 60,
-  'POST /trace/v2': 60,             // HTTP_TIMEOUT_TRACE_SECS
+  'POST /nodes/query': 120,         // HTTP_TIMEOUT_GRAPH_SECS
+  'POST /edges/between': 90,        // HTTP_TIMEOUT_AGGREGATION_SECS
+  'POST /edges/aggregated': 90,
+  'GET /nodes/top-level': 120,
+  'GET /children-with-edges': 120,
+  'POST /trace/v2': 120,            // HTTP_TIMEOUT_TRACE_SECS
 } as const
 
 const CLIENT_MS = {

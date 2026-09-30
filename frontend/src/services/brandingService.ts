@@ -10,6 +10,10 @@
  * Admin → Branding settings page.
  */
 import { authFetch } from './apiClient'
+import { fetchWithTimeout } from './fetchWithTimeout'
+import { useHealthStore } from '@/store/health'
+import { extractErrorMessageFromText } from '@/lib/errorMessage'
+import { readJsonLossless } from '@/lib/losslessJson'
 
 const API = '/api/v1'
 
@@ -62,13 +66,40 @@ export function fetchAdminBranding(): Promise<Branding> {
     return authFetch<Branding>(`${API}/admin/branding`)
 }
 
-/** Admin update — optimistic concurrency via ``expectedVersion``. */
-export function updateBranding(patch: BrandingPatch): Promise<Branding> {
-    return authFetch<Branding>(`${API}/admin/branding`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-    })
+/** Thrown by ``updateBranding`` on HTTP 409: the ``expectedVersion`` is
+ *  stale because someone else saved first. Detected by status, never by
+ *  message text, so an unrelated error that mentions "conflict" is not
+ *  mistaken for one. */
+export class BrandingConflictError extends Error {
+    readonly code = 'CONFLICT' as const
+    constructor(message: string) {
+        super(message)
+        this.name = 'BrandingConflictError'
+    }
+}
+
+/** Admin update — optimistic concurrency via ``expectedVersion``. A stale
+ *  version rejects with ``BrandingConflictError``. */
+export async function updateBranding(patch: BrandingPatch): Promise<Branding> {
+    let res: Response
+    try {
+        res = await fetchWithTimeout(`${API}/admin/branding`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch),
+        })
+    } catch (err) {
+        // Network / timeout: feed the health banner, as authFetch does.
+        useHealthStore.getState().reportFailure(err)
+        throw err
+    }
+    if (!res.ok) {
+        const detail = extractErrorMessageFromText(await res.text(), res.statusText)
+        if (res.status === 409) throw new BrandingConflictError(detail)
+        if (res.status === 401) throw new Error('Session expired')
+        throw new Error(detail)
+    }
+    return readJsonLossless<Branding>(res)
 }
 
 /** Reset all branding to the deployment (env) defaults. */

@@ -173,7 +173,7 @@ This is the authoritative system of record and the single most important thing t
 | Edition / tier | **Enterprise Plus**, `db-perf-optimized-N-16` (**16 vCPU / 128 GB**) + data cache |
 | Storage | **1 TB SSD** (≈27% used at target; IOPS scale with size) |
 | HA | **Regional** (synchronous standby in a second zone — automatic failover) |
-| Replicas | **1 in-region read replica** (wired to the app `READONLY` pool — offloads heavy versioned diffs, exports, audits) + **1 cross-region replica** (DR) |
+| Replicas | **1 in-region read replica** (not used by the app today — every pool role, `READONLY` included, connects to `MANAGEMENT_DB_URL`; routing reads to a replica is future work) + **1 cross-region replica** (DR) |
 | Connectivity | Private IP / PSC only, TLS required; app connects via the Cloud SQL connector or private DNS |
 | Backups | Automated daily + **PITR (7-day WAL)**; cross-region replica doubles as DR |
 
@@ -204,7 +204,7 @@ One HA instance carries both schemas for launch (A4). The `graphver` split (§5.
 
 - `DB_POOL_PRE_PING=true` (default) — a Cloud SQL failover surfaces as a **~5 s blip** (stale connections detected and replaced), not stuck sockets.
 - Regional HA is **synchronous** → **zero RPO** on zonal failover; the standby promotes automatically, the private IP is unchanged, so no app repoint.
-- The read replica is **asynchronous** — the `READONLY` pool tolerates seconds of lag (it serves diffs/exports/audits, never authoritative reads).
+- The read replica is **asynchronous**. The app does not read from it today (the `READONLY` pool connects to the primary like every other role), so its lag affects only what you point at it yourself.
 
 ### 5.4 Connection management under horizontal scale (the section that must always balance)
 
@@ -233,7 +233,7 @@ GRAPHVER_POOL_SIZE=6       GRAPHVER_POOL_MAX_OVERFLOW=3
 
 **Session-mode pooling does NOT solve the multiplication.** SQLAlchemy holds `pool_size` connections open (idle between requests); a *session*-mode pooler pins a server backend for each held connection's lifetime, so server connections ≈ the ~2,400 held client connections. No reduction — you'd still exhaust `max_connections`.
 
-**Only transaction-mode pooling multiplexes**, because it returns the backend to the pool *after each transaction*. The ~2,400 client connections are idle ~99% of the time and collapse onto a small server pool sized by *concurrent-in-transaction* count. (Safe here: the web tier's transactions are ms-scale; the long-hold exception — `GRAPH_READ` across a 30 s trace — holds an *app-side* connection during awaited provider I/O, which is not an open DB transaction.)
+**Only transaction-mode pooling multiplexes**, because it returns the backend to the pool *after each transaction*. The ~2,400 client connections are idle ~99% of the time and collapse onto a small server pool sized by *concurrent-in-transaction* count. (The web tier's transactions are ms-scale, with one exception: a graph request's `GRAPH_READ` session stays *idle in transaction* for the whole request, FalkorDB call included, so a transaction pooler can't multiplex it. Size the server pool for concurrent graph requests; see `docs/SCALING_CONCURRENT_USERS.md` §4.5.)
 
 > **Required app setting.** Transaction/statement-mode pooling with asyncpg needs server-side prepared statements disabled, or they collide across multiplexed backends (`prepared statement "__asyncpg_stmt_N__" already exists`). Set **`DB_POOLER_MODE=transaction`** on every backend tier; `db/engine.py` then passes `statement_cache_size=0` to asyncpg. This is verified correct for SQLAlchemy 2.0 (whose asyncpg dialect routes prepared-statement caching *through* asyncpg's `statement_cache_size` — there is no separate dialect knob) and is exactly what GCP documents for asyncpg behind Cloud SQL Managed Connection Pooling. Leave it **unset** for dev / direct connections so prepared statements (the query-plan-cache win) stay on.
 

@@ -221,6 +221,15 @@ export const guideEntries: GuideEntry[] = [
     importFn: () => import('@docs/guide/EXPLORING_GRAPH.md?raw'),
   },
   {
+    slug: 'advanced-search',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Advanced Search',
+    description: 'Find every match in a View, act on it on the canvas, and save the searches you reuse',
+    readingTime: '10 min',
+    importFn: () => import('@docs/guide/ADVANCED_SEARCH.md?raw'),
+  },
+  {
     slug: 'lineage-lens',
     section: 'viewer',
     persona: 'viewer',
@@ -257,6 +266,15 @@ export const guideEntries: GuideEntry[] = [
     description: 'Edit, share, co-own, and keep your collection tidy',
     readingTime: '6 min',
     importFn: () => import('@docs/guide/MANAGING_VIEWS.md?raw'),
+  },
+  {
+    slug: 'display-rules',
+    section: 'builder',
+    persona: 'builder',
+    title: 'Display Rules',
+    description: 'Tag every entity that matches a search with a coloured chip, and share rules between Views',
+    readingTime: '7 min',
+    importFn: () => import('@docs/guide/DISPLAY_RULES.md?raw'),
   },
   {
     slug: 'semantic-layer',

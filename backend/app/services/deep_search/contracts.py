@@ -35,6 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, AsyncContextManager, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
+from backend.common.adapters.circuit import register_logical_exception
 from backend.common.models.search import SearchQuery, SearchResultPage
 
 
@@ -53,6 +54,16 @@ class SearchFailed(RuntimeError):
     from (a part that ran out of time or memory is split first). Rule
     counts report it as that rule's error; the other rules in the
     request count on."""
+
+
+# A slow search is not an unreachable store: registered so a
+# CircuitBreakerProxy re-raises it untouched instead of counting it —
+# three slow searches in a row would otherwise open the breaker for every
+# graph read on the source. Module top level, after the class, is the
+# supported pattern (see aggregation/cancel.py): the web tier imports this
+# package with its routes (endpoints/graph.py), before any provider — and
+# so any proxy — is constructed, and circuit.py imports nothing from here.
+register_logical_exception(SearchFailed)
 
 
 @dataclass(frozen=True)

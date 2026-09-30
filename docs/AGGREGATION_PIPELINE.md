@@ -1430,8 +1430,8 @@ matters is larger than the window's share:
 
 | Read | Budget | Why |
 |---|---|---|
-| Generic read (`FALKORDB_QUERY_TIMEOUT`) | 15 s | Aligned with the canvas read below; was 5 s, which every serious caller had to override |
-| `get_children` / `get_children_with_edges` | 15 s | Wide containers with many lineage cross-edges legitimately exceed a small graph's read |
+| Generic read (`FALKORDB_QUERY_TIMEOUT`) | 30 s | Aligned with the canvas read below; was 5 s, which every serious caller had to override, then 15 s |
+| `get_children` / `get_children_with_edges` | 30 s | Wide containers with many lineage cross-edges legitimately exceed a small graph's read |
 | `get_stats`' two full scans | 30 s | They are O(nodes)+O(edges); below this the stats refresh fails and the asset shows stale |
 | EXTRACT's range scans (`scanTimeoutS`) | 30 s | The longest reads a rebuild takes |
 | The aggregated ladder, per rung | 0.8 x the HTTP tier | Sized under `HTTP_TIMEOUT_AGGREGATION_SECS` so the provider's own answer wins the race |
@@ -1447,9 +1447,9 @@ The ordering that must hold, smallest first:
 | Write batch target | `writeBatchTargetS` | ~1 s |
 | Per-query WRITE budget | derived ceiling | a share of the node timeout (6 s at 15 s) |
 | Cluster failure detector | `--cluster-node-timeout` | 15 s |
-| Per-query READ budget | per call site | 15-30 s |
+| Per-query READ budget | per call site | 30-80 s |
 | Server query limit | `TIMEOUT_MAX` | 120 s |
-| HTTP graph tier | `HTTP_TIMEOUT_GRAPH_SECS` | 60 s |
+| HTTP graph tier | `HTTP_TIMEOUT_GRAPH_SECS` | 120 s (≥ `TIMEOUT_MAX`; the read budgets sit under both) |
 
 Note that a read budget sits ABOVE the failure detector and that is deliberate:
 the detector is not a limit on reads. What a read must stay under is the server

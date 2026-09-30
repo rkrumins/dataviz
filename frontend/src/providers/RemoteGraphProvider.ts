@@ -731,6 +731,8 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return await this.fetch<GraphEdge[]>('/edges/query', {
             method: 'POST',
             body: JSON.stringify({ query }),
+            // An URN-set query runs on the /edges/between budget server-side.
+            timeoutMs: TIMEOUTS.EDGES_BETWEEN_MS,
         })
     }
 

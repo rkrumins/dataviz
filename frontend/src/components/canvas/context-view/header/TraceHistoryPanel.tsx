@@ -28,6 +28,9 @@ export interface TraceHistoryPanelEntry {
   label: string
   mode: 'up' | 'down' | 'both'
   timestamp: number
+  /** False when no link can carry this entry (a trace of several
+   *  entities): the row offers no share action. */
+  shareable?: boolean
 }
 
 export interface TraceHistoryPanelProps {
@@ -174,7 +177,7 @@ export function TraceHistoryPanel({
                   {/* HAND IT OVER WITHOUT OPENING IT. The trace worth sending
                       is often not the one on screen, and opening it first
                       just to copy a link is a walk nobody needed. */}
-                  {onCopyLink && (
+                  {onCopyLink && e.shareable !== false && (
                     <HoverTip
                       className="flex flex-shrink-0"
                       label={justCopied

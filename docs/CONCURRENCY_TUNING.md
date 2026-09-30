@@ -26,7 +26,7 @@ A graph request passes through nine ceilings. Each is a separate queue.
 
 | # | Ceiling | Code default | **As deployed** | Scope |
 |---|---|---|---|---|
-| 1 | ASGI request tier | 45s aggregation / 60s graph+trace / 120s versioning | same | per request |
+| 1 | ASGI request tier | 90s aggregation / 120s graph+trace / 120s versioning | same | per request |
 | 2 | Per-source admission gate | `hard = GRAPH_READ pool − 4` = 16 | **12** | per **process**, per data source |
 | 3 | `GRAPH_READ` DB session | `pool_size 10 + overflow 10` = 20 | **8 + 8 = 16** | per **process** |
 | 4 | Provider semaphore | `PROVIDER_MAX_CONCURRENCY` = **8** (+16 waiters, 2s wait) | same | per **process**, per (provider, graph) |
@@ -88,7 +88,7 @@ rather than from memory.
 
 ```
 FalkorDB TIMEOUT (per query)  <  provider budget  <  ASGI tier  <  client  <  ingress
-        clamped to TIMEOUT_MAX      e.g. 30s          45s          60s        180s
+        clamped to TIMEOUT_MAX      e.g. 80s          90s          105s       180s
 ```
 
 When this holds, the innermost layer that can *explain* the failure is the one that
@@ -270,11 +270,14 @@ times; the invariant is **a read that failed is not a read that returned nothing
 
 ### Canvas opens time out on large views, every time
 
-1. `FALKORDB_NODES_QUERY_TIMEOUT` pinned at the old `5` is the usual cause. The default
-   is **20**; a type-shaped query sorts a whole label before paging and legitimately
-   exceeds 5s on a large graph.
-2. `HTTP_TIMEOUT_GRAPH_SECS` pinned at `15` kills `/edges/between` (40s budget)
-   mid-flight. The default is **60**.
+1. `FALKORDB_NODES_QUERY_TIMEOUT` pinned at an old `5` or `20` is the usual cause. The
+   default is **45**; a type-shaped query sorts a whole label before paging and
+   legitimately exceeds 5s on a large graph.
+2. `HTTP_TIMEOUT_GRAPH_SECS` pinned at an old `15` kills `/nodes/query` (45s)
+   mid-flight; pinned at `60` it still kills `/nodes/top-level` (60s page + 5s count)
+   and advanced search's 100s request cap. The default is **120**. The same goes for
+   `HTTP_TIMEOUT_AGGREGATION_SECS` pinned at `45` under `/edges/between` (80s budget);
+   its default is **90**.
 3. If neither is pinned, the view is genuinely too wide. The read ladder should be
    returning a *degraded partial* rather than nothing — if it is not, check that
    `FALKORDB_AGGREGATED_READ_BUDGET_SECS` still sits under `HTTP_TIMEOUT_AGGREGATION_SECS`.
@@ -397,8 +400,10 @@ bulk-load at ~74 MB/s (13 GB ≈ 3 min) against incremental replay at minutes pe
 |---|---|---|---|
 | `THREAD_COUNT` (base/helm) | 4 | **8** | Read concurrency. Requires cpu 8 / memory 14Gi together. |
 | `THREAD_COUNT_ASSUMED` | 4 | **8** | The memory guard's fallback. Too low under-books and approves an OOM. |
-| `FALKORDB_NODES_QUERY_TIMEOUT` | 5 | **20** | Canvas hydration on large views. |
-| `HTTP_TIMEOUT_GRAPH_SECS` | 15 | **60** | Must outlast the 40s `/edges/between` budget. |
+| `FALKORDB_NODES_QUERY_TIMEOUT` | 20 (5 before that) | **45** | Canvas hydration on very large views. |
+| `HTTP_TIMEOUT_GRAPH_SECS` | 60 (15 before that) | **120** | Must outlast the 60s top-level budget and advanced search's 100s request cap. |
+| `HTTP_TIMEOUT_AGGREGATION_SECS` | 45 | **90** | Must outlast the 80s `/edges/between` budget; the aggregated read's wall clock follows it (72s). |
+| `DEEP_SEARCH_CHUNK_TIMEOUT_MS` | 15000 | **45000** | One advanced-search scan unit; a walk unit that ran out failed the whole search. |
 | `PROVIDER_SEMAPHORE_BUDGET_S` | 0.25 | **2.0** | Absorb a canvas open's burst instead of shedding its tail. |
 | `PROVIDER_PREFLIGHT_DEADLINE_S` | 1.5 | **2.5** | A loaded provider must not fail its own probe. |
 | `PROVIDER_SLOT_MAX_WAITERS` | — | **16** | Bounds the queue so waiting cannot drain the DB pool. |

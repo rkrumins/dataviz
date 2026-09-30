@@ -52,32 +52,3 @@ stringData:
   # MANAGEMENT_DB_URL (single-instance launch, spec §5.6). To split the versioned
   # store onto a second Cloud SQL later, add GRAPHVER_DB_URL here.
   MANAGEMENT_DB_URL: "postgresql+asyncpg://synodic:${POSTGRES_PASSWORD}@${DB_HOST}:5432/synodic"
----
-# ── Remove the in-cluster data stores (replaced by managed services) ──
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: postgres
-  namespace: synodic
-$patch: delete
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres
-  namespace: synodic
-$patch: delete
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: redis
-  namespace: synodic
-$patch: delete
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis
-  namespace: synodic
-$patch: delete

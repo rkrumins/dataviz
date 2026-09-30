@@ -63,8 +63,9 @@ interface LayerColumnProps {
   expandedNodes: Set<string>
   searchResults: ReadonlySet<string>
   onSelect: (id: string, multi?: boolean) => void
-  /** Shift-range result: the visible rows from the last-clicked one to the
-   *  clicked one, resolved HERE because this column owns the visible order. */
+  /** Shift-range result: the selection already held, plus the visible rows
+   *  from the last-clicked one to the clicked one — resolved HERE because
+   *  this column owns the visible order. */
   onSelectRange: (ids: string[]) => void
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
@@ -849,7 +850,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     })
   }, [
     rawFlatTree, matchUrnSet, ancestorMatchCounts, canvasFilterMode,
-    selectedNodeId,
+    selectedNodeId, selectedNodeIds,
   ])
 
   // Count total including nested
@@ -939,25 +940,31 @@ export const LayerColumn = React.memo(function LayerColumn({
     return map
   }, [navigableItems])
 
-  // Row click → selection. Cmd/Ctrl toggles; Shift takes everything between
+  // Row click → selection. Cmd/Ctrl toggles; Shift ADDS everything between
   // the last-clicked row and this one, in the order the column is DRAWN
   // (navigableItems, so a collapsed subtree contributes nothing — a range is
-  // what the user can see, not what the tree happens to hold).
+  // what the user can see, not what the tree happens to hold). Adds, because
+  // a selection is often built across columns: a range here must not drop
+  // the entities already picked in another.
   //
   // The anchor is the store's lastNodeClick, which bumps on every click. When
   // it names a row in another column — or nothing has been clicked yet — a
-  // shift-click falls through to a plain select rather than silently doing
-  // nothing.
+  // shift-click toggles this one row in, as Cmd/Ctrl would, rather than
+  // silently doing nothing or replacing what is held.
   const handleRowSelect = useCallback((id: string, modifiers: RowSelectModifiers) => {
     if (modifiers.range) {
-      const anchorId = useCanvasStore.getState().lastNodeClick.nodeId
+      const { lastNodeClick, selectedNodeIds: held } = useCanvasStore.getState()
+      const anchorId = lastNodeClick.nodeId
       const from = anchorId ? navigableIndexMap.get(anchorId) : undefined
       const to = navigableIndexMap.get(id)
       if (from !== undefined && to !== undefined) {
         const [lo, hi] = from <= to ? [from, to] : [to, from]
-        onSelectRange(navigableItems.slice(lo, hi + 1).map((item) => item.node.id))
+        const range = navigableItems.slice(lo, hi + 1).map((item) => item.node.id)
+        onSelectRange([...new Set([...held, ...range])])
         return
       }
+      onSelect(id, true)
+      return
     }
     // Armed from the UI, a plain click behaves as a modifier-click would.
     onSelect(id, modifiers.multi || useCanvasStore.getState().multiSelectArmed)
@@ -1223,6 +1230,17 @@ export const LayerColumn = React.memo(function LayerColumn({
         onReorderNudge(item.node.id, e.key === 'ArrowUp' ? 'up' : 'down')
         return
       }
+    }
+    // Space or Cmd/Ctrl+Enter toggles the focused row in the selection — the
+    // keyboard's Cmd-click. Only on the column itself: typed into a row's
+    // search box or rename field, or on a focused button, the key is theirs.
+    if ((e.key === ' ' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) && e.target === e.currentTarget) {
+      const item = navigableItems[focusIndex]
+      if (item) {
+        e.preventDefault()
+        onSelect(item.node.id, true)
+      }
+      return
     }
     switch (e.key) {
       case 'ArrowDown':
@@ -2939,7 +2957,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                         schema={schema}
                         isSelected={selectedNodeIds ? selectedNodeIds.has(node.id) : selectedNodeId === node.id}
                         isBulkSelected={(selectedNodeIds?.size ?? 0) > 1 && !!selectedNodeIds?.has(node.id)}
-                        isDimmedBySelection={(selectedNodeIds?.size ?? 0) > 1 && !selectedNodeIds?.has(node.id)}
+                        // A partner the selection's lines reach is part of what
+                        // is being looked at: full strength, with its ring, as
+                        // with one entity selected.
+                        isDimmedBySelection={(selectedNodeIds?.size ?? 0) > 1 && !selectedNodeIds?.has(node.id)
+                          && !(isHighlightActive && (highlightedNodes?.has(node.id) ?? false))}
                         isExpanded={expandedNodes.has(node.id)}
                         isLoading={loadingNodes?.has(node.id) ?? false}
                         isSearchResult={searchResults.has(node.id)}

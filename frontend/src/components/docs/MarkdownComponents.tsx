@@ -40,6 +40,7 @@ export const filenameMap: Record<string, string> = {
   'MIGRATIONS.md': 'migrations',
   'FALKORDB_DEPLOYMENT.md': 'falkordb-deployment',
   'CONCURRENCY_TUNING.md': 'concurrency-tuning',
+  'SCALING_CONCURRENT_USERS.md': 'scaling-concurrent-users',
   'FALKORDB_DR_RUNBOOK.md': 'falkordb-dr',
   'INFRASTRUCTURE_LAUNCH_SCALE.md': 'infra-launch-scale',
   'INFRASTRUCTURE_SCALING_250M.md': 'infra-scaling-250m',
@@ -57,6 +58,7 @@ export const filenameMap: Record<string, string> = {
   'features/aggregation-reconciliation.md': 'feature-aggregation-reconciliation',
   'features/external-change-notification.md': 'feature-external-change-notification',
   'features/view-portability.md': 'feature-view-portability',
+  'features/search-and-rules-reference.md': 'feature-search-and-rules-reference',
   'aggregation-reconciliation.md': 'feature-aggregation-reconciliation',
   'external-change-notification.md': 'feature-external-change-notification',
 }

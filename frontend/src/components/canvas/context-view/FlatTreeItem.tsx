@@ -4,6 +4,7 @@ import * as LucideIcons from 'lucide-react'
 import type { PlacedOut, PlacementInfo } from './placement'
 import { PlacedTag } from '@/components/ui/PlacedTag'
 import { cn } from '@/lib/utils'
+import { isApplePlatform } from '@/lib/platform'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -540,15 +541,39 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           borderLeft: `3px solid ${nodeColor}40`,
         }),
       }}
+      // Shift-click takes a range; without this the browser also paints a
+      // text selection across every row between the two clicks. A field in
+      // the row (a group's rename) keeps its own Shift-click, and the column
+      // still takes the keyboard, as a plain press would give it.
+      onMouseDown={(e) => {
+        if (!e.shiftKey || (e.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return
+        e.preventDefault()
+        e.currentTarget.closest<HTMLElement>('[tabindex]')?.focus({ preventScroll: true })
+      }}
       onClick={(e) => {
         e.stopPropagation()
+        // A Mac Ctrl-click is answered by `onContextMenu` below; answering the
+        // click as well would toggle the row straight back out.
+        if (isApplePlatform() && e.ctrlKey && !e.metaKey) return
         onSelect(node.id, { multi: e.metaKey || e.ctrlKey, range: e.shiftKey })
       }}
       onDoubleClick={(e) => {
         e.stopPropagation()
         onDoubleClick(node.id, e)
       }}
-      onContextMenu={(e) => onContextMenu(e, node.id)}
+      onContextMenu={(e) => {
+        // On a Mac, Ctrl-click is the system's secondary click and arrives
+        // here, not as a click — yet it is also the Ctrl-click the selection
+        // hint teaches. A primary-button Ctrl-click toggles the row; a real
+        // right-click (button 2) still opens the menu.
+        if (isApplePlatform() && e.ctrlKey && e.button === 0) {
+          e.preventDefault()
+          e.stopPropagation()
+          onSelect(node.id, { multi: true, range: false })
+          return
+        }
+        onContextMenu(e, node.id)
+      }}
       onMouseEnter={() => {
         setIsHovered(true)
         document.documentElement.dataset.hoveredNode = node.id
