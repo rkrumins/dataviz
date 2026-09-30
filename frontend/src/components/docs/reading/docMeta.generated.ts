@@ -20,7 +20,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-09-29",
+    "updated": "2026-09-30",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -108,15 +108,15 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/RBAC.md"
   },
   "sso": {
-    "updated": "2026-09-03",
+    "updated": "2026-09-29",
     "path": "docs/SSO.md"
   },
   "sso-integration": {
-    "updated": "2026-09-03",
+    "updated": "2026-09-26",
     "path": "docs/SSO_INTEGRATION.md"
   },
   "multi-environment-sessions": {
-    "updated": "2026-09-03",
+    "updated": "2026-09-26",
     "path": "docs/MULTI_ENVIRONMENT_SESSIONS.md"
   },
   "signup-service": {
@@ -230,15 +230,15 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/WORKSPACE_ADMIN.md"
   },
   "users-access": {
-    "updated": "2026-08-30",
+    "updated": "2026-09-26",
     "path": "docs/guide/USERS_ACCESS.md"
   },
   "sso-setup": {
-    "updated": "2026-09-03",
+    "updated": "2026-09-27",
     "path": "docs/guide/SSO_SETUP.md"
   },
   "sso-operations": {
-    "updated": "2026-08-30",
+    "updated": "2026-09-29",
     "path": "docs/guide/SSO_OPERATIONS.md"
   },
   "governance-ops": {
