@@ -75,6 +75,10 @@ library and import one.
 
 ### Upgrading
 
+**Full detail:** `docs/RELEASE_NOTES_2026-09-30_branding-traces-timeouts-scaling.md` — what was
+wrong behind each report, every value that moved and every knob that tunes it, rollout order,
+verification, and how to go back.
+
 No migration. The new timeouts are defaults: a deployment that pins `HTTP_TIMEOUT_*`,
 `FALKORDB_*_TIMEOUT` or `DEEP_SEARCH_CHUNK_TIMEOUT_MS` keeps its own values. `VITE_TIMEOUT_*` are
 baked in at build time, so rebuild the frontend image. A load balancer or gateway in front of the
