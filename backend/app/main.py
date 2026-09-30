@@ -199,6 +199,7 @@ def _assert_session_config_coherent() -> None:
         SESSION_ABSOLUTE_MAX_SECONDS,
         SESSION_IDLE_MAX_SECONDS,
         SSO_SESSION_MAX_AGE_HOURS,
+        SSO_SESSION_MAX_AGE_SECONDS,
     )
 
     access_ttl = JWT_EXPIRY_MINUTES * 60
@@ -229,6 +230,37 @@ def _assert_session_config_coherent() -> None:
             "Every session would be refused at its first rotation. "
             "Raise the idle ceiling or lower the access TTL."
         )
+    # The SSO re-authentication ceiling has no "off" — unlike the two
+    # above, 0 is not a way to disable it. A ceiling no longer than one
+    # access-token lifetime refuses every SSO session at its first
+    # renewal, and every sign-in is judged stale before it starts.
+    if SSO_SESSION_MAX_AGE_SECONDS <= access_ttl:
+        raise RuntimeError(
+            f"SSO_SESSION_MAX_AGE_HOURS={SSO_SESSION_MAX_AGE_HOURS} gives "
+            f"{SSO_SESSION_MAX_AGE_SECONDS}s, not longer than one "
+            f"access-token lifetime (JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} "
+            f"= {access_ttl}s). Every SSO session would be refused at its "
+            "first renewal. Raise the ceiling (the default is 24) or lower "
+            "the access TTL."
+        )
+    # The absolute ceiling is measured from the oldest refresh record the
+    # session still has, and records are purged once they expire — one
+    # refresh lifetime after they were minted. A ceiling longer than that
+    # lifetime is measured from a start that keeps moving, so it never
+    # fires: a stolen cookie on an active session stays good indefinitely.
+    refresh_ttl = JWT_REFRESH_EXPIRY_DAYS * 24 * 3600
+    if SESSION_ABSOLUTE_MAX_SECONDS > refresh_ttl:
+        msg = (
+            f"SESSION_ABSOLUTE_MAX_HOURS gives {SESSION_ABSOLUTE_MAX_SECONDS}s, "
+            f"longer than the refresh-token lifetime "
+            f"(JWT_REFRESH_EXPIRY_DAYS={JWT_REFRESH_EXPIRY_DAYS} = "
+            f"{refresh_ttl}s). The session's start is purged before the "
+            "ceiling is reached, so it never ends a session. Lower the "
+            "ceiling or raise the refresh lifetime."
+        )
+        if _is_production():
+            raise RuntimeError(msg)
+        logger.warning("%s", msg)
     if (
         0 < SESSION_ABSOLUTE_MAX_SECONDS
         and SESSION_IDLE_MAX_SECONDS > SESSION_ABSOLUTE_MAX_SECONDS
@@ -994,8 +1026,11 @@ async def lifespan(_app: FastAPI):
         }
 
     # Phase 2.E: inject the session-killer (RevocationService). Called
-    # by the auth service when the SSO daily ceiling forces re-auth so
-    # every live access token across all tabs bounces to the IdP.
+    # by the auth service when an enterprise IdP withdraws a session on a
+    # liveness check — the corporate side ended it, so every live access
+    # token the user holds, in every browser, bounces to the IdP. A
+    # session reaching its OWN time limit (the daily re-auth ceiling, a
+    # corporate token's expiry) ends only that session.
     async def _kill_user_sessions(user_id: str) -> None:
         await get_revocation_service().revoke_all_user_sessions(user_id)
 
@@ -1005,6 +1040,12 @@ async def lifespan(_app: FastAPI):
     # the same user's sessions in other browsers.
     async def _revoke_one_session(sid: str) -> None:
         await get_revocation_service().revoke_session(sid)
+
+    # And the question both of those answer: is this sid tombstoned? Read
+    # by /auth/me and /auth/csrf, so the page is never told it is signed
+    # in by a session every other request refuses.
+    async def _is_session_revoked(sid: str) -> bool:
+        return await get_revocation_service().is_revoked(sid)
 
     # Phase 4: inject the platform SSO posture provider. The
     # ``auth_service`` stays free of ``backend.app.*`` imports —
@@ -1109,6 +1150,7 @@ async def lifespan(_app: FastAPI):
         sso_role_preview=_preview_sso_targets,
         session_killer=_kill_user_sessions,
         session_revoker=_revoke_one_session,
+        revocation_checker=_is_session_revoked,
         auth_config_provider=_auth_config_provider,
         avatar_fetcher=_fetch_avatar_image,
     )

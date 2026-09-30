@@ -9,6 +9,216 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — SSO sessions that still work the next day
+
+### Fixed
+
+**After signing in with SSO, every graph could say "Taking a little longer than usual" and never
+load.** Signing out and back in with a password fixed it; for gateway users, signing in with SSO again
+did not. Four causes, each fixed where it starts:
+
+- **The page did not know which cookie held its CSRF token after an SSO sign-in on the page.** With
+  `AUTH_ENVIRONMENT_ID` set, the CSRF and expiry cookies carry the environment in their name
+  (`nx_csrf_production`), and the page learned it only from `GET /auth/me` on load or from a password
+  sign-in. The Enterprise Gateway's button and automatic sign-in, a portal sign-in, an invited signup
+  and the gateway's silent re-sign-in all started a session without it — so every write went out
+  without its CSRF token and was refused, graph reads included (they are POSTs), the CSRF repair could
+  not help, and renewal ahead of expiry was off. Every response that starts, renews or repairs a
+  session already named the environment in its body; the page now takes it from each, and the CSRF
+  repair (`GET /auth/csrf`) names it too, so a repair can always finish itself. This is also the
+  "CSRF token missing or invalid" that came and went.
+- **A gateway session could start already past the daily re-authentication limit.** The limit counts
+  from when the identity provider says the person signed in, and a gateway reports the corporate
+  portal's original login (`lastLogin`) — days old for many people. The session was refused at its
+  first renewal, minutes after sign-in, every time. No session now starts past the limit: OIDC and SAML
+  ask the identity provider for a fresh sign-in once (`prompt=login`, `ForceAuthn`); gateway, portal
+  and custom connections, which have no way to ask, and an identity provider that ignores the request,
+  count the limit from that sign-in. `user.logged_in` records `auth_time_anchored`.
+- **Loading permissions could renew the session by a route of its own**, missing the handling of the
+  re-authentication answer, so a session that could have been renewed silently ended at the sign-in
+  page instead. It now goes through the same renewal as everything else.
+- **The canvas showed a session problem as a slow graph**, retrying forever. A sign-in the page could
+  not repair now reads "Reconnecting your session", with a Reload button, and keeps retrying.
+
+**Coming back the next day ended an SSO session at the sign-in page.** An SSO session past the idle
+(12 h) or absolute (7 d) limit now goes back through its identity provider — silently for a gateway,
+and without forcing a password prompt for OIDC or SAML — instead of a dead end. Password sessions are
+unchanged.
+
+**A busy moment could sign gateway users out.** The gateway's silent re-sign-in treated a 429, a 5xx
+or a dropped connection as a refusal, which a 9am rush behind one corporate address produces. It now
+retries once; if the corporate side really says no, the sign-in page opens with the reason.
+
+**Signing out did not stick for gateway and portal users.** The automatic sign-in waited only a
+minute, in that tab only, so a new tab signed the person straight back in. It now waits, in every tab,
+until someone signs in.
+
+**A gateway whose sign-in runs in the browser could not sign anyone in behind the shipped frontend
+image.** The page's Content-Security-Policy allows only its own origin (`connect-src 'self'`), so the
+browser refused the sign-in trigger and the browser-side translate call before they were sent — the
+button, the automatic sign-in and the silent re-sign-in all failed, and nothing reached either
+server's logs. The frontend container now takes the gateway's origins in `CSP_CONNECT_SRC`, and a
+call the policy blocks says exactly that, naming the origin to add. The connection form names it too.
+
+**A failed renewal could land on "You're already signed in".** A refused renewal cleared no cookies —
+the framework drops a response's headers when the route raises — so the sign-in page found the
+still-valid access cookie and, since `GET /auth/me` did not consult revocations, reported a live
+session. A refused renewal now clears the session cookies, and `/auth/me` and `/auth/csrf` refuse a
+revoked session, so the page shows why sign-in is needed instead.
+
+**Re-authenticating now keeps your place.** A session that ends mid-task — renewal refused, or
+signed out by the server — returns to the page and query it was on after signing in again, through
+the identity provider or on the sign-in page, instead of the home page.
+
+**More gateway renewals finish without anyone noticing:**
+
+- **A gateway with no browser half renews in place.** Its corporate cookie rides every request, so
+  renewal now redeems it with one call instead of navigating the page away and back.
+- **Re-authentication goes back to the session's own connection**, not to whichever connection the
+  person used most recently.
+- **A gateway token stamped a few seconds in the future is accepted.** Its issue and not-before
+  times now get the same clock-skew allowance (`JWT_CLOCK_SKEW_LEEWAY_SECONDS`) as everything else.
+- **A failure that was only the network is retried.** The browser's own call to the corporate host
+  timing out, answering 429 or 5xx, or not answering at all (a VPN still connecting) is retried once
+  and is not held against the next attempt; the sign-in page also tries again once its one-minute
+  hold lapses and when the network comes back.
+- **A slow gateway cannot outlast the renewal.** The renewal re-check gives up after 10 seconds and
+  counts that as an outage (the connection's grace applies); a connection's per-call timeout is
+  capped at 30 seconds; the browser gives up on a renewal after 20, inside the server's 30-second
+  rotation grace, so its retry is never mistaken for a replayed token; and name lookups for the
+  gateway no longer hold up other requests while they wait.
+
+**A session found dead by the background renewal left the tab signed in**, on a page whose every
+request would fail, until something else noticed. The renewal now signs the tab out itself, as a
+failed request does.
+
+**When the gateway was down, the sign-in page gave no reason.** A renewal that failed only because
+the corporate side did not answer now lands on the sign-in page saying so, and that the page will
+try again — which it does, at once and after a minute — instead of a bare form.
+
+**Gateway sign-in in the browser, with several tabs and on a laptop:**
+
+- **A silent re-sign-in gives up after 45 seconds.** It holds every tab's requests while it runs,
+  and a corporate host that never answered could hold them for over two minutes.
+- **Every tab shows why sign-in is needed**, and none re-runs the call to the corporate host while
+  a refusal is being honoured. Only the tab that tried used to know.
+- **Renewal cannot call the gateway every two seconds.** It renews at half the token's life when
+  that is under two minutes, and schedules by the server's clock rather than the laptop's, so a
+  short token or a clock running fast no longer renews on a loop — each renewal being a call to
+  the corporate gateway. It also catches up after a laptop wakes or the network comes back.
+- **A gateway that reads the corporate cookie on the server signs people in automatically too**,
+  like the other kinds, instead of waiting for the button.
+- **SSO diagnostics blamed passwords for gateway failures.** A refused gateway sign-in — the button,
+  the automatic attempt on the sign-in page, the silent re-sign-in — and a refused portal sign-in were
+  written only to the server log. What reached the audit log was what the person tried next: typing
+  their corporate password into the password form, recorded as `invalid_credentials` against an
+  account that has no password to type. Those refusals are now recorded with their reference, reason
+  and underlying error, and the password attempt says `no_local_password`.
+- **The "Failed sign-ins (24h)" tile counted every warning in the log**, sign-outs and configuration
+  changes included. It now counts failed sign-in attempts.
+- **A revoked session kept working on some routes until its token expired.** Signing out, a password
+  change or reset, and a role change are refused on the next request by routes that authenticate
+  through the user — but the view, graph and view-version routes authorise on the token's claims
+  alone and never checked, so a signed-out or demoted session kept its old access there for up to
+  one access-token lifetime. Every route now refuses a revoked session.
+- **Unlinking an SSO identity ended none of the sessions it had started**, including an admin's
+  unlink of an identity believed compromised. It now ends the sessions that identity minted; the
+  person's other sessions carry on.
+
+### Added
+
+**Sign-in problems, in Admin → SSO → Diagnostics.** Everyone who could not sign in over the last
+day, week or month, one row per person with the people still failing first: why (the reason code in
+words, and what to do), how often, whether they have signed in since, the connections their account
+can use and whether it has a password, why their session ended before it, and each attempt's network
+address, browser, reference and underlying error. Failures that happened before anyone could be named
+— no corporate session on the request, a gateway that could not be reached — are shown beside the
+person whose attempt followed from the same browser. Filter by reason or connection, or find a person;
+built on the server from a bounded read (`GET /api/v1/admin/sso/failures`, `system:audit:read`).
+
+**An Activity tab in Admin → SSO.** Every sign-in, failure, session ending, sign-out, identity link
+and SSO configuration change as a table: when, person, connection, outcome, reason and the error
+behind it, reference, and network address and browser, each its own column. Outcome chips carry their
+counts; filter by connection and window; one search finds a person, an email, a reference or an
+address; click a person or a connection to narrow to them; open a row for the whole record. Every
+filter runs on the server (`GET /api/v1/admin/sso/activity`), so pages are full and paging continues
+where it left off. Diagnostics keeps the problem list and the person lookup, and its *Given a
+reference?* card opens Activity with the reference searched.
+
+**End one person's sessions, in Admin → Users**, without suspending them — a lost laptop, a session
+you do not trust. They are signed out everywhere and can sign straight back in
+(`POST /api/v1/admin/users/{id}/sessions/revoke`, recorded as `user.sessions_ended_by_admin`).
+
+**When each person last used the platform, in Admin → Users.** A sortable **Last seen** column, and an
+**Activity** block in the user drawer: Joined, Last signed in (any kind of sign-in), Last seen (had
+the app open) and Last activity (what Activity analytics counts). Last seen and last activity are
+recorded to five minutes, one conditional row update per person per window.
+
+### Changed
+
+- **A daily-limit expiry ends only that session.** The user's other browsers carry their own limits;
+  ending them all made every expiry on one device force a renewal on every other. An enterprise
+  identity provider withdrawing a session still ends all of them.
+- **A gateway reply with no sign-in time is never refused.** The *Require an authentication time*
+  setting is retired: one renamed field on the corporate side locked out everyone on the connection.
+  The daily limit counts from each sign-in instead, and the gateway still governs the session.
+- **`user.sso_session_expired` carries a `reason`** — `reauth_ceiling`, `idle` or `absolute`.
+- **A failed sign-in says who, why and from where.** `user.sso_login_failed` adds `email`, `user_id`
+  and `external_id` when the attempt got far enough to know, the error behind the reason in its own
+  `detail` field, and `client_ip`, `user_agent` and `path`. The reason itself is a code again:
+  `bad_flow_cookie`, `token_or_idtoken`, `saml_validate`, `envelope_invalid`, `payload_rejected` and
+  `idp_error` no longer carry the error text after a `:` or `=`.
+- **`user.login_failed` says which refusal it was** — `user_not_found`, `no_local_password`,
+  `account_inactive` (with `status`), `invalid_credentials`, `throttled`, `local_login_disabled` —
+  with `user_id` and where the attempt came from. The person is told the same thing as before.
+- **A renewal refused for a reason nothing recorded is recorded**: `user.session_refused` with
+  `reuse_detected`, `no_record`, `family_revoked`, `user_inactive`, `sessions_revoked`,
+  `session_idle` or `session_expired`.
+- **A refused gateway sign-in shows the person a reference** to quote, as the redirect sign-ins do.
+
+### Upgrading
+
+- **A gateway connection with a sign-in trigger or a browser-side translate call needs its origins in
+  the frontend container's `CSP_CONNECT_SRC`** (space-separated `https://` origins, e.g.
+  `CSP_CONNECT_SRC="https://sso.corp.example"`): `env` in the k8s frontend Deployment,
+  `services.frontend.cspConnectSrc` in Helm, the environment in docker-compose. Unset, the policy is
+  exactly as before. A value that is not a bare `https://` or `wss://` origin stops the container from
+  starting.
+- A gateway connection's per-call timeout above 30 seconds is used as 30.
+- A migration adds `users.last_login_at`, `last_seen_at` and `last_active_at`, and backfills
+  `last_login_at` from each person's identity sign-ins. Password-only accounts fill in at their next
+  sign-in; the other two as people use the platform.
+- `require_auth_time` on existing gateway connections is ignored from now on; nothing to do.
+- A migration indexes `outbox_events` on `(event_type, created_at)`. The build holds a write lock on
+  that table for its duration — seconds on most installs; on a very large audit trail, run the
+  upgrade in a quiet window.
+- Audit rows for failed sign-ins now hold the network address and browser of the attempt. They are
+  readable only with `system:audit:read`, like the rest of the audit log.
+- **The server refuses to start with an SSO session limit that ends every SSO session**:
+  `SSO_SESSION_MAX_AGE_HOURS` at or under one access token (`JWT_EXPIRY_MINUTES`). Unlike the idle and
+  absolute limits, `0` does not switch it off. The shipped value is 24.
+- **In production, the server refuses to start with `SESSION_ABSOLUTE_MAX_HOURS` longer than the
+  refresh-token lifetime** (`JWT_REFRESH_EXPIRY_DAYS` × 24), a limit that could never fire; elsewhere
+  it logs a warning. The shipped values (168 and 7) are equal and start normally.
+- Size `RATELIMIT_LOGIN_PER_IP` for your largest corporate egress address: the gateway's sign-in and
+  silent re-sign-in share that bucket.
+
+### Known limitations
+
+- A 403 for a missing permission still shows on the canvas as slow.
+- Disabling or deleting a connection stops new sign-ins through it but ends no existing session;
+  use the connection's **End sessions**. A disabled back-channel connection also stops re-checking
+  its sessions with the gateway, so they run to their time limits.
+- A role or workspace-access change ends the access token only; the session renews with the new
+  access, by design. There is no receiver for an identity provider's own logout notifications
+  (OIDC back-channel logout); an IdP sign-out reaches us at the next re-check or time limit.
+- The Helm chart's `expiryMinutes` default is 60; the other deploy configs use 15. Against 60-minute
+  tokens, a gateway connection's default 15-minute outage grace ends sessions at the first renewal
+  that finds the gateway down: set it to at least twice the token lifetime.
+- Tabs left open across the upgrade run the previous page until they are reloaded.
+
+---
+
 ## [Unreleased] — Exports up to 50 GB, with downloads that resume
 
 ### Added

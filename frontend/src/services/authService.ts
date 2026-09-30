@@ -12,7 +12,7 @@
  * forward the ``X-CSRF-Token`` header. The general apiClient does.
  */
 
-import { fetchWithTimeout } from './fetchWithTimeout'
+import { adoptEnvironmentId, adoptServerClock, fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const AUTH_API = '/api/v1/auth'
@@ -180,6 +180,85 @@ export async function runAuthenticateTrigger(
  *  leaving the login page silently stuck. */
 export const AUTHENTICATE_TIMEOUT_MS = 10_000
 
+/** A failed call from this page to the provider's own authenticate or
+ *  translate endpoint. ``transient`` says whether it is worth one more
+ *  try: a timeout, a 429 or a 5xx says nothing about the corporate
+ *  session — a VPN still connecting looks exactly like this — while a 4xx
+ *  or this page's own security policy refusing the call is an answer. */
+export class GatewayCallError extends Error {
+    readonly transient: boolean
+
+    constructor(message: string, transient: boolean) {
+        super(message)
+        this.name = 'GatewayCallError'
+        this.transient = transient
+    }
+}
+
+function originOf(url: string): string | null {
+    try {
+        return new URL(url, window.location.href).origin
+    } catch {
+        return null
+    }
+}
+
+/** ``fetch`` for the two browser-side gateway calls, with a timeout of
+ *  our own and failures that say what happened.
+ *
+ *  One failure needs detecting rather than reporting: the page's
+ *  Content-Security-Policy refusing the call. The browser blocks it before
+ *  it is sent, so neither server logs anything, and ``fetch`` rejects with
+ *  the same bare ``TypeError`` as a network outage. The
+ *  ``securitypolicyviolation`` event is the only witness, and it is a
+ *  task of its own that can land just after the rejection it caused —
+ *  hence the short wait, paid only on a call that already failed. */
+async function gatewayFetch(url: string, init: RequestInit): Promise<Response> {
+    const target = originOf(url)
+    let blocked = false
+    const onViolation = (e: SecurityPolicyViolationEvent) => {
+        if (
+            e.disposition === 'enforce'
+            && e.effectiveDirective === 'connect-src'
+            && originOf(e.blockedURI) === target
+        ) {
+            blocked = true
+        }
+    }
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
+    document.addEventListener('securitypolicyviolation', onViolation)
+    let res: Response
+    try {
+        res = await fetch(url, { ...init, signal: abort.signal })
+    } catch (err) {
+        if (abort.signal.aborted) {
+            throw new GatewayCallError(
+                'The sign-in service did not answer in time.', true,
+            )
+        }
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 50))
+        if (blocked) {
+            throw new GatewayCallError(
+                "Blocked by this site's security policy — add "
+                + `${target} to CSP_CONNECT_SRC on the frontend.`,
+                false,
+            )
+        }
+        throw err
+    } finally {
+        clearTimeout(timer)
+        document.removeEventListener('securitypolicyviolation', onViolation)
+    }
+    if (!res.ok) {
+        throw new GatewayCallError(
+            `The sign-in service answered ${res.status}.`,
+            res.status === 429 || res.status >= 500,
+        )
+    }
+    return res
+}
+
 export async function runAuthenticateCall(cfg: {
     url?: string
     method?: string
@@ -192,32 +271,15 @@ export async function runAuthenticateCall(cfg: {
     const tokenPath = cfg.tokenPath || ''
 
     // Raw fetch on purpose (cross-origin, no CSRF, no refresh-on-401) —
-    // but that also means no timeout unless we bring one. A hung
-    // corporate endpoint must not hang the silent sign-in forever.
-    const abort = new AbortController()
-    const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
-    let res: Response
-    try {
-        res = await fetch(url, {
-            method,
-            headers,
-            // The whole point. Without it the browser neither sends the
-            // provider's existing cookies nor offers to answer a Negotiate
-            // challenge from the OS.
-            credentials: 'include',
-            signal: abort.signal,
-        })
-    } catch (err) {
-        if (abort.signal.aborted) {
-            throw new Error('The sign-in service did not answer in time.')
-        }
-        throw err
-    } finally {
-        clearTimeout(timer)
-    }
-    if (!res.ok) {
-        throw new Error(`The sign-in service answered ${res.status}.`)
-    }
+    // see ``gatewayFetch`` for the timeout and failures it brings.
+    const res = await gatewayFetch(url, {
+        method,
+        headers,
+        // The whole point. Without it the browser neither sends the
+        // provider's existing cookies nor offers to answer a Negotiate
+        // challenge from the OS.
+        credentials: 'include',
+    })
     if (!tokenPath) return null
 
     let body: unknown
@@ -322,28 +384,12 @@ export async function runBrowserExchangeCall(cfg: {
             headers.set('content-type', 'application/json')
         }
     }
-    const abort = new AbortController()
-    const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
-    let res: Response
-    try {
-        res = await fetch(cfg.url as string, {
-            method: cfg.method || 'GET',
-            headers,
-            credentials: 'include',
-            signal: abort.signal,
-            ...(body !== undefined ? { body } : {}),
-        })
-    } catch (err) {
-        if (abort.signal.aborted) {
-            throw new Error('The sign-in service did not answer in time.')
-        }
-        throw err
-    } finally {
-        clearTimeout(timer)
-    }
-    if (!res.ok) {
-        throw new Error(`The sign-in service answered ${res.status}.`)
-    }
+    const res = await gatewayFetch(cfg.url as string, {
+        method: cfg.method || 'GET',
+        headers,
+        credentials: 'include',
+        ...(body !== undefined ? { body } : {}),
+    })
 
     const path = cfg.tokenPath || ''
     let token: unknown
@@ -390,15 +436,19 @@ export class BackchannelLoginError extends Error {
     code: string
     email?: string
     reasons?: string[]
+    /** The handle the refusal was recorded under, for the person to quote. */
+    ref?: string
 
     constructor(
-        code: string, opts: { email?: string; reasons?: string[] } = {},
+        code: string,
+        opts: { email?: string; reasons?: string[]; ref?: string } = {},
     ) {
         super('Signing in with that session did not work.')
         this.name = 'BackchannelLoginError'
         this.code = code
         this.email = opts.email
         this.reasons = opts.reasons
+        this.ref = opts.ref
     }
 }
 
@@ -425,7 +475,9 @@ export async function loginWithBackchannel(
         },
     )
     if (!res.ok) {
-        type DenialDetail = { error?: string; email?: string; reasons?: string[] }
+        type DenialDetail = {
+            error?: string; email?: string; reasons?: string[]; ref?: string
+        }
         let detail: DenialDetail | null = null
         try {
             const parsed = (await res.json()) as { detail?: DenialDetail }
@@ -440,10 +492,11 @@ export async function loginWithBackchannel(
                 reasons: Array.isArray(detail?.reasons)
                     ? detail.reasons.map(String)
                     : undefined,
+                ref: typeof detail?.ref === 'string' ? detail.ref : undefined,
             },
         )
     }
-    return res.json() as Promise<SessionResponse>
+    return adoptSession((await res.json()) as SessionResponse)
 }
 
 /** Complete a back-channel sign-in with a handle the trigger returned. */
@@ -518,12 +571,30 @@ export interface PermissionClaims {
 
 // ── HTTP helper ───────────────────────────────────────────────────────
 
+/**
+ * Adopt the deployment a session response names, then hand it back.
+ *
+ * Every call here that establishes a session goes through this — the
+ * password, gateway, portal and invited-signup sign-ins, and ``/auth/me``
+ * — including the gateway's silent re-sign-in, which calls
+ * {@link loginWithBackchannel} directly. The session cookies it just set
+ * are read by an environment-scoped name, and this is the only place the
+ * page learns the name: an in-page sign-in never makes the bootstrap call.
+ */
+function adoptSession<T extends { environment_id?: string | null }>(resp: T): T {
+    adoptEnvironmentId(resp?.environment_id)
+    return resp
+}
+
 async function request<T>(url: string, init?: RequestInit & { skipAuthRefresh?: boolean }): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })
+    // ``/auth/me`` among them: the keepalive's first schedule, straight
+    // after bootstrap, reads the server's clock from here.
+    adoptServerClock(res)
     if (!res.ok) {
         const text = await res.text()
         // Use the shared extractor so the structured permission /
@@ -549,9 +620,14 @@ export const authService = {
         user?: AuthUser | null
         redirectTo?: string | null
     }> {
-        return request<{ message: string }>(`${AUTH_API}/signup`, {
-            method: 'POST',
-            body: JSON.stringify(req),
+        return request<{ message: string; environmentId?: string | null }>(
+            `${AUTH_API}/signup`,
+            { method: 'POST', body: JSON.stringify(req) },
+        ).then((resp) => {
+            // Camel-cased like the rest of this DTO; the same field as
+            // ``SessionResponse.environment_id``.
+            adoptEnvironmentId(resp?.environmentId)
+            return resp
         })
     },
 
@@ -559,12 +635,12 @@ export const authService = {
         return request<SessionResponse>(`${AUTH_API}/login`, {
             method: 'POST',
             body: JSON.stringify(req),
-        })
+        }).then(adoptSession)
     },
 
     /** Validate the access cookie and return the current user. */
     me(): Promise<SessionResponse> {
-        return request<SessionResponse>(`${AUTH_API}/me`)
+        return request<SessionResponse>(`${AUTH_API}/me`).then(adoptSession)
     },
 
     /**
@@ -583,11 +659,6 @@ export const authService = {
     /** Revoke the refresh-token family and clear cookies. Idempotent. */
     logout(): Promise<{ ok: boolean }> {
         return request<{ ok: boolean }>(`${AUTH_API}/logout`, { method: 'POST' })
-    },
-
-    /** Rotate access + refresh cookies. Used by apiClient on 401. */
-    refresh(): Promise<SessionResponse> {
-        return request<SessionResponse>(`${AUTH_API}/refresh`, { method: 'POST' })
     },
 
     forgotPassword(email: string): Promise<{ message: string }> {
@@ -679,7 +750,7 @@ export const authService = {
         return request<SessionResponse>(
             `${AUTH_API}/${encodeURIComponent(providerSlug)}/browser-profile`,
             { method: 'POST', body: JSON.stringify({ payload }) },
-        )
+        ).then(adoptSession)
     },
 
     /** Apply an invite to the already-signed-in user. The SSO route

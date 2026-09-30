@@ -327,6 +327,18 @@ credentialed cross-origin calls, and your desktop team will need
 workstations configured to answer the challenge for that host. Both are
 in the contract document below.
 
+{brand}&rsquo;s own page has to allow the call too. Its
+Content-Security-Policy lets the page talk only to its own origin, so
+the browser blocks the trigger — and the browser-side translate call
+described below — before it is sent, unless whoever deploys {brand}
+lists your provider&rsquo;s origins in the frontend container&rsquo;s
+`CSP_CONNECT_SRC`: space-separated `https://` origins, scheme, host and
+port only, for example
+`CSP_CONNECT_SRC="https://sso.corp.example"`. The connection form
+names the origin to add under each URL you fill in. Anything that is
+not a bare `https://` or `wss://` origin stops the frontend from
+starting rather than weakening the policy.
+
 ### What you need from your identity team
 
 Ask them for:

@@ -85,7 +85,6 @@ export interface BackchannelSettings {
     timeout_seconds?: number | null
     max_response_bytes?: number | null
     tls_verify?: boolean
-    require_auth_time?: boolean
     map_avatar?: boolean
     trust_gateway_email?: boolean
     liveness_on_refresh?: boolean
@@ -136,7 +135,6 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     timeout_seconds: 5,
     max_response_bytes: 262144,
     tls_verify: true,
-    require_auth_time: true,
     map_avatar: false,
     trust_gateway_email: true,
     liveness_on_refresh: true,
@@ -253,6 +251,31 @@ function Toggle({
                 </span>
             </span>
         </label>
+    )
+}
+
+/** The trigger and the translate call are fetches from the sign-in page
+ *  itself, and that page's Content-Security-Policy allows only its own
+ *  origin — so until the deployment lists the provider's, the browser
+ *  blocks the call before it is sent, and neither server has anything to
+ *  say about why sign-in failed. The list lives on the frontend container
+ *  (CSP_CONNECT_SRC), not here, hence a note naming the exact origin
+ *  rather than a field. Absolute https URLs only: the container refuses
+ *  an http:// origin, and a half-typed URL has no origin to name yet. */
+function CspOriginNote({ url }: { url: string | null | undefined }) {
+    let origin: string
+    try {
+        const u = new URL((url ?? '').trim())
+        if (u.protocol !== 'https:') return null
+        origin = u.origin
+    } catch {
+        return null
+    }
+    return (
+        <p className="text-[11px] text-ink-muted leading-relaxed">
+            This page&rsquo;s security policy must allow <code>{origin}</code>{' '}
+            &mdash; add it to <code>CSP_CONNECT_SRC</code> on the frontend.
+        </p>
     )
 }
 
@@ -562,6 +585,7 @@ export function BackchannelSettingsForm({
                         placeholder="https://sso.corp.example/authenticate"
                     />
                 </Field>
+                <CspOriginNote url={value.authenticate_url} />
                 {hasTrigger && (
                     <>
                         <Toggle
@@ -869,6 +893,7 @@ export function BackchannelSettingsForm({
                         placeholder="https://sso.corporate.com/auth-service/translate"
                     />
                 </Field>
+                <CspOriginNote url={value.browser_exchange_url} />
                 <FieldGrid>
                     <Field label="Method">
                         <select
@@ -943,6 +968,7 @@ export function BackchannelSettingsForm({
                         <TextField
                             type="number"
                             min={1}
+                            max={30}
                             mono={false}
                             value={value.timeout_seconds == null ? '' : String(value.timeout_seconds)}
                             placeholder="5"
@@ -1027,12 +1053,12 @@ export function BackchannelSettingsForm({
                         and the sign-in page silently repeats the exchange.
                     </p>
                 )}
-                <Toggle
-                    label="Require an authentication time in the user details"
-                    hint="Without one there is no way to tell how long ago someone actually signed in, and the daily re-authentication ceiling stops applying to them."
-                    checked={value.require_auth_time !== false}
-                    onChange={v => set('require_auth_time', v)}
-                />
+                <p className="text-[11px] text-ink-muted leading-relaxed">
+                    When the gateway&rsquo;s reply carries no sign-in time,
+                    or one too old to use, the daily re-authentication
+                    limit counts from each sign-in here instead. Sign-in is
+                    never refused for it.
+                </p>
                 <Toggle
                     label="Treat the gateway's email addresses as verified"
                     hint="Applies only when their reply carries no email_verified claim at all — corporate gateways rarely send one, and without this the linking policy refuses to attach the sign-in to an existing account with the same address. An explicit false from the gateway is always respected."
@@ -1041,7 +1067,7 @@ export function BackchannelSettingsForm({
                 />
                 <Toggle
                     label="Sign people in automatically"
-                    hint="Applies to the sign-in page only: on, the page attempts this connection silently when it is the one that can; off, it waits for the button. Signing out always requires a fresh click in that tab either way, and mid-session renewals — the re-certification ceiling included — are unaffected."
+                    hint="Applies to the sign-in page only: on, the page attempts this connection silently when it is the one that can; off, it waits for the button. After someone signs out, every tab waits for a fresh click either way, and mid-session renewals — the re-certification ceiling included — are unaffected."
                     checked={value.auto_signin !== false}
                     onChange={v => set('auto_signin', v)}
                 />

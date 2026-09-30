@@ -21,6 +21,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ProductEventORM
+from backend.app.db.repositories import user_repo
 
 
 async def record(
@@ -30,7 +31,11 @@ async def record(
     actor_id: str | None,
     payload: dict[str, Any] | None,
 ) -> None:
-    """Append one telemetry row. The caller owns the transaction/commit."""
+    """Append one telemetry row. The caller owns the transaction/commit.
+
+    Also the actor's "last activity" for Admin → Users: these are the rows
+    Activity analytics counts as someone being active.
+    """
     session.add(
         ProductEventORM(
             event_type=event_type,
@@ -39,6 +44,7 @@ async def record(
         )
     )
     await session.flush()
+    await user_repo.note_activity(session, actor_id)
 
 
 def _decode(row: ProductEventORM) -> dict[str, Any]:

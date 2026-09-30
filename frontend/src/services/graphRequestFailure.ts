@@ -12,18 +12,21 @@
  * next reads never left the browser. Only a page reload (fresh breaker
  * registry) cleared it — the "refreshing sometimes fixes it" symptom.
  *
- * Three kinds:
+ * Five kinds:
  *  - `warming`     — the backend said the provider is loading its dataset
  *                    (503 + `PROVIDER_LOADING`). Transient, keep polling fast.
  *  - `unavailable` — the backend CONFIRMED the provider is unreachable (503 +
  *                    `PROVIDER_UNAVAILABLE`: breaker open, preflight down), or
  *                    the browser could not reach the backend at all. The only
  *                    kind that counts toward the client circuit breaker.
+ *  - `session`     — a 401, or a 403 `csrf_failed`, that reached us AFTER the
+ *                    fetch layer's own repair (silent refresh / CSRF heal, then
+ *                    one replay) had already failed. Not the provider and not
+ *                    slowness: the sign-in needs reconnecting, which a page
+ *                    reload does. Never an outage, never retried in place.
  *  - `transient`   — everything else from the network: a slow request (504,
  *                    client timeout), load shedding (429), a gateway hiccup
- *                    (502), a rejected query (500), or a session/CSRF problem
- *                    the fetch layer repairs on its own (401/403). Never an
- *                    outage.
+ *                    (502), a rejected query (500). Never an outage.
  *  - `error`       — not from the network at all: a `TypeError`, `RangeError`,
  *                    `ReferenceError` or `SyntaxError` thrown by code while the
  *                    load ran (a UI library reading a property of `undefined`,
@@ -40,7 +43,7 @@ export interface ApiStatusError extends Error {
   retryAfterMs?: number
 }
 
-export type GraphFailureKind = 'warming' | 'unavailable' | 'transient' | 'error'
+export type GraphFailureKind = 'warming' | 'unavailable' | 'session' | 'transient' | 'error'
 
 export function isApiStatusError(err: unknown): err is ApiStatusError {
   return err instanceof Error && typeof (err as Partial<ApiStatusError>).status === 'number'
@@ -145,6 +148,16 @@ export function classifyGraphFailure(err: unknown): GraphFailureKind {
   if (code === 'PROVIDER_UNAVAILABLE') return 'unavailable'
   // The client breaker's own rejection: it only opens on confirmed signals.
   if (message.includes('circuit open')) return 'unavailable'
+  // By the time a 401 or a CSRF 403 reaches here, fetchWithTimeout has
+  // already done what it can — silently refreshed (401) or re-minted the
+  // CSRF cookie (403 `csrf_failed`) and replayed once — and the replay
+  // failed too. Calling that 'transient' put every view of an SSO user whose
+  // session broke on "taking longer than usual" forever: a sign-in problem
+  // a reload fixes, reported as a slow graph to wait on. A 403 for a
+  // missing permission is NOT a session problem and stays 'transient'.
+  if (isApiStatusError(err) && (err.status === 401 || (err.status === 403 && err.code === 'csrf_failed'))) {
+    return 'session'
+  }
   if (isNetworkError(err)) return 'unavailable'
   if (isApplicationError(err)) return 'error'
   return 'transient'

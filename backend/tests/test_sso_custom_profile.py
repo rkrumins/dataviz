@@ -501,8 +501,12 @@ async def test_browser_profile_post_rejects_bad_signature(
                               secret="w" * 48)},
     )
     assert resp.status_code == 401
-    # The precise reason is logged, never returned.
-    assert resp.json()["detail"] == {"error": "profile_rejected"}
+    # The precise reason is recorded, never returned — only the generic
+    # code and the reference an admin looks it up by.
+    detail = resp.json()["detail"]
+    assert set(detail) == {"error", "ref"}
+    assert detail["error"] == "profile_rejected"
+    assert re.fullmatch(r"[0-9a-f]{8}", detail["ref"])
 
 
 @pytest.mark.asyncio

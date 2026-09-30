@@ -235,6 +235,12 @@ class AdminUserResponse(BaseModel):
     # Break-glass: keeps password sign-in under SSO enforcement, and
     # forced sign-out sweeps skip it.
     is_system_account: bool = Field(False, alias="isSystemAccount")
+    # When this person last used the platform — see ``UserORM``. NULL until
+    # the thing first happens; "last seen" and "last activity" are recorded
+    # to five minutes.
+    last_login_at: Optional[str] = Field(default=None, alias="lastLoginAt")
+    last_seen_at: Optional[str] = Field(default=None, alias="lastSeenAt")
+    last_active_at: Optional[str] = Field(default=None, alias="lastActiveAt")
 
 
 class AdminUserStatsResponse(BaseModel):
@@ -274,6 +280,10 @@ class SignUpResponse(BaseModel):
     #: Where to land them — the invited workspace when the invite was
     #: workspace-scoped, otherwise the app root.
     redirect_to: Optional[str] = Field(default=None, alias="redirectTo")
+    #: Which deployment answered, set alongside the session cookies. The
+    #: page reads two of them by an environment-scoped name, and this is
+    #: how it learns the name — see ``SessionResponse.environment_id``.
+    environment_id: Optional[str] = Field(default=None, alias="environmentId")
 
 
 class ResetTokenResponse(BaseModel):

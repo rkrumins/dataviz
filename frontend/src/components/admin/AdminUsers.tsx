@@ -15,7 +15,7 @@ import {
     RefreshCw, Search, UserPlus, Ban, X, Loader2, Mail,
     ChevronDown, ChevronUp,
     KeyRound, UserCog,
-    RotateCcw, Lock, Copy, Check, Link2, Pencil, ScrollText, ListChecks, AtSign, Fingerprint,
+    RotateCcw, Lock, Copy, Check, Link2, Pencil, ScrollText, ListChecks, AtSign, Fingerprint, LogOut,
 } from 'lucide-react'
 import {
     adminUserService,
@@ -44,6 +44,7 @@ import { UserAvatar } from '@/components/ui/UserAvatar'
 import { logoFor } from '@/components/admin/sso/IdpLogos'
 import { presetById } from '@/components/admin/sso/vendorPresets'
 import { cn } from '@/lib/utils'
+import { formatUtc, timeAgo as timeAgoUtc } from '@/lib/timeAgo'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { AccessSummary } from '@/components/access/AccessSummary'
 import { ROLE_NAMES } from '@/lib/roleNames'
@@ -54,12 +55,13 @@ import { PageContainer } from '@/components/layout/PageContainer'
 // entry. Mirrors the backend rules so the modal can drive the
 // workspace-picker + email-required UX before the request is sent.
 type StatusFilter = 'all' | 'pending' | 'active' | 'suspended'
-type SortField = 'name' | 'email' | 'status' | 'role' | 'createdAt'
+type SortField = 'name' | 'email' | 'status' | 'role' | 'createdAt' | 'lastSeenAt'
 type SortDir = 'asc' | 'desc'
 type ModalType =
     | { kind: 'reject'; userId: string; name: string }
     | { kind: 'role'; userId: string; name: string; currentRole: string }
     | { kind: 'suspend'; userId: string; name: string }
+    | { kind: 'endSessions'; userId: string; name: string }
     | { kind: 'systemAccount'; userId: string; name: string; makeSystem: boolean }
     | { kind: 'resetPassword'; userId: string; name: string }
     | { kind: 'invite' }
@@ -562,6 +564,15 @@ export function AdminUsers() {
         closeModal()
     }
 
+    const handleEndSessionsConfirm = async () => {
+        if (modal?.kind !== 'endSessions') return
+        await withAction(modal.userId, () =>
+            adminUserService.endSessions(modal.userId),
+            `${nameOf(modal.userId)} is signed out everywhere — they can sign back in.`,
+            `Could not end ${nameOf(modal.userId)}'s sessions.`)
+        closeModal()
+    }
+
     const handleSystemAccountConfirm = async () => {
         if (modal?.kind !== 'systemAccount') return
         await withAction(modal.userId, () =>
@@ -998,6 +1009,7 @@ export function AdminUsers() {
                                 <th className="text-left px-5 py-3"><span className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Sign-in</span></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Role" field="role" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Joined" field="createdAt" current={sortField} dir={sortDir} onSort={handleSort} /></th>
+                                <th className="text-left px-5 py-3"><SortHeader label="Last seen" field="lastSeenAt" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-right px-5 py-3"><span className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Actions</span></th>
                             </tr>
                         </thead>
@@ -1103,6 +1115,19 @@ export function AdminUsers() {
                                             <p className="text-[11px] text-ink-muted mt-0.5">{timeAgo(user.createdAt)}</p>
                                         </td>
 
+                                        {/* Last seen — last had the app open. Relative,
+                                            with the exact instant on hover; null until
+                                            tracking has seen them (or an older server). */}
+                                        <td className="px-5 py-4">
+                                            {user.lastSeenAt ? (
+                                                <p className="text-sm text-ink-secondary whitespace-nowrap" title={formatUtc(user.lastSeenAt)}>
+                                                    {timeAgoUtc(user.lastSeenAt)}
+                                                </p>
+                                            ) : (
+                                                <p className="text-sm text-ink-muted whitespace-nowrap">Not yet</p>
+                                            )}
+                                        </td>
+
                                         {/* Actions — clicks must not bubble to the row's drawer-open handler. */}
                                         <td className="px-5 py-4 text-right" onClick={(e) => e.stopPropagation()}>
                                             <div className="flex items-center gap-1.5 justify-end">
@@ -1176,6 +1201,16 @@ export function AdminUsers() {
                                                             <KeyRound className="w-4 h-4" />
                                                             Reset password
                                                         </button>
+
+                                                        {/* End sessions: a lost laptop, a copied
+                                                            cookie — without touching the account. */}
+                                                        {user.status === 'active' && (
+                                                            <button onClick={() => setModal({ kind: 'endSessions', userId: user.id, name: user.displayName })}
+                                                                disabled={isActing} title="End sessions"
+                                                                className="p-2 rounded-lg text-ink-muted hover:text-amber-500 hover:bg-amber-500/5 transition-colors disabled:opacity-50">
+                                                                <LogOut className="w-4 h-4" />
+                                                            </button>
+                                                        )}
 
                                                         {/* Suspend / Reactivate */}
                                                         {user.status === 'active' && (
@@ -1270,6 +1305,24 @@ export function AdminUsers() {
                                     </p>
                                     <ModalFooter onCancel={closeModal} onConfirm={handleSuspendConfirm}
                                         confirmLabel="Suspend User" confirmIcon={Ban} confirmClass="bg-red-500 hover:bg-red-600 shadow-red-500/20"
+                                        loading={!!actionLoading} />
+                                </>
+                            )}
+
+                            {/* ── End sessions modal ── */}
+                            {modal.kind === 'endSessions' && (
+                                <>
+                                    <ModalHeader icon={LogOut} iconBg="bg-amber-500/10 border-amber-500/20" iconColor="text-amber-500"
+                                        title="End sessions" subtitle="Signed out everywhere, now" onClose={closeModal} />
+                                    <UserPill name={modal.name} userId={modal.userId} />
+                                    <p className="text-sm text-ink-secondary mb-5">
+                                        Every browser and device this person is signed in on is
+                                        signed out on its next request. Their account is unchanged,
+                                        and they can sign straight back in — for a lost laptop or a
+                                        session you do not trust.
+                                    </p>
+                                    <ModalFooter onCancel={closeModal} onConfirm={handleEndSessionsConfirm}
+                                        confirmLabel="End their sessions" confirmIcon={LogOut} confirmClass="bg-amber-500 hover:bg-amber-600 shadow-amber-500/20"
                                         loading={!!actionLoading} />
                                 </>
                             )}
@@ -1561,6 +1614,32 @@ export function AdminUsers() {
                                 >
                                     <X className="w-4 h-4" />
                                 </button>
+                            </div>
+                            {/* Activity — from the row itself (a deep link
+                                only opens a drawer for a row on the page), so
+                                it shows at once, ahead of the access call.
+                                "Not yet": nothing since tracking began. */}
+                            <div className="px-5 py-3 border-b border-glass-border shrink-0">
+                                <p className="text-[10px] uppercase tracking-wider font-bold text-ink-muted">Activity</p>
+                                <dl className="mt-1.5 space-y-1 text-[11px]">
+                                    {([
+                                        ['Joined', accessUser.createdAt],
+                                        ['Last signed in', accessUser.lastLoginAt],
+                                        ['Last seen', accessUser.lastSeenAt],
+                                        ['Last activity', accessUser.lastActiveAt],
+                                    ] as const).map(([label, at]) => (
+                                        <div key={label} className="flex items-baseline gap-3">
+                                            <dt className="w-24 shrink-0 text-ink-muted">{label}</dt>
+                                            <dd className="min-w-0 truncate text-ink-secondary">
+                                                {at ? (
+                                                    <>{formatUtc(at)} <span className="text-ink-muted">· {timeAgoUtc(at)}</span></>
+                                                ) : (
+                                                    <span className="text-ink-muted">Not yet</span>
+                                                )}
+                                            </dd>
+                                        </div>
+                                    ))}
+                                </dl>
                             </div>
                             {/* Body: show skeleton placeholders while the
                                 /users/{id}/access call is in flight, so the

@@ -25,6 +25,12 @@ RUN npm run build
 FROM nginx:1.31-alpine AS runtime
 RUN rm /etc/nginx/conf.d/default.conf
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+# connect-src beyond 'self' for the CSP in default.conf: an empty default,
+# and the start-up hook that rewrites it from CSP_CONNECT_SRC. The official
+# entrypoint runs executable /docker-entrypoint.d/*.sh before nginx starts.
+COPY frontend/nginx/00-csp-connect.conf /etc/nginx/conf.d/00-csp-connect.conf
+COPY frontend/nginx/40-csp-connect-src.sh /docker-entrypoint.d/40-csp-connect-src.sh
+RUN chmod +x /docker-entrypoint.d/40-csp-connect-src.sh
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 \

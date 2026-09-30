@@ -39,11 +39,25 @@ export interface AdminUserResponse {
     /** Break-glass: keeps password sign-in under SSO enforcement, and
      *  forced sign-out sweeps skip it. */
     isSystemAccount: boolean
+    /** Last successful sign-in of any kind (password, invite, OIDC, SAML,
+     *  portal, Enterprise Gateway, silent gateway re-sign-in). The three
+     *  activity stamps are null until it happens after tracking began, and
+     *  absent from older servers. */
+    lastLoginAt?: string | null
+    /** Last time the account had the app open (its last authenticated
+     *  request), to 5-minute resolution. */
+    lastSeenAt?: string | null
+    /** Last action that counts toward Activity analytics (opened a view,
+     *  searched/traced, exported/published, edited a view), to 5-minute
+     *  resolution. */
+    lastActiveAt?: string | null
 }
 
 /** The admin user list's sortable columns. The server sorts by what each
- *  column shows (the resolved display name, the role or its default). */
-export type AdminUserSort = 'name' | 'email' | 'status' | 'role' | 'createdAt'
+ *  column shows (the resolved display name, the role or its default);
+ *  never-seen / never-signed-in accounts sort last either way. */
+export type AdminUserSort =
+    | 'name' | 'email' | 'status' | 'role' | 'createdAt' | 'lastSeenAt' | 'lastLoginAt'
 
 export interface ListUsersParams {
     status?: string
@@ -217,6 +231,14 @@ export const adminUserService = {
         return authFetch<AdminUserResponse>(`${ADMIN_USERS_API}/${userId}`, {
             method: 'PATCH',
             body: JSON.stringify(body),
+        })
+    },
+
+    /** Sign someone out of every browser and device, leaving the account
+     *  as it is — they can sign straight back in. */
+    endSessions(userId: string): Promise<{ detail: string }> {
+        return authFetch<{ detail: string }>(`${ADMIN_USERS_API}/${userId}/sessions/revoke`, {
+            method: 'POST',
         })
     },
 

@@ -479,6 +479,7 @@ def create_oidc_state_token(
     code_verifier: str,
     next_path: str,
     provider_id: str | None = None,
+    force_reauth: bool = False,
     expires_in_minutes: int = 10,
 ) -> str:
     """Sign the in-flight OIDC handshake parameters into a JWT.
@@ -491,6 +492,13 @@ def create_oidc_state_token(
     rather than a live bypass, but the cheap half of that pair was
     missing. Optional so a flow cookie minted before this deploy still
     decodes; the callback treats an absent id as "cannot check".
+
+    ``force_reauth`` records that this flow already asked the IdP for a
+    fresh authentication (``prompt=login``). The callback needs to know:
+    a stale ``auth_time`` on an ordinary flow is worth one forced round
+    trip, while a stale one on a FORCED flow means the IdP ignored the
+    request, and asking again would loop. Written only when set, so a
+    cookie minted before this deploy reads as not forced.
     """
     now = datetime.now(timezone.utc)
     payload = {
@@ -506,6 +514,8 @@ def create_oidc_state_token(
     }
     if provider_id is not None:
         payload["pid"] = provider_id
+    if force_reauth:
+        payload["force"] = True
     return _encode(payload)
 
 
@@ -533,6 +543,7 @@ def create_saml_state_token(
     next_path: str,
     provider_id: str | None = None,
     request_id: str | None = None,
+    force_reauth: bool = False,
     expires_in_minutes: int = 10,
 ) -> str:
     """Sign the in-flight SAML handshake state into a JWT.
@@ -548,6 +559,10 @@ def create_saml_state_token(
     satisfied provider A's RelayState check.
 
     Both optional so a cookie minted before this deploy still decodes.
+
+    ``force_reauth`` records that the AuthnRequest carried
+    ``ForceAuthn`` — see ``create_oidc_state_token``, where it does the
+    same job.
     """
     now = datetime.now(timezone.utc)
     payload = {
@@ -563,6 +578,8 @@ def create_saml_state_token(
         payload["pid"] = provider_id
     if request_id is not None:
         payload["rid"] = request_id
+    if force_reauth:
+        payload["force"] = True
     return _encode(payload)
 
 

@@ -472,15 +472,19 @@ async def test_a_live_upstream_token_lets_the_refresh_through():
 @pytest.mark.asyncio
 async def test_an_expired_upstream_token_ends_the_session():
     """The corporate token expired between renewals. The next refresh
-    ends the family — everywhere — and answers with the reauth envelope
-    the silent re-sign-in keys on."""
+    ends the family and answers with the reauth envelope the silent
+    re-sign-in keys on — and ends ONLY this session. The token that lapsed
+    belongs to this browser; the user's other sessions carry their own and
+    lapse on their own schedule. Killing them all made every expiry on one
+    device force a renewal on every other, as often as a short-lived
+    corporate token lapses."""
     killed: list = []
     store = InMemoryRefreshStore()
     token, claims = await _minted(store, idp_exp=int(time.time()) - 10)
 
     with pytest.raises(SsoReauthRequired):
         await _service(store, killed).refresh(token, ambient_cookies={})
-    assert killed == ["usr_1"]
+    assert killed == []
     assert store.revoked_family == claims.family_id
 
 
@@ -707,16 +711,14 @@ async def test_a_dry_run_verifies_without_writing(
 async def test_a_dry_run_names_the_missing_auth_time(
     test_client, db_session, registry, sso_events, monkeypatch,
 ):
-    """A rehearsal that succeeds without an authentication time only
-    happens on a row whose requirement is off — and then the ceiling
-    silently changes what it measures. The verdict states it, so the
-    operator learns it before real users sign in."""
+    """A sign-in without an authentication time succeeds, and the
+    re-auth ceiling then measures from the sign-in rather than from the
+    corporate authentication. The verdict states it, so the operator
+    learns it before real users sign in."""
     from backend.auth_service.core.tokens import create_dryrun_token
 
     _routes(monkeypatch)
-    row = await _make_row(
-        db_session, lifecycle="draft", require_auth_time=False,
-    )
+    row = await _make_row(db_session, lifecycle="draft")
     resp = await test_client.post(
         "/api/v1/auth/corp-browser/backchannel",
         json={"assertion": _assertion(auth_time=None)},
@@ -1138,3 +1140,34 @@ async def test_a_handle_rehearsal_carries_no_verification_verdict(
     )
     assert resp.status_code == 200, resp.text
     assert "verification" not in resp.json()["outcome"]
+
+
+# ── a gateway's clock a few seconds ahead of ours ────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim", ["iat", "nbf"])
+async def test_a_gateway_a_few_seconds_ahead_still_signs_in(monkeypatch, claim):
+    """pyjwt checks ``iat`` and ``nbf`` with ZERO tolerance, and the browser
+    posts the assertion milliseconds after the gateway mints it — so a
+    corporate clock even one second ahead of ours refused a share of every
+    sign-in as ``backchannel_jwt_invalid``, and a silent re-sign-in latched
+    it as a verdict. The portal kind fixed the same thing long ago."""
+    _routes(monkeypatch)
+    token = _assertion(jti=f"skew-{claim}", **{claim: int(time.time()) + 5})
+
+    identity = await BackchannelProvider(_settings()).identity_from_assertion(token)
+
+    assert identity.email == "ada.lovelace@corporate.com"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim", ["iat", "nbf"])
+async def test_a_token_from_well_past_the_tolerance_is_still_refused(
+    monkeypatch, claim,
+):
+    _routes(monkeypatch)
+    token = _assertion(jti=f"future-{claim}", **{claim: int(time.time()) + 3600})
+
+    with pytest.raises(BackchannelError):
+        await BackchannelProvider(_settings()).identity_from_assertion(token)

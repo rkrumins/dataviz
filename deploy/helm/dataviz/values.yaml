@@ -305,6 +305,12 @@ services:
   frontend:
     replicas: 2
     # frontend has no DB access — schema check is N/A
+    # Origins the SPA's Content-Security-Policy lets the page fetch beyond
+    # its own (CSP_CONNECT_SRC) — space-separated https:// origins, e.g.
+    # "https://sso.corp.example" for an Enterprise Gateway whose sign-in
+    # trigger or translate call runs in the browser. Empty = connect-src
+    # 'self' only. An invalid value stops the frontend from starting.
+    cspConnectSrc: ""
     resources:
       requests: { cpu: 50m, memory: 64Mi }
       limits: { cpu: 250m, memory: 128Mi }
