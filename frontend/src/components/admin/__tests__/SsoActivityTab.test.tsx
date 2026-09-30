@@ -75,7 +75,7 @@ describe('the table', () => {
     it('counts every outcome and says how many are shown', async () => {
         render(<SsoActivityTab />)
         const chips = await screen.findByRole('group', { name: /filter by outcome/i })
-        expect(within(chips).getByRole('button', { name: /Failures\s*7/ })).toBeInTheDocument()
+        expect(await within(chips).findByRole('button', { name: /Failures\s*7/ })).toBeInTheDocument()
         expect(within(chips).getByRole('button', { name: /Everything\s*171/ })).toBeInTheDocument()
         expect(screen.getByText(/showing 2 of 171/i)).toBeInTheDocument()
     })
