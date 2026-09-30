@@ -117,11 +117,14 @@ describe('the tab that signs out', () => {
         expect(useAuthStore.getState().isAuthenticated).toBe(false)
     })
 
-    it('spends the auto-attempt sentinel, so sign-out sticks', async () => {
+    it('marks the sign-out for every tab, so it sticks', async () => {
         // Logged out and immediately signed back in by the login page's
-        // silent attempt is a sign-out that did not happen. The sentinel
-        // makes this tab's login page wait for the button.
+        // silent attempt is a sign-out that did not happen. The marker
+        // makes every tab's login page wait for the button — a new tab, or
+        // a reload a minute later, included, which the old per-tab
+        // sixty-second sentinel did not cover.
         window.sessionStorage.clear()
+        window.localStorage.clear()
         vi.doMock('@/store/permissionChangeBus', () => ({
             notifySignedOut,
             notifyPermissionsChanged: vi.fn(),
@@ -134,7 +137,8 @@ describe('the tab that signs out', () => {
 
         await useAuthStore.getState().logout()
 
-        expect(window.sessionStorage.getItem('nx_portal_autologin_tried'))
-            .not.toBeNull()
+        expect(window.localStorage.getItem('nx_signed_out')).not.toBeNull()
+        const { autoPortalAlreadyTried } = await import('@/services/backchannelReauth')
+        expect(autoPortalAlreadyTried()).toBe(true)
     })
 })

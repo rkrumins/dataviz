@@ -133,6 +133,7 @@ _SSO_PREFIXES = (
     "user.logged_in",
     "user.login_failed",
     "user.logged_out",
+    "user.session_refused",
 )
 
 
@@ -271,9 +272,12 @@ def _summary_login(p: dict) -> str:
 
 
 def _summary_login_failed(p: dict) -> str:
-    reason = p.get("reason") or "invalid_credentials"
+    # ``: {reason}`` last, like every other failure line, so the reason
+    # parses out for the explanation beside it. A row without one says so
+    # rather than guessing which refusal it was.
+    reason = p.get("reason") or "unspecified"
     email = p.get("email") or "?"
-    return f"Failed login for {email} ({reason})"
+    return f"Failed password sign-in for {email}: {reason}"
 
 
 def _summary_session_revoked(p: dict) -> str:
@@ -296,7 +300,9 @@ def _summary_sso_failure(p: dict) -> str:
     slug = p.get("provider_slug") or "?"
     reason = p.get("reason") or "unknown"
     lead = f"[{ref}] " if ref else ""
-    return f"{lead}Sign-in via {slug} failed: {reason}"
+    who = p.get("email") or p.get("user_id")
+    for_who = f" for {who}" if who else ""
+    return f"{lead}Sign-in via {slug} failed{for_who}: {reason}"
 
 
 def _summary_sso_user(verb: str) -> callable:
@@ -315,6 +321,30 @@ def _summary_sso_denied(p: dict) -> str:
     return f"Refused {who} from {slug}" + (f": {reasons}" if reasons else "")
 
 
+#: Why an SSO session ended, as ``user.sso_session_expired`` records it.
+#: Events written before the reason was recorded carry none and read as
+#: before.
+_SSO_EXPIRY_REASONS = {
+    "reauth_ceiling": ", daily re-authentication",
+    "idle": ", idle",
+    "absolute": ", maximum session age",
+}
+
+
+def _summary_session_refused(p: dict) -> str:
+    return (
+        f"Session renewal refused for {p.get('user_id') or '?'}: "
+        f"{p.get('reason') or 'unknown'}"
+    )
+
+
+def _summary_session_ended_upstream(p: dict) -> str:
+    return (
+        f"SSO session for {p.get('user_id') or '?'} ended by "
+        f"{p.get('provider_slug') or 'its IdP'}: {p.get('reason') or 'unknown'}"
+    )
+
+
 _EVENT_META: dict[str, tuple[str, callable]] = {
     # ── critical: role / identity changes / forced revocation
     "user.role_changed": ("critical", _summary_role_changed),
@@ -323,6 +353,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.identity.admin_linked": ("critical", _summary_identity("linked")),
     "user.identity.admin_unlinked": ("critical", _summary_identity("unlinked")),
     "user.session_revoked": ("critical", _summary_session_revoked),
+    "user.sessions_ended_by_admin": (
+        "critical",
+        lambda p: f"Every session of {p.get('user_id') or '?'} ended by an admin",
+    ),
     "auth.config.updated": ("critical", lambda p: "SSO / login config changed"),
     "rbac.role.cascade_revoked": ("critical", _summary_cascade),
     "rbac.workspace.roles_cascaded": ("critical", _summary_ws_roles_cascaded),
@@ -377,11 +411,17 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
         "info",
         lambda p: (
             f"SSO session expired for {p.get('user_id') or '?'} "
-            f"({p.get('provider_slug') or 'sso'}) — re-authentication required"
+            f"({p.get('provider_slug') or 'sso'}"
+            f"{_SSO_EXPIRY_REASONS.get(p.get('reason'), '')}) — "
+            "re-authentication required"
         ),
     ),
     # Degraded-trust logins. Warning, not info: each one is a login the
     # platform could not cryptographically verify.
+    # Why a session stopped renewing — context for the sign-in that
+    # usually follows, not a failure in itself.
+    "user.session_refused": ("info", _summary_session_refused),
+    "user.sso_session_ended_upstream": ("info", _summary_session_ended_upstream),
     "user.sso_unsigned_accepted": (
         "warning",
         lambda p: (

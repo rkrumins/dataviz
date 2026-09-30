@@ -379,3 +379,118 @@ describe('concurrent writes during a repair', () => {
         expect(Object.keys(attempts)).toHaveLength(2)
     })
 })
+
+describe('a session established on the page, without a bootstrap', () => {
+    // The production failure. With AUTH_ENVIRONMENT_ID set the backend
+    // writes only `nx_csrf_<env>`, and the page learned `<env>` from
+    // GET /auth/me alone. An SSO sign-in completed on the page — the
+    // Enterprise Gateway button or its automatic sign-in, a portal, an
+    // invited signup — never makes that call, so the tab read `nx_csrf`,
+    // found nothing, and sent every write without its token. Graph reads
+    // are POSTs, so every graph 403'd and the canvas said "slow" forever.
+    // Every response that establishes a session names the environment;
+    // the client adopts it from each.
+
+    function captureCsrfHeader(): { sent: () => string | null } {
+        let sent: string | null = null
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+                const url = String(input)
+                if (url.includes('/backchannel') || url.includes('/browser-profile')
+                    || url.includes('/auth/login') || url.includes('/auth/signup')) {
+                    // The session cookies the backend sets, scoped.
+                    setCookie('nx_csrf_a', 'mine')
+                    setCookie('nx_access_exp_a', String(Math.floor(Date.now() / 1000) + 900))
+                    return url.includes('/auth/signup')
+                        ? json({ message: 'ok', autoSignedIn: true, user: {}, environmentId: 'a' }, 201)
+                        : json({ user: {}, environment_id: 'a' }, 200)
+                }
+                sent = new Headers(init?.headers).get('X-CSRF-Token')
+                return json({ nodes: [] }, 200)
+            }),
+        )
+        return { sent: () => sent }
+    }
+
+    it('a gateway sign-in names the environment for the writes after it', async () => {
+        const { loginWithBackchannel } = await import('./authService')
+        const probe = captureCsrfHeader()
+
+        await loginWithBackchannel('corp-gateway', {})
+        await fetchWithTimeout('/api/v1/ws_1/graph/nodes/page', { method: 'POST', body: '{}' })
+
+        expect(probe.sent()).toBe('mine')
+    })
+
+    it('so does a portal, a password and an invited-signup sign-in', async () => {
+        const { authService } = await import('./authService')
+        for (const signIn of [
+            () => authService.loginWithBrowserProfile('portal', 'payload'),
+            () => authService.login({ email: 'a@b.c', password: 'pw' }),
+            () => authService.signup({
+                email: 'a@b.c', password: 'pw', firstName: 'A', lastName: 'B',
+            } as Parameters<typeof authService.signup>[0]),
+        ]) {
+            clearCookies()
+            setAuthEnvironmentId(null)
+            const probe = captureCsrfHeader()
+
+            await signIn()
+            await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
+
+            expect(probe.sent()).toBe('mine')
+        }
+    })
+
+    it('a CSRF repair names the cookie it minted, so the replay can read it', async () => {
+        // Even a tab that never learned the environment recovers: the
+        // heal's own answer says which name it wrote.
+        setCookie('nx_access_exp_a', String(Math.floor(Date.now() / 1000) + 900))
+        const writes: Array<string | null> = []
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+                const url = String(input)
+                if (url.includes('/auth/csrf')) {
+                    setCookie('nx_csrf_a', 'healed')
+                    return json({ ok: true, environment_id: 'a' }, 200)
+                }
+                const token = new Headers(init?.headers).get('X-CSRF-Token')
+                writes.push(token)
+                return token === 'healed' ? json({ ok: true }, 200) : json(CSRF_403, 403)
+            }),
+        )
+
+        const res = await fetchWithTimeout('/api/v1/ws_1/graph/nodes/page', {
+            method: 'POST', body: '{}',
+        })
+
+        expect(res.status).toBe(200)
+        expect(writes).toEqual([null, 'healed'])
+    })
+
+    it('a response that does not name the environment never forgets it', async () => {
+        // An older backend, or a body with no such field: silence is not
+        // an instruction to fall back to the unscoped name.
+        setAuthEnvironmentId('a')
+        setCookie('nx_csrf_a', 'mine')
+        setCookie('nx_access_exp_a', String(Math.floor(Date.now() / 1000) + 900))
+        let sent: string | null = null
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+                if (String(input).includes('/auth/csrf')) return json({ ok: true }, 200)
+                sent = new Headers(init?.headers).get('X-CSRF-Token')
+                return json({ ok: true }, 200)
+            }),
+        )
+        const { loginWithBackchannel } = await import('./authService')
+        vi.mocked(fetch).mockImplementationOnce(async () => json({ user: {} }, 200))
+
+        await loginWithBackchannel('corp-gateway', {})
+        await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
+
+        expect(sent).toBe('mine')
+    })
+})

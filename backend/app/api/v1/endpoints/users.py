@@ -150,6 +150,9 @@ async def _admin_response(
         signupSource=getattr(user, "signup_source", None),
         identities=[_identity_ref(row) for row in identities],
         isSystemAccount=bool(getattr(user, "is_system_account", False)),
+        lastLoginAt=getattr(user, "last_login_at", None),
+        lastSeenAt=getattr(user, "last_seen_at", None),
+        lastActiveAt=getattr(user, "last_active_at", None),
     )
 
 
@@ -597,7 +600,9 @@ async def list_users(
     response: Response,
     status_filter: Optional[str] = Query(None, alias="status"),
     search: Optional[str] = Query(None, max_length=200),
-    sort: Literal["name", "email", "status", "role", "createdAt"] = Query("createdAt"),
+    sort: Literal[
+        "name", "email", "status", "role", "createdAt", "lastSeenAt", "lastLoginAt",
+    ] = Query("createdAt"),
     order: Literal["asc", "desc"] = Query("desc"),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
@@ -611,6 +616,8 @@ async def list_users(
     fetched the first page (with its default ``limit``) is how the admin
     table came to stop at fifty people. ``search`` covers what a row shows:
     name, email, id, role, and the providers the account signs in with.
+    ``lastSeenAt`` / ``lastLoginAt`` put accounts with no value last, in
+    either direction.
     """
     users = await user_repo.list_users(
         session, status=status_filter, limit=limit, offset=offset,
@@ -880,6 +887,45 @@ async def suspend_user(
 
     logger.info("User %s suspended by %s", user_id, admin.id)
     return {"detail": "User suspended"}
+
+
+@admin_router.post("/{user_id}/sessions/revoke", status_code=status.HTTP_200_OK)
+async def revoke_user_sessions(
+    user_id: str,
+    admin=Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """End every session a person holds, everywhere, and change nothing
+    else about the account — a lost laptop, a cookie that may have been
+    copied. They sign in again as normal.
+
+    The same two halves a suspension uses: the cutoff refuses each refresh
+    family at its next renewal, and the tombstones end the access tokens
+    live right now. Your own sessions go through "sign out everywhere",
+    which also clears this browser's cookies.
+    """
+    user = await user_repo.get_user_by_id(session, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.id == admin.id:
+        raise HTTPException(
+            status_code=409,
+            detail="Use sign out everywhere to end your own sessions",
+        )
+
+    from backend.app.services.revocation_service import (
+        revoke_every_session_for_user,
+    )
+    await revoke_every_session_for_user(
+        user_id, session=session, reason="admin_ended_sessions",
+    )
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.sessions_ended_by_admin",
+        payload={"user_id": user_id, "actor_id": admin.id},
+    )
+    logger.info("Sessions of %s ended by %s", user.id, admin.id)
+    return {"detail": "Sessions ended"}
 
 
 # ── System account (break-glass) ──────────────────────────────────────

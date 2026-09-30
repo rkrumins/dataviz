@@ -448,3 +448,50 @@ def test_an_unrelated_error_is_not():
     assert is_tls_verification_failure(
         httpx.ConnectError("connection refused"),
     ) is False
+
+
+# ── a slow resolver never stalls the worker ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_slow_dns_lookup_does_not_freeze_the_event_loop(monkeypatch):
+    """The address check resolves the gateway's name before every call —
+    the liveness check included, once per active session per access
+    lifetime. ``socket.getaddrinfo`` blocks, and it ran on the event loop:
+    a slow corporate resolver froze every request on that worker, which
+    users see as every page "taking longer than usual". It runs off the
+    loop now, so everything else keeps being served while it waits."""
+    import asyncio
+    import socket
+    import time as _time
+
+    real = socket.getaddrinfo
+
+    def _slow(host, *args, **kwargs):
+        _time.sleep(0.3)
+        return real("127.0.0.1", *args, **kwargs) if host != "gw.example" else [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ]
+
+    monkeypatch.setattr(outbound.socket, "getaddrinfo", _slow)
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda request: httpx.Response(200, json={"ok": True})),
+    )
+
+    ticks = 0
+
+    async def _heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    beat = asyncio.create_task(_heartbeat())
+    try:
+        await request_json("https://gw.example/userinfo", timeout=2.0)
+    finally:
+        beat.cancel()
+
+    # 0.3s of lookup at a 20ms heartbeat: a frozen loop manages ~0.
+    assert ticks >= 5, ticks

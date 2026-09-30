@@ -680,6 +680,13 @@ services:
       dockerfile: frontend/Dockerfile
     ports:
       - "${FRONTEND_PORT:-3080}:80"
+    environment:
+      # Origins the page's Content-Security-Policy may fetch beyond its own:
+      # space-separated https:// origins, e.g. "https://sso.corp.example" for
+      # an Enterprise Gateway whose sign-in trigger or translate call runs in
+      # the browser. Empty = connect-src 'self' only; an invalid value stops
+      # the container from starting.
+      CSP_CONNECT_SRC: ${CSP_CONNECT_SRC:-}
     depends_on:
       viz-service:
         condition: service_healthy

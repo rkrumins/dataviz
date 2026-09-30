@@ -1862,6 +1862,22 @@ class UserORM(Base):
     # cutoff a client that silently refreshed on a 401 walked straight
     # back in. Stamped by ``user_repo.revoke_sessions_from_now``.
     sessions_valid_from = Column(Text, nullable=True)
+    # When this person last used the platform, for Admin → Users. ISO
+    # instants like the columns around them, NULL until the thing first
+    # happens. Written through the conditional ``user_repo.touch_*``
+    # updates, which leave ``updated_at`` alone — that column means "the
+    # account was edited", and a sign-in is not an edit.
+    #: The last successful sign-in of any kind: password, invite, every SSO
+    #: kind, and a gateway's silent re-sign-in.
+    last_login_at = Column(Text, nullable=True)
+    #: The last authenticated request — the app open and in use. Recorded
+    #: at most once per ``user_activity.RESOLUTION_SECONDS``.
+    last_seen_at = Column(Text, nullable=True)
+    #: The last action that counts toward Activity analytics (a view
+    #: opened, a search or trace, an export or publish, a view edited) —
+    #: the same rows ``analytics_repo`` reads for "active users". Same
+    #: resolution as ``last_seen_at``.
+    last_active_at = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True)                       # soft delete
@@ -3205,6 +3221,9 @@ class OutboxEventORM(Base):
         Index("idx_outbox_processed_created", "processed", "created_at"),
         Index("idx_outbox_aggregate", "aggregate_type", "aggregate_id"),
         Index("idx_outbox_event_type", "event_type"),
+        # "These kinds of event, newest first, since then" — the shape of
+        # every per-kind read of this table, which only grows.
+        Index("idx_outbox_event_type_created", "event_type", "created_at"),
     )
 
     def __repr__(self) -> str:

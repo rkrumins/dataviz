@@ -23,6 +23,8 @@ from .endpoints import (
     admin_sso_config,
     me_identities,
     audit,
+    sso_activity,
+    sso_failures,
     branding,
     telemetry,
     analytics,
@@ -219,6 +221,21 @@ api_router.include_router(
     audit.router,
     prefix="/admin/audit",
     tags=["admin:audit"],
+)
+
+# Who could not sign in, why, and whether they have since — the audit
+# trail's sign-in failures summarised per person for SSO diagnostics.
+api_router.include_router(
+    sso_failures.router,
+    prefix="/admin/sso/failures",
+    tags=["admin:sso:diagnostics"],
+)
+
+# Every SSO event as a row with its fields as columns, filtered in SQL.
+api_router.include_router(
+    sso_activity.router,
+    prefix="/admin/sso/activity",
+    tags=["admin:sso:diagnostics"],
 )
 
 # RBAC Phase 5 — IdP group -> RoleBinding / Group membership mapping.

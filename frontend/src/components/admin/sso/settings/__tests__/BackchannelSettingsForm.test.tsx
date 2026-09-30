@@ -144,7 +144,6 @@ describe('defaults', () => {
         // our session outliving the enterprise session — stays open for
         // anyone who does not go looking for the switch.
         expect(DEFAULT_BACKCHANNEL_SETTINGS.liveness_on_refresh).toBe(true)
-        expect(DEFAULT_BACKCHANNEL_SETTINGS.require_auth_time).toBe(true)
     })
 
     // Asserted by name rather than by counting. A count breaks whenever
@@ -153,16 +152,25 @@ describe('defaults', () => {
     const toggle = (name: RegExp) =>
         screen.getByRole('checkbox', { name }) as HTMLInputElement
 
-    it('has the two behaviour toggles on for a row never edited', () => {
+    it('has the liveness re-check on for a row never edited', () => {
         renderForm({})
         expect(toggle(/re-check with the provider/i).checked).toBe(true)
-        expect(toggle(/require an authentication time/i).checked).toBe(true)
     })
 
     it('respects an explicit false rather than treating it as unset', async () => {
-        renderForm({ liveness_on_refresh: false, require_auth_time: false })
+        renderForm({ liveness_on_refresh: false })
         expect(toggle(/re-check with the provider/i).checked).toBe(false)
-        expect(toggle(/require an authentication time/i).checked).toBe(false)
+    })
+
+    it('never offers to refuse a sign-in that carries no login time', () => {
+        // That switch locked out everyone on a connection the day their
+        // gateway renamed a field. A missing time is measured from the
+        // sign-in instead, and the form says so rather than asking.
+        renderForm({})
+        expect(
+            screen.queryByRole('checkbox', { name: /require an authentication time/i }),
+        ).not.toBeInTheDocument()
+        expect(screen.getByText(/counts from each sign-in here instead/i)).toBeInTheDocument()
     })
 })
 
@@ -271,6 +279,46 @@ describe('reaching the allowlist', () => {
         renderForm()
         expect(screen.getByText(/Internal gateways SSO may call/i))
             .toBeInTheDocument()
+    })
+})
+
+describe("the page's own security policy", () => {
+    // The browser-made calls have the mirror-image problem: the page's
+    // CSP allows only its own origin, so the browser blocks them before
+    // they are sent, and no server log says why. The fix is on the
+    // frontend container, so the form names the exact origin to add.
+    it('names the trigger origin — scheme, host and port, no path', () => {
+        renderForm({ authenticate_url: 'https://sso.corp.example:8443/authenticate?x=1' })
+        expect(screen.getByText('https://sso.corp.example:8443')).toBeInTheDocument()
+        expect(screen.getByText('CSP_CONNECT_SRC')).toBeInTheDocument()
+    })
+
+    it('names the translate origin when the browser makes that call', () => {
+        renderForm({
+            exchange_mode: 'browser',
+            browser_exchange_url: 'https://sso.corporate.com/auth-service/translate',
+        })
+        expect(screen.getByText('https://sso.corporate.com')).toBeInTheDocument()
+    })
+
+    it('says nothing about a translate URL the browser never calls', () => {
+        // Server mode: the translate fields are hidden and the call is
+        // not the browser's to make.
+        renderForm({
+            exchange_mode: 'server',
+            browser_exchange_url: 'https://sso.corporate.com/auth-service/translate',
+        })
+        expect(screen.queryByText('CSP_CONNECT_SRC')).not.toBeInTheDocument()
+    })
+
+    it.each([
+        ['blank', ''],
+        ['not absolute', 'sso.corp.example/authenticate'],
+        ['plain http', 'http://sso.corp.example/authenticate'],
+        ['half-typed', 'https://'],
+    ])('says nothing for a %s URL', (_, url) => {
+        renderForm({ authenticate_url: url })
+        expect(screen.queryByText('CSP_CONNECT_SRC')).not.toBeInTheDocument()
     })
 })
 
