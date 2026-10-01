@@ -2238,6 +2238,62 @@ async def get_source_stale_reason(
         return None
 
 
+_SEARCH_OUTCOME_PREFIX = "searchrun:v1"    # key: searchrun:v1:{ws}:{ds}; value = JSON
+_SEARCH_OUTCOME_TTL_S = 7 * 86400          # older than this says nothing about now
+
+
+def _search_outcome_key(workspace_id: str, data_source_id: str) -> str:
+    return f"{_SEARCH_OUTCOME_PREFIX}:{workspace_id}:{data_source_id}"
+
+
+async def record_search_outcome(
+    workspace_id: Optional[str], data_source_id: Optional[str], *, ok: bool,
+    reason: Optional[str] = None,
+) -> None:
+    """Keep how a data source's latest search went — when, whether it
+    answered, and why not (a reason fit for anyone who can open the view).
+    Read by the view's sync status, so "search is working" is said on
+    evidence. One key per data source, overwritten by every search.
+    Best-effort: never raises."""
+    ws, ds = str(workspace_id or ""), str(data_source_id or "")
+    if not ws or not ds:
+        return
+    outcome: dict = {"at": datetime.now(timezone.utc).isoformat(), "ok": bool(ok)}
+    if reason:
+        outcome["reason"] = reason[:200]
+    try:
+        cache = get_graph_cache()
+        await cache._coord_redis.set(
+            _search_outcome_key(ws, ds), json.dumps(outcome), ex=_SEARCH_OUTCOME_TTL_S)
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: record_search_outcome failed for %s/%s: %s", ws, ds, exc,
+        )
+
+
+async def read_search_outcome(
+    workspace_id: Optional[str], data_source_id: Optional[str],
+) -> Optional[dict]:
+    """The latest search's outcome (``record_search_outcome``), or ``None``
+    when there is none, on empty ids, or on any Redis error. Best-effort:
+    never raises."""
+    ws, ds = str(workspace_id or ""), str(data_source_id or "")
+    if not ws or not ds:
+        return None
+    try:
+        cache = get_graph_cache()
+        raw = await cache._coord_redis.get(_search_outcome_key(ws, ds))
+        if not raw:
+            return None
+        outcome = json.loads(raw)
+        return outcome if isinstance(outcome, dict) else None
+    except Exception as exc:
+        logger.warning(
+            "graph_cache: read_search_outcome failed for %s/%s: %s", ws, ds, exc,
+        )
+        return None
+
+
 async def get_cache_as_of(
     workspace_id: str, data_source_id: str, branch_id: str = "",
 ) -> Optional[str]:

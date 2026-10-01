@@ -242,7 +242,7 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
             </div>
           )}
 
-          <ol className="px-4 pt-3.5 pb-3" aria-label="Where this view's data comes from">
+          <ol className="px-4 pt-3.5 pb-3" aria-label="Where this view's data comes from, and whether search works on it">
             {lanes.map((lane, i) => (
               <Lane
                 key={lane.key}

@@ -47,10 +47,14 @@ from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
     CompileError,
+    SearchFailed,
     SearchRunContext,
     get_deep_search_settings,
 )
-from backend.common.adapters import ProviderBusy, ProviderFailingOver, ProviderUnavailable
+from backend.common.adapters import (
+    ProviderBusy, ProviderFailingOver, ProviderTimeout, ProviderUnavailable,
+)
+from backend.app.services.background import spawn_detached
 from backend.app.services.fair_share import get_fair_share
 from backend.app.config import resilience
 from backend.app.services.graph_cache import (
@@ -71,6 +75,8 @@ from backend.app.services.graph_cache import (
     get_source_stale_reason,
     graph_ns_hash,
     invalidate_aggregated_reads,
+    read_search_outcome,
+    record_search_outcome,
 )
 from backend.app.services.stats_cache import (
     CacheMiss, SYNTHETIC_SCHEMA_MISSING_FIELDS,
@@ -1842,11 +1848,37 @@ async def search_advanced(
         raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
         raise _map_not_implemented(engine, exc) from exc
+    except Exception as exc:
+        reason = _search_failure_reason(exc)
+        if reason:
+            spawn_detached(record_search_outcome(ws_id, dataSourceId, ok=False, reason=reason),
+                           name="search.outcome")
+        raise
+    # The view's sync status reads this to say, on evidence, that search
+    # works. Detached: the answer never waits on it.
+    spawn_detached(record_search_outcome(ws_id, dataSourceId, ok=True), name="search.outcome")
 
     if eff_scope.dropped_urns:
         response.headers["X-Search-Dropped-URNs"] = str(len(eff_scope.dropped_urns))
     response.headers["X-Search-Scope-Hash"] = eff_scope.scope_hash
     return page
+
+
+def _search_failure_reason(exc: Exception) -> Optional[str]:
+    """Why a search failed, in words for anyone who can open the view — the
+    sync status shows it — or None when the failure says nothing about
+    search working: the graph was only busy, or the request was refused."""
+    if isinstance(exc, ProviderBusy):
+        return None
+    if isinstance(exc, HTTPException) and exc.status_code < 500:
+        return None
+    if isinstance(exc, (ProviderTimeout, TimeoutError)):
+        return "It ran out of time before the graph answered"
+    if isinstance(exc, ProviderUnavailable):
+        return "The graph store was not answering"
+    if isinstance(exc, SearchFailed):
+        return "It could not finish on part of the graph"
+    return "It stopped on an unexpected error"
 
 
 def _statement_admission(engine: ContextEngine):
@@ -2428,6 +2460,23 @@ class _SyncSource(BaseModel):
         populate_by_name = True
 
 
+class _SyncSearch(BaseModel):
+    """Whether search works on this view's data: does its graph store run
+    search, is the store answering, and how did the latest search go."""
+    supported: bool                              # only FalkorDB runs search
+    status: str                                  # ready | unavailable | unknown
+    # Where a node without a displayName is named from — what a name search
+    # matches for it (the data source's Display-name property, resolved).
+    name_property: Optional[str] = Field(None, alias="nameProperty")
+    checked_at: Optional[str] = Field(None, alias="checkedAt")
+    last_search_at: Optional[str] = Field(None, alias="lastSearchAt")
+    last_search_ok: Optional[bool] = Field(None, alias="lastSearchOk")
+    last_search_reason: Optional[str] = Field(None, alias="lastSearchReason")
+
+    class Config:
+        populate_by_name = True
+
+
 class SyncStatusResponse(BaseModel):
     kind: str                                   # "versioned" | "external"
     data_source_id: str = Field(alias="dataSourceId")
@@ -2436,9 +2485,53 @@ class SyncStatusResponse(BaseModel):
     source: Optional[_SyncSource] = None
     summaries: Optional[_SyncSummaries] = None
     counts: Optional[_SyncCounts] = None
+    search: Optional[_SyncSearch] = None
 
     class Config:
         populate_by_name = True
+
+
+async def _sync_search(session: AsyncSession, ws_id: str, data_source_id: str
+                       ) -> Optional[_SyncSearch]:
+    """The search lane's evidence: the data source's graph store, whether it
+    is answering — the in-memory breaker and warmup state the provider status
+    reads, no I/O — the property names are read from, and the latest
+    search's outcome. None when the data source or its provider can't be
+    read."""
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+    from backend.app.providers.reachability import resolve_provider_status
+    from backend.app.services.node_identity import load_node_identity
+
+    ds = await session.get(WorkspaceDataSourceORM, data_source_id)
+    provider = (await session.get(ProviderORM, ds.provider_id)
+                if ds is not None and ds.provider_id else None)
+    if provider is None:
+        return None
+    try:
+        breakers = provider_manager.report_provider_states()
+    except Exception:                                   # pragma: no cover - degrade
+        breakers = {}
+    warmup = getattr(provider_manager, "warmup_cache", {}) or {}
+    status, _error = resolve_provider_status(
+        is_active=provider.is_active, provider_id=provider.id,
+        breaker_states=breakers, warmup_cache=warmup)
+    # When that verdict was observed, as the provider status dates it: a
+    # breaker verdict is real traffic, now; a warmup one carries its own time.
+    checked_at = None
+    if status != "unknown":
+        if any(k.startswith(f"{provider.id}:") and v for k, v in breakers.items()):
+            checked_at = datetime.now(timezone.utc).isoformat()
+        elif (warmup.get(provider.id) or {}).get("checked_at") is not None:
+            checked_at = datetime.fromtimestamp(
+                warmup[provider.id]["checked_at"], tz=timezone.utc).isoformat()
+    last = await read_search_outcome(ws_id, data_source_id) or {}
+    identity = await load_node_identity(session, ds)
+    return _SyncSearch(
+        supported=provider.provider_type == "falkordb",
+        status=status, name_property=identity.name_property, checked_at=checked_at,
+        last_search_at=last.get("at"), last_search_ok=last.get("ok"),
+        last_search_reason=last.get("reason"),
+    )
 
 
 @router.get("/sync-status", response_model=SyncStatusResponse, response_model_by_alias=True)
@@ -2450,10 +2543,12 @@ async def get_sync_status(
     """Is what this view reads in sync with where it comes from? For a VERSIONED graph: the
     system of record's published head vs the version the graph holds (with both revisions). For
     an EXTERNAL graph: when the app last checked the source and last caught up with it. Both: the
-    lineage summaries and the automation keeping them current (queued / running / cooling down).
+    lineage summaries and the automation keeping them current (queued / running / cooling down),
+    and whether search works on it (``_sync_search``).
 
-    Cheap by construction — Postgres rows and the freshness row the cockpit already serves; no
-    FalkorDB or provider call — so the view header can show it to everyone who can open the view."""
+    Cheap by construction — Postgres rows, the freshness row the cockpit already serves, in-memory
+    provider state and one Redis read; no FalkorDB or provider call — so the view header can show
+    it to everyone who can open the view."""
     from backend.app.services.aggregation.models import AggregationJobORM
     from backend.app.services.aggregation.service import assemble_fleet_freshness
     from backend.app.services.versioning.service import GraphVersioningService
@@ -2522,6 +2617,12 @@ async def get_sync_status(
             last_success_at=last_success,
         )
 
+    search = None
+    try:
+        search = await _sync_search(session, ws_id, dataSourceId)
+    except Exception:                                   # pragma: no cover - degrade, never 500
+        logger.warning("sync-status: search state unavailable for %s", dataSourceId, exc_info=True)
+
     svc = GraphVersioningService()
     graph = await svc.get_graph_by_data_source(dataSourceId)
     if graph and str(graph.get("workspace_id")) == str(ws_id):
@@ -2549,7 +2650,7 @@ async def get_sync_status(
                 committed_revision=_rev(wm.get("committed_revision")),
                 projected_revision=_rev(wm.get("projected_revision")),
             ),
-            summaries=summaries, counts=counts,
+            summaries=summaries, counts=counts, search=search,
         )
 
     source = None if row is None else _SyncSource(
@@ -2564,7 +2665,7 @@ async def get_sync_status(
     return SyncStatusResponse(
         kind="external", data_source_id=dataSourceId,
         checked_at=datetime.now(timezone.utc).isoformat(),
-        source=source, summaries=summaries, counts=counts,
+        source=source, summaries=summaries, counts=counts, search=search,
     )
 
 

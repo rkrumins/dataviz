@@ -1269,6 +1269,44 @@ async def test_stale_marker_helpers_guard_empty_ids(monkeypatch) -> None:
     assert reason is None
 
 
+# ─── search outcome (the sync status's search lane) ────────────────────
+
+@pytest.mark.asyncio
+async def test_a_search_outcome_is_kept_per_source_and_read_back(monkeypatch) -> None:
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    await graph_cache.record_search_outcome(
+        "ws1", "ds1", ok=False, reason="The graph store was not answering")
+    key, value = redis.set.call_args.args
+    assert "ws1" in key and "ds1" in key
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._SEARCH_OUTCOME_TTL_S
+    stored = json.loads(value)
+    assert stored["ok"] is False and stored["reason"] == "The graph store was not answering"
+    assert stored["at"]
+
+    redis.get = AsyncMock(return_value=value)
+    assert await graph_cache.read_search_outcome("ws1", "ds1") == stored
+
+
+@pytest.mark.asyncio
+async def test_search_outcome_helpers_never_raise_and_ignore_empty_ids(monkeypatch) -> None:
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    monkeypatch.setattr(graph_cache, "get_graph_cache", lambda: cache)
+
+    await graph_cache.record_search_outcome("", "ds1", ok=True)
+    assert await graph_cache.read_search_outcome("ws1", None) is None
+    redis.set.assert_not_called()
+    redis.get.assert_not_called()
+
+    redis.set = AsyncMock(side_effect=RedisError("down"))
+    redis.get = AsyncMock(side_effect=RedisError("down"))
+    await graph_cache.record_search_outcome("ws1", "ds1", ok=True)  # must not raise
+    assert await graph_cache.read_search_outcome("ws1", "ds1") is None
+
+
 # ─── list_stale_sources (Task 4 scheduler reconciler) ──────────────────
 
 @pytest.mark.asyncio

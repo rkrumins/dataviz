@@ -88,6 +88,21 @@ def _request(*, view_capability: str | None = None) -> Request:
     return Request({"type": "http", "headers": [], "state": state})
 
 
+@pytest.fixture(autouse=True)
+def outcomes(monkeypatch):
+    """Every search's outcome, as the route records it for the sync status
+    — captured here, as the route hands it over (it records detached), so no
+    test writes to Redis."""
+    recorded: list = []
+
+    def _record(ws_id, data_source_id, *, ok, reason=None):
+        recorded.append((ws_id, data_source_id, ok, reason))
+        return asyncio.sleep(0)
+
+    monkeypatch.setattr(graph_mod, "record_search_outcome", _record)
+    return recorded
+
+
 @pytest.fixture
 def patched_search(monkeypatch):
     """Replace ``AdvancedSearchService.search`` with a recorder.
@@ -311,6 +326,76 @@ async def test_the_data_version_is_the_published_graphs(monkeypatch):
 async def test_no_workspace_means_no_data_version(monkeypatch):
     monkeypatch.setattr(graph_mod, "_cache_scope", lambda engine: None)
     assert await graph_mod._search_data_version(_FakeEngine()) == ""
+
+
+# ---------------------------------------------------------------------------
+# The outcome the view's sync status reads
+# ---------------------------------------------------------------------------
+
+async def test_a_search_that_answers_is_recorded_for_its_source(
+    slot, patched_search, outcomes, legacy_engine,
+):
+    await graph_mod.search_advanced(
+        query=_query(), request=_request(), response=Response(),
+        ws_id="ws-1", dataSourceId="ds-1", engine=_FakeEngine(), session=None,
+    )
+
+    assert outcomes == [("ws-1", "ds-1", True, None)]
+
+
+@pytest.mark.parametrize("raised, reason", [
+    # The engine's own words name Cypher and FalkorDB; the sync status is
+    # read by anyone who can open the view, so it gets the plain reason.
+    (lambda: graph_mod.SearchFailed("search failed: Query timed out at MATCH (n:`Column`)"),
+     "It could not finish on part of the graph"),
+    (lambda: graph_mod.ProviderTimeout(provider_name="falkordb", reason="40s budget spent"),
+     "It ran out of time before the graph answered"),
+    (lambda: graph_mod.ProviderUnavailable(provider_name="falkordb", reason="Circuit open"),
+     "The graph store was not answering"),
+    (lambda: RuntimeError("boom"), "It stopped on an unexpected error"),
+])
+async def test_a_failed_search_is_recorded_with_a_reason_anyone_may_read(
+    slot, monkeypatch, outcomes, legacy_engine, raised, reason,
+):
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+    error = raised()
+
+    async def _fail(self, query, **kwargs):
+        raise error
+
+    monkeypatch.setattr(AdvancedSearchService, "search", _fail)
+    with pytest.raises(type(error)):
+        await graph_mod.search_advanced(
+            query=_query(), request=_request(), response=Response(),
+            ws_id="ws-1", dataSourceId="ds-1", engine=_FakeEngine(), session=None,
+        )
+
+    assert outcomes == [("ws-1", "ds-1", False, reason)]
+
+
+@pytest.mark.parametrize("kind", ["busy", "refused"])
+async def test_a_busy_graph_or_a_refused_query_records_nothing(
+    slot, monkeypatch, outcomes, legacy_engine, kind,
+):
+    """A busy graph is shedding load, not failing; a refused query is the
+    query's fault. Neither says anything about whether search works."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    error = (graph_mod.ProviderBusy(provider_name="falkordb", reason="saturated")
+             if kind == "busy" else ValidationError("bad predicate"))
+
+    async def _fail(self, query, **kwargs):
+        raise error
+
+    monkeypatch.setattr(AdvancedSearchService, "search", _fail)
+    with pytest.raises((type(error), HTTPException)):
+        await graph_mod.search_advanced(
+            query=_query(), request=_request(), response=Response(),
+            ws_id="ws-1", dataSourceId="ds-1", engine=_FakeEngine(), session=None,
+        )
+
+    assert outcomes == []
 
 
 # ---------------------------------------------------------------------------

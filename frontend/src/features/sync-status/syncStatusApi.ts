@@ -2,7 +2,8 @@
  * Is what a view reads in sync with where it comes from? One read for both kinds of graph:
  * a VERSIONED (managed) graph reports the system of record's published head against the version
  * the graph holds, with both revisions; an EXTERNAL graph reports when the app last checked it and
- * last caught up. Both report the lineage summaries and the automation keeping them current.
+ * last caught up. Both report the lineage summaries and the automation keeping them current, and
+ * whether search works on the data.
  * Served by the graph router, so anyone who can open the view can read it (`viewId` carries that).
  */
 import { authFetch } from '@/services/apiClient'
@@ -72,6 +73,22 @@ export interface SyncSource {
   changedSinceRefresh?: boolean | null
 }
 
+export interface SyncSearch {
+  /** Only FalkorDB runs search; another graph store has none. */
+  supported: boolean
+  /** Is the graph store answering — from real traffic, else the background probe. */
+  status: 'ready' | 'unavailable' | 'unknown' | string
+  /** Where a node without a displayName is named from — what a name search matches for it
+   *  (the data source's Display-name property). */
+  nameProperty?: string | null
+  /** When that was observed. */
+  checkedAt?: string | null
+  /** The latest search of this data source: when, whether it answered, and why not. */
+  lastSearchAt?: string | null
+  lastSearchOk?: boolean | null
+  lastSearchReason?: string | null
+}
+
 export interface SyncStatus {
   kind: 'versioned' | 'external'
   dataSourceId: string
@@ -80,6 +97,7 @@ export interface SyncStatus {
   source?: SyncSource | null
   summaries?: SyncSummaries | null
   counts?: SyncCounts | null
+  search?: SyncSearch | null
 }
 
 export function getSyncStatus(wsId: string, dataSourceId: string, viewId?: string): Promise<SyncStatus> {

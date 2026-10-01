@@ -12,18 +12,22 @@
  *    changed since the last refresh → green; a change waiting, counts not read for a while, or a
  *    failed summaries rebuild → amber; summaries not served at all → red.
  *
+ * Both end with SEARCH: does it work on this data? The latest search answered, or the graph is
+ * answering → ready; the latest search failed → amber; the graph not answering → red. Search can
+ * only make the verdict worse — a working search never makes an unreported sync look green.
+ *
  * Accuracy rules: every claim is dated with the evidence behind it. "No changes" comes from a live
  * comparison of the latest counts with the last refresh's baseline, never from a stored verdict
  * (which survives skipped evaluations); a failure is shown with WHEN it happened, beside the last
  * success; and "what happens next" says only what the automation will actually do.
  */
 import { timeAgo } from '@/lib/timeAgo'
-import type { SyncRevision, SyncStatus, SyncSummaries } from './syncStatusApi'
+import type { SyncRevision, SyncSearch, SyncStatus, SyncSummaries } from './syncStatusApi'
 
 export type SyncTone = 'ok' | 'warn' | 'bad' | 'busy' | 'idle'
 
 export interface SyncLane {
-  key: 'record' | 'graph' | 'source' | 'summaries'
+  key: 'record' | 'graph' | 'source' | 'summaries' | 'search'
   title: string
   /** The technology, for readers who know it (quiet, secondary). */
   tech: string
@@ -140,12 +144,47 @@ function summariesLane(s: SyncSummaries | null | undefined, doc: SyncStatus, now
   return { ...lane, tone: 'ok', short: 'up to date', status: 'Up to date', lines: [built], next }
 }
 
+/** Search on this view's data, said on evidence: the graph not answering outranks the latest
+ *  search, which outranks "the graph is answering" (no one has searched since). */
+function searchLane(s: SyncSearch | null | undefined): SyncLane {
+  const lane: SyncLane = { key: 'search', title: 'Search', tech: 'FalkorDB', tone: 'idle', status: 'Not reported', lines: [] }
+  if (!s) return lane
+  if (!s.supported) return { ...lane, tech: '', status: 'Not available for this graph store' }
+  const last = s.lastSearchAt
+    ? `Last search ${s.lastSearchOk ? 'answered' : 'failed'} ${ago(s.lastSearchAt)}`
+    : 'No search run yet'
+  const answering = `The graph is answering${s.checkedAt ? ` · checked ${ago(s.checkedAt)}` : ''}`
+  // What "name" means to search here — set by the data source's Display-name property.
+  const names = s.nameProperty && s.nameProperty !== 'displayName' ? [`Names from displayName, else ${s.nameProperty}`] : []
+  if (s.status === 'unavailable') {
+    return { ...lane, tone: 'bad', short: 'unavailable', status: "Unavailable · the graph isn't answering",
+      lines: [last], next: 'Works again as soon as the graph answers' }
+  }
+  if (s.lastSearchAt && s.lastSearchOk === false) {
+    return { ...lane, tone: 'warn', short: 'last search failed', status: `Last search failed ${ago(s.lastSearchAt)}`,
+      lines: s.lastSearchReason ? [s.lastSearchReason] : [], next: 'Each search starts afresh — run it again' }
+  }
+  if (s.lastSearchAt) return { ...lane, tone: 'ok', short: 'ready', status: 'Ready', lines: [last, ...names] }
+  if (s.status === 'ready') return { ...lane, tone: 'ok', short: 'ready', status: 'Ready', lines: [answering, last, ...names] }
+  return { ...lane, status: 'Not checked yet', lines: [last] }
+}
+
+/** How search reads in the card's one-line detail — nothing when there's nothing to say. */
+function searchNote(search: SyncLane): string {
+  if (search.tone === 'ok') return 'search ready'
+  if (search.tone === 'warn' || search.tone === 'bad') return `search: ${search.status.toLowerCase()}`
+  return ''
+}
+
 export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()): SyncVerdict {
   if (!doc) {
     return { kind: null, kindLabel: '', kindExplainer: '', tone: 'idle', chip: 'Checking sync…',
       headline: 'Checking sync…', detail: '', lanes: [], busy: false }
   }
   const summaries = summariesLane(doc.summaries, doc, now)
+  const search = searchLane(doc.search)
+  // Only a search that needs attention weighs on the verdict (see the header).
+  const searchIssue = search.tone === 'warn' || search.tone === 'bad'
   const counts = doc.counts
   const countLine = counts ? `${num(counts.nodes)} items · ${num(counts.edges)} connections` : null
 
@@ -185,19 +224,22 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
         : v.lastError ? 'A manager can rebuild it from Data health'
         : 'Catches up automatically',
     }
-    const lanes = [record, graph, summaries]
-    const tone = worst([graph.tone, summaries.tone])
+    const lanes = [record, graph, summaries, search]
+    const tone = worst([graph.tone, summaries.tone, ...(searchIssue ? [search.tone] : [])])
     const busy = graph.tone === 'busy' || summaries.tone === 'busy'
+    const summariesOk = summaries.tone === 'ok' || summaries.tone === 'idle'
     const chip = graph.tone === 'ok'
       ? summaries.tone === 'busy' ? 'Summaries updating'
         : summaries.tone === 'warn' || summaries.tone === 'bad' ? 'Summaries need attention'
+        : searchIssue ? `Search: ${search.short}`
         : `In sync · v${v.committed}`
       : graph.status
     const headline = graph.tone === 'ok'
-      ? summaries.tone === 'ok' || summaries.tone === 'idle' ? 'Everything is in sync' : 'The graph is in sync'
+      ? !summariesOk ? 'The graph is in sync' : searchIssue ? 'Search needs attention' : 'Everything is in sync'
       : graph.tone === 'busy' ? 'Catching up' : 'The graph is behind'
     const detail = graph.tone === 'ok'
-      ? `Published version #${v.committed} is in the graph${summaries.tone === 'ok' || summaries.tone === 'idle' ? '' : ` · summaries: ${summaries.status.toLowerCase()}`}`
+      ? [`Published version #${v.committed} is in the graph`, summariesOk ? '' : `summaries: ${summaries.status.toLowerCase()}`, searchNote(search)]
+        .filter(Boolean).join(' · ')
       : `The system of record is at #${v.committed}; the graph holds #${v.projected}`
     return { kind: 'versioned', kindLabel: KIND_TEXT.versioned.label, kindExplainer: KIND_TEXT.versioned.explainer,
       tone, chip, headline, detail, lanes, busy }
@@ -226,19 +268,22 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
     ],
     next: readStale ? 'Counts are read automatically — they have not arrived recently' : undefined,
   }
-  const lanes = [source, summaries]
-  const tone = worst([source.tone, summaries.tone])
+  const lanes = [source, summaries, search]
+  const syncTone = worst([source.tone, summaries.tone])
+  const tone = searchIssue ? worst([syncTone, search.tone]) : syncTone
   const busy = summaries.tone === 'busy'
   const chip = tone === 'ok' ? `In sync · read ${ago(counts?.readAt)}`
     : summaries.tone === 'busy' ? 'Refreshing'
     : summaries.tone === 'bad' ? 'Summaries missing'
     : source.tone === 'warn' ? source.status
     : summaries.tone === 'warn' ? `Summaries: ${summaries.short ?? 'need attention'}`
+    : searchIssue ? `Search: ${search.short}`
     : 'Sync not reported yet'
   const headline = tone === 'ok' ? 'In sync with the source'
     : busy ? 'Catching up with the source'
+    : syncTone === 'ok' && searchIssue ? 'Search needs attention'
     : tone === 'idle' ? 'Sync not reported yet' : 'Needs attention'
-  const detail = [source.lines[0], summaries.tone !== 'ok' && summaries.tone !== 'idle' ? `Summaries: ${summaries.status.toLowerCase()}` : '']
+  const detail = [source.lines[0], summaries.tone !== 'ok' && summaries.tone !== 'idle' ? `Summaries: ${summaries.status.toLowerCase()}` : '', searchNote(search)]
     .filter(Boolean).join(' · ')
   return { kind: 'external', kindLabel: KIND_TEXT.external.label, kindExplainer: KIND_TEXT.external.explainer,
     tone, chip, headline, detail, lanes, busy }

@@ -16,7 +16,7 @@ describe('deriveSync — a versioned (managed) graph', () => {
   it('is green when the graph holds the published version, and says what kind of graph it is', () => {
     const v = deriveSync(versioned(), NOW)
     expect(v).toMatchObject({ tone: 'ok', chip: 'In sync · v11', headline: 'Everything is in sync', kind: 'versioned', kindLabel: 'Versioned graph' })
-    expect(v.lanes.map((l) => l.key)).toEqual(['record', 'graph', 'summaries'])
+    expect(v.lanes.map((l) => l.key)).toEqual(['record', 'graph', 'summaries', 'search'])
     expect(v.lanes[0].revision?.commitId).toBe(rev.commitId)
     expect(v.lanes[0].lines[0]).toMatch(/by System Admin$/)
     expect(v.lanes[1].lines.join(' ')).toMatch(/1,922 items · 2,288 connections/)
@@ -83,6 +83,71 @@ describe('deriveSync — an external graph', () => {
   it('is amber when counts have not been read for over an hour, red when summaries are not served', () => {
     expect(deriveSync(external({ changedSinceRefresh: false }, { aggregationStatus: 'ready', driftState: 'inSync' }, '2026-09-24T18:00:00Z'), NOW).tone).toBe('warn')
     expect(deriveSync(external({ changedSinceRefresh: false }, { aggregationStatus: 'ready', driftState: 'projectionStalled' }), NOW).tone).toBe('bad')
+  })
+})
+
+describe('deriveSync — search', () => {
+  const justNow = () => new Date(Date.now() - 5_000).toISOString()
+  const inSync = (search: SyncStatus['search']): SyncStatus => ({
+    kind: 'external', dataSourceId: 'ds', checkedAt: '', search,
+    source: { changedSinceRefresh: false, lastReconciledAt: '2026-09-24T20:00:00Z' },
+    summaries: { aggregationStatus: 'ready', driftState: 'inSync', autoRefresh: true, lastJobStatus: 'completed' },
+    counts: { nodes: 519594, edges: 1691567, readAt: '2026-09-24T20:35:19Z' },
+  })
+  const searchOf = (v: ReturnType<typeof deriveSync>) => v.lanes.find((l) => l.key === 'search')!
+
+  it('says search is ready, in the "In sync with the source" card, on the latest search', () => {
+    const v = deriveSync(inSync({ supported: true, status: 'ready', lastSearchAt: justNow(), lastSearchOk: true }), NOW)
+    expect(v).toMatchObject({ tone: 'ok', headline: 'In sync with the source' })
+    expect(v.lanes.map((l) => l.key)).toEqual(['source', 'summaries', 'search'])
+    expect(searchOf(v)).toMatchObject({ tone: 'ok', status: 'Ready', lines: ['Last search answered just now'] })
+    expect(v.detail).toMatch(/ · search ready$/)
+  })
+
+  it('is ready on the graph answering when no one has searched yet', () => {
+    const v = deriveSync(inSync({ supported: true, status: 'ready', checkedAt: justNow() }), NOW)
+    expect(searchOf(v)).toMatchObject({ tone: 'ok', status: 'Ready',
+      lines: ['The graph is answering · checked just now', 'No search run yet'] })
+  })
+
+  it('says where names come from — the data source\'s Display-name property', () => {
+    const v = deriveSync(inSync({ supported: true, status: 'ready', nameProperty: 'assetName',
+      lastSearchAt: justNow(), lastSearchOk: true }), NOW)
+    expect(searchOf(v).lines).toEqual(['Last search answered just now', 'Names from displayName, else assetName'])
+  })
+
+  it('is red when the graph is not answering, and the chip says it is search', () => {
+    const v = deriveSync(inSync({ supported: true, status: 'unavailable', lastSearchAt: justNow(), lastSearchOk: true }), NOW)
+    expect(v).toMatchObject({ tone: 'bad', chip: 'Search: unavailable', headline: 'Search needs attention' })
+    expect(searchOf(v)).toMatchObject({ tone: 'bad', status: "Unavailable · the graph isn't answering",
+      lines: ['Last search answered just now'], next: 'Works again as soon as the graph answers' })
+  })
+
+  it('is amber when the latest search failed, with the reason it was given', () => {
+    const v = deriveSync(inSync({ supported: true, status: 'ready', lastSearchAt: justNow(), lastSearchOk: false,
+      lastSearchReason: 'It ran out of time before the graph answered' }), NOW)
+    expect(v).toMatchObject({ tone: 'warn', chip: 'Search: last search failed' })
+    expect(searchOf(v)).toMatchObject({ tone: 'warn', status: 'Last search failed just now',
+      lines: ['It ran out of time before the graph answered'] })
+  })
+
+  it('never makes the verdict better: a working search does not turn an unreported sync green', () => {
+    const v = deriveSync({ kind: 'external', dataSourceId: 'ds', checkedAt: '',
+      search: { supported: true, status: 'ready', lastSearchAt: justNow(), lastSearchOk: true } }, NOW)
+    expect(v).toMatchObject({ tone: 'idle', headline: 'Sync not reported yet' })
+  })
+
+  it('says so, without weighing on the verdict, where the graph store runs no search', () => {
+    const v = deriveSync(inSync({ supported: false, status: 'ready' }), NOW)
+    expect(v).toMatchObject({ tone: 'ok', headline: 'In sync with the source' })
+    expect(searchOf(v)).toMatchObject({ tone: 'idle', status: 'Not available for this graph store' })
+    expect(v.detail).not.toMatch(/search/)
+  })
+
+  it('weighs on a versioned graph the same way', () => {
+    const down = deriveSync({ ...versioned(), search: { supported: true, status: 'unavailable' } }, NOW)
+    expect(down).toMatchObject({ tone: 'bad', chip: 'Search: unavailable', headline: 'Search needs attention' })
+    expect(down.detail).toBe("Published version #11 is in the graph · search: unavailable · the graph isn't answering")
   })
 })
 

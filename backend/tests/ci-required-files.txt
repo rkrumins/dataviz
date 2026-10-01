@@ -122,6 +122,7 @@ tests/test_seed_memory.py
 tests/test_shard_capacity.py
 tests/test_source_changed_signal.py
 tests/test_store_governor.py
+tests/test_sync_status_search.py
 tests/test_thread_count_assumption.py
 tests/test_timeout_ladder.py
 tests/test_timeout_middleware.py
