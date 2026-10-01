@@ -72,6 +72,7 @@ from backend.app.providers.falkordb_search.raw_properties import RawLeaf
 from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.common.derived_artifacts import is_derived_label
+from backend.common.providers.identity import node_name_match
 from backend.common.search_semantics import (
     SemanticsError,
     element_texts,
@@ -211,7 +212,9 @@ class _Compiler:
     Ontology-resolved edge type sets are injected via the constructor so
     the compiler never hardcodes lineage / containment edge names. The
     executor passes the provider's resolved sets through to keep this
-    module dependency-free at module-load time.
+    module dependency-free at module-load time. ``name_key`` is the
+    source's configured name property, so a name search reads the name
+    the canvas shows (``identity.node_name_match``).
     """
 
     def __init__(
@@ -219,6 +222,7 @@ class _Compiler:
         *,
         lineage_edge_types: Optional[Set[str]] = None,
         containment_edge_types: Optional[Set[str]] = None,
+        name_key: Optional[str] = None,
     ):
         self.params: Dict[str, Any] = {}
         self.hoisted_root_urns: List[List[str]] = []
@@ -242,6 +246,7 @@ class _Compiler:
         # containment classification will raise CompileError on visit.
         self._lineage_edge_types = lineage_edge_types
         self._containment_edge_types = containment_edge_types
+        self._name_key = name_key
 
     def _next(self) -> str:
         n = self._param_counter
@@ -339,16 +344,17 @@ class _Compiler:
 
         # ``target='name'`` widens to OR across the canonical name-like
         # fields the storage layer commits to — displayName and
-        # qualifiedName only. It deliberately does NOT include
-        # n.searchableText: that field also absorbs description and
-        # every string-valued user property, so folding it into 'name'
-        # would make "name is exactly X" / "name ends with X" false —
-        # either false-positiving on a property value or never matching
-        # via the blob. ``target='any'`` is the broad, property-inclusive
-        # target. Any single field can be null/empty on a given node
-        # (legacy sync, partial ingestion) without blackholing the
-        # search — the predicate matches if ANY of the listed columns
-        # contains the value.
+        # qualifiedName — and, for a node without a displayName, the name
+        # it is shown by instead (see below). It deliberately does NOT
+        # include n.searchableText: that field also absorbs description
+        # and every string-valued user property, so folding it into
+        # 'name' would make "name is exactly X" / "name ends with X"
+        # false — either false-positiving on a property value or never
+        # matching via the blob. ``target='any'`` is the broad,
+        # property-inclusive target. Any single field can be null/empty
+        # on a given node (legacy sync, partial ingestion) without
+        # blackholing the search — the predicate matches if ANY of the
+        # listed columns contains the value.
         #
         # ``description`` / ``tags`` / ``qualifiedName`` stay
         # single-field — those are explicit, pure user targets.
@@ -381,8 +387,8 @@ class _Compiler:
             # properties). The toLower on read is defensive in case a
             # node was written by an older provider that didn't
             # lowercase. displayName/qualifiedName are ORed in directly
-            # so a node whose searchableText hasn't been backfilled yet
-            # is still found by its name.
+            # so a node whose searchableText hasn't been backfilled — or
+            # that this app never wrote — is still found by its name.
             cols = ["n.searchableText", "n.displayName", "n.qualifiedName"]
         else:
             raise CompileError(f"unknown text target: {target!r}")
@@ -418,10 +424,19 @@ class _Compiler:
         else:
             op = "CONTAINS"  # substring
 
+        def compare(c: str) -> str:
+            return f"{wrap_col(c)} {op} ${pn}"
+
         if len(cols) == 1:
-            return f"{wrap_col(cols[0])} {op} ${pn}"
+            return compare(cols[0])
         # Multi-field OR — wrap in parens so it composes inside an AND.
-        clauses = [f"{wrap_col(c)} {op} ${pn}" for c in cols]
+        # displayName is the name a node is SHOWN by only when it has one;
+        # one without is shown by — so matched by — its source's name
+        # property, name, title or label. Reading displayName alone, "Name
+        # contains snowflake" found nothing on a graph this app did not
+        # write, while the canvas showed "snowflake_prod".
+        clauses = [node_name_match(self._name_key, compare) if c == "n.displayName"
+                   else compare(c) for c in cols]
         return "(" + " OR ".join(clauses) + ")"
 
     def _visit_property(self, p) -> str:
@@ -985,8 +1000,9 @@ def _resolve_candidate_cap(query: SearchQuery, settings) -> int:
 
 def _build_compiler_for_provider(provider) -> _Compiler:
     """Construct a `_Compiler` with the provider's ontology-resolved
-    edge type sets. Missing-injection is tolerated (the compiler will
-    raise on visit only if a predicate actually depends on them).
+    edge type sets and its source's name property. Missing-injection is
+    tolerated (the compiler will raise on visit only if a predicate
+    actually depends on them).
     """
     lineage: Optional[Set[str]] = None
     containment: Optional[Set[str]] = None
@@ -1001,6 +1017,7 @@ def _build_compiler_for_provider(provider) -> _Compiler:
     return _Compiler(
         lineage_edge_types=lineage,
         containment_edge_types=containment,
+        name_key=getattr(provider, "_name_property", None),
     )
 
 

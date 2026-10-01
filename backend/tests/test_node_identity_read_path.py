@@ -10,10 +10,13 @@ byte-for-byte unaffected.
 """
 import pytest
 
-from backend.app.providers.falkordb_provider import _node_from_props
+from backend.app.providers.falkordb_provider import FalkorDBProvider, _node_from_props
 from backend.common.providers.identity import (
     node_display_name_expr,
     node_identity_expr,
+    node_name_columns,
+    node_name_match,
+    node_shown_name_expr,
     quote_property,
 )
 
@@ -109,6 +112,50 @@ def test_display_name_expr_is_asymmetric_on_purpose():
     sourced from `name` by default — so `name` must still coalesce."""
     assert node_display_name_expr("displayName") == "n.`displayName`"
     assert node_display_name_expr("name") == "coalesce(n.`displayName`, n.`name`)"
+
+
+@pytest.mark.parametrize("name_property, props, shown", [
+    (None, {"name": "SNOWFLAKE_PROD"}, "SNOWFLAKE_PROD"),
+    (None, {"displayName": "orders", "name": "ignored"}, "orders"),
+    (None, {"displayName": "", "title": "Sales"}, "Sales"),
+    ("assetName", {"assetName": "snowflake-ml", "name": "other"}, "snowflake-ml"),
+    ("title", {"name": "first", "title": "second"}, "second"),
+])
+def test_the_name_columns_are_the_read_paths_order(name_property, props, shown):
+    """Search, ranking and the canvas agree on a node's name only if the
+    columns are read in ``_node_from_props``'s order."""
+    node = _node_from_props({"urn": "u", **props}, name_property=name_property)
+    assert node.display_name == shown
+    first = next(props[c] for c in node_name_columns(name_property) if props.get(c))
+    assert first == shown
+
+
+def test_the_shown_name_is_the_first_text_of_those_columns():
+    text = "CASE WHEN typeOf(n.`{0}`) = 'String' AND n.`{0}` <> '' THEN n.`{0}` END".format
+    assert node_shown_name_expr("assetName") == (
+        f"coalesce({text('displayName')}, {text('assetName')}, {text('name')}, "
+        f"{text('title')}, {text('label')})")
+    assert node_shown_name_expr(None, "c", fallback_only=True) == (
+        f"coalesce({text('name').replace('n.', 'c.')}, {text('title').replace('n.', 'c.')}, "
+        f"{text('label').replace('n.', 'c.')})")
+
+
+def test_a_name_match_reads_the_fallback_only_without_a_display_name():
+    where = node_name_match(None, lambda col: f"{col} CONTAINS $q", "c")
+    assert where == (
+        "c.displayName CONTAINS $q OR ((c.displayName IS NULL OR c.displayName = '') AND "
+        f"{node_shown_name_expr(None, 'c', fallback_only=True)} CONTAINS $q)")
+
+
+def test_the_simple_searches_match_the_shown_name_or_the_urn():
+    """Find in a container, the top-level list and ``/search`` share one
+    condition — the configured name property included."""
+    provider = FalkorDBProvider.__new__(FalkorDBProvider)
+    provider.set_node_identity(None, "assetName")
+    cond = provider._name_or_urn_contains("c", "$s")
+    assert cond.startswith("toLower(toString(c.displayName)) CONTAINS $s OR ((c.displayName IS NULL")
+    assert "c.`assetName`" in cond
+    assert cond.endswith(" OR toLower(toString(c.urn)) CONTAINS $s")
 
 
 @pytest.mark.parametrize("hostile", ["id`", "a`b", "`", "x``y"])

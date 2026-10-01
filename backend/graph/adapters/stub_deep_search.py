@@ -384,16 +384,17 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
     if isinstance(predicate, TextPredicate):
         # Mirror the FalkorDB compiler's column mapping (see
         # ``_visit_text`` in ``falkordb_deep_search.py``):
-        #   name           → displayName + qualifiedName
+        #   name           → display name + qualifiedName
         #   qualifiedName  → qualifiedName
         #   description    → description
         #   tags           → tag list
-        #   any            → searchableText + displayName + qualifiedName
-        # Otherwise the stub silently produces different results than
-        # production for the same predicate. Each column is evaluated
-        # SEPARATELY (a match on displayName OR a match on
-        # qualifiedName) — never a space-joined haystack across fields
-        # — so exact/prefix/suffix semantics hold per field.
+        #   any            → searchableText + display name + qualifiedName
+        # The display name is the one a node is shown by
+        # (``_display_name``). Otherwise the stub silently produces
+        # different results than production for the same predicate. Each
+        # column is evaluated SEPARATELY (a match on the display name OR a
+        # match on qualifiedName) — never a space-joined haystack across
+        # fields — so exact/prefix/suffix semantics hold per field.
         target = predicate.target or "any"
         if target == "property" and predicate.property_key:
             # Same typed text comparison the compiler makes for it.
@@ -408,26 +409,26 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
         if not needle:
             return True
         if target == "name":
-            cols = ("displayName", "qualifiedName")
+            fields = (_display_name(node), node.get("qualifiedName"))
         elif target == "qualifiedName":
-            cols = ("qualifiedName",)
+            fields = (node.get("qualifiedName"),)
         elif target == "description":
-            cols = ("description",)
+            fields = (node.get("description"),)
         elif target == "tags":
-            cols = ("tags",)
+            fields = (node.get("tags"),)
         elif target == "any":
-            cols = ("searchableText", "displayName", "qualifiedName")
+            fields = (node.get("searchableText"), _display_name(node),
+                      node.get("qualifiedName"))
         else:
-            cols = (target,)
+            fields = (node.get(target),)
 
-        def _field(key: str) -> str:
-            v = node.get(key)
+        def _field(v: Any) -> str:
             if isinstance(v, list):
                 return " ".join(str(x) for x in v).lower()
             return str(v or "").lower()
 
-        for key in cols:
-            value = _field(key)
+        for raw in fields:
+            value = _field(raw)
             if predicate.match == "exact":
                 matched = value == needle
             elif predicate.match == "prefix":
@@ -482,13 +483,23 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
     )
 
 
+def _display_name(node: Dict[str, Any]) -> str:
+    """The name a node is shown by: displayName, else name, title or label
+    — the read path's fallbacks (``display_name_expr``)."""
+    for key in ("displayName", "name", "title", "label"):
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _to_search_hit(node: Dict[str, Any]) -> SearchHit:
     """Coerce a fixture node dict into a ``SearchHit`` for response."""
     return SearchHit(
         node={
             "urn": node["urn"],
             "entityType": node.get("entityType", "unknown"),
-            "displayName": node.get("displayName", ""),
+            "displayName": _display_name(node),
             "qualifiedName": node.get("qualifiedName"),
             "description": node.get("description"),
             "tags": node.get("tags") or [],

@@ -49,23 +49,16 @@ from backend.app.providers.falkordb_deep_search import (
 )
 from backend.app.providers.falkordb_typed_ops import text_of
 from backend.common.models.search import GroupPredicate, PropertyPredicate, SearchQuery
+from backend.common.providers.identity import node_shown_name_expr
 from backend.common.search_semantics import fold_case
 
 
 def display_name_expr(name_key: Optional[str]) -> str:
     """The row's display name: the first non-empty text of displayName, the
     source's name property, name, title, label — ``_rows_to_candidates``'s
-    fallbacks, as ``or`` chains them. Null when there is none."""
-    columns = ["displayName"]
-    for key in (name_key, "name", "title", "label"):
-        if key and key not in columns:
-            columns.append(key)
-    parts = ", ".join(_text_if_any(f"n.{_safe_property_name(c)}") for c in columns)
-    return f"coalesce({parts})"
-
-
-def _text_if_any(col: str) -> str:
-    return f"CASE WHEN typeOf({col}) = 'String' AND {col} <> '' THEN {col} END"
+    fallbacks, as ``or`` chains them. Null when there is none. The same name
+    a name search matches (``identity.node_name_match``)."""
+    return node_shown_name_expr(name_key)
 
 
 def _string_only(col: str) -> str:

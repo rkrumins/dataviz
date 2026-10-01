@@ -95,8 +95,9 @@ logger = logging.getLogger(__name__)
 #: Bumped when a session's meaning changes, so no session from an older
 #: build answers a newer one's request. (3: a search asking for the
 #: ``ancestor`` facet tallies it during the scan. 4: a descendantOf reaches
-#: its own ``maxDepth``, which older sessions ignored.)
-ENGINE_VERSION = "4"
+#: its own ``maxDepth``, which older sessions ignored. 5: a name search
+#: matches a node without a displayName by the name it is shown by.)
+ENGINE_VERSION = "5"
 
 #: Slack past the last unit's budget before a request stops waiting for it
 #: (the budget ends a unit first), and in the request's lease.

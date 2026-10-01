@@ -351,6 +351,26 @@ async def test_text_target_any_matches_property_but_name_does_not():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("match, value", [
+    ("substring", "snowflake"), ("prefix", "snowflake"), ("suffix", "_prod"),
+    ("exact", "SNOWFLAKE_PROD"),
+])
+@pytest.mark.parametrize("target", ["name", "any"])
+async def test_a_name_kept_under_name_is_found_by_its_name(match, value, target):
+    """A graph this app did not write names its nodes under ``name`` and
+    has no displayName (or searchableText). The canvas shows that name, so
+    a name search must find it — it used to read displayName alone."""
+    stub = StubDeepSearchProvider(nodes=[
+        {"urn": "urn:db:1", "entityType": "database", "name": "SNOWFLAKE_PROD"},
+        {"urn": "urn:db:2", "entityType": "database", "name": "postgres_main"},
+    ])
+    page = await stub.deep_search(
+        _query(TextPredicate(value=value, target=target, match=match)))
+    assert [(h.node.urn, h.node.display_name) for h in page.hits] == [
+        ("urn:db:1", "SNOWFLAKE_PROD")]
+
+
+@pytest.mark.asyncio
 async def test_group_predicate_and(stub):
     query = _query(GroupPredicate(op="and", children=[
         EntityTypePredicate(op="in", values=["dataset"]),

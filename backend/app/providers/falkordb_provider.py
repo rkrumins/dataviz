@@ -55,6 +55,7 @@ from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 from backend.common.property_patch import apply_properties_patch
+from backend.common.providers.identity import node_name_match
 
 logger = logging.getLogger(__name__)
 
@@ -5817,6 +5818,16 @@ class FalkorDBProvider(GraphDataProvider):
             "withinHops predicates)."
         )
 
+    def _name_or_urn_contains(self, var: str, needle: str) -> str:
+        """The simple searches' condition: ``var``'s shown name — displayName,
+        or for a node without one the source's name property, name, title or
+        label (``node_name_match``) — or its urn contains ``needle``, a
+        lower-cased text expression. Not parenthesised."""
+        name = node_name_match(
+            getattr(self, "_name_property", None),
+            lambda col: f"toLower(toString({col})) CONTAINS {needle}", var)
+        return f"{name} OR toLower(toString({var}.urn)) CONTAINS {needle}"
+
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
         """Extract GraphNode from a FalkorDB result row (Node or dict of properties)."""
         if not row:
@@ -6202,7 +6213,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         if query.search_query:
             params["search"] = query.search_query.lower()
-            search_cond = "(toLower(toString(n.displayName)) CONTAINS $search OR toLower(toString(n.urn)) CONTAINS $search)"
+            search_cond = f"({self._name_or_urn_contains('n', '$search')})"
             conditions.append(search_cond)
             if shared_conditions is not None:
                 shared_conditions.append(search_cond)
@@ -6824,7 +6835,7 @@ class FalkorDBProvider(GraphDataProvider):
         params: Dict[str, Any] = {"parent": parent_urn, "lim": limit, "relTypes": rel_list}
 
         if search_query:
-            search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
+            search_where = f"AND ({self._name_or_urn_contains('c', 'toLower($searchQuery)')}) "
             params["searchQuery"] = search_query
 
         # Keyset pagination (O(log N) with FalkorDB indices vs O(N) for SKIP).
@@ -6940,7 +6951,7 @@ class FalkorDBProvider(GraphDataProvider):
         params: Dict[str, Any] = {"parent": parent_urn, "lim": limit, "relTypes": rel_list}
 
         if search_query:
-            search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
+            search_where = f"AND ({self._name_or_urn_contains('c', 'toLower($searchQuery)')}) "
             params["searchQuery"] = search_query
 
         # Keyset pagination, O(log N) vs SKIP's O(N). The keyset is COMPOSITE
@@ -7264,10 +7275,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         if search_query:
             params["search"] = search_query.lower()
-            filter_fragments.append(
-                "(toLower(toString(n.displayName)) CONTAINS $search "
-                "OR toLower(toString(n.urn)) CONTAINS $search)"
-            )
+            filter_fragments.append(f"({self._name_or_urn_contains('n', '$search')})")
 
         # Structural top-level predicate — the whole point of this method.
         # Empty containment set = flat graph, skip the predicate entirely.

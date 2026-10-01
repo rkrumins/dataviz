@@ -65,10 +65,10 @@ describe('isNameOverridden', () => {
 })
 
 describe('nameCoalesceExpr', () => {
-    it('renders plain n.name for the default', () => {
-        expect(nameCoalesceExpr('')).toBe('n.name')
-        expect(nameCoalesceExpr('name')).toBe('n.name')
-        expect(nameCoalesceExpr(undefined)).toBe('n.name')
+    it('puts a node\'s own displayName first for the default too, as the read path and search do', () => {
+        expect(nameCoalesceExpr('')).toBe('coalesce(n.displayName, n.name)')
+        expect(nameCoalesceExpr('name')).toBe('coalesce(n.displayName, n.name)')
+        expect(nameCoalesceExpr(undefined)).toBe('coalesce(n.displayName, n.name)')
     })
     it('renders a displayName coalesce fallback for a mapped property', () => {
         expect(nameCoalesceExpr('title')).toBe('coalesce(n.displayName, n.title)')

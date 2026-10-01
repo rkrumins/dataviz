@@ -29,7 +29,9 @@ from backend.app.providers.falkordb_deep_search import (
     match_hash,
     query_hash,
 )
+from backend.app.providers.falkordb_search.relevance import display_name_expr
 from backend.app.providers.falkordb_typed_ops import compile_comparison
+from backend.common.providers.identity import node_shown_name_expr
 from backend.app.services.advanced_search_service import (
     MAX_LEAF_COUNT,
     MAX_OR_BRANCH,
@@ -78,6 +80,14 @@ def _typed(col, op, value, *, first=0, **kw):
         return f"${name}"
 
     return compile_comparison(col, resolve_comparison(op, value, **kw), bind), params
+
+
+def _fallback(op, *, case_sensitive=False):
+    """The clause matching a node with no displayName by the name it is
+    shown by instead — name, title, label (``node_name_match``)."""
+    name = node_shown_name_expr(None, fallback_only=True)
+    col = name if case_sensitive else f"toLower(toString({name}))"
+    return f" OR ((n.displayName IS NULL OR n.displayName = '') AND {col} {op} $p0)"
 
 
 # Compiler fixture for degree-family tests: inject a realistic lineage
@@ -555,9 +565,41 @@ class TestCompilerLeaves:
         where = c.compile(TextPredicate(value="Customer", target="name"))
         assert where == (
             "(toLower(toString(n.displayName)) CONTAINS $p0"
+            + _fallback("CONTAINS") +
             " OR toLower(toString(n.qualifiedName)) CONTAINS $p0)"
         )
         assert c.params == {"p0": "customer"}
+
+    def test_display_name_expr_is_the_read_paths_fallback_chain(self):
+        # The first non-empty text of displayName, the source's name
+        # property, name, title, label — ``_node_from_props``'s order, so
+        # a name search matches the name the canvas shows.
+        def text(c):
+            return f"CASE WHEN typeOf(n.`{c}`) = 'String' AND n.`{c}` <> '' THEN n.`{c}` END"
+
+        assert display_name_expr(None) == (
+            f"coalesce({text('displayName')}, {text('name')}, {text('title')}, "
+            f"{text('label')})")
+        assert display_name_expr("assetName") == (
+            f"coalesce({text('displayName')}, {text('assetName')}, {text('name')}, "
+            f"{text('title')}, {text('label')})")
+        # A configured name property already in the chain is read once,
+        # straight after displayName, as ``_node_from_props`` reads it.
+        assert display_name_expr("title") == (
+            f"coalesce({text('displayName')}, {text('title')}, {text('name')}, "
+            f"{text('label')})")
+
+    def test_a_node_without_a_display_name_is_matched_by_the_name_it_shows(self):
+        # The source's configured name property comes first, then the
+        # common keys — and only for a node with no displayName.
+        fallback = node_shown_name_expr("assetName", fallback_only=True)
+        assert fallback.index("`assetName`") < fallback.index("`name`")
+        assert "displayName" not in fallback
+        for target in ("name", "any"):
+            where = _Compiler(name_key="assetName").compile(
+                TextPredicate(value="snowflake", target=target))
+            assert ("((n.displayName IS NULL OR n.displayName = '') AND "
+                    f"toLower(toString({fallback})) CONTAINS $p0)") in where, target
 
     def test_text_name_prefix_ors_with_starts_with(self):
         c = _Compiler()
@@ -566,6 +608,7 @@ class TestCompilerLeaves:
         ))
         assert where == (
             "(toLower(toString(n.displayName)) STARTS WITH $p0"
+            + _fallback("STARTS WITH") +
             " OR toLower(toString(n.qualifiedName)) STARTS WITH $p0)"
         )
         assert c.params == {"p0": "cust"}
@@ -577,6 +620,7 @@ class TestCompilerLeaves:
         ))
         assert where == (
             "(toLower(toString(n.displayName)) = $p0"
+            + _fallback("=") +
             " OR toLower(toString(n.qualifiedName)) = $p0)"
         )
         assert c.params == {"p0": "customer"}
@@ -591,6 +635,7 @@ class TestCompilerLeaves:
         ))
         assert where == (
             "(toLower(toString(n.displayName)) ENDS WITH $p0"
+            + _fallback("ENDS WITH") +
             " OR toLower(toString(n.qualifiedName)) ENDS WITH $p0)"
         )
         assert c.params == {"p0": "_v2"}
@@ -682,6 +727,7 @@ class TestCompilerLeaves:
         assert where == (
             "(toLower(toString(n.searchableText)) CONTAINS $p0"
             " OR toLower(toString(n.displayName)) CONTAINS $p0"
+            + _fallback("CONTAINS") +
             " OR toLower(toString(n.qualifiedName)) CONTAINS $p0)"
         )
         assert c.params == {"p0": "orders"}
@@ -698,6 +744,7 @@ class TestCompilerLeaves:
         assert where == (
             "(n.searchableText CONTAINS $p0"
             " OR n.displayName CONTAINS $p0"
+            + _fallback("CONTAINS", case_sensitive=True) +
             " OR n.qualifiedName CONTAINS $p0)"
         )
         assert c.params == {"p0": "Orders"}
@@ -714,6 +761,7 @@ class TestCompilerLeaves:
         assert where == (
             "(toLower(toString(n.searchableText)) CONTAINS $p0"
             " OR toLower(toString(n.displayName)) CONTAINS $p0"
+            + _fallback("CONTAINS") +
             " OR toLower(toString(n.qualifiedName)) CONTAINS $p0)"
         )
         assert c.params == {"p0": "snowflake"}
@@ -726,6 +774,7 @@ class TestCompilerLeaves:
         assert where == (
             "(toLower(toString(n.searchableText)) STARTS WITH $p0"
             " OR toLower(toString(n.displayName)) STARTS WITH $p0"
+            + _fallback("STARTS WITH") +
             " OR toLower(toString(n.qualifiedName)) STARTS WITH $p0)"
         )
         assert c.params == {"p0": "orders"}
@@ -738,6 +787,7 @@ class TestCompilerLeaves:
         assert where == (
             "(toLower(toString(n.searchableText)) = $p0"
             " OR toLower(toString(n.displayName)) = $p0"
+            + _fallback("=") +
             " OR toLower(toString(n.qualifiedName)) = $p0)"
         )
         assert c.params == {"p0": "orders pipeline"}
@@ -1303,6 +1353,7 @@ class TestCompilerGroups:
         ]))
         assert where == (
             "((toLower(toString(n.displayName)) = $p0"
+            + _fallback("=") +
             " OR toLower(toString(n.qualifiedName)) = $p0)"
             " OR EXISTS(n.`foo`))"
         )

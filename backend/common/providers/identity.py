@@ -21,10 +21,13 @@ exactly the Cypher it always did.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, List, Optional
 
 DEFAULT_IDENTITY_PROPERTY = "urn"
 DEFAULT_DISPLAY_NAME_PROPERTY = "displayName"
+#: Where a node with no displayName is named from, after the source's own name
+#: property — the read path's fallbacks (``falkordb_provider._node_from_props``).
+NAME_FALLBACK_PROPERTIES = ("name", "title", "label")
 
 
 def quote_property(name: str) -> str:
@@ -74,3 +77,46 @@ def node_display_name_expr(
     if not prop or prop == DEFAULT_DISPLAY_NAME_PROPERTY:
         return canonical
     return f"coalesce({canonical}, {var}.{quote_property(prop)})"
+
+
+def node_name_columns(name_property: Optional[str]) -> List[str]:
+    """Where the name a node is SHOWN by is read from, first to last:
+    displayName, the source's name property, then name, title, label — the
+    read path's order, so the canvas, ranking and search agree on a name."""
+    columns = [DEFAULT_DISPLAY_NAME_PROPERTY]
+    for key in ((name_property or "").strip(), *NAME_FALLBACK_PROPERTIES):
+        if key and key not in columns:
+            columns.append(key)
+    return columns
+
+
+def node_shown_name_expr(name_property: Optional[str], var: str = "n", *,
+                         fallback_only: bool = False) -> str:
+    """Cypher for the name a node is shown by: the first non-empty text of
+    :func:`node_name_columns`, as the read path's ``or`` chain takes it; null
+    when there is none. ``fallback_only`` leaves displayName out — the name of
+    a node that has none."""
+    columns = node_name_columns(name_property)[1 if fallback_only else 0:]
+    parts = ", ".join(_text_if_any(f"{var}.{quote_property(c)}") for c in columns)
+    return f"coalesce({parts})"
+
+
+def node_name_match(name_property: Optional[str], test: Callable[[str], str],
+                    var: str = "n") -> str:
+    """``test`` — a column expression to a condition — applied to the name a
+    node is shown by: its displayName, or for a node without one, its
+    fallback (:func:`node_shown_name_expr`). A graph this app did not write
+    keeps its names under ``name`` and has no displayName, so a search that
+    read displayName alone found none of them.
+
+    displayName is compared on its own, as it always was, and the fallback
+    only for a node without one: FalkorDB short-circuits a WHERE, so a node
+    that has a displayName costs what it did. Not parenthesised — the caller
+    ORs it among its own conditions."""
+    shown = f"{var}.{DEFAULT_DISPLAY_NAME_PROPERTY}"
+    fallback = node_shown_name_expr(name_property, var, fallback_only=True)
+    return f"{test(shown)} OR (({shown} IS NULL OR {shown} = '') AND {test(fallback)})"
+
+
+def _text_if_any(col: str) -> str:
+    return f"CASE WHEN typeOf({col}) = 'String' AND {col} <> '' THEN {col} END"

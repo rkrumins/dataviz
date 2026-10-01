@@ -615,3 +615,140 @@ async def test_the_catalog_is_every_property_exactly(provider, scope_name):
         tags.update(entity_tags)
     assert out["tagged"] == tagged
     assert {t["tag"]: t["count"] for t in out["tags"]} == dict(tags)
+
+
+# ---------------------------------------------------------------------------
+# Names: a name search reads the name the canvas shows, wherever it is kept
+# ---------------------------------------------------------------------------
+
+#: How each entity keeps its name. A graph this app did not write has no
+#: displayName: its names sit under ``name`` — or ``title``, ``label``, or the
+#: source's own name property — and the canvas shows them from there.
+NAMED = [
+    {"displayName": "snowflake_staging", "name": "ignored_name"},   # displayName wins
+    {"name": "SNOWFLAKE_PROD"},
+    {"name": "analytics_snowflake", "qualifiedName": "wh.analytics_snowflake"},
+    {"title": "Snowflake Sales"},
+    {"label": "raw snowflake"},
+    {"assetName": "snowflake-ml", "name": "other_name"},          # the configured property
+    {"displayName": "", "name": "snowflake_after_empty"},          # empty falls through
+    {"name": "postgres_main", "owner": "snowflake team"},           # not in its name
+    {"qualifiedName": "db.snowflake.orders"},                       # no name at all
+    {"displayName": "orders"},
+]
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def named_provider():
+    """A graph whose entities keep their names every way a source does,
+    read with ``assetName`` as the source's configured name property: the
+    entities sit in one container, beside a second, empty one — both named
+    under ``name`` alone."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(
+        host=os.getenv("FALKORDB_HOST", "localhost"),
+        port=int(os.getenv("FALKORDB_PORT", "6379")),
+        graph_name=f"names_{uuid.uuid4().hex[:8]}",
+        auth_enabled=False,
+    )
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    p.set_resolved_edge_metadata({}, ["TRANSFORMS"])
+    p.set_node_identity(None, "assetName")
+    await p._ensure_connected()
+    for label in ("Container", "Asset"):
+        await p._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.urn)")
+    await p._graph.query(
+        "CREATE (:Container {urn: 'urn:container:0', name: 'warehouse'}), "
+        "(:Container {urn: 'urn:container:1', name: 'snowflake_root'})")
+    await p._graph.query(
+        "MATCH (w:Container {urn: 'urn:container:0'}) UNWIND $rows AS r "
+        "CREATE (w)-[:CONTAINS]->(n:Asset) SET n = r",
+        {"rows": [{"urn": f"urn:asset:{i}", **row} for i, row in enumerate(NAMED)]})
+    try:
+        yield p
+    finally:
+        await p._graph.delete()
+
+
+async def _shown(provider) -> dict:
+    """Each entity's name as the canvas shows it — the read path's own."""
+    rows = (await provider._ro_query("MATCH (n) RETURN n", timeout=60)).result_set
+    nodes = [provider._extract_node_from_result(r) for r in rows]
+    return {n.urn: (n.display_name, n.qualified_name) for n in nodes}
+
+
+def _text_matches(text, value: str, match: str) -> bool:
+    t, v = (text or "").lower(), value.lower()
+    return bool(t) and {"substring": v in t, "prefix": t.startswith(v),
+                        "suffix": t.endswith(v), "exact": t == v}[match]
+
+
+@pytest.mark.parametrize("target", ["name", "any"])
+@pytest.mark.parametrize("match, value", [
+    ("substring", "snowflake"), ("prefix", "snowflake"), ("suffix", "snowflake"),
+    ("suffix", "_prod"), ("exact", "Snowflake Sales"),
+    # Kept under a property the entity is NOT shown by: never its name.
+    ("substring", "ignored"), ("substring", "other_name"),
+])
+async def test_a_name_search_finds_the_name_each_entity_is_shown_by(named_provider, target,
+                                                                    match, value):
+    """Every surface a name condition reaches — the search's pages, its
+    exact total, a display rule's membership and the capped engine — finds
+    exactly the entities whose shown name (or qualifiedName) matches. Before,
+    they read displayName alone: on a graph without one, "Name contains
+    snowflake" found nothing while the canvas showed SNOWFLAKE_PROD."""
+    from pydantic import TypeAdapter
+
+    from backend.app.providers.falkordb_search.engine import execute_count_session
+    from backend.app.services.deep_search import SearchRunContext
+    from backend.common.models.search import Predicate, SearchOptions
+
+    shown = await _shown(named_provider)
+    want = {urn for urn, (name, qualified) in shown.items()
+            if _text_matches(name, value, match) or _text_matches(qualified, value, match)}
+    if (match, value) == ("substring", "snowflake"):
+        assert len(want) == 9        # every entity named so, under any key
+    if value in ("ignored", "other_name"):
+        assert want == set()
+
+    leaf = {"kind": "text", "target": target, "match": match, "value": value}
+    q = _query(leaf, {"scopeMode": "data_source"}, sort="displayName")
+    # Its own data version: these sessions must not find the other graph's.
+    first, got = await _walk(named_provider, q, data_version="names")
+    assert set(got) == want and first.total_count == len(want)
+
+    counted = await execute_count_session(
+        named_provider, q.model_copy(update={"options": SearchOptions(results="hits")}),
+        context=SearchRunContext(data_version="names"))
+    assert counted["status"] == "complete" and counted["count"] == len(want)
+
+    predicate = TypeAdapter(Predicate).validate_python(leaf)
+    out = await named_provider.deep_search_membership(
+        q.scope, [("rule", predicate)], sorted(shown), context=SearchRunContext())
+    assert set(out["matches"]["rule"]) == want
+
+    capped = await named_provider.deep_search(q.model_copy(update={"options": SearchOptions(
+        results="hits", page_size=100)}))
+    assert {h.node.urn for h in capped.hits} == want
+
+
+async def test_find_in_a_container_and_the_top_level_search_read_the_shown_name(named_provider):
+    """The searches beside the engine — Find inside a container (the lineage
+    lens, children paging) and the top-level list's search (the view wizard)
+    — match the same shown name, or the urn. They read displayName alone, so
+    on a graph without one they found only what the urn happened to spell."""
+    shown = await _shown(named_provider)
+    named = {urn for urn, (name, _qualified) in shown.items()
+             if "snowflake" in (name or "").lower()}
+    inside = {urn for urn in named if urn.startswith("urn:asset:")}
+    assert len(inside) == 7
+
+    page = await named_provider.get_children_with_edges(
+        "urn:container:0", search_query="Snowflake", limit=100)
+    assert {c.urn for c in page.children} == inside
+    children = await named_provider.get_children(
+        "urn:container:0", search_query="Snowflake", limit=100)
+    assert {c.urn for c in children} == inside
+    top = await named_provider.get_top_level_or_orphan_nodes(search_query="snowflake")
+    assert {n.urn for n in top.nodes} == {"urn:container:1"}

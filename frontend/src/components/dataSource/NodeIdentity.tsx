@@ -45,11 +45,11 @@ export const normalizeName = (v: string | null | undefined): string =>
 export const isNameOverridden = (v: string | null | undefined): boolean =>
     normalizeName(v) !== 'name'
 
-/** The read-time Cypher resolution the display-name mapping produces. */
-export const nameCoalesceExpr = (v: string | null | undefined): string => {
-    const n = normalizeName(v)
-    return n === 'name' ? 'n.name' : `coalesce(n.displayName, n.${n})`
-}
+/** The read-time Cypher resolution the display-name mapping produces — for the
+ *  default too: a node's own displayName always comes first, and the mapped
+ *  property names a node that has none (`backend/common/providers/identity.py`). */
+export const nameCoalesceExpr = (v: string | null | undefined): string =>
+    `coalesce(n.displayName, n.${normalizeName(v)})`
 
 /** Where a resolved mapping came from — mirrors the backend's provenance
  *  strings (`backend/app/services/node_identity.py`). */
@@ -387,8 +387,9 @@ export function NodeIdentityField({
                                     {inheritNote(nameSource, canEdit, () => onNameChange!(''))}
                                 </div>
                                 <p className="text-[11px] text-ink-muted mb-2 leading-relaxed">
-                                    The label the platform shows for a node comes from <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">displayName</code>.
-                                    If your graph stores its human-readable name under a different property, map it here so nodes don't render blank.
+                                    The name the platform shows for a node — and the name search matches — comes from <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">displayName</code>.
+                                    A node without one is named by the property mapped here, then <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">name</code>, <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">title</code> or <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">label</code>.
+                                    If your graph stores its human-readable name under another property, map it here so nodes don't render blank and search finds them by name.
                                 </p>
                                 <div className="flex items-center gap-1.5 mb-2 flex-wrap">
                                     {NAME_PRESETS.map(preset =>
@@ -417,7 +418,7 @@ export function NodeIdentityField({
                                 </div>
                             </div>
                             <div className="rounded-lg bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border px-3 py-2">
-                                <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-muted mb-1">Node label resolved as</div>
+                                <div className="text-[9px] font-semibold uppercase tracking-wider text-ink-muted mb-1">Shown and searched as</div>
                                 <code className="text-[11px] text-emerald-600 dark:text-emerald-400 font-mono break-all">
                                     {nameCoalesceExpr(nameValue)}
                                 </code>

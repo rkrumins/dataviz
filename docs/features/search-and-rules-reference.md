@@ -134,7 +134,11 @@ with 3 edge predicates:
 
 **Text targets**: `name` (display name or qualified name), `qualifiedName`,
 `description`, `tags`, `property` (with `propertyKey`), `any` (the entity's
-searchable text, name and qualified name). **Match modes**: `substring`,
+searchable text, name and qualified name). The display name is the one the
+canvas shows: `displayName`, or — for an entity without one, as in a graph
+{brand} did not write — the data source's display-name property (**Node
+Identity & Display Name**; `nameProperty` on the data source, provider,
+workspace or platform), then `name`, `title` or `label`. **Match modes**: `substring`,
 `prefix`, `suffix`, `exact`. `fulltext` and `regex` are part of the model but
 refused (`400`).
 
