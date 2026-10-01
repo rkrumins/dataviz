@@ -52,6 +52,7 @@ tests/test_edge_update_patch_semantics.py
 tests/test_edges_beneath.py
 tests/test_entity_audit_unit.py
 tests/test_export_downloads.py
+tests/test_falkordb_data_dir_is_persistent.py
 tests/test_falkordb_edges_pair_binding.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
@@ -72,7 +73,6 @@ tests/test_graph_change_op_contract.py
 tests/test_graph_export_api.py
 tests/test_graph_store_api.py
 tests/test_graph_store_fork_settings.py
-tests/test_falkordb_data_dir_is_persistent.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
 tests/test_heal_native_leftovers.py
