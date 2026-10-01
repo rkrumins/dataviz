@@ -9,6 +9,48 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Search finds entities by the name they are shown by
+
+### Fixed
+
+**A name search found nothing on a graph without `displayName`.** An entity's name on the canvas is
+its `displayName` or, when it has none, the data source's display-name property, then `name`,
+`title` or `label`. Searching by name read `displayName` alone (and `qualifiedName`). So on a graph
+{brand} did not write, which keeps its names under `name`, the canvas showed `SNOWFLAKE_PROD` while
+**Name** contains, starts with or ends with "snowflake" found nothing, and so did **Everything**. A
+property search on `name` found it, which is how it showed. A name search now matches the name each
+entity is shown by: in the search box, Advanced Search, display rules, rule counts, exports and the
+capped engine. **Find** inside a container (the Lineage Lens) and the view wizard's tree search,
+which matched `displayName` or the urn, read it too. An entity that has a `displayName` is compared
+exactly as before and costs what it did: over a million entities that all have one, a name search
+took 1.07 s against 0.93 s.
+
+### Added
+
+**Search in the view's sync status.** The sync card ("In sync with the source" for an external
+graph, "Everything is in sync" for a versioned one) ends with a **Search** lane. It reads **Ready**
+when the latest search of the data source answered or the graph is answering, turns amber when the
+latest search failed (saying why), and red when the graph isn't answering. It also says which
+property names come from. Search can only make the card's verdict worse: a working search never
+turns an unreported sync green. A busy graph shedding load and a refused query are not recorded as
+failures. The evidence is the latest search's outcome, kept per data source in Redis for a week,
+and the provider's in-memory health; the endpoint still makes no graph call.
+
+### Changed
+
+**The Display-name property now drives search too**, wherever it is set: data source, provider,
+workspace or platform, under **Node Identity & Display Name**. Its preview reads **Shown and
+searched as** `coalesce(n.displayName, n.name)`. The default used to preview as `n.name`, although a
+node's own `displayName` has always come first.
+
+### Known limitations
+
+- **Everything** reaches descriptions and property values only through `searchableText`, which only
+  {brand} writes. On a graph it did not write, **Everything** matches names and qualified names;
+  look in **Description** or in the property to search those.
+- A **NOT group** around a name filter leaves out every entity without a qualified name, matched or
+  not: the comparison on the missing field is unknown, and NOT of unknown is not a match.
+
 ## [Unreleased] — Branding that saves, combined traces, and time for very large graphs
 
 ### Added

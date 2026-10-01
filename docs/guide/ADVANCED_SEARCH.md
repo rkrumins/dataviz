@@ -54,6 +54,9 @@ server as you type (from two characters; **Enter** searches even one).
 
 - **Look in** narrows where the word must appear: **Everything**, **Name**,
   **Description**, **Tags**, or any property the View's entities carry.
+  **Name** is the name each entity is shown by: its `displayName` or, for one
+  without, the property set as the data source's **Display-name property**
+  (under **Node Identity & Display Name**), then `name`, `title` or `label`.
 - **Match** chooses **Contains**, **Starts with**, **Ends with** or **Is
   exactly**.
 - The list shows the **Top matches** (the first ten). **↑ / ↓**, **Home** and
@@ -367,6 +370,7 @@ Within N hops of…**, then set the URN, hops and direction in the JSON it adds:
 | What you see | Why | What to do |
 | --- | --- | --- |
 | **No matches**, but you know it's there | The property name or value differs from what you typed, or the entity is outside the View | Pick the property and value from the suggestions; check the scope menu; try **Entire data source** |
+| Searches fail, or you want to know search is working | — | Open the View's sync status in the header: its **Search** lane says whether search is ready, when the last search answered, and why the last one failed |
 | A **draft**'s new entity isn't found | Search reads the published graph; changes on a draft aren't searchable until they're published | Publish, or look in the draft's canvas directly |
 | "*This view has no boundaries yet, so searching for a word on its own…*" | A plain word over **Everything**, in a View that doesn't limit itself to any entities or types, would read the whole data source | Add a type, tag or property filter, or set **Look in** to **Name** |
 | "*…only allowed in the top-level AND group*" | *Inside Subtree*, *Within N hops* or *Path* sits inside an OR or NOT group | Move it to the top level of the query |
