@@ -86,7 +86,10 @@ gunzip <host>-<ts>.rdb.gz
 ```
 
 The PVC can't be mounted while the pod runs, so copy the file in with a throwaway pod
-that mounts the same claim:
+that mounts the same claim (`falkordb-data-falkordb-shard-N-0` on the production
+cluster). `/data` below is the restore pod's own mount of the claim root — the same
+files the FalkorDB pod sees at `/var/lib/falkordb/data`, where the image's `--dir`
+points:
 
 ```bash
 kubectl -n synodic run rdb-restore --rm -it --restart=Never \
@@ -99,11 +102,13 @@ kubectl -n synodic run rdb-restore --rm -it --restart=Never \
 kubectl -n synodic cp <host>-<ts>.rdb rdb-restore:/data/dump.rdb
 ```
 
-Also remove the stale AOF so it cannot win over the RDB:
+Also remove the stale AOF so it cannot win over the RDB, and any `temp-*.rdb` a
+SIGKILLed save left behind:
 
 ```bash
 # inside the restore pod
 rm -rf /data/appendonlydir
+rm -f /data/temp-*.rdb
 ```
 
 ### 3. Boot once with AOF off, then re-enable

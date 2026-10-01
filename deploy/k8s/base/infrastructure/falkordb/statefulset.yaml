@@ -115,7 +115,11 @@ spec:
             timeoutSeconds: 3
           volumeMounts:
             - name: falkordb-data
-              mountPath: /data
+              # The image's data dir (FALKORDB_DATA_PATH; run.sh passes it as
+              # --dir AFTER REDIS_ARGS, so it cannot be moved from here). At
+              # /data this claim held only nodes.conf — everything else lived
+              # in the container's writable layer on the node boot disk.
+              mountPath: /var/lib/falkordb/data
   volumeClaimTemplates:
     - metadata:
         name: falkordb-data

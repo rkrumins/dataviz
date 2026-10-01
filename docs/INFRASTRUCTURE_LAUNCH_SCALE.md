@@ -330,6 +330,10 @@ repl-backlog-size 1gb                 # the catch-up window; a rebuild fills 256
 repl-diskless-sync yes
 repl-timeout 300                      # a full resync of a large shard takes longer than a minute
 client-output-buffer-limit replica 2gb 1gb 300   # overflow drops the replica and forces a full resync under the same load
+repl-diskless-load disabled           # the replica loads from its PVC; the master's fork child lives for the transfer, not the hour-long load
+shutdown-on-sigterm nosave            # the AOF is fsynced on shutdown; a blocking 15 GB SAVE only outlives the grace period and is SIGKILLed
+shutdown-timeout 60                   # a drained master waits for a lagging replica before it exits
+cluster-config-file /var/lib/falkordb/data/nodes.conf   # on the claim, beside the data
 ```
 
 FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  OMP_THREAD_COUNT 1  CACHE_SIZE 40  QUERY_MEM_CAPACITY 1073741824  TIMEOUT_MAX 120000  TIMEOUT_DEFAULT 30000  MAX_QUEUED_QUERIES 150  EFFECTS_THRESHOLD 0`.
@@ -349,7 +353,7 @@ FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  OMP_THREAD_COUNT 1 
   Two pairings that do **not** fit: `maxmemory 40gb` with a 2 GiB per-query ceiling needs **66.6 GiB** even ignoring replication (these were the shipped values before this was checked, so a shard under load could be OOM-killed while every figure inside Redis looked healthy); and a 1.5 GiB ceiling needs **57.7 GiB** once the replication buffers are counted. Raising replication buffers is a memory decision, not only a durability one. Check what each shard currently holds before lowering `maxmemory`. Full rule and worked examples: `FALKORDB_DEPLOYMENT.md` § *Sizing: the ceilings share ONE budget*.
 - `EFFECTS_THRESHOLD 0` makes writes replicate as a compact change log instead of being **re-run on each replica's main thread** — the mechanism that took whole shards down during rebuilds (`FALKORDB_DEPLOYMENT.md` §5aa).
 
-PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 8× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. Liveness `initialDelaySeconds: 60` with `timeoutSeconds: 10` and `failureThreshold: 6` — a node busy applying replication is not a dead process, and the readiness probe already takes it out of rotation.
+PVC **250 Gi** per pod (`hyperdisk-balanced`), mounted at the image's data dir `/var/lib/falkordb/data` — at `/data` it held only `nodes.conf` while the dataset filled the node boot disk until the kubelet evicted the pod — ≈ 8× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. A `startupProbe` (PONG, up to 4 h) covers the AOF replay; liveness `timeoutSeconds: 10` with `failureThreshold: 18` — a node busy applying replication is not a dead process, and the readiness probe already takes it out of rotation. `podManagementPolicy: Parallel` so an evicted pod is recreated while its sibling is still loading; `updateStrategy: OnDelete` because a fresh replica is Ready (PONG) during the RDB transfer, so rotations are operator-paced (production-cluster README).
 
 ### 7.3 Mandatory application settings in cluster mode
 

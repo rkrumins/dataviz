@@ -170,10 +170,24 @@ Three settings back that up:
 | `--client-output-buffer-limit replica 2gb 1gb 300` | was the 256 MB default | When a replica's output buffer overflows, the master **drops it** and it comes back with a full resync — a fork and a whole-dataset transfer, under the same write load that caused it. |
 | `--repl-timeout 300` | was 60 | A full resync of a large shard takes longer than a minute; timing it out mid-transfer starts it over. |
 | `--cluster-node-timeout 15000` | was 5000 | How long a node may be silent before the cluster calls it failed and elects a replacement. A node busy applying replication is silent for seconds at a time, and a 5s window turned that into an election — a promotion no one needed, and a slot map churn every client had to follow. The cost of 15s is that a genuinely dead master is replaced three times slower; the application covers that window (reads fail fast with a retry hint and keep serving cached data, a rebuild waits and resumes), so the trade is worth it. |
+| `--repl-diskless-load disabled` | the default, pinned | The replica writes the RDB to its PVC and loads from there, so the master's fork child lives for the transfer (minutes), not for the hour an `on-empty-db` parse would hold it open under copy-on-write. |
+| `--shutdown-on-sigterm nosave` | was the default (blocking `SAVE`) | With save points set, SIGTERM ran a blocking RDB save of the whole shard — longer than the 120 s grace on 15 GB, so it was SIGKILLed mid-save and left a `temp-*.rdb`. The AOF is fsynced first either way, so the save bought nothing. |
+| `--shutdown-timeout 60` | was 10 | A drained master pauses writes and waits for a lagging replica to catch up before exiting, so the failover that follows loses nothing. |
 
-And the liveness probe gets room to be slow: `timeoutSeconds: 10`,
-`failureThreshold: 6`. A busy main thread is not a dead process, and the
-readiness probe (strict, 3s) already takes a busy node out of rotation.
+A `startupProbe` (PONG only, 10 s × 1440) holds liveness off while a pod replays
+its AOF, and the liveness probe gets room to be slow: `timeoutSeconds: 10`,
+`failureThreshold: 18`. A busy main thread is not a dead process, a liveness kill
+costs a replay plus a full sync, and the readiness probe (strict, 3s) already
+takes a busy node out of rotation.
+
+One limit none of these settings moves: a replica that takes longer than
+`repl-timeout` to load the RDB it received sends no `REPLCONF ACK` meanwhile, and
+the master drops it ("Disconnecting timedout replica (streaming sync)"). It
+finishes loading and asks for a partial resync, and whether it gets one depends
+only on `repl-backlog-size` still holding every byte written during the transfer
+and the load. Size the backlog (and the replica output-buffer hard limit) from the
+measured write rate × load time, or a long load under a rebuild is a full-sync
+loop.
 
 Finally, the application does not rely on any of this alone: a rebuild asks
 the master how many replicas have acknowledged its writes (`WAIT`) and holds
@@ -299,6 +313,17 @@ lost the input. AOF `everysec` bounds the loss window to ~1 second;
 refusing to start. Keep RDB snapshots enabled alongside AOF — they
 remain the fast-restart and DR-export mechanism.
 
+**Where the files live.** The image runs `redis-server … --dir /var/lib/falkordb/data`
+(`FALKORDB_DATA_PATH`, passed *after* `REDIS_ARGS`, so nothing in our args can move
+it) and `/data` holds only a symlink into that directory. The k8s StatefulSets mount
+the claim at `/var/lib/falkordb/data`. Mounted at `/data` the claim held only
+`nodes.conf` while the RDB, the `appendonlydir` and every temp file lived in the
+container's writable layer on the node boot disk, filled it, and the kubelet evicted
+the pod — recreated with RESTARTS 0, no previous log and an empty data dir, so it came
+back as a replica and full-synced for an hour.
+`backend/tests/test_falkordb_data_dir_is_persistent.py` pins the path for base,
+cluster, compose and Helm.
+
 ## 5bb. Forks, and the settings a rebuild cannot hold its way out of
 
 A rebuild took a master and its replica down. Read §5aa for the write side;
@@ -333,7 +358,11 @@ one free, and it cannot hold through a fork the node takes on its own schedule.
 
 The liveness probe already accepts `LOADING`, so a node replaying its AOF is not
 killed for taking an hour; readiness stays strict, so it takes no traffic while
-it does. `backend/tests/test_graph_store_fork_settings.py` parses the manifests
+it does. A replica restarted from its AOF cannot partial-resync — the AOF carries
+no replication id or offset — so an in-place replica restart is the replay *and
+then* a full sync; rotate a replica with its `appendonlydir` removed when the hour
+of replay matters (production-cluster README § Rotating pods).
+`backend/tests/test_graph_store_fork_settings.py` parses the manifests
 and fails if any of this drifts, including across the three duplicated shard
 blocks in the production-cluster overlay.
 

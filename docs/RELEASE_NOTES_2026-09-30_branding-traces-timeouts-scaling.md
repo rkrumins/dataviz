@@ -478,9 +478,10 @@ Defaults come from `SYNODIC_BASE_URL` (else `http://localhost:8000`), `SYNODIC_E
     panel's shortcuts (fixed for the Library menu and its import dialog only).
   * `DEEP_SEARCH_SOFT_DEADLINE_MS` is dead config.
   * To verify in a real cluster: the default-deny NetworkPolicy does not admit the FalkorDB
-    cluster shards, a Prometheus scraper or the in-cluster load test; the k8s FalkorDB PVC is
-    mounted at `/data` while compose and Helm use `/var/lib/falkordb/data`. Both are in the
-    scaling guide's Known gaps.
+    cluster shards, a Prometheus scraper or the in-cluster load test; the k8s FalkorDB PVC was
+    mounted at `/data` while compose and Helm use `/var/lib/falkordb/data` (mount fixed
+    2026-10-01 — it was why shard pods were evicted and came back empty; the NetworkPolicy
+    gap remains in the scaling guide's Known gaps).
 
 ---
 

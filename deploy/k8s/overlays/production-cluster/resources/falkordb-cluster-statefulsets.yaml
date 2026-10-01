@@ -14,6 +14,12 @@
 #     Service) instead of a pod IP that dies with every reschedule.
 #   - aof-load-truncated yes: same crash-recovery stance as the base
 #     single-instance StatefulSet.
+#   - repl-diskless-load disabled / shutdown-on-sigterm nosave /
+#     shutdown-timeout 60: see the REDIS_ARGS comment in shard-0 below.
+# The claim is mounted at the image's data dir, /var/lib/falkordb/data —
+# NOT /data. Mounted at /data it held only nodes.conf while the RDB, the
+# appendonlydir and every temp file filled the node boot disk, and the
+# kubelet evicted the pod (RESTARTS 0, no previous log, empty data dir).
 # cluster-require-full-coverage no = a dead shard must not take down
 # reads on the other two (the whole point of this exercise).
 apiVersion: apps/v1
@@ -28,6 +34,18 @@ metadata:
 spec:
   serviceName: falkordb-cluster
   replicas: 2
+  # Pods are independent Redis Cluster nodes whose identity is nodes.conf on
+  # the PVC, not their ordinal. OrderedReady (the default) refuses to recreate
+  # an evicted -1 until -0 is Running+Ready — an hour or more for a pod
+  # replaying 15 GB, with the shard short a node the whole time.
+  podManagementPolicy: Parallel
+  # A fresh replica answers PONG (Ready) while the RDB is still streaming in,
+  # then -LOADING for the hour it loads; a RollingUpdate takes that first PONG
+  # as "done" and deletes the master next, with both copies then gone.
+  # Rotations are operator-paced (README § Rotating pods): a template change
+  # does nothing until a pod is deleted.
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: falkordb-shard-0
@@ -140,10 +158,21 @@ spec:
             #     FIRST, and synchronously on 13 GB that is minutes of a main
             #     thread answering nothing: how a replica that was merely
             #     catching up failed its probe and was restarted in turn.
+            #   repl-diskless-load disabled (the default, pinned) — the replica
+            #     writes the RDB to its PVC and loads from there, so the master's
+            #     fork child lives for the transfer (minutes), not for the hour
+            #     an on-empty-db parse would hold it open under copy-on-write.
+            #   shutdown-on-sigterm nosave — the default does a BLOCKING SAVE on
+            #     SIGTERM when save points exist; on 15 GB that outlives the 120s
+            #     grace and is SIGKILLed mid-save, leaving a temp-*.rdb. The AOF
+            #     is fsynced first either way, so the save buys nothing here.
+            #   shutdown-timeout 60 — wait (writes paused) for a lagging replica
+            #     to catch up before a drain takes the master down; 60 + fsync
+            #     stays inside terminationGracePeriodSeconds.
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
-                --cluster-config-file /data/nodes.conf
+                --cluster-config-file /var/lib/falkordb/data/nodes.conf
                 --cluster-node-timeout 15000
                 --cluster-require-full-coverage no
                 --cluster-migration-barrier 1
@@ -162,6 +191,9 @@ spec:
                 --repl-diskless-sync yes
                 --repl-timeout 300
                 --client-output-buffer-limit replica 2gb 1gb 300
+                --repl-diskless-load disabled
+                --shutdown-on-sigterm nosave
+                --shutdown-timeout 60
             # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
             # empty-guarded so unauthenticated shards are unchanged; set
             # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
@@ -177,9 +209,26 @@ spec:
             requests:
               cpu: "7"
               memory: 56Gi
+              # Nothing of Redis's belongs on the node disk once the claim is
+              # at the data dir. A limit makes the kubelet evict THIS pod with
+              # a named reason if something lands there anyway, instead of the
+              # node hitting DiskPressure and evicting by its own ranking.
+              ephemeral-storage: 1Gi
             limits:
               cpu: "7"
               memory: 56Gi
+              ephemeral-storage: 4Gi
+          startupProbe:
+            # PONG only: a pod replaying its AOF answers -LOADING for as long
+            # as the replay takes (an hour on a 15 GB shard). Until this
+            # succeeds liveness is not evaluated, so the main thread may go
+            # silent through the engine's post-load finalisation without being
+            # killed into another replay. 10s × 1440 = 4h ceiling.
+            exec:
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 1440
           readinessProbe:
             # Strict: -LOADING (AOF/RDB replay) and -MASTERDOWN are not
             # PONG, so a replaying or orphaned pod takes no traffic.
@@ -200,13 +249,19 @@ spec:
             periodSeconds: 10
             # A busy main thread is not a dead process. At 3s × 3 failures a
             # replica replaying a heavy write was restarted after ~30s, which
-            # took its shard's availability with it. 10s × 6 gives a busy node
-            # a minute to answer before the kubelet gives up on it.
+            # took its shard's availability with it. 10s × 18 gives a busy node
+            # three minutes: a liveness kill costs an AOF replay plus a full
+            # sync, while a dead master is already failed over by the cluster
+            # at cluster-node-timeout.
             timeoutSeconds: 10
-            failureThreshold: 6
+            failureThreshold: 18
           volumeMounts:
             - name: falkordb-data
-              mountPath: /data
+              # The image's data dir (FALKORDB_DATA_PATH; run.sh passes it as
+              # --dir AFTER REDIS_ARGS, so it cannot be moved from here). At
+              # /data this claim held only nodes.conf — everything else lived
+              # in the container's writable layer on the node boot disk.
+              mountPath: /var/lib/falkordb/data
   volumeClaimTemplates:
     - metadata:
         name: falkordb-data
@@ -231,6 +286,18 @@ metadata:
 spec:
   serviceName: falkordb-cluster
   replicas: 2
+  # Pods are independent Redis Cluster nodes whose identity is nodes.conf on
+  # the PVC, not their ordinal. OrderedReady (the default) refuses to recreate
+  # an evicted -1 until -0 is Running+Ready — an hour or more for a pod
+  # replaying 15 GB, with the shard short a node the whole time.
+  podManagementPolicy: Parallel
+  # A fresh replica answers PONG (Ready) while the RDB is still streaming in,
+  # then -LOADING for the hour it loads; a RollingUpdate takes that first PONG
+  # as "done" and deletes the master next, with both copies then gone.
+  # Rotations are operator-paced (README § Rotating pods): a template change
+  # does nothing until a pod is deleted.
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: falkordb-shard-1
@@ -282,7 +349,7 @@ spec:
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
-                --cluster-config-file /data/nodes.conf
+                --cluster-config-file /var/lib/falkordb/data/nodes.conf
                 --cluster-node-timeout 15000
                 --cluster-require-full-coverage no
                 --cluster-migration-barrier 1
@@ -301,6 +368,9 @@ spec:
                 --repl-diskless-sync yes
                 --repl-timeout 300
                 --client-output-buffer-limit replica 2gb 1gb 300
+                --repl-diskless-load disabled
+                --shutdown-on-sigterm nosave
+                --shutdown-timeout 60
             # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
             # empty-guarded so unauthenticated shards are unchanged; set
             # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
@@ -315,9 +385,26 @@ spec:
             requests:
               cpu: "7"
               memory: 56Gi
+              # Nothing of Redis's belongs on the node disk once the claim is
+              # at the data dir. A limit makes the kubelet evict THIS pod with
+              # a named reason if something lands there anyway, instead of the
+              # node hitting DiskPressure and evicting by its own ranking.
+              ephemeral-storage: 1Gi
             limits:
               cpu: "7"
               memory: 56Gi
+              ephemeral-storage: 4Gi
+          startupProbe:
+            # PONG only: a pod replaying its AOF answers -LOADING for as long
+            # as the replay takes (an hour on a 15 GB shard). Until this
+            # succeeds liveness is not evaluated, so the main thread may go
+            # silent through the engine's post-load finalisation without being
+            # killed into another replay. 10s × 1440 = 4h ceiling.
+            exec:
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 1440
           readinessProbe:
             exec:
               command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
@@ -330,10 +417,14 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 10
-            failureThreshold: 6
+            failureThreshold: 18
           volumeMounts:
             - name: falkordb-data
-              mountPath: /data
+              # The image's data dir (FALKORDB_DATA_PATH; run.sh passes it as
+              # --dir AFTER REDIS_ARGS, so it cannot be moved from here). At
+              # /data this claim held only nodes.conf — everything else lived
+              # in the container's writable layer on the node boot disk.
+              mountPath: /var/lib/falkordb/data
   volumeClaimTemplates:
     - metadata:
         name: falkordb-data
@@ -356,6 +447,18 @@ metadata:
 spec:
   serviceName: falkordb-cluster
   replicas: 2
+  # Pods are independent Redis Cluster nodes whose identity is nodes.conf on
+  # the PVC, not their ordinal. OrderedReady (the default) refuses to recreate
+  # an evicted -1 until -0 is Running+Ready — an hour or more for a pod
+  # replaying 15 GB, with the shard short a node the whole time.
+  podManagementPolicy: Parallel
+  # A fresh replica answers PONG (Ready) while the RDB is still streaming in,
+  # then -LOADING for the hour it loads; a RollingUpdate takes that first PONG
+  # as "done" and deletes the master next, with both copies then gone.
+  # Rotations are operator-paced (README § Rotating pods): a template change
+  # does nothing until a pod is deleted.
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: falkordb-shard-2
@@ -407,7 +510,7 @@ spec:
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
-                --cluster-config-file /data/nodes.conf
+                --cluster-config-file /var/lib/falkordb/data/nodes.conf
                 --cluster-node-timeout 15000
                 --cluster-require-full-coverage no
                 --cluster-migration-barrier 1
@@ -426,6 +529,9 @@ spec:
                 --repl-diskless-sync yes
                 --repl-timeout 300
                 --client-output-buffer-limit replica 2gb 1gb 300
+                --repl-diskless-load disabled
+                --shutdown-on-sigterm nosave
+                --shutdown-timeout 60
             # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
             # empty-guarded so unauthenticated shards are unchanged; set
             # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
@@ -440,9 +546,26 @@ spec:
             requests:
               cpu: "7"
               memory: 56Gi
+              # Nothing of Redis's belongs on the node disk once the claim is
+              # at the data dir. A limit makes the kubelet evict THIS pod with
+              # a named reason if something lands there anyway, instead of the
+              # node hitting DiskPressure and evicting by its own ranking.
+              ephemeral-storage: 1Gi
             limits:
               cpu: "7"
               memory: 56Gi
+              ephemeral-storage: 4Gi
+          startupProbe:
+            # PONG only: a pod replaying its AOF answers -LOADING for as long
+            # as the replay takes (an hour on a 15 GB shard). Until this
+            # succeeds liveness is not evaluated, so the main thread may go
+            # silent through the engine's post-load finalisation without being
+            # killed into another replay. 10s × 1440 = 4h ceiling.
+            exec:
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 1440
           readinessProbe:
             exec:
               command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
@@ -455,10 +578,14 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 10
-            failureThreshold: 6
+            failureThreshold: 18
           volumeMounts:
             - name: falkordb-data
-              mountPath: /data
+              # The image's data dir (FALKORDB_DATA_PATH; run.sh passes it as
+              # --dir AFTER REDIS_ARGS, so it cannot be moved from here). At
+              # /data this claim held only nodes.conf — everything else lived
+              # in the container's writable layer on the node boot disk.
+              mountPath: /var/lib/falkordb/data
   volumeClaimTemplates:
     - metadata:
         name: falkordb-data
