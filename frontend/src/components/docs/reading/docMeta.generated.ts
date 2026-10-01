@@ -20,7 +20,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-09-30",
+    "updated": "2026-10-01",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -88,7 +88,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/features/view-portability.md"
   },
   "feature-search-and-rules-reference": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-01",
     "path": "docs/features/search-and-rules-reference.md"
   },
   "versioning-api-reference": {
@@ -186,7 +186,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-01",
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "lineage-lens": {
