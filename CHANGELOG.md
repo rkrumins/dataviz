@@ -9,6 +9,116 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — FalkorDB cluster: shard pods that stay, loads that finish, replicas that are measured
+
+### Fixed
+
+- **Every app deploy replaced every FalkorDB shard pod.**
+  - `make apply` rewrote the shards' `:prod-latest` image tag to the git sha, so each deploy
+    was a new StatefulSet revision. Every pod was rolled, showed `restartCount 0`, and
+    reloaded for up to an hour.
+  - The production-cluster overlay now pins its own tag (`v4.20.6-1`), built only by
+    `make build-falkordb-cluster push-falkordb-cluster`.
+  - The shard StatefulSets use `updateStrategy: OnDelete`, so a template change reaches a pod
+    only when it is deleted, role by role.
+- **A restarted shard pod came back empty.**
+  - The image's `run.sh` points Redis at `/var/lib/falkordb/data` on the container layer. Only
+    `nodes.conf` reached the PVC at `/data`, so a new container still owned its slots and held
+    nothing.
+  - The shards now set `FALKORDB_DATA_PATH=/data`. A `--dir` in `REDIS_ARGS` would have been
+    silently overridden.
+- **The full-resync loop that started the load again, and the ~4 GB of replication lag.**
+  - A replica that fell behind was dropped, couldn't be bridged by the 1 GB backlog, and
+    full-synced.
+  - During the hour-long load its 2 GB full-sync buffer and the master's 2 GB buffer
+    overflowed, so the partial resync after the load failed and it full-synced again, with no
+    pod restart.
+  - The backlog, the replica output-buffer limit and the full-sync buffer are now 4 GB each, and
+    the soft limit is off.
+- **Every shard restart was a full resync.** An AOF restart cannot resume by partial resync,
+  because the replication ID is not in the AOF. The shards now run `--appendonly no` with
+  `--shutdown-on-sigterm save`: a replica restart, a hand-over and a planned master restart
+  resume by PSYNC.
+- **A crashed master could rejoin with stale or empty data and wipe its replica.**
+  - A node whose `nodes.conf` says it was a master owning slots now holds 45 s at start, so
+    its replica is promoted first.
+  - A master's `preStop` hands its slots to its shard's no-read standby with
+    `CLUSTER FAILOVER`, and to the `-2` read replica only when no standby is online.
+- **The replica lag gate never tripped.** It read the replica's own
+  `master_repl_offset − slave_repl_offset`, which Redis keeps at 0. It measured 0 while the
+  master saw 31 MB of lag. Lag is now the master's offset minus the replica's, on the same
+  replication history. The Admin → Graph store topology page uses the same rule, and shows
+  nothing rather than 0 when it can't measure.
+- **The DR backup forked the master after any failover.** It targeted the `-1` pods. It now
+  reads each candidate's role live, SYNCs the first eligible replica of each shard
+  (`-1|-0|-2`), and fails rather than fork a master.
+
+### Changed
+
+- **The repo now ships the live topology:** 3 shards × (1 master + 2 replicas) = 9 pods, with
+  both replicas attached by the init Job.
+  - App reads prefer one replica per shard, `-2`, through the new
+    `FALKORDB_REPLICA_READ_HOSTS` setting; the standby answers only while `-2` cannot.
+  - The master takes no reads (`FALKORDB_MASTER_READ_SHARE "0"`).
+  - The other replica is a no-read hot standby, so it stays in step and wins failovers.
+  - Why: on FalkorDB 4.20.6, a write arriving during a long read of the same graph freezes the
+    node's main thread for the rest of the read. That was measured at 14 s on a replica, and at
+    17.8 s on a master, which is past the 15 s failover window.
+- **Shard settings:**
+  - `maxmemory` goes from 32gb to 28gb. The sizing rule gives 55.05 of 56 GiB, and there is no
+    thread headroom left.
+  - New FalkorDB module settings: `VKEY_MAX_ENTITY_COUNT 100000000` (a graph with 65,534
+    property names took 91–96 s to load as 12 virtual keys, and 7.7 s as one) and
+    `DELAY_INDEXING yes`.
+  - `podManagementPolicy: Parallel`.
+  - Probes:
+    - a startup probe;
+    - liveness at 10 s × 18;
+    - readiness that requires a replica's link to be up.
+  - `terminationGracePeriodSeconds` 300.
+  - A `falkordb-cluster` PriorityClass, and ephemeral-storage requests and limits.
+  - `cluster-allow-replica-migration no`.
+- **A `falkordb-cluster` NetworkPolicy** admits the shards' clients and peers. It is inert until
+  NetworkPolicy enforcement is on.
+
+### Upgrading
+
+**Full detail:** `docs/RELEASE_NOTES_2026-10-01_falkordb-cluster-stability.md`. It covers the
+investigation, every value that moved, a diagnostic runbook for the live cluster, and the
+rollout.
+
+**A deploy does not move a live cluster onto these settings.** By design, applying no longer
+restarts shard pods. The rollout is operator-run and has six parts:
+
+1. Capture the evidence and freeze.
+2. Apply the settings at runtime with `CONFIG SET` and `GRAPH.CONFIG SET`, with no restarts.
+3. Do one apply, after deleting the completed init Job and orphan-deleting the StatefulSets.
+   `podManagementPolicy` is immutable.
+4. Roll one pod at a time, by role from `CLUSTER NODES`: the read replica, then the standby,
+   then `CLUSTER FAILOVER`, then the old master. Each pod full-syncs once, because its old
+   data was on the container layer.
+5. Run the drills.
+6. Recreate the graph at 65,534 property names.
+
+There is no database migration.
+
+### Known limitations
+
+- **No cap on replica reads.** A long read can still freeze the `-2` replica until it ends, and
+  a timed-out replica read is deliberately not re-run on a master.
+- **If `-2` becomes a shard's master** (after a failover, or a hand-over with no standby
+  online), or is down, syncing or behind, that shard's reads go to its master until the role
+  is handed back. So do they for 30 s after one read on `-2` fails or times out.
+- **A load still loops if a rebuild writes more than ~8 GB during it.** Alert on a second
+  `Full resync requested by replica` for one replica (`master_current_sync_attempts` alone
+  also counts reconnects).
+- **The single-node base StatefulSet still writes its data to the container layer.** It is the
+  same `FALKORDB_DATA_PATH` fix, not made here.
+- **The FalkorDB Browser still runs inside every shard container.**
+- **One graph is still at 65,534/65,534 property names** and has to be recreated.
+
+---
+
 ## [Unreleased] — Branding that saves, combined traces, and time for very large graphs
 
 ### Added

@@ -40,7 +40,7 @@ Rows 7 and 8 are the **production-cluster overlay's** shards
 (`overlays/production-cluster/resources/falkordb-cluster-statefulsets.yaml`). The k8s base
 and the Helm chart run a single instance at `THREAD_COUNT 8` / `MAX_QUEUED_QUERIES 64` on a
 14Gi pod — the pairs are not interchangeable, and carrying 8 threads onto a 56Gi shard needs
-56.4 GiB and OOM-kills it. A test parses both values out of that manifest and fails if this
+57.65 GiB and OOM-kills it. A test parses both values out of that manifest and fails if this
 table drifts from it.
 
 **Row 6 is two pools, and they are not the same knob.** A graph request goes through the
@@ -141,11 +141,12 @@ is the most important number on the page:
 
 ```
 one data source → one graph key → ONE hash slot → ONE shard
-read-only Cypher is routed to that shard's in-sync replicas (_replica_for,
-falkordb_provider.py:2326) and round-robined across them — that shard's only
+read-only Cypher is routed to that shard's in-step replicas (_replica_for,
+falkordb_provider.py) — and on the production cluster to ONE of them:
 
-  today  (replicas: 2 = 1 master + 1 replica)   1 replica  × THREAD_COUNT 6 =  6 threads
-  at nine pods (replicas: 3 = 1 master + 2)     2 replicas × THREAD_COUNT 6 = 12 threads
+  shipped (replicas: 3 = 1 master + 2 replicas)
+    read replica (-2, FALKORDB_REPLICA_READ_HOSTS)   1 × THREAD_COUNT 6 = 6 threads
+    no-read standby, master (FALKORDB_MASTER_READ_SHARE 0)               0
 
 queue behind them: MAX_QUEUED_QUERIES 150 per node
 ```
@@ -154,22 +155,28 @@ queue behind them: MAX_QUEUED_QUERIES 150 per node
 Everyone looking at the same data source is served by the query threads of that source's
 shard — six of them on the shape shipped today.
 
-> **The binding constraint is the six (soon twelve) query threads on one shard's
-> replicas.** Adding viz-service replicas does not add graph capacity — it adds queue
-> depth. Adding *shards* only helps if your load is spread across several data sources.
-> Going from `replicas: 2` to `replicas: 3` on the cluster StatefulSets **doubles read
-> capacity per source**, which makes the 9-pod move a throughput change, not only a
-> resilience one.
+> **The binding constraint is the six query threads on one shard's read replica.** Adding
+> viz-service replicas does not add graph capacity — it adds queue depth. Adding *shards*
+> only helps if your load is spread across several data sources.
 >
-> **It needs nine nodes first, and it will not tell you.** The overlay's anti-affinity is
+> **The second replica is deliberately not read capacity.**
+> * **Why.** FalkorDB applies a replicated write under the graph's write lock on the
+>   node's main thread. So one write arriving during a long read of the same graph freezes
+>   that node — PING, replication, every graph — for the rest of the read (measured ~14 s
+>   on a replica). On a master, a write queued behind a read freezes it past the 15 s
+>   failover window (measured 17.8 s).
+> * **What the overlay does.** Reads go to `-2` only. The other replica is a no-read hot
+>   standby that stays in step and wins failovers, and masters take no reads.
+> * **The trade.** It gives up the 2× read throughput that reading from both replicas
+>   would buy, in exchange for failovers that land on an in-step replica.
+> * **To take it back.** Unset `FALKORDB_REPLICA_READ_HOSTS`. Read the 2026-10-01 release
+>   notes (§1.4) first.
+>
+> **Every pod needs a node to itself.** The overlay's anti-affinity is
 > `requiredDuringScheduling` with one FalkorDB pod per hostname and `requests ≈ limits`, so
-> a pod needs a node to itself; the README provisions `falkordb-pool` with six (2 per zone
-> × 3 zones). Setting `replicas: 3` against that pool leaves three pods `Pending` for as
-> long as you leave it — not degraded, not slower, just three shards that never get their
-> second replica. Grow the pool to 3 per zone, confirm the nodes are `Ready`, then change
-> `replicas:`. (`FALKORDB_DEPLOYMENT.md` worked example 2 is already budgeted for the
-> 9-pod shape at `2 replicas × 2gb hard`, so the 6-pod deployment shipped today has ~2 GiB
-> more headroom per shard than that table shows.)
+> `falkordb-pool` needs nine nodes (3 per zone × 3 zones). Short by one, and a pod sits
+> `Pending` for as long as you leave it — not degraded, not slower, just a shard that never
+> gets its replica.
 
 Each HTTP request issues one Cypher per label bucket, so what reaches the store is
 `slots_in_use × buckets`, and once that is ≥ 150 the store answers `Max pending queries
@@ -199,8 +206,9 @@ At one cold open per user per 60s, against **6 threads** (today's shape):
 | 50 ms | 120 q/s | 2.2 | ~130 |
 | 100 ms | 60 q/s | 1.1 | ~65 |
 
-Double each row for the 9-pod shape. Cache hit rate moves it more than anything else on
-this page — a warm open costs no Cypher at all.
+The 9-pod production cluster is the same six threads per source (one read replica), so the
+same rows apply. Cache hit rate moves it more than anything else on this page — a warm open
+costs no Cypher at all.
 
 **Measure your service time before trusting any row of that table.** It is the one input
 that decides the answer and the one nobody can derive from the manifests — so the
@@ -382,7 +390,18 @@ is displaying. `AGGREGATION_JOB_RETENTION_DAYS=0` restores the old unbounded beh
 
 ### A node restart takes an hour
 
-This is AOF incremental replay, not RDB load. The repo's own measurement puts base AOF
+**On the production cluster** (no AOF since 2026-10-01), look at three things:
+
+* **The full-resync loop.** A replica that cannot resume by partial resync full-syncs, and a
+  load that outruns its replication buffers loops: it finishes and starts over.
+* **A graph with tens of thousands of property names.** Its every virtual key re-parses the
+  name table: 7.4–8 s per key at 65,534 names.
+* **A pod whose data directory is still the container layer.**
+
+`RELEASE_NOTES_2026-10-01_falkordb-cluster-stability.md` §7 is the runbook for telling them
+apart.
+
+**On a single instance (AOF):** this is AOF incremental replay, not RDB load. The repo's own measurement puts base AOF
 bulk-load at ~74 MB/s (13 GB ≈ 3 min) against incremental replay at minutes per GB.
 
 * `--auto-aof-rewrite-percentage 80 --auto-aof-rewrite-min-size 256mb` bound the
@@ -410,6 +429,8 @@ bulk-load at ~74 MB/s (13 GB ≈ 3 min) against incremental replay at minutes pe
 | `PROVIDER_FLEET_MAX_CONCURRENCY` | — | **0** | 0 = size the fleet-wide count from the node's `THREAD_COUNT`. The per-process cap alone was 12 × 8. |
 | `FALKORDB_AGGREGATED_READ_BUDGET_SECS` | — | **0.8 × tier** | One wall clock for the whole read ladder, not one per rung. |
 | `EFFECTS_THRESHOLD` | — | **0** | Replicate writes as effects; required for the replication behaviour in §5aa. |
+| `FALKORDB_MASTER_READ_SHARE` (production-cluster) | 1 | **0** | Masters take no reads: a write queued behind a long read freezes a master past the failover window. |
+| `FALKORDB_REPLICA_READ_HOSTS` (production-cluster) | — (every replica) | `'^falkordb-shard-[0-9]+-2\.'` | One read replica per shard; the other is a no-read standby. Per-source read capacity stays at one replica's `THREAD_COUNT`. |
 
 ---
 
@@ -481,14 +502,18 @@ Nothing here costs capacity; it removes load.
 
 The 9-pod layout exists so reads do not all land on three masters.
 
-* **Add the second replica.** The cluster StatefulSets ship `replicas: 2` (1 master +
-  1 replica); `FALKORDB_DEPLOYMENT.md` §3 specifies `replicas: 3` (the 9-pod rule), and
-  the 56Gi sizing budget already assumes two replicas per master. Reads round-robin
-  across a shard's in-sync replicas, so this is a **2× read-throughput change per data
-  source**, not only a resilience one. It is the single largest safe win available.
+* **The second replica is not a read lever on the production cluster.** The StatefulSets
+  ship `replicas: 3` (1 master + 2 replicas), and only `-2` takes reads
+  (`FALKORDB_REPLICA_READ_HOSTS`). The other is a no-read standby, kept out of the graph
+  lock so that it wins failovers. See §1 for the trade, and the 2026-10-01 release notes
+  before reading from both.
 * Confirm read routing is actually offloading. If `GRAPH.INFO` shows the master busy and
-  the replica idle, `_replica_for` is returning None — usually the settle window after a
-  write, or a replica judged out of step — and every read is hitting the master.
+  the read replica idle, `_replica_for` is returning None. The usual causes:
+  * the settle window after a write;
+  * a replica judged out of step (its lag is now measured against its master);
+  * `-2` is currently the master, after a failover.
+
+  In each case every read is hitting the master.
 * Check placement skew. One shard holding the busy data source means one shard doing the
   work regardless of how many nodes exist. Admin → Graph store shows per-shard memory.
   Sharding helps only when load is spread across *several* data sources.
@@ -506,7 +531,7 @@ required container memory =
   + THREAD_COUNT × 1.3 × QUERY_MEM_CAPACITY
   + repl-backlog-size
   + replicas × replica-output-buffer-hard-limit
-  + overhead (≈1Gi)
+  + overhead (1Gi at maxmemory ≥ 32 GiB, else 256Mi)
 ```
 
 > **The in-app guard counts replication.** `container_memory_needed()` takes the
@@ -517,17 +542,20 @@ required container memory =
 > numbers in the dialog say which was used. It did not count them until 2026-09-11,
 > and approved 8 threads on a 56Gi shard that the manifest's own budget refused.
 
-Worked, for the cluster overlay today (32gb maxmemory, 1GiB ceiling, 56Gi limit, 2
-replicas per master, 1GiB backlog, 2GiB replica output buffer):
+Worked, for the cluster overlay today (28gb maxmemory, 1GiB ceiling, 56Gi limit, 2
+replicas per master, 4GiB backlog, 4GiB replica output buffer — raised on 2026-10-01 from
+32gb / 1GiB / 2GiB, which is why `maxmemory` came down):
 
 | THREAD_COUNT | Query memory | Needed (the guard's figure) | Fits in 56Gi? |
 |---|---|---|---|
-| 6 (current) | 7.8 | 53.8 | yes, 2.2 spare |
-| 7 | 9.1 | 55.1 | yes, 0.9 spare — tight |
-| 8 | 10.4 | 56.4 | **no** |
+| 5 | 6.5 | 53.75 | yes, 2.25 spare |
+| 6 (current) | 7.8 | 55.05 | yes, 0.95 spare |
+| 7 | 9.1 | 56.35 | **no** |
+| 8 | 10.4 | 57.65 | **no** |
 
-So on the current shape there is **one thread of headroom**, not four — and the last row
-is the case the dialog used to approve. To go further you must
+So on the current shape there is **no thread of headroom** — and the last row is both the
+case the dialog used to approve and what the guard assumes (`THREAD_COUNT_ASSUMED` 8) for a
+node that does not report its thread count. To go further you must
 first lower `QUERY_MEM_CAPACITY`, lower `maxmemory`, or move to a larger machine —
 **in that order of preference**, since the first two are reversible and the third is not.
 Raising `THREAD_COUNT` without the memory trades a caught query error for an OOM-killed

@@ -14,7 +14,13 @@
 # One pod per target (Indexed Job): each pod snapshots exactly one endpoint, so the
 # staging footprint is one shard's RDB — not the whole cluster's — and shards run in
 # parallel on different nodes. The production-cluster overlay patches
-# completions/parallelism and the target list to the three shard replicas.
+# completions/parallelism and the target list to one field per shard.
+#
+# A target field is a '|'-separated candidate list in preference order; the pod
+# SYNCs the first candidate whose LIVE INFO says it can serve one (see the script).
+# Role is read, never inferred from the pod name: the cluster patch once hard-wired
+# the -1 pods as "the replicas", and after any failover a -1 is the master — the
+# backup then forked a loaded master, the exact thing it exists to avoid.
 #
 # SETUP (once):
 #   1. Bucket:  gcloud storage buckets create gs://<BUCKET> --location=US \
@@ -94,16 +100,57 @@ spec:
                 - |
                   set -eu
                   IDX="${JOB_COMPLETION_INDEX:-0}"
-                  TARGET=$(echo "$FALKORDB_BACKUP_TARGETS" | cut -d, -f$((IDX + 1)))
-                  if [ -z "$TARGET" ]; then
+                  CANDIDATES=$(echo "$FALKORDB_BACKUP_TARGETS" | cut -d, -f$((IDX + 1)))
+                  if [ -z "$CANDIDATES" ]; then
                     echo "no target at index $IDX in '$FALKORDB_BACKUP_TARGETS'" >&2
                     exit 1
                   fi
-                  HOST="${TARGET%%:*}"
-                  PORT="${TARGET##*:}"
+                  info() { printf '%s\n' "$INFO" | sed -n "s/^$1://p"; }
+                  HOST=
+                  SKIPPED=
+                  N=$(echo "$CANDIDATES" | tr '|' '\n' | wc -l)
+                  I=0
+                  for TARGET in $(echo "$CANDIDATES" | tr '|' ' '); do
+                    I=$((I + 1))
+                    H="${TARGET%%:*}"
+                    P="${TARGET##*:}"
+                    # Exit status deliberately ignored: unreachable (exit 1) and an
+                    # error reply (NOAUTH exits 0) both surface as a missing role.
+                    INFO=$(redis-cli -h "$H" -p "$P" INFO replication persistence 2>&1 | tr -d '\r') || true
+                    ROLE=$(info role)
+                    WHY=
+                    if [ -z "$ROLE" ]; then
+                      WHY="no INFO: $(printf '%s\n' "$INFO" | head -n 1)"
+                    elif [ "$(info loading)" = 1 ]; then
+                      WHY="loading its dataset"
+                    # Set by the cluster overlay: never fork a master there.
+                    elif [ "$ROLE" = master ] && [ "${FALKORDB_BACKUP_REPLICA_ONLY:-}" = 1 ]; then
+                      WHY="master (FALKORDB_BACKUP_REPLICA_ONLY=1)"
+                    # SYNC on it would fail -NOMASTERLINK (resyncing, or master gone).
+                    elif [ "$ROLE" = slave ] && [ "$(info master_link_status)" != up ]; then
+                      WHY="replica with master_link_status:$(info master_link_status)"
+                    # Redis would queue our SYNC and fork again the moment that child
+                    # exits: prefer a node not already paying copy-on-write. Not for
+                    # the LAST candidate — there the queued SYNC is the snapshot, as it
+                    # always was on the single instance (one fork at a time either way).
+                    elif [ "$(info rdb_bgsave_in_progress)" = 1 ] && [ "$I" -lt "$N" ]; then
+                      WHY="fork already in progress"
+                    fi
+                    if [ -z "$WHY" ]; then
+                      HOST="$H"
+                      PORT="$P"
+                      break
+                    fi
+                    echo "skipping ${TARGET}: ${WHY}" >&2
+                    SKIPPED="${SKIPPED} [${TARGET}: ${WHY}]"
+                  done
+                  if [ -z "$HOST" ]; then
+                    echo "no eligible snapshot source in '${CANDIDATES}':${SKIPPED}" >&2
+                    exit 1
+                  fi
                   TS=$(date -u +%Y%m%dT%H%M%SZ)
                   OUT="/backup/${HOST}-${TS}.rdb.gz"
-                  echo "snapshotting ${HOST}:${PORT} -> ${OUT}"
+                  echo "snapshotting ${HOST}:${PORT} (role ${ROLE}) -> ${OUT}"
                   # SYNC streams a consistent RDB; gzip it inline so only the
                   # compressed image is staged. pipefail makes a mid-stream failure
                   # fail the step instead of shipping a truncated snapshot.
@@ -115,6 +162,9 @@ spec:
                   fi
                   ls -l "$OUT"
               env:
+                # ',' = one field per Job index; '|' = candidates in preference
+                # order. FALKORDB_BACKUP_REPLICA_ONLY stays unset here: the single
+                # instance IS the master and the only copy, so it must be eligible.
                 - name: FALKORDB_BACKUP_TARGETS
                   value: "falkordb:6379"
                 # Optional — set only when the instance requires AUTH. redis-cli

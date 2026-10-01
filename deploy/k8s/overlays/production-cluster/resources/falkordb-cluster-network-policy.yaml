@@ -1,0 +1,60 @@
+# Ingress for the FalkorDB cluster shard pods.
+#
+# The base's allow-backends-to-falkordb selects `app.kubernetes.io/name:
+# falkordb`, which no shard pod carries (each is falkordb-shard-N). So under
+# the base default-deny-ingress, the day NetworkPolicy enforcement is
+# switched on every shard would refuse its clients AND its peers —
+# replication, cluster-bus gossip and failover votes — and the cluster would
+# partition itself. Inert until enforcement is enabled; harmless before.
+#
+#   6379  — the app backends (the base rule's components), the seed Job, the
+#           DR backup snapshotting a replica, the cluster-init Job, and the
+#           shards themselves (replication, the preStop hand-over's CLUSTER
+#           FAILOVER, redis-cli --cluster).
+#   16379 — the cluster bus: shard pods only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: falkordb-cluster
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: falkordb-cluster
+    app.kubernetes.io/component: graph-database
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: falkordb-cluster
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - api
+                  - controlplane
+                  - worker
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: seed
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: falkordb-dr-backup
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: falkordb-cluster-init
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: falkordb-cluster
+      ports:
+        - protocol: TCP
+          port: 6379
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: falkordb-cluster
+      ports:
+        - protocol: TCP
+          port: 16379

@@ -1419,12 +1419,16 @@ shard.
 
 For one commit they were, and that was wrong. A write holds the graph's write
 lock and blocks its client, so one that approaches the window races the
-election. **A read cannot cause that at all**: FalkorDB dispatches `GRAPH.*` to
-a module thread pool and the main thread goes on answering the cluster bus, so a
-long read never stops this master replying to the others. It can only be a
-*victim* of a demotion something else caused.
+election. A read *alone* does not stop the main thread — but, corrected
+2026-10-01, a write to the **same graph** that arrives during a long read does:
+it waits for the read lock holding the GIL, and froze a FalkorDB 4.20.6 master
+for 17.8 s, past the 15 s detector (on a replica, `GRAPH.EFFECT` waits the same
+way on the main thread). The answer is still not to clamp reads: the cluster
+overlay keeps long reads off masters (`FALKORDB_MASTER_READ_SHARE` 0) and on one
+read replica per shard (`FALKORDB_REPLICA_READ_HOSTS`). See
+[`RELEASE_NOTES_2026-10-01_falkordb-cluster-stability.md`](RELEASE_NOTES_2026-10-01_falkordb-cluster-stability.md).
 
-That is a far weaker reason, and the price of acting on it was real. Read
+Clamping them had a real price. Read
 budgets are not accidents — they were chosen per call site, and every one that
 matters is larger than the window's share:
 

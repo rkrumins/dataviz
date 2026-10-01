@@ -381,10 +381,40 @@ def _sentinel_retry_backoffs() -> tuple:
 
 _SENTINEL_RETRY_BACKOFFS: tuple = _sentinel_retry_backoffs()
 
-#: How far behind a replica may be and still answer a read (seconds).
+#: How far behind a replica may be and still answer a read, in BYTES of
+#: replication stream not yet applied — its MASTER's offset minus its own
+#: (``_vouched_replicas``). Never the replica's self-reported figure, which
+#: is 0 by construction (``info_parse.replication_stats``).
 _REPLICA_READ_MAX_LAG_BYTES = int(
     os.getenv("FALKORDB_REPLICA_READ_MAX_LAG_BYTES", str(8 * 1024 * 1024))
 )
+
+
+def _compile_replica_read_hosts(raw: Optional[str]) -> Optional["re.Pattern[str]"]:
+    """``FALKORDB_REPLICA_READ_HOSTS`` as a compiled regex, or None for "every
+    replica may read" — unset, blank, or not a valid regex. The last fails
+    OPEN to today's routing, loudly: a typo in one env var must not be what
+    quietly moves a fleet's reads, nor what stops the provider importing."""
+    if not raw or not raw.strip():
+        return None
+    try:
+        return re.compile(raw)
+    except re.error as exc:
+        logger.warning(
+            "FALKORDB_REPLICA_READ_HOSTS=%r is not a valid regex (%s) — "
+            "ignored; every in-step replica may take reads.", raw, exc,
+        )
+        return None
+
+
+#: Which replicas are PREFERRED for reads: ``re.search`` against each
+#: candidate's host as the client addresses it (the announced hostname on a
+#: cluster with ``cluster-preferred-endpoint-type hostname``). Unset, every
+#: in-step replica is. Production names one replica per shard so the other
+#: stays a no-read standby while that one can answer — see the rotation in
+#: ``_replica_for``.
+_REPLICA_READ_HOSTS = _compile_replica_read_hosts(os.getenv("FALKORDB_REPLICA_READ_HOSTS"))
+
 #: How long this process's own writes pin a graph's reads to its master.
 #:
 #: Read-your-own-writes, and it is a BACKSTOP rather than the primary guard.
@@ -517,9 +547,12 @@ def _vouch_is_current(vouched_at: Optional[float], now: float) -> bool:
 #: replica per shard — 100% of reads landed on the single node that is also
 #: applying the write stream, while the master's six query threads and 150
 #: queue slots sat idle. One slot each is a straight doubling of read
-#: capacity per source at no infrastructure cost, and it is the only
-#: doubling available: a third replica cannot be scheduled on the six-node
-#: pool the deployment mandates.
+#: capacity per source at no infrastructure cost.
+#:
+#: The production cluster overlay sets 0. A FalkorDB write queued behind a
+#: long read of the same graph holds the master's MAIN thread while it waits
+#: for the graph lock — measured 17.8 s, past the 15 s cluster-node-timeout,
+#: so a master serving reads can be failed over by one of them.
 _MASTER_READ_SHARE = int(os.getenv("FALKORDB_MASTER_READ_SHARE", "1"))
 
 #: Set to "master" for work that must see its own writes — the aggregation
@@ -683,14 +716,17 @@ def cluster_write_ceiling_s() -> Optional[float]:
     write lock and blocks its client for the duration, so one that
     approaches the window races the election: the replica is promoted, this
     master is demoted part-way through the batch, and every blocked client
-    gets ``-UNBLOCKED``. A READ takes no lock and cannot cause that at all —
-    FalkorDB runs GRAPH.* on a module thread pool while the main thread goes
-    on answering the cluster bus — so it is only ever a VICTIM of a demotion
-    something else caused. Bounding reads by this number bought that much
-    less exposure and cost far more: it cut ``get_children`` from the 15s it
-    is deliberately given to 6s, and turned wide-container canvas reads into
-    errors on exactly the graphs the wider budget exists for. Reads are
-    bounded by their own per-call budgets under the ASGI tier instead.
+    gets ``-UNBLOCKED``. A READ alone does not stop the main thread — but a
+    write to the SAME graph that arrives during a long read does: it waits
+    for the read lock holding the GIL (``QueryCtx_AcquireWriteLock``), and
+    froze a FalkorDB 4.20.6 master for 17.8 s, past the 15 s detector
+    (docs/RELEASE_NOTES_2026-10-01_falkordb-cluster-stability.md). Bounding
+    reads by this number is still the wrong answer: it cut ``get_children``
+    from the 15s it is deliberately given to 6s, and turned wide-container
+    canvas reads into errors on exactly the graphs the wider budget exists
+    for. The cluster overlay keeps long reads OFF masters instead
+    (``FALKORDB_MASTER_READ_SHARE`` 0, ``FALKORDB_REPLICA_READ_HOSTS``), and
+    reads stay bounded by their own per-call budgets under the ASGI tier.
 
     Three sources, most authoritative first: what a node REPORTED about
     itself, the ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` env mirror, and — when
@@ -3414,6 +3450,7 @@ class FalkorDBProvider(GraphDataProvider):
             await self._release_pinned_replicas()
             self._repl_sample = {}
             self._repl_vouched_at = {}
+            self._repl_master_seen = {}
 
             old_pool, old_proj_pool = self._pool, self._proj_pool
             old_db, old_proj_db = self._db, self._proj_db
@@ -3597,7 +3634,10 @@ class FalkorDBProvider(GraphDataProvider):
     #   3. this process has not written to the graph recently (the settle
     #      window) — a run must always see its own writes;
     #   4. the replica has not just failed us (a short penalty box).
-    # Any error from a replica re-issues the same read on the master once.
+    # A fault the REPLICA caused (a refused or dropped connection) re-issues
+    # the same read on the master once. A deadline benches the replica but is
+    # NOT re-run — the caller's budget went with it — and an error the master
+    # would repeat is not re-run either (``_replica_at_fault``).
 
     _replica_reads: int = 0
     _master_reads: int = 0
@@ -3705,6 +3745,9 @@ class FalkorDBProvider(GraphDataProvider):
         replicas = [n for n in candidates if self._replica_usable(n)]
         if not replicas:
             return None
+        # Every usable replica is vouched for, not only the allowlisted ones:
+        # the allowlist is a PREFERENCE (below), and the replica it passes
+        # over is the one that has to answer when the preferred one cannot.
         vouched = await self._vouched_replicas(graph_key, replicas, master=master)
         # Read-your-own-writes pins a graph this process just wrote to its
         # master — unless that master is the node that has stopped
@@ -3723,10 +3766,28 @@ class FalkorDBProvider(GraphDataProvider):
             return None
         # Round-robin so one replica does not take every read of a shard —
         # and, when the caller allows it, so the master's idle query threads
-        # take their share instead of only writes. On the shipped overlay
-        # (one replica per shard) that is the only doubling of read capacity
-        # available without more hardware: `replicas: 3` cannot schedule on
-        # the six-node pool the overlay's own README mandates.
+        # take their share instead of only writes.
+        #
+        # The production cluster (1 master + 2 replicas per shard, nine
+        # nodes) deliberately reads from ONE of them: FALKORDB_REPLICA_READ_HOSTS
+        # names ordinal -2 and FALKORDB_MASTER_READ_SHARE 0 takes the master
+        # out, so ordinal -1 is a no-read hot standby. That is a failover
+        # choice. Redis Cluster ranks an automatic failover's candidates by
+        # replication offset, so the replica nobody reads from — the one
+        # that is never stalled — is in step when it matters and wins. A
+        # read replica can be frozen outright: FalkorDB applies a replicated
+        # write (GRAPH.EFFECT) under the graph's write lock on the MAIN
+        # thread, so one write arriving during a 15 s read of the same graph
+        # stopped the whole node — PING, INFO, every graph — for ~14 s.
+        #
+        # A preference, not a filter. When no allowlisted replica is vouched
+        # (it is loading, syncing, behind, or benched after a timeout), the
+        # standby answers rather than the master: the same lock wait on a
+        # master holds the GIL and froze one for 17.8 s, past the 15 s
+        # failure detector, where on a replica it costs only lag.
+        if _REPLICA_READ_HOSTS is not None:
+            preferred = [n for n in vouched if _REPLICA_READ_HOSTS.search(str(n.host))]
+            vouched = preferred or vouched
         rotation: List[Any] = list(vouched)
         if include_master and _MASTER_READ_SHARE > 0:
             rotation.extend([None] * _MASTER_READ_SHARE)
@@ -3867,10 +3928,24 @@ class FalkorDBProvider(GraphDataProvider):
         moment a failover or a role swap happens, which is precisely when
         sending a read to the wrong node costs the most. A node's own
         ``INFO replication`` carries its CURRENT role, its link health,
-        whether it is mid-resync, and a lag computed from one snapshot
-        (``master_repl_offset - slave_repl_offset``), so there is no
-        cross-node skew and nothing to match: candidates and answers live in
-        the client's address space alone.
+        whether it is mid-resync, and its applied offset — but not its lag.
+        The ``master_repl_offset - slave_repl_offset`` it reports is 0 by
+        construction (Redis advances both as each command is applied; see
+        ``info_parse.replication_stats``): it read 0 on a replica its master
+        saw 31 MB behind, and this gate vouched for it. So the lag is the
+        MASTER's offset minus the replica's, and only when the replica's
+        ``replId`` is the master's ``replId`` or ``replId2`` — offsets from
+        two replication histories mean nothing together. The replication ID
+        is the join, so there is still nothing to match by address:
+        candidates and answers live in the client's address space alone.
+
+        The master's offset comes from this sample when it answered as a
+        master; otherwise from the last sample it did answer. That figure
+        only falls behind the master's real offset, so a lag measured
+        against it is a lower bound: past ``_REPLICA_VOUCH_MAX_AGE_S`` it
+        can still REFUSE a replica (over budget stays over budget) but no
+        longer admit one — an in-budget lag that old is UNKNOWN, and an
+        unknown lag never passes the strict gate.
 
         When the master is gone its replicas are the only copies of the
         graph still standing, so a link that is down stops disqualifying
@@ -3885,17 +3960,24 @@ class FalkorDBProvider(GraphDataProvider):
         vouched_at = getattr(self, "_repl_vouched_at", None)
         if vouched_at is None:
             vouched_at = self._repl_vouched_at = {}
+        # graph_key -> (monotonic, offset, replId, replId2) from the last
+        # sample the master answered AS a master: what a lag is measured
+        # against while it is replaying or gone.
+        master_seen = getattr(self, "_repl_master_seen", None)
+        if master_seen is None:
+            master_seen = self._repl_master_seen = {}
         now = time.monotonic()
         by_key = {f"{n.host}:{n.port}": n for n in candidates}
         cached = cache.get(graph_key)
         if cached is not None and now - cached[0] < _REPLICA_SAMPLE_S:
             return [by_key[k] for k in cached[1] if k in by_key]
 
-        # The master is asked too, and only so we know whether it is THERE.
-        # Inferring that from "no replica reports a live link" is too clever:
+        # The master is asked too: for the offset every replica's lag is
+        # measured against, and so we know whether it is THERE. Inferring
+        # the latter from "no replica reports a live link" is too clever:
         # one replica mid-resync gives the same signal as a dead master, and
         # relaxing then hands reads to a node that is deliberately not
-        # serving. One extra INFO per shard per window buys a fact.
+        # serving. One extra INFO per shard per window buys both facts.
         probes = [self._ask_node_role(n) for n in candidates]
         if master is not None:
             probes.append(
@@ -3943,6 +4025,42 @@ class FalkorDBProvider(GraphDataProvider):
         master_silent = master is not None and not master_timed_out and (
             not master_answered or master_loading
         )
+        # Only a node answering AS a master, and not replaying, has the
+        # offset its replicas owe. A loading or vanished master — or one
+        # answering as a replica behind a stale slot map — leaves the last
+        # one it gave. (A BUSY master never reaches this with replica answers
+        # in hand: its probe shares the sample's deadline, and the sample's
+        # fires first and takes every answer with it.)
+        if (
+            master_answered and not master_loading
+            and master_answer.get("role") == "master"
+            and isinstance(master_answer.get("replOffset"), int)
+        ):
+            reference = master_seen[graph_key] = (
+                now, master_answer["replOffset"],
+                master_answer.get("replId"), master_answer.get("replId2"),
+            )
+        else:
+            reference = master_seen.get(graph_key)
+
+        def _lag_of(answer: Dict[str, Any]) -> Optional[int]:
+            """Bytes this replica has still to apply, or None if unknowable."""
+            offset, repl_id = answer.get("replOffset"), answer.get("replId")
+            if reference is None or not isinstance(offset, int) or repl_id is None:
+                return None
+            if repl_id not in (reference[2], reference[3]):
+                return None                               # another history
+            lag = max(0, reference[1] - offset)
+            # The reference stops moving when the master does, so the lag
+            # measured against it only ever looks better with age: past the
+            # vouch ceiling "in step" is a claim it can no longer make. "Too
+            # far behind" it still can, however old — the master's offset
+            # only grows. Forgetting that is what vouched a replica known
+            # GiBs behind for the rest of an hour-long master load, the
+            # loading master re-stamping the vouch on every sample.
+            if lag <= _REPLICA_READ_MAX_LAG_BYTES and now - reference[0] > _REPLICA_VOUCH_MAX_AGE_S:
+                return None
+            return lag
 
         strict: List[str] = []
         alive_replicas: List[str] = []
@@ -3960,16 +4078,15 @@ class FalkorDBProvider(GraphDataProvider):
                 self._log_loading(key, answer)
                 continue
             link_up = answer.get("masterLinkStatus") == "up"
-            lag = answer.get("lagBytes")
-            within_budget = (
-                not isinstance(lag, int) or lag <= _REPLICA_READ_MAX_LAG_BYTES
-            )
+            lag = _lag_of(answer)
+            within_budget = lag is None or lag <= _REPLICA_READ_MAX_LAG_BYTES
             # A replica that was already far behind when its master died is
             # still a bad answer, so the relaxation below drops the LINK and
-            # SYNC requirements and keeps the lag one: a detached replica
-            # still reports the offsets its last snapshot knew, so the
-            # figure remains readable. Only an unknowable lag is waved
-            # through, and only once the master is gone.
+            # SYNC requirements and keeps the lag one wherever there is a
+            # lag to keep: the master's last answered offset against the
+            # offset the replica reports now (see ``_lag_of`` for its age).
+            # Only an unknowable lag is waved through (no such offset, or a
+            # replica on another history), and only once the master is gone.
             # It answered and is not replaying, so a NEXT replay on this
             # node is news again — pods get rotated more than once.
             self._clear_loading_note(key)
@@ -3978,7 +4095,7 @@ class FalkorDBProvider(GraphDataProvider):
             if (
                 link_up
                 and not answer.get("masterSyncInProgress")
-                and isinstance(lag, int)
+                and lag is not None
                 and lag <= _REPLICA_READ_MAX_LAG_BYTES
             ):
                 strict.append(key)
@@ -4001,9 +4118,9 @@ class FalkorDBProvider(GraphDataProvider):
         # miss is what left the relaxed set with no maximum age at all, so one
         # master that stayed unreachable froze its shard's lag verdict for as
         # long as it stayed gone. That verdict decays in a way the figures do
-        # not show — a detached replica goes on reporting the offsets from the
-        # moment it detached, so ``lagBytes`` stays readable and stops being
-        # true. The ceiling is the only thing that notices.
+        # not show — the master offset a lag is measured against stopped
+        # moving when the master did, so an in-budget lag stays computable
+        # and stops being true. The ceiling is the only thing that notices.
         if master_answered:
             vouched_at[graph_key] = now
         self._note_master_silent(graph_key, master_silent)
@@ -4695,12 +4812,14 @@ class FalkorDBProvider(GraphDataProvider):
     async def _read_query(self, graph_of, graph_key: str, cypher: str, params, t: float,
                           op: Optional[str], *, kind: str):
         # DELIBERATELY NOT clamped by the cluster window, unlike the write
-        # boundary. A read does not CAUSE a failover: FalkorDB dispatches
-        # GRAPH.* to a module thread pool and the main thread goes on
-        # answering the cluster bus, so a long read cannot make the other
-        # masters vote this one out. It can only be CAUGHT by a demotion
-        # something else caused, which is a far weaker reason — and the
-        # price of pre-empting it was failing reads whose budgets were
+        # boundary. A read alone does not stop the main thread, but a write
+        # to the same graph arriving during it does — on a master it waits
+        # for the read lock holding the GIL (17.8 s measured, past the 15 s
+        # detector), on a replica GRAPH.EFFECT waits on the main thread. So
+        # the cluster overlay keeps long reads off masters
+        # (FALKORDB_MASTER_READ_SHARE 0) and on one read replica per shard
+        # (FALKORDB_REPLICA_READ_HOSTS) rather than clamping them — the
+        # price of clamping was failing reads whose budgets were
         # chosen on purpose and are larger than the window's share:
         # get_children at 15s (wide containers legitimately exceed the
         # generic 5s default), get_stats' two full scans at 30s, and each

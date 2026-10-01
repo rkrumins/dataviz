@@ -1,0 +1,25 @@
+# Priority for the FalkorDB shard pods (priorityClassName in
+# falkordb-cluster-statefulsets.yaml).
+#
+# When a node runs short of memory or disk, the kubelet evicts by usage
+# over request FIRST, then by PRIORITY, then by usage — and node-pressure
+# eviction ignores PodDisruptionBudgets. Priority is that second key: it
+# decides a shard pod against anything else on its node that is equally
+# within (or over) its request, and an evicted shard pod costs an hour-long
+# reload and a full resync. 1000000 ranks above every unclassed pod
+# (priority 0) and far below system-node-critical / system-cluster-critical,
+# so the node's own agents still outrank it.
+#
+# PreemptLowerPriority: a shard pod rescheduled after losing its node may
+# displace a lower-priority pod on the pool rather than sit Pending.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: falkordb-cluster
+  labels:
+    app.kubernetes.io/name: falkordb-cluster
+    app.kubernetes.io/component: graph-database
+value: 1000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "FalkorDB cluster shard pods: evicted after unclassed pods under node pressure, below system-*-critical."

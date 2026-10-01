@@ -56,11 +56,16 @@ REPLICAS_OF = {
 }
 
 
+#: The replication ID every fake master runs and its replicas follow.
+REPLID = "8b5f0c2d1e3a4b6c7d8e9f0a1b2c3d4e5f6a7b8c"
+
+
 def _master_info(endpoint, *, used=10 * GB, maxmemory=40 * GB, replicas=(),
                  offset=1000, run_id=None, sync_full=0):
     info = {
         "role": "master", "connected_slaves": len(replicas),
         "master_repl_offset": offset,
+        "master_replid": REPLID, "master_replid2": "0" * 40,
         "used_memory": used, "used_memory_rss": used, "used_memory_peak": used,
         "maxmemory": maxmemory, "maxmemory_policy": "noeviction",
         "mem_fragmentation_ratio": 1.1, "mem_clients_slaves": 1024,
@@ -80,11 +85,15 @@ def _master_info(endpoint, *, used=10 * GB, maxmemory=40 * GB, replicas=(),
 
 
 def _replica_info(endpoint, master, *, lag=0, link="up", used=9 * GB, run_id=None):
+    """A replica's own INFO, as Redis writes it: its APPLIED offset twice
+    (``master_repl_offset`` == ``slave_repl_offset``), so ``lag`` behind a
+    master at offset 1000 is visible only against the master's reading."""
     host, _, port = master.rpartition(":")
     return {
         "role": "slave", "master_host": host, "master_port": port,
         "master_link_status": link, "master_sync_in_progress": 0,
-        "master_repl_offset": 1000, "slave_repl_offset": 1000 - lag,
+        "master_replid": REPLID, "master_replid2": "0" * 40,
+        "master_repl_offset": 1000 - lag, "slave_repl_offset": 1000 - lag,
         "master_last_io_seconds_ago": 0,
         "used_memory": used, "maxmemory": 40 * GB, "maxmemory_policy": "noeviction",
         "redis_version": "7.2.0", "uptime_in_seconds": 100_000,
@@ -462,9 +471,16 @@ def test_info_replication_gives_lag_per_replica_and_on_the_replica():
     ))
     assert master["role"] == "master" and master["connectedReplicas"] == 2
     assert [r["lagBytes"] for r in master["replicas"]] == [2048, 0]
+    assert master["replOffset"] == 1000
+    assert (master["replId"], master["replId2"]) == (REPLID, "0" * 40)
     replica = info_parse.replication_stats(_replica_info("r", "10.0.0.1:6379", lag=4096))
-    assert replica["role"] == "replica" and replica["lagBytes"] == 4096
+    assert replica["role"] == "replica"
     assert replica["masterEndpoint"] == "10.0.0.1:6379"
+    # 4096 bytes behind, and its OWN reading cannot say so: Redis advances
+    # both offsets it subtracts together (0 measured on a replica its master
+    # saw 31 MB behind). What it can give is the two halves of the real lag.
+    assert replica["lagBytes"] == 0
+    assert replica["replOffset"] == 1000 - 4096 and replica["replId"] == REPLID
 
 
 def test_replica_output_buffer_and_sizes_are_read_from_config():
@@ -848,6 +864,26 @@ def test_a_lagging_or_disconnected_replica_is_named(monkeypatch):
     # MiB, not MB: the figure divides by 1024 and is measured against a
     # power-of-two buffer limit, and the capacity card spells it the same way.
     assert "10.0.0.4:6379" in behind.text and "200.0 MiB" in behind.text
+
+
+def test_a_replicas_lag_is_measured_against_its_master_not_itself(monkeypatch):
+    """A replica's own INFO says 0 bytes behind whatever the truth, so the
+    page took it at its word. The figure is the master's offset minus the
+    replica's — and only on one replication history: a replica following
+    another stream has a lag nobody can state, which is not the same as 0."""
+    nodes = _cluster_nodes({})
+    nodes["10.0.0.4:6379"]["info"] = _replica_info(
+        "10.0.0.4:6379", MASTERS[0], lag=300 * 1024 ** 2)
+    nodes["10.0.0.5:6379"]["info"] = {
+        **_replica_info("10.0.0.5:6379", MASTERS[0], lag=300 * 1024 ** 2),
+        "master_replid": "f" * 40,
+    }
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    shard = _run(topology.get_topology_snapshot()).instances[0].shards[0]
+    lag = {r.endpoint: r.replication.lag_bytes for r in shard.replicas}
+    assert lag == {"10.0.0.4:6379": 300 * 1024 ** 2, "10.0.0.5:6379": None}
+    assert shard.replication.max_lag_bytes == 300 * 1024 ** 2
 
 
 def test_a_failover_in_flight_keeps_the_shard_and_says_what_disagrees(monkeypatch):

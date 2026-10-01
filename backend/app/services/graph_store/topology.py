@@ -1026,6 +1026,33 @@ def _remember(node: GraphStoreNode, prev: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _lag_from_master(read: Dict[str, Any], master_read: Dict[str, Any]) -> Dict[str, Any]:
+    """A replica's reading with ``lagBytes`` measured against its MASTER.
+
+    The replica's own figure is 0 by construction — Redis advances both
+    offsets it subtracts as each command is applied (see
+    ``info_parse.replication_stats``) — so this page said "0 B behind" for
+    a replica its master saw 31 MB behind. The lag is the master's offset
+    minus the replica's, on one replication history only (the replica's
+    ``replId`` is the master's ``replId`` or ``replId2``); anything else is
+    not said (None), never 0. Same rule as the read router's.
+    """
+    mine, theirs = read.get("replication"), master_read.get("replication") or {}
+    if not mine:
+        return read
+    lag = None
+    if (
+        master_read.get("status") == "up" and theirs.get("role") == "master"
+        and mine.get("role") == "replica"
+        and isinstance(theirs.get("replOffset"), int)
+        and isinstance(mine.get("replOffset"), int)
+        and mine.get("replId") is not None
+        and mine.get("replId") in (theirs.get("replId"), theirs.get("replId2"))
+    ):
+        lag = max(0, theirs["replOffset"] - mine["replOffset"])
+    return {**read, "replication": {**mine, "lagBytes": lag}}
+
+
 def _assemble_nodes(
     idx: int, slot: _Pending, raw: RawTopology,
     reads: Dict[Tuple[int, str], Dict[str, Any]],
@@ -1036,9 +1063,12 @@ def _assemble_nodes(
     graphs an instance is expected to hold follow from that list."""
     shards: List[GraphStoreShard] = []
     for index, (raw_master, raw_replicas) in enumerate(raw.shards):
-        master = _node_from_read(raw_master, reads[(idx, _read_key(raw_master))], previous)
+        master_read = reads[(idx, _read_key(raw_master))]
+        master = _node_from_read(raw_master, master_read, previous)
         replicas = [
-            _node_from_read(r, reads[(idx, _read_key(r))], previous) for r in raw_replicas
+            _node_from_read(r, _lag_from_master(reads[(idx, _read_key(r))], master_read),
+                            previous)
+            for r in raw_replicas
         ]
         shards.append(GraphStoreShard(
             index=index,

@@ -14,6 +14,13 @@ TAG          ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "latest")
 OVERLAY      ?= dev
 REPO_ROOT    := $(shell cd ../.. && pwd)
 
+# The production-cluster overlay pins its shard StatefulSets + init Job to this
+# tag. Deliberately NOT $(TAG): `apply` rewrites :prod-latest to the per-commit
+# tag, so every app deploy changed the shard pod template and replaced every
+# shard pod (restartCount 0, then a full reload). Bump it — and run
+# build/push-falkordb-cluster — only when the FalkorDB image itself changes.
+FALKORDB_CLUSTER_TAG ?= v4.20.6-1
+
 # The ONLY placeholders `apply` substitutes into the rendered manifests. Scoped on
 # purpose: a bare `envsubst` also rewrites every $VAR / ${VAR} inside the shell
 # scripts embedded in manifests (the cluster-init Job, the DR backup CronJob),
@@ -29,7 +36,8 @@ ENVSUBST_VARS := '$$DB_HOST $$REDIS_COORD_HOST $$REDIS_CACHE_HOST $$POSTGRES_PAS
 
 .PHONY: help build push deploy apply dry-run status seed \
         build-viz build-controlplane build-worker build-stats build-frontend build-falkordb build-seed \
-        push-viz push-controlplane push-worker push-stats push-frontend push-falkordb push-seed
+        push-viz push-controlplane push-worker push-stats push-frontend push-falkordb push-seed \
+        build-falkordb-cluster push-falkordb-cluster
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -60,6 +68,11 @@ build-seed: ## Build seed job image
 
 build: build-viz build-controlplane build-worker build-stats build-frontend build-falkordb build-seed ## Build all images
 
+# Kept OUT of build/push: the pinned tag is rebuilt only on purpose (see
+# FALKORDB_CLUSTER_TAG), never as a side effect of an app deploy.
+build-falkordb-cluster: ## Build the FalkorDB image pinned by production-cluster (FALKORDB_CLUSTER_TAG)
+	docker build -t $(REGISTRY)/falkordb:$(FALKORDB_CLUSTER_TAG) -f $(REPO_ROOT)/data/quickstart/Dockerfile.falkordb $(REPO_ROOT)/data/quickstart
+
 # ── Push ───────────────────────────────────────────────────────────
 
 push-viz: ## Push viz-service image
@@ -84,6 +97,9 @@ push-seed: ## Push seed image
 	docker push $(REGISTRY)/seed:$(TAG)
 
 push: push-viz push-controlplane push-worker push-stats push-frontend push-falkordb push-seed ## Push all images
+
+push-falkordb-cluster: ## Push the FalkorDB image pinned by production-cluster (FALKORDB_CLUSTER_TAG)
+	docker push $(REGISTRY)/falkordb:$(FALKORDB_CLUSTER_TAG)
 
 # ── Deploy ─────────────────────────────────────────────────────────
 

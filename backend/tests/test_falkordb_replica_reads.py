@@ -15,6 +15,7 @@ is a correctness bug that looks like a caching bug.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import types
 
@@ -45,6 +46,14 @@ MASTER = _Node("10.0.0.1")
 R1 = _Node("10.0.1.1")
 R2 = _Node("10.0.2.1")
 
+#: The replication ID the fake master runs and its replicas follow. A real
+#: node reports it as ``master_replid``, and it is what makes a replica's
+#: offset comparable with its master's at all.
+REPLID = "8b5f0c2d1e3a4b6c7d8e9f0a1b2c3d4e5f6a7b8c"
+#: ``master_replid2`` on a node whose history has not changed since it
+#: started.
+NO_REPLID = "0" * 40
+
 
 class _Conn:
     """A cluster connection whose slot map has one master and two replicas."""
@@ -54,11 +63,17 @@ class _Conn:
             slots_cache={7: [MASTER, *replicas]},
             get_node_from_slot=lambda slot: MASTER,
         )
-        self._info = info if info is not None else {
-            "role": "master", "connected_slaves": 2, "master_repl_offset": 100,
-            "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online", "offset": 100, "lag": 0},
-            "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 100, "lag": 0},
-        }
+        # A real master always reports both replication IDs; the tests that
+        # pass their own reading are about offsets and links, not histories.
+        self._info = {"master_replid": REPLID, "master_replid2": NO_REPLID, **(
+            info if info is not None else {
+                "role": "master", "connected_slaves": 2, "master_repl_offset": 100,
+                "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online",
+                           "offset": 100, "lag": 0},
+                "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online",
+                           "offset": 100, "lag": 0},
+            }
+        )}
         self.calls = []
 
     def keyslot(self, key):
@@ -68,15 +83,23 @@ class _Conn:
         return None
 
     def _self_report(self, node):
-        """What one replica says about ITSELF, derived from what the master
-        observes about it — which is how a healthy pair actually agrees.
+        """What one replica says about ITSELF, as a real Redis replica says it.
 
-        The router asks every candidate directly now (see
-        ``_vouched_replicas``), so a fake that answered the master's INFO
-        whatever was addressed would have every replica claim to be the
-        master. The translation is the honest one: ``state: online`` means
-        the link is up, ``wait_bgsave`` means a full resync is in flight,
-        and the offsets carry across so ``lagBytes`` comes out identical.
+        The router asks every candidate directly (see ``_vouched_replicas``),
+        so a fake that answered the master's INFO whatever was addressed
+        would have every replica claim to be the master. ``state: online``
+        means the link is up and ``wait_bgsave`` that a full resync is in
+        flight. The offsets do NOT carry across as a lag: a replica reports
+        its own APPLIED offset as both ``master_repl_offset`` and
+        ``slave_repl_offset`` (Redis advances them together — measured on
+        8.6.3), so its self-computed lag is 0 however far behind it is. It
+        follows its master's replication ID, and only the MASTER's offset
+        says how far behind it is.
+
+        This fake used to copy the master's ``master_repl_offset`` into the
+        replica's report — semantics no real replica produces, and the
+        reason the router's lag gate passed its tests while vouching for
+        replicas 31 MB behind.
         """
         entry = None
         for key, value in self._info.items():
@@ -95,11 +118,11 @@ class _Conn:
             "role": "slave",
             "master_link_status": "up" if state == "online" else "down",
             "master_sync_in_progress": 1 if state == "wait_bgsave" else 0,
+            "master_replid": self._info.get("master_replid"),
+            "master_replid2": NO_REPLID,
         }
-        if self._info.get("master_repl_offset") is not None:
-            report["master_repl_offset"] = self._info["master_repl_offset"]
         if entry.get("offset") is not None:
-            report["slave_repl_offset"] = entry["offset"]
+            report["master_repl_offset"] = report["slave_repl_offset"] = entry["offset"]
         return report
 
     async def execute_command(self, command, *args, target_nodes=None):
@@ -264,8 +287,9 @@ def _deaf_master(conn):
     Only the MASTER goes quiet. Its replicas are the copies still standing,
     which is the whole point of the case, so they keep answering — and what
     they say about themselves is that their link is down, because it is.
-    They still carry the offsets from their last snapshot, so how far behind
-    each one was remains readable.
+    They still report the offset they had applied, and the router keeps the
+    master's last answered offset for the vouch's maximum age, so how far
+    behind each one was remains measurable.
     """
     async def _refuse(command, *args, target_nodes=None):
         conn.calls.append((command, args, target_nodes))
@@ -367,8 +391,9 @@ def test_replication_is_sampled_not_asked_per_read():
     on it — otherwise the routing costs more than it saves.
 
     The round is now one INFO per NODE (each node is asked about itself,
-    which is what removed the address matching) plus one for the master, to
-    know whether it is there. On the shipped one-replica-per-shard topology
+    which is what removed the address matching) plus one for the master —
+    for the offset every lag is measured against, and to know whether it is
+    there. On the shipped one-replica-per-shard topology
     that is two calls per 5s window; it is still bounded by the window and
     not by the read rate, which is the property that matters."""
     conn = _Conn()
@@ -549,44 +574,70 @@ def test_the_counters_say_how_reads_were_served():
 # exactly when routing a read to the wrong node matters most.
 #
 # So each candidate is asked about ITSELF. A node's own INFO replication
-# carries its current role, its link health, whether it is mid-resync, and
-# a lag computed from ONE snapshot (master_repl_offset - slave_repl_offset)
-# — so there is no cross-node skew and, crucially, nothing to match: the
-# candidates and the answer live in the client's address space alone.
+# carries its current role, its link health, whether it is mid-resync and
+# its applied offset — nothing to match by address: the candidates and the
+# answers live in the client's address space alone.
+#
+# What it does NOT carry is its lag. The router used to trust the replica's
+# own master_repl_offset - slave_repl_offset, which Redis advances together
+# as each command is applied: 0 on a replica its master saw 31 MB behind
+# (measured, Redis 8.6.3 + FalkorDB 4.20.6). The lag is the MASTER's offset
+# minus the replica's, joined by replication ID rather than by address.
 
 
 def _asking_provider(answers, *, replicas=(R1, R2)):
-    """A provider whose candidates answer INFO replication with ``answers``,
-    keyed by "host:port"."""
+    """A provider whose nodes answer INFO replication with ``answers``,
+    keyed by "host:port". A missing node refuses; an exception is raised;
+    a coroutine function is awaited (a node that takes its time)."""
     class _AskConn(_Conn):
         async def execute_command(self, command, *args, target_nodes=None):
             if command == "INFO":
                 key = f"{target_nodes.host}:{target_nodes.port}"
                 if key not in answers:
                     raise ConnectionError(f"{key} unreachable")
+                if isinstance(answers[key], BaseException):
+                    raise answers[key]
+                if callable(answers[key]):
+                    return await answers[key]()
                 return answers[key]
             return "OK"
 
     return _provider(_AskConn(replicas=replicas))
 
 
-def _replica_info(*, role="slave", link="up", syncing=0, master_off=1000, slave_off=1000):
+def _replica_info(*, role="slave", link="up", syncing=0, offset=1000, replid=REPLID):
+    """A replica's own INFO, as Redis writes it: its APPLIED offset twice."""
     return {
         "role": role,
         "master_link_status": link,
         "master_sync_in_progress": syncing,
-        "master_repl_offset": master_off,
-        "slave_repl_offset": slave_off,
+        "master_replid": replid,
+        "master_replid2": NO_REPLID,
+        "master_repl_offset": offset,
+        "slave_repl_offset": offset,
     }
+
+
+def _master_answer(*, offset=1000, replid=REPLID, replid2=NO_REPLID):
+    return {
+        "role": "master", "connected_slaves": 2,
+        "master_replid": replid, "master_replid2": replid2,
+        "master_repl_offset": offset,
+    }
+
+
+def _names(nodes):
+    return {f"{n.host}:{n.port}" for n in nodes}
 
 
 def test_an_in_sync_replica_is_vouched_for_from_its_own_answer():
     p = _asking_provider({
+        "10.0.0.1:6379": _master_answer(),
         "10.0.1.1:6379": _replica_info(),
         "10.0.2.1:6379": _replica_info(),
     })
-    got = _run(p._vouched_replicas("g1", [R1, R2]))
-    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.1.1:6379", "10.0.2.1:6379"}
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert _names(got) == {"10.0.1.1:6379", "10.0.2.1:6379"}
 
 
 def test_a_promoted_replica_is_never_read_from_as_a_replica():
@@ -594,11 +645,12 @@ def test_a_promoted_replica_is_never_read_from_as_a_replica():
     a node that is the master must not be taken for a replica — whatever a
     cached slot map or the old master's replica list still says."""
     p = _asking_provider({
+        "10.0.0.1:6379": _master_answer(),
         "10.0.1.1:6379": _replica_info(role="master"),   # promoted
         "10.0.2.1:6379": _replica_info(),
     })
-    got = _run(p._vouched_replicas("g1", [R1, R2]))
-    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert _names(got) == {"10.0.2.1:6379"}
 
 
 def test_a_replica_whose_link_is_down_is_not_vouched_for():
@@ -606,35 +658,190 @@ def test_a_replica_whose_link_is_down_is_not_vouched_for():
     replica knows whether its own link is up. An asymmetric partition was
     invisible to the master-side check."""
     p = _asking_provider({
+        "10.0.0.1:6379": _master_answer(),
         "10.0.1.1:6379": _replica_info(link="down"),
         "10.0.2.1:6379": _replica_info(),
     })
-    got = _run(p._vouched_replicas("g1", [R1, R2]))
-    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert _names(got) == {"10.0.2.1:6379"}
 
 
 def test_a_replica_mid_full_resync_is_not_vouched_for():
     p = _asking_provider({
+        "10.0.0.1:6379": _master_answer(),
         "10.0.1.1:6379": _replica_info(syncing=1),
         "10.0.2.1:6379": _replica_info(),
     })
-    got = _run(p._vouched_replicas("g1", [R1, R2]))
-    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert _names(got) == {"10.0.2.1:6379"}
 
 
 def test_a_replica_too_far_behind_is_not_vouched_for():
     p = _asking_provider({
-        "10.0.1.1:6379": _replica_info(master_off=10 ** 12, slave_off=0),
-        "10.0.2.1:6379": _replica_info(),
+        "10.0.0.1:6379": _master_answer(offset=10 ** 12),
+        "10.0.1.1:6379": _replica_info(offset=0),
+        "10.0.2.1:6379": _replica_info(offset=10 ** 12),
     })
-    got = _run(p._vouched_replicas("g1", [R1, R2]))
-    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert _names(got) == {"10.0.2.1:6379"}
 
 
 def test_an_unreachable_candidate_is_skipped_not_fatal():
-    p = _asking_provider({"10.0.2.1:6379": _replica_info()})   # R1 absent
-    got = _run(p._vouched_replicas("g1", [R1, R2]))
-    assert {f"{n.host}:{n.port}" for n in got} == {"10.0.2.1:6379"}
+    p = _asking_provider({
+        "10.0.0.1:6379": _master_answer(),
+        "10.0.2.1:6379": _replica_info(),                   # R1 absent
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert _names(got) == {"10.0.2.1:6379"}
+
+
+# ── the lag is the master's offset minus the replica's ──────────────────
+
+GiB = 1024 ** 3
+
+
+def test_a_replica_reporting_no_lag_of_its_own_is_measured_against_its_master():
+    """The regression. Both replicas say, about themselves, that they are 0
+    bytes behind — every real replica does. One of them is 4 GiB behind its
+    master, the backlog the production shard actually carried, and it must
+    not answer a read."""
+    from backend.app.services.graph_store import info_parse
+
+    behind = _replica_info(offset=1000)
+    assert info_parse.replication_stats(behind)["lagBytes"] == 0   # its own figure
+    p = _asking_provider({
+        "10.0.0.1:6379": _master_answer(offset=4 * GiB + 1000),
+        "10.0.1.1:6379": behind,
+        "10.0.2.1:6379": _replica_info(offset=4 * GiB + 1000),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert _names(got) == {"10.0.2.1:6379"}
+
+
+def test_a_replica_on_another_replication_history_is_not_vouched_for():
+    """Offsets from two histories are two unrelated counters: an equal number
+    means nothing. A replica still following a different master's stream —
+    mid-failover, or re-pointed — has no measurable lag, and an unknown lag
+    is never in step."""
+    p = _asking_provider({
+        "10.0.0.1:6379": _master_answer(offset=1000),
+        "10.0.1.1:6379": _replica_info(offset=1000, replid="f" * 40),
+        "10.0.2.1:6379": _replica_info(offset=1000),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert _names(got) == {"10.0.2.1:6379"}
+
+
+def test_a_replica_still_on_its_masters_previous_history_is_measured():
+    """After a failover the promoted master runs a NEW replication ID and
+    keeps the old one as ``master_replid2``; the offsets carry straight on.
+    A replica that has not yet adopted the new ID is on that continuous
+    history, so its lag is real and is gated like any other."""
+    old, new = REPLID, "1" * 40
+    p = _asking_provider({
+        "10.0.0.1:6379": _master_answer(offset=200 * 1024 ** 2, replid=new, replid2=old),
+        "10.0.1.1:6379": _replica_info(offset=200 * 1024 ** 2, replid=old),
+        "10.0.2.1:6379": _replica_info(offset=100 * 1024 ** 2, replid=old),
+    })
+    got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+    assert _names(got) == {"10.0.1.1:6379"}
+
+
+def test_a_busy_master_keeps_its_reads(monkeypatch):
+    """A master that took the connection and did not answer in time is BUSY,
+    not gone: no relaxation, and nothing vouched — with or without an offset
+    of its on record. Its probe and the whole sample share one deadline, and
+    the sample's fires first, so the replicas' own answers go with it (live,
+    Redis 8.6.3: a master frozen 4 s by a Lua loop left ``_replica_for`` None
+    after 3.0 s). A real client never raises a timeout early: the fake waits
+    past the deadline, as the master does."""
+    monkeypatch.setattr(fp, "_REPLICA_SAMPLE_TIMEOUT_S", 0.2)
+
+    async def _busy():
+        await asyncio.sleep(2)
+        return _master_answer(offset=100 * 1024 ** 2)
+
+    answers = {
+        "10.0.0.1:6379": _busy,
+        "10.0.1.1:6379": _replica_info(offset=100 * 1024 ** 2),
+        "10.0.2.1:6379": _replica_info(offset=100 * 1024 ** 2),
+    }
+    p = _asking_provider(answers)
+    assert _run(p._vouched_replicas("g1", [R1, R2], master=MASTER)) == []
+    assert not p._master_is_silent("g1")
+
+    answers["10.0.0.1:6379"] = _master_answer(offset=100 * 1024 ** 2)
+    p._repl_sample.clear()
+    assert len(_run(p._vouched_replicas("g1", [R1, R2], master=MASTER))) == 2
+    answers["10.0.0.1:6379"] = _busy                  # a fresh offset on record
+    p._repl_sample.clear()
+    assert _run(p._vouched_replicas("g1", [R1, R2], master=MASTER)) == []
+    assert _run(p._replica_for("g1")) is None
+    assert not p._master_is_silent("g1")
+
+
+def test_a_lag_measured_before_the_master_began_loading_still_counts():
+    """The master's offset only grows, so a lag measured against an old one
+    is a LOWER bound: too far behind stays too far behind however old the
+    figure. A loading master answers INFO and so renews the vouch on every
+    sample — the relaxed path stays open for the whole load, an hour on the
+    15 GB shard — and the replica known 4 GiB behind must stay out for all
+    of it, not for the reference's first 15 s."""
+    answers = {
+        "10.0.0.1:6379": _master_answer(offset=4 * GiB + 1000),
+        "10.0.1.1:6379": _replica_info(offset=1000),
+        "10.0.2.1:6379": _replica_info(offset=4 * GiB + 1000),
+    }
+    p = _asking_provider(answers)
+    assert _names(_run(p._vouched_replicas("g1", [R1, R2], master=MASTER))) == {
+        "10.0.2.1:6379"}
+    seen = p._repl_master_seen["g1"]
+
+    answers["10.0.0.1:6379"] = _loading_info(role="master")
+    answers["10.0.1.1:6379"] = _replica_info(offset=1000, link="down")
+    answers["10.0.2.1:6379"] = _replica_info(offset=4 * GiB + 1000, link="down")
+    for age in (0, fp._REPLICA_VOUCH_MAX_AGE_S + 1, 3600):
+        p._repl_master_seen["g1"] = (seen[0] - age, *seen[1:])
+        p._repl_sample.clear()
+        got = _run(p._vouched_replicas("g1", [R1, R2], master=MASTER))
+        # The in-step one too: past the ceiling its lag is unknown, which the
+        # relaxed path waves through — what keeps reads up while the master
+        # cannot serve.
+        assert _names(got) == {"10.0.2.1:6379"}, f"reference {age}s old"
+        assert p._master_is_silent("g1")
+
+
+def test_an_old_reference_no_longer_admits_on_the_strict_path():
+    """In step against a figure past the vouch's maximum age is not in step:
+    the master may have moved on since. Here the node in the master's slot
+    answers as a REPLICA — demoted behind a stale slot map — so it is there,
+    nothing relaxes, and its last master reading is all there is."""
+    answers = {
+        "10.0.0.1:6379": _master_answer(offset=100 * 1024 ** 2),
+        "10.0.1.1:6379": _replica_info(offset=100 * 1024 ** 2),
+        "10.0.2.1:6379": _replica_info(offset=100 * 1024 ** 2),
+    }
+    p = _asking_provider(answers)
+    assert len(_run(p._vouched_replicas("g1", [R1, R2], master=MASTER))) == 2
+
+    answers["10.0.0.1:6379"] = _replica_info(offset=100 * 1024 ** 2)
+    p._repl_sample.clear()
+    assert len(_run(p._vouched_replicas("g1", [R1, R2], master=MASTER))) == 2
+    at, *rest = p._repl_master_seen["g1"]
+    p._repl_master_seen["g1"] = (at - fp._REPLICA_VOUCH_MAX_AGE_S - 1, *rest)
+    p._repl_sample.clear()
+    assert _run(p._vouched_replicas("g1", [R1, R2], master=MASTER)) == []
+    assert not p._master_is_silent("g1")
+
+
+def test_a_failover_rebuild_forgets_the_old_masters_offset():
+    """A promoted node's offset is a different number on a different
+    history; the old master's must not be what the new replicas are
+    measured against."""
+    import inspect
+
+    src = inspect.getsource(FalkorDBProvider._rebuild_graph_client_for_failover)
+    assert "self._repl_master_seen = {}" in src
 
 
 def test_when_every_replica_has_lost_the_master_they_still_answer_reads():
@@ -725,6 +932,7 @@ def _loading_info(*, role="slave", pct=15.7, eta=2400):
 
 def test_a_loading_replica_is_never_vouched_for():
     p = _asking_provider({
+        "10.0.0.1:6379": _master_answer(),
         "10.0.1.1:6379": _loading_info(),
         "10.0.2.1:6379": _replica_info(),
     })
@@ -783,6 +991,7 @@ def test_a_node_that_finished_loading_is_vouched_for_again():
     """Nothing sticky: the next window asks again, and a node that finished
     its replay goes straight back into service."""
     answers = {
+        "10.0.0.1:6379": _master_answer(),
         "10.0.1.1:6379": _loading_info(),
         "10.0.2.1:6379": _replica_info(),
     }
@@ -854,12 +1063,13 @@ class _SentinelConn:
         if self._master_info is not None:
             return self._master_info
         info = {"role": "master", "connected_slaves": len(self._replicas),
-                "master_repl_offset": 500}
+                "master_replid": REPLID, "master_replid2": NO_REPLID,
+                "master_repl_offset": 1000}
         if self._loading:
             info["loading"] = 1
         for i, (ip, port) in enumerate(self._replicas):
             info[f"slave{i}"] = {"ip": ip, "port": str(port),
-                                 "state": "online", "offset": 500, "lag": 0}
+                                 "state": "online", "offset": 1000, "lag": 0}
         return info
 
 
@@ -1014,3 +1224,115 @@ def test_the_number_of_pinned_replica_clients_is_bounded(monkeypatch):
     )
     _run(p._replica_for("g1"))
     assert len(p._pinned_replicas) <= fp._MAX_PINNED_REPLICAS
+
+
+# ── FALKORDB_REPLICA_READ_HOSTS: one read replica, one standby ──────────
+#
+# Production runs 1 master + 2 replicas per shard and reads from ONE of
+# them. A replica serving reads can be frozen whole — FalkorDB applies a
+# replicated write under the graph's write lock on the MAIN thread, so one
+# write arriving during a 15 s read of that graph stopped PING, INFO and
+# every other graph for ~14 s — and Redis Cluster promotes the replica with
+# the best offset. The one nobody reads from is the one that is in step.
+
+READER = _Node("falkordb-shard-0-2.falkordb-cluster.synodic.svc.cluster.local")
+STANDBY = _Node("falkordb-shard-0-1.falkordb-cluster.synodic.svc.cluster.local")
+#: What the production-cluster overlay sets.
+_PRODUCTION_HOSTS = r"^falkordb-shard-[0-9]+-2\."
+
+
+def _hostname_provider():
+    conn_answers = {
+        "10.0.0.1:6379": _master_answer(),
+        f"{READER.host}:6379": _replica_info(),
+        f"{STANDBY.host}:6379": _replica_info(),
+    }
+    p = _asking_provider(conn_answers, replicas=(STANDBY, READER))
+    asked = []
+    inner = p._db.connection.execute_command
+
+    async def _recording(command, *args, target_nodes=None):
+        if command == "INFO":
+            asked.append(target_nodes)
+        return await inner(command, *args, target_nodes=target_nodes)
+
+    p._db.connection.execute_command = _recording
+    return p, asked
+
+
+def test_the_read_hosts_allowlist_keeps_reads_off_the_standby(monkeypatch):
+    monkeypatch.setattr(fp, "_REPLICA_READ_HOSTS",
+                        fp._compile_replica_read_hosts(_PRODUCTION_HOSTS))
+    p, asked = _hostname_provider()
+    served = [_run(p._replica_for("g1")) for _ in range(6)]
+    assert served == [READER] * 6
+    # A preference, not a filter: the standby is still asked about itself,
+    # because it is the one that answers when the read replica cannot.
+    assert STANDBY in asked
+
+
+def test_the_standby_answers_when_the_read_replica_is_behind(monkeypatch):
+    """Not the master. The lock wait that freezes a replica for a read's
+    remaining time holds the GIL on a master — 17.8 s measured, past the
+    15 s failure detector — so the in-step standby is the safer fallback."""
+    monkeypatch.setattr(fp, "_REPLICA_READ_HOSTS",
+                        fp._compile_replica_read_hosts(_PRODUCTION_HOSTS))
+    ahead = 10 ** 12
+    conn_answers = {
+        "10.0.0.1:6379": _master_answer(offset=ahead),
+        f"{READER.host}:6379": _replica_info(offset=1000),       # ~1 TB behind
+        f"{STANDBY.host}:6379": _replica_info(offset=ahead),
+    }
+    p = _asking_provider(conn_answers, replicas=(STANDBY, READER))
+    assert [_run(p._replica_for("g1")) for _ in range(4)] == [STANDBY] * 4
+
+
+def test_the_allowlist_unset_reads_from_every_in_step_replica(monkeypatch):
+    monkeypatch.setattr(fp, "_REPLICA_READ_HOSTS", fp._compile_replica_read_hosts(None))
+    assert fp._REPLICA_READ_HOSTS is None
+    p, _asked = _hostname_provider()
+    assert {_run(p._replica_for("g1")) for _ in range(4)} == {READER, STANDBY}
+    assert fp._compile_replica_read_hosts("  ") is None     # blank is unset
+
+
+def test_an_allowlist_no_replica_matches_reads_from_every_in_step_replica(monkeypatch):
+    monkeypatch.setattr(fp, "_REPLICA_READ_HOSTS", re.compile(r"^nothing-here\."))
+    p, _asked = _hostname_provider()
+    assert {_run(p._replica_for("g1")) for _ in range(4)} == {READER, STANDBY}
+
+
+def test_an_invalid_allowlist_is_warned_about_and_ignored(monkeypatch, caplog):
+    """Fail OPEN, loudly: a typo in one env var must not be what moves a
+    fleet's reads, nor what stops the provider importing."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        assert fp._compile_replica_read_hosts("^falkordb-shard-[0-9+-2") is None
+    assert "FALKORDB_REPLICA_READ_HOSTS" in caplog.text
+    monkeypatch.setattr(fp, "_REPLICA_READ_HOSTS", None)
+    p, _asked = _hostname_provider()
+    assert {_run(p._replica_for("g1")) for _ in range(4)} == {READER, STANDBY}
+
+
+def test_the_allowlist_is_read_from_the_environment_at_import():
+    """Read in a fresh interpreter: a module constant, and reloading the
+    provider in-process would hand every other test a second copy of its
+    classes."""
+    import os
+    import subprocess
+    import sys
+
+    def _imported(value):
+        env = {**os.environ, "FALKORDB_REPLICA_READ_HOSTS": value}
+        return subprocess.run(
+            [sys.executable, "-c",
+             "from backend.app.providers import falkordb_provider as fp;"
+             "h = fp._REPLICA_READ_HOSTS; print(h.pattern if h else None)"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(fp.__file__))) + "/../..",
+            env=env, capture_output=True, text=True, check=True,
+        )
+
+    assert _imported(_PRODUCTION_HOSTS).stdout.strip() == _PRODUCTION_HOSTS
+    broken = _imported("(")
+    assert broken.stdout.strip() == "None"
+    assert "not a valid regex" in broken.stderr

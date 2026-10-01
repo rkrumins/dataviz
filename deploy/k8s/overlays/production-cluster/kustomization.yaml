@@ -1,13 +1,14 @@
 # Production + FalkorDB Redis Cluster (INFRASTRUCTURE_LAUNCH_SCALE.md §7).
 #
 # Layers on the production overlay and swaps the single-replica FalkorDB
-# StatefulSet for the 3-shard × (master + replica) cluster on the dedicated
+# StatefulSet for the 3-shard × (master + 2 replicas) cluster on the dedicated
 # `falkordb-pool` node pool. Opt-in by design: rendering/deploying
 # `overlays/production` is unchanged; deploy THIS overlay to cut over.
 #
 # PREREQUISITES (see README.md in this directory):
-#   1. The tainted node pool exists:  falkordb-pool, 6 × n4-highmem-8,
-#      2 per zone, taint dedicated=falkordb:NoSchedule (doc §3).
+#   1. The tainted node pool exists:  falkordb-pool, 9 × n4-highmem-8,
+#      3 per zone (one node per shard pod), taint dedicated=falkordb:NoSchedule
+#      (doc §3).
 #   2. CACHE_REDIS_URL points at Memorystore (managed-data-tier patch) —
 #      cluster mode cannot host the provider cache (ADR-020 / doc §7.3).
 #   3. Cutover reseeds graphs from Cloud SQL (doc §7.4) — FalkorDB is a
@@ -22,6 +23,8 @@ resources:
   - resources/falkordb-cluster-statefulsets.yaml
   - resources/falkordb-cluster-pdb.yaml
   - resources/falkordb-cluster-init-job.yaml
+  - resources/falkordb-cluster-priority-class.yaml
+  - resources/falkordb-cluster-network-policy.yaml
 
 patches:
   # The 3-shard cluster replaces the single-node StatefulSet + Service.
@@ -47,4 +50,11 @@ patches:
 images:
   - name: REGISTRY/falkordb
     newName: us-docker.pkg.dev/PROJECT_ID/synodic/falkordb
-    newTag: prod-latest
+    # A pinned tag that none of the Makefile's seds (:prod-latest,
+    # :dev-latest, :staging-latest, :v1.0.0) rewrite, so an app deploy never
+    # changes the shard or init-Job templates. Under :prod-latest every
+    # `make deploy`/`apply` re-tagged them to the git sha — a new StatefulSet
+    # revision each time, every shard pod replaced (restartCount 0), and an
+    # apply that failed on the completed init Job. Bump it deliberately and
+    # roll the shards by hand (README).
+    newTag: v4.20.6-1

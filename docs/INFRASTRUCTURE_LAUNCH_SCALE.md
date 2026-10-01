@@ -67,10 +67,10 @@ flowchart TB
             VW["versioning-worker ×2 (HPA 2–4)<br/>projection engine"]
             ST["stats-service ×1–2"]
         end
-        subgraph fk["falkordb node pool — 6 × n4-highmem-8, tainted dedicated=falkordb"]
-            S0["StatefulSet falkordb-shard-0<br/>master + replica"]
-            S1["StatefulSet falkordb-shard-1<br/>master + replica"]
-            S2["StatefulSet falkordb-shard-2<br/>master + replica"]
+        subgraph fk["falkordb node pool — 9 × n4-highmem-8, tainted dedicated=falkordb"]
+            S0["StatefulSet falkordb-shard-0<br/>master + 2 replicas"]
+            S1["StatefulSet falkordb-shard-1<br/>master + 2 replicas"]
+            S2["StatefulSet falkordb-shard-2<br/>master + 2 replicas"]
         end
     end
     CSQL[("Cloud SQL PG16 — regional HA<br/>db-perf-optimized-N-16 · 1 TB<br/>+ read replica + cross-region DR")]
@@ -137,7 +137,7 @@ Provision **1 TB SSD** (≈27% utilized). The headroom is deliberate: Cloud SQL 
 | :--- | :--- |
 | Cluster | **Regional**, `us-central1` (a/b/c), **GKE Standard**, **Dataplane V2** (NetworkPolicy enforcement — required for the `NetworkPolicy` objects in `deploy/k8s/base/networking/` to actually apply), **Workload Identity** enabled |
 | App node pool | `app-pool`: **n4-standard-8** (8 vCPU / 32 GB), cluster-autoscaled **4–12** nodes, 3-zone balanced |
-| FalkorDB node pool | `falkordb-pool`: **6 × n4-highmem-8** (8 vCPU / 64 GB), 2 per zone, taint `dedicated=falkordb:NoSchedule`, one FalkorDB pod per node (hostname anti-affinity) |
+| FalkorDB node pool | `falkordb-pool`: **9 × n4-highmem-8** (8 vCPU / 64 GB), 3 per zone, taint `dedicated=falkordb:NoSchedule`, one FalkorDB pod per node (hostname anti-affinity) |
 | Ingress | GKE ingress (managed cert) → `frontend`; **HTTP/2 at the edge** so ~6-conn/host limits don't turn a few slow requests into an app-wide stall |
 | Deploy | `deploy/k8s/overlays/production` (kustomize) via `deploy.sh deploy production` — single reconciled manifest system |
 
@@ -308,9 +308,11 @@ FalkorDB is a Redis **module** — Memorystore cannot run it, so it lives on the
 
 ### 7.1 Shard topology
 
-**3 shards × (1 master + 1 replica) = 6 pods**, one StatefulSet per shard (`falkordb-shard-0/1/2`), zone-spread, one pod per node. Redis Cluster splits the 16,384 slots three ways; a graph key lives **entirely on one shard** (`keyslot(graph_name)` — the client discovers topology and follows `MOVED`). This is the minimum HA cluster: 3 masters (cluster requirement) each with a replica for < 1 s failover.
+**3 shards × (1 master + 2 replicas) = 9 pods**, one StatefulSet per shard (`falkordb-shard-0/1/2`), zone-spread (one pod of each shard per zone), one pod per node. Redis Cluster splits the 16,384 slots three ways; a graph key lives **entirely on one shard** (`keyslot(graph_name)` — the client discovers topology and follows `MOVED`).
 
-> For stricter zone-loss posture (a shard keeps a spare replica through a full zone outage), go **3 × 3 = 9 pods**. At this corpus (~45M live) 3×2 is the right cost/HA balance; the graphs are rebuildable, so a brief single-replica window after a zone loss is acceptable.
+- **Roles.** In each shard, ordinal `-2` is the **read replica**, the only node the app reads from. The other replica is a **no-read hot standby**: it never waits on a reader's graph lock, so it stays in step and wins the failover. Masters take no reads. A write arriving during a long read of the same graph freezes a FalkorDB node's main thread (measured 14 s on a replica and 17.8 s on a master), which on a master outlasts the 15 s node timeout.
+- **Failover time.** A planned hand-over (`CLUSTER FAILOVER`, run by each master's `preStop`) swaps roles in about a second. A crashed master is replaced only after `cluster-node-timeout` (15 s) plus an election.
+- **Evidence.** `RELEASE_NOTES_2026-10-01_falkordb-cluster-stability.md`.
 
 ### 7.2 Per-pod resources & Redis config (ConfigMap)
 
@@ -321,35 +323,43 @@ cluster-enabled yes
 cluster-node-timeout 15000            # a busy node is not a dead node; 5s started elections during heavy rebuilds
 cluster-require-full-coverage no      # a dead shard must not take down reads on the other two
 cluster-migration-barrier 1
-maxmemory 32gb                        # sized by the rule below, not by a share of the node
+cluster-allow-replica-migration no    # with 2 replicas per master, a replica must not re-home to another shard
+maxmemory 28gb                        # sized by the rule below, not by a share of the node
 maxmemory-policy noeviction           # Redis must never silently evict a graph key; eviction is the app's job (budgets below)
-appendonly yes
-appendfsync everysec
-save 3600 1                           # hourly RDB floor; the DR CronJob triggers explicit BGSAVE
-repl-backlog-size 1gb                 # the catch-up window; a rebuild fills 256mb in seconds and forces full resyncs
+appendonly no                         # RDB + PSYNC is the recovery path: an AOF restart can never resume by partial resync
+save 21600 1                          # six-hourly RDB floor; each save is a fork
+shutdown-on-sigterm save              # the RDB a restart resumes from by partial resync
+repl-backlog-size 4gb                 # the catch-up window; a rebuild fills 256mb in seconds and forces full resyncs
 repl-diskless-sync yes
 repl-timeout 300                      # a full resync of a large shard takes longer than a minute
-client-output-buffer-limit replica 2gb 1gb 300   # overflow drops the replica and forces a full resync under the same load
+client-output-buffer-limit replica 4gb 0 0   # overflow drops the replica and forces a full resync under the same load; no soft limit
+replica-full-sync-buffer-limit 4gb    # what a LOADING replica may buffer of the live stream
 ```
 
-FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  OMP_THREAD_COUNT 1  CACHE_SIZE 40  QUERY_MEM_CAPACITY 1073741824  TIMEOUT_MAX 120000  TIMEOUT_DEFAULT 30000  MAX_QUEUED_QUERIES 150  EFFECTS_THRESHOLD 0`.
+The data directory is the PVC: env `FALKORDB_DATA_PATH=/data`. The image's `run.sh` passes `--dir "$FALKORDB_DATA_PATH"` after the Redis args, so a `dir` above would be ignored.
 
-- `THREAD_COUNT 6` (of 8) reserves cores for Redis I/O, AOF rewrite and replication; `OMP_THREAD_COUNT 1` stops one query spawning a thread per core inside the engine.
+FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  OMP_THREAD_COUNT 1  CACHE_SIZE 40  QUERY_MEM_CAPACITY 1073741824  TIMEOUT_MAX 120000  TIMEOUT_DEFAULT 30000  MAX_QUEUED_QUERIES 150  EFFECTS_THRESHOLD 0  VKEY_MAX_ENTITY_COUNT 100000000  DELAY_INDEXING yes`.
+
+- `THREAD_COUNT 6` (of 8) reserves cores for Redis I/O, the RDB fork and replication; `OMP_THREAD_COUNT 1` stops one query spawning a thread per core inside the engine.
 - **The memory numbers come from the sizing rule, not from a share of the node.** Every term below is charged inside the SAME 56 GiB container limit — replication included:
 
   | Term | Figure | GiB |
   | :--- | :--- | ---: |
-  | Dataset | `1.25 × 32gb` | 40.0 |
+  | Dataset | `1.25 × 28gb` | 35.0 |
   | Query memory | `6 × 1.3 × 1gb` | 7.8 |
-  | Replication backlog | `repl-backlog-size 1gb` | 1.0 |
-  | Replica output buffers | `2 replicas × 2gb hard` | 4.0 |
-  | Server overhead | instance ≥ 32 GiB | 1.0 |
-  | **Needed** | | **53.8** |
+  | Replication backlog | `repl-backlog-size 4gb` | 4.0 |
+  | Replica output buffers | `2 replicas × 4gb hard` | 8.0 |
+  | Server overhead | instance < 32 GiB | 0.25 |
+  | **Needed** | | **55.05** |
 
-  Two pairings that do **not** fit: `maxmemory 40gb` with a 2 GiB per-query ceiling needs **66.6 GiB** even ignoring replication (these were the shipped values before this was checked, so a shard under load could be OOM-killed while every figure inside Redis looked healthy); and a 1.5 GiB ceiling needs **57.7 GiB** once the replication buffers are counted. Raising replication buffers is a memory decision, not only a durability one. Check what each shard currently holds before lowering `maxmemory`. Full rule and worked examples: `FALKORDB_DEPLOYMENT.md` § *Sizing: the ceilings share ONE budget*.
+  The 4 GiB buffers cost 4 GiB of `maxmemory`: at `32gb` they need 60.8 GiB. Other pairings that do **not** fit: `maxmemory 40gb` with a 2 GiB per-query ceiling needs **66.6 GiB** even ignoring replication (these were the shipped values before this was checked, so a shard under load could be OOM-killed while every figure inside Redis looked healthy); and, at the old `32gb` with 1 GiB / 2 × 2 GiB buffers, a 1.5 GiB ceiling needed **57.7 GiB** once the replication buffers were counted. Raising replication buffers is a memory decision, not only a durability one. Check what each shard currently holds before lowering `maxmemory`. Full rule and worked examples: `FALKORDB_DEPLOYMENT.md` § *Sizing: the ceilings share ONE budget*.
 - `EFFECTS_THRESHOLD 0` makes writes replicate as a compact change log instead of being **re-run on each replica's main thread** — the mechanism that took whole shards down during rebuilds (`FALKORDB_DEPLOYMENT.md` §5aa).
 
-PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 8× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. Liveness `initialDelaySeconds: 60` with `timeoutSeconds: 10` and `failureThreshold: 6` — a node busy applying replication is not a dead process, and the readiness probe already takes it out of rotation.
+PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 9× `maxmemory`, room for the RDB, a full sync's temp file beside it, and headroom.
+
+- `terminationGracePeriodSeconds: 300`: the `preStop` hand-over (`CLUSTER FAILOVER` to the no-read standby, or to `-2` only when no standby is online), then the shutdown RDB save.
+- A `startupProbe` (10 s × 60) gates liveness, which then allows `timeoutSeconds: 10` × `failureThreshold: 18`. A node frozen behind a long read, or loading, is not a dead process.
+- The readiness probe takes it out of rotation, and on a replica it also requires `master_link_status:up`.
 
 ### 7.3 Mandatory application settings in cluster mode
 
@@ -406,7 +416,7 @@ Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monito
 Phased; each gate verifiable before the next.
 
 1. **Cluster + managed data** → GKE regional (Dataplane V2, Workload Identity), Cloud SQL HA instance + pooler + read replica, both Memorystore instances. *Gate: `deploy.sh deploy production` renders and applies; all pods healthy; per-role `resolve_redis_config` validation (WS2.1) passes for both `STREAMS` and `CACHE` in every deployed role.*
-2. **FalkorDB cluster** → tainted node pool, 3 StatefulSets, bootstrap Job, DR CronJob. *Gate: kill a pod and a zone's pods in staging — failover < 1 s, no read errors, `cluster_state: ok`.*
+2. **FalkorDB cluster** → tainted node pool, 3 StatefulSets, bootstrap Job, DR CronJob. *Gate: delete a master pod and a zone's pods in staging — a planned delete hands over in about a second, a lost master is replaced after `cluster-node-timeout` (15 s) plus an election, reads hold through it with a retry hint, `cluster_state: ok`.*
 3. **Connection-budget validation** → load the per-role pool overrides + pooler. *Gate: at 800 req/s synthetic, server-side connections ≤ 70%, zero pool-wait timeouts.*
 4. **Projection under load** → seed the ~300-graph / ~3,000-view corpus; drive concurrent edits + imports. *Gate: projection watermark lag stays within SLO while a bulk import runs; §1.1 read latencies hold at ≤ 65% shard memory.*
 5. **DR drill** → promote the cross-region Cloud SQL replica, reseed hot FalkorDB graphs from it. *Gate: measured RTO within §8.*

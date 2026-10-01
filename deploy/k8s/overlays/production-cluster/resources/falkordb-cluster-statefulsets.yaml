@@ -1,19 +1,31 @@
-# FalkorDB Redis Cluster — 3 shards × (1 master + 1 replica) = 6 pods,
+# FalkorDB Redis Cluster — 3 shards × (1 master + 2 replicas) = 9 pods,
 # one StatefulSet per shard (INFRASTRUCTURE_LAUNCH_SCALE.md §7.1/§7.2).
 # The three docs below are identical except for the shard name.
 #
+# Roles: ordinal -2 is each shard's READ replica — the only node the app
+# sends replica reads to (FALKORDB_REPLICA_READ_HOSTS, patches/
+# cluster-config.yaml). The other replica takes no reads: a hot standby
+# whose main thread never waits on a long read's graph lock, so it stays
+# in step with the master and is the one that wins a failover.
+#
 # Placement: dedicated tainted pool (falkordb-pool, n4-highmem-8), ONE pod
 # per node (hostname anti-affinity across all cluster pods), and each
-# shard's master/replica pair forced into different zones (per-shard zone
-# spread) so a zone loss costs at most one side of each pair.
+# shard's three pods spread one per zone (per-shard zone spread) so a zone
+# loss costs at most one pod of each shard.
 #
-# Redis config is doc §7.2 verbatim. Two additions the doc implies but
-# k8s makes explicit:
+# Redis config is doc §7.2 with these departures, which k8s or the
+# incidents made explicit:
 #   - cluster-announce-hostname + preferred-endpoint-type hostname:
 #     gossip/MOVED carry the stable per-pod DNS name (see the headless
 #     Service) instead of a pod IP that dies with every reschedule.
-#   - aof-load-truncated yes: same crash-recovery stance as the base
-#     single-instance StatefulSet.
+#   - Crash recovery is RDB + PSYNC, NOT the base single-instance
+#     StatefulSet's AOF: a restarted node reloads the RDB its shutdown wrote
+#     and resumes replication from the master's backlog instead of a full
+#     resync (PERSISTENCE, in the env below).
+#   - FALKORDB_DATA_PATH=/data puts that RDB on the PVC at all — before it,
+#     only nodes.conf did (see the env entry).
+#   - updateStrategy OnDelete: an apply never restarts a shard pod; shards
+#     are rolled role-aware by hand (README).
 # cluster-require-full-coverage no = a dead shard must not take down
 # reads on the other two (the whole point of this exercise).
 apiVersion: apps/v1
@@ -27,7 +39,21 @@ metadata:
     app.kubernetes.io/component: graph-database
 spec:
   serviceName: falkordb-cluster
-  replicas: 2
+  # 1 master + 2 replicas: -2 serves reads, the other is the standby.
+  replicas: 3
+  # OrderedReady will not (re)create a missing -2 while -0 is NotReady, and
+  # a shard pod loading its RDB is NotReady for up to an hour — so one slow
+  # load also kept the shard a replica short. IMMUTABLE on a live
+  # StatefulSet: changing it is the README's orphan-delete + re-apply step
+  # (the pods are adopted, not restarted).
+  podManagementPolicy: Parallel
+  # A template change (image bump, args) never restarts a shard pod: each
+  # pod takes the new revision only when it is deleted, which the README's
+  # role-aware roll does replica-first, one pod at a time. Caveat: a pod the
+  # kubelet EVICTS (phase Failed) is recreated by the controller at the NEW
+  # revision — roll promptly after applying a template change.
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: falkordb-shard-0
@@ -39,8 +65,13 @@ spec:
         app.kubernetes.io/component: graph-database
     spec:
       serviceAccountName: synodic-infra
-      # 120s: final AOF fsync + failover handoff on drain (doc §7.2).
-      terminationGracePeriodSeconds: 120
+      # Eviction ranking under node pressure (resources/falkordb-cluster-
+      # priority-class.yaml).
+      priorityClassName: falkordb-cluster
+      # 300s: the preStop hand-over below, then the shutdown RDB save
+      # (shutdown-on-sigterm save) that lets the restart PSYNC. Cut short by
+      # SIGKILL, the node restarts from an older RDB and full-resyncs.
+      terminationGracePeriodSeconds: 300
       nodeSelector:
         dedicated: falkordb
       tolerations:
@@ -58,7 +89,7 @@ spec:
                   app.kubernetes.io/part-of: falkordb-cluster
               topologyKey: kubernetes.io/hostname
       topologySpreadConstraints:
-        # THIS shard's master+replica must not share a zone.
+        # THIS shard's pods: no two in one zone while a zone is free.
         - maxSkew: 1
           topologyKey: topology.kubernetes.io/zone
           whenUnsatisfiable: DoNotSchedule
@@ -68,6 +99,41 @@ spec:
       containers:
         - name: falkordb
           image: REGISTRY/falkordb:latest
+          # Wraps the image ENTRYPOINT (run.sh ignores the image CMD, so
+          # replacing both loses nothing):
+          #   1. A node whose nodes.conf says it was a master OWNING SLOTS
+          #      holds 45s (3 × cluster-node-timeout) before starting. Killed
+          #      outright, it restarts from an RDB older than its replica's
+          #      data; started at once it rejoins as master before the cluster
+          #      has failed it, and its replica full-syncs the STALE set —
+          #      writes lost (reproduced with kill -9). Held, the replica is
+          #      promoted first and this node rejoins as its replica. A master
+          #      that handed over in preStop (myself,slave) does not wait; one
+          #      that stopped WITHOUT handing over is held too, and rejoins
+          #      through a full resync (measured: no writes lost) — the preStop
+          #      hand-over is what spares it that. The hold traps TERM: this
+          #      shell is PID 1, which drops any signal it has no handler for,
+          #      so a stop during a bare `sleep 45` was lost — the pod sat out
+          #      its 300s grace while Redis started, loaded and began a sync,
+          #      to be SIGKILLed with no shutdown save (reproduced, dash as
+          #      PID 1). `exec` resets the trap, so redis-server's own SIGTERM
+          #      handling is unchanged.
+          #   2. temp-*.rdb are a killed BGSAVE's or sync's partial files, up
+          #      to a dataset each on the PVC and never read again.
+          # No dollar-paren anywhere in these scripts: the kubelet expands
+          # that form for every env var below (POD_NAME, REDISCLI_AUTH, …).
+          command:
+            - sh
+            - -c
+            - |
+              if [ -f /data/nodes.conf ] && awk '/myself,master/ && NF > 8 { found = 1 } END { exit !found }' /data/nodes.conf; then
+                echo "nodes.conf: this node was a master owning slots; holding 45s so its replica is promoted before this dataset rejoins"
+                trap 'exit 0' TERM
+                sleep 45 & wait $!
+                trap - TERM
+              fi
+              rm -f /data/temp-*.rdb
+              exec /var/lib/falkordb/bin/run.sh
           ports:
             - containerPort: 6379
               name: falkordb
@@ -78,36 +144,59 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            # run.sh passes --dir "$FALKORDB_DATA_PATH" AFTER REDIS_ARGS and
+            # the later --dir wins, so a --dir in REDIS_ARGS is ignored. At the
+            # image default (/var/lib/falkordb/data, the container layer) every
+            # RDB, AOF and sync file lived on the node's boot disk and only
+            # nodes.conf (an absolute path) reached this PVC: a restarted
+            # container came back still owning its slots, with an EMPTY dataset.
+            - name: FALKORDB_DATA_PATH
+              value: /data
             # Module args per doc §7.2: THREAD_COUNT 6 of 8 reserves cores
-            # for Redis I/O + AOF rewrite + replication; QUERY_MEM_CAPACITY
+            # for Redis I/O + the RDB fork + replication; QUERY_MEM_CAPACITY
             # 1 GiB (1073741824) bounds a runaway Cypher query. 2 GiB is the
             # value the budget block below records as the BUG — at 40 GiB
             # maxmemory it needed 66.6 GiB of a 56 GiB container — so the
             # comment naming it here read as the intent rather than the
             # thing that was fixed.
+            #
+            # VKEY_MAX_ENTITY_COUNT 100000000: an RDB stores a graph as one
+            # virtual key per that many entities, and on a graph with 65,534
+            # property names EVERY virtual key re-parses the name table on the
+            # main thread — 7.4-8 s each with PING unanswered: 1M nodes + 200k
+            # edges loaded in 91-96 s at the default 100000 (12 virtual keys)
+            # and in 7.7 s as one. It applies when an RDB is WRITTEN (the next
+            # save after this lands) and changes only the encoding. DELAY_INDEXING
+            # yes builds indexes on a background thread after a load; queries
+            # stay correct (label scans) until the indexes are OPERATIONAL.
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
+              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0 VKEY_MAX_ENTITY_COUNT 100000000 DELAY_INDEXING yes"
             # Sizing, by the deployment guide's own rule (§ "Sizing: the
-            # ceilings share ONE budget"). Every term is in the SAME container
-            # limit, replication included:
-            #   dataset        1.25 × 32 GiB                       = 40.0
+            # ceilings share ONE budget") — exactly
+            # shard_capacity.container_memory_needed, which a test evaluates
+            # against these args. Every term is in the SAME container limit,
+            # replication included:
+            #   dataset        1.25 × 28 GiB                       = 35.0
             #   query memory   6 threads × 1.3 × 1 GiB             =  7.8
-            #   repl backlog   repl-backlog-size 1gb               =  1.0
-            #   replica bufs   2 replicas × 2 GiB hard limit       =  4.0
-            #   overhead       instance ≥ 32 GiB                   =  1.0
-            #                                                  total 53.8 ≤ 56
-            # Two pairings that do NOT fit: 40 GiB maxmemory with a 2 GiB
-            # per-query ceiling needs 66.6 GiB (the shipped values before this
-            # was checked), and a 1.5 GiB ceiling needs 57.7 GiB once the
-            # replication buffers below are counted. Raising those buffers is a
+            #   repl backlog   repl-backlog-size 4gb               =  4.0
+            #   replica bufs   2 replicas × 4 GiB hard limit       =  8.0
+            #   overhead       maxmemory < 32 GiB                  =  0.25
+            #                                                 total 55.05 ≤ 56
+            # 28 GiB is what the larger replication buffers below cost: at
+            # 32 GiB the same buffers need 60.8 GiB. Raising those buffers is a
             # memory decision, not only a durability one.
             #
             # BEFORE APPLYING: check what each shard currently holds
             # (`redis-cli info memory | grep used_memory_human`, or Admin →
-            # Graph store). A shard already above 32 GiB will refuse writes
-            # the moment this lands. If one is, lower QUERY_MEM_CAPACITY or
-            # THREAD_COUNT to buy the headroom back instead, or move to a
-            # larger machine type — do not raise maxmemory past the formula.
+            # Graph store). The 4 GiB backlog counts AGAINST maxmemory once it
+            # has filled (only replica buffers beyond it are exempt), so a
+            # shard needs used_memory + 4 GiB < 28 GiB or it refuses writes
+            # the moment this lands. If one does not fit, give THAT shard a
+            # higher maxmemory and pay for it with a lower QUERY_MEM_CAPACITY
+            # (30gb with 805306368 needs 55.6 GiB), delete data from it, or
+            # move to a larger machine type — do not raise maxmemory past the
+            # formula. Lowering QUERY_MEM_CAPACITY alone frees container, not
+            # used_memory, and a graph cannot move shards: its slot is its name.
             #
             # noeviction: Redis must never silently evict a graph key —
             # eviction is the app's job (GRAPHVER_FALKOR_BUDGETS, doc §7.3).
@@ -118,23 +207,52 @@ spec:
             # each replica's main thread, which is what stopped replicas
             # answering their health probes during a large rebuild.
             #
-            # FORKS (doc §5bb). BGSAVE, an AOF rewrite and a replica's full
-            # resync all fork, and every page the parent writes while the child
-            # lives is copied — so a fork under a rebuild's write load costs the
-            # dataset twice and meets the container limit. A rebuild now HOLDS
-            # its writes for the whole fork, which makes one survivable; it
-            # cannot hold through one the node takes on its own schedule, hence:
-            #   save 21600 1  — the RDB is a FLOOR, not the recovery path (AOF
-            #     is; an RDB is read only when the appendonlydir is missing or
-            #     quarantined, or across an engine upgrade, doc §5c). Its value
-            #     does not decay in six hours — Cloud SQL is the source of truth
-            #     for every graph — while `save 3600 1` forked this node hourly
-            #     whatever else it was doing.
-            #   auto-aof-rewrite-min-size 512mb — the 64 MB default rewrites a
-            #     small AOF repeatedly for nothing. The PERCENTAGE stays at its
-            #     default on purpose: lowering it shortens replay only in
-            #     proportion (on a 13 GB base even 80% leaves 10 GB) and buys
-            #     that by forking more often.
+            # PERSISTENCE: RDB + PSYNC (doc §5bb/§5c). A restart that resumes
+            # replication from the master's backlog (PSYNC) costs seconds; one
+            # that cannot is a FULL resync — a fork on the master and an
+            # hour-long load of a 15 GB shard. What decides it is whether the
+            # node comes back knowing its replication ID and offset:
+            #   appendonly no — an AOF restart can NEVER PSYNC: the replication
+            #     ID is not restored from the AOF, so every restart full-synced
+            #     (reproduced). The RDB carries both.
+            #   shutdown-on-sigterm save — the RDB written at SIGTERM is what
+            #     makes a restart PSYNC: a replica, and a master demoted by the
+            #     preStop hand-over, both resumed partially. A replica also
+            #     keeps the RDB of its last full sync, so even a kill -9 can
+            #     PSYNC while the backlog still covers the gap.
+            #   save 21600 1 — stays the FLOOR, not the recovery path: Cloud
+            #     SQL is the source of truth for every graph, and each save is
+            #     a FORK — `save 3600 1` forked this node hourly whatever else
+            #     it was doing, and a fork under a rebuild's write load costs
+            #     the dataset twice.
+            #   The one RDB that must NOT be served is a killed master's — older
+            #   than its replica's data. The startup hold in `command` keeps it
+            #   from rejoining as master before its replica is promoted.
+            # Moving a LIVE shard onto these args: each pod comes back with an
+            # empty /data (its old files were on the container layer) and
+            # full-syncs once — replicas first, a master only after it has
+            # handed over (README).
+            #
+            # REPLICATION LIMITS — the full-resync loop. A replica 2 GB behind
+            # was dropped by the old `replica 2gb 1gb 300`; a 1 GB backlog could
+            # not cover the gap, so it full-resynced, and during the hour-long
+            # load the writes it buffered outran its own full-sync buffer (which
+            # defaults to the replica hard limit, 2 GB) plus the master's 2 GB —
+            # ~4 GB, the lag seen live — so the PSYNC after the load failed and
+            # the loop began again, with no pod restart to show for it.
+            #   repl-backlog-size 4gb — a dropped or restarted replica PSYNCs
+            #     across up to 4 GB of writes instead of full-syncing.
+            #   client-output-buffer-limit replica 4gb 0 0 — the soft limit off
+            #     (0): a replica is dropped only past 4 GB, never for being
+            #     1 GB behind for five minutes of a rebuild.
+            #   replica-full-sync-buffer-limit 4gb — what a LOADING replica may
+            #     buffer of the master's stream, stated rather than inherited.
+            #
+            # cluster-allow-replica-migration no: with two replicas per master
+            # and migration-barrier 1, a replica would re-home itself to another
+            # shard's orphaned master — onto the wrong PVC's dataset, the wrong
+            # DR target and the wrong read allowlist.
+            #
             #   replica-lazy-flush / lazyfree-lazy-server-del — a replica
             #     following a promotion or a full resync flushes what it held
             #     FIRST, and synchronously on 13 GB that is minutes of a main
@@ -147,21 +265,21 @@ spec:
                 --cluster-node-timeout 15000
                 --cluster-require-full-coverage no
                 --cluster-migration-barrier 1
+                --cluster-allow-replica-migration no
                 --cluster-announce-hostname $(POD_NAME).falkordb-cluster.synodic.svc.cluster.local
                 --cluster-preferred-endpoint-type hostname
-                --maxmemory 32gb
+                --maxmemory 28gb
                 --maxmemory-policy noeviction
-                --appendonly yes
-                --appendfsync everysec
-                --aof-load-truncated yes
-                --auto-aof-rewrite-min-size 512mb
+                --appendonly no
                 --save 21600 1
+                --shutdown-on-sigterm save
                 --replica-lazy-flush yes
                 --lazyfree-lazy-server-del yes
-                --repl-backlog-size 1gb
+                --repl-backlog-size 4gb
                 --repl-diskless-sync yes
                 --repl-timeout 300
-                --client-output-buffer-limit replica 2gb 1gb 300
+                --client-output-buffer-limit replica 4gb 0 0
+                --replica-full-sync-buffer-limit 4gb
             # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
             # empty-guarded so unauthenticated shards are unchanged; set
             # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
@@ -174,36 +292,125 @@ spec:
                   optional: true
           resources:
             # requests ≈ limits — the pod owns its n4-highmem-8 node.
+            #
+            # ephemeral-storage: the data dir is on the PVC now, so the
+            # container layer holds only logs. The request ranks this pod
+            # LAST under node DiskPressure; the limit is a tripwire — an
+            # eviction that names ephemeral-storage — should the dataset ever
+            # land on the layer again, instead of a boot disk that fills.
             requests:
               cpu: "7"
               memory: 56Gi
+              ephemeral-storage: 2Gi
             limits:
               cpu: "7"
               memory: 56Gi
+              ephemeral-storage: 8Gi
+          # Gates liveness until the process answers at all: covers the 45s
+          # hold in `command` and process start (60 × 10s). LOADING passes —
+          # a load is not a reason to restart.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
           readinessProbe:
-            # Strict: -LOADING (AOF/RDB replay) and -MASTERDOWN are not
-            # PONG, so a replaying or orphaned pod takes no traffic.
+            # Strict: -LOADING (RDB load) and -MASTERDOWN are not PONG, so a
+            # loading or orphaned pod takes no traffic.
             # grep PONG: redis-cli exits 0 even on a NOAUTH/error reply, so
             # the bare probe stayed green while every client was rejected.
+            # And a replica must have its link UP: it answers PONG through an
+            # hour-long full sync (and through the rdb-channel handshake,
+            # where master_sync_in_progress still reads 0), holding data that
+            # is not its master's. NotReady also holds the PDB, so no second
+            # pod is drained while one is out of step.
             exec:
-              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
+              command:
+                - sh
+                - -c
+                - |
+                  [ -n "$REDISCLI_AUTH" ] || unset REDISCLI_AUTH
+                  redis-cli ping 2>/dev/null | grep -q PONG || exit 1
+                  INFO=`redis-cli info replication 2>/dev/null`
+                  echo "$INFO" | grep -q '^role:master' || echo "$INFO" | grep -q '^master_link_status:up'
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
           livenessProbe:
             exec:
-              # LOADING = alive and replaying — killing it restarts the
-              # replay from scratch (see the base StatefulSet's history).
+              # LOADING = alive and loading — killing it restarts the load
+              # from scratch (see the base StatefulSet's history).
               command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
-            # RDB load of a full shard takes minutes (doc §7.2).
-            initialDelaySeconds: 60
+            # No initialDelaySeconds: the startupProbe gates this one.
             periodSeconds: 10
-            # A busy main thread is not a dead process. At 3s × 3 failures a
-            # replica replaying a heavy write was restarted after ~30s, which
-            # took its shard's availability with it. 10s × 6 gives a busy node
-            # a minute to answer before the kubelet gives up on it.
+            # A busy main thread is not a dead process, and here it can be
+            # busy for minutes: a write queued behind a long read of the same
+            # graph holds the main thread for the rest of that read (FalkorDB's
+            # graph lock — measured freezing PING, INFO and every graph), and
+            # a read can run to the 120 s TIMEOUT_MAX and past it, the timeout
+            # being cooperative. A wide graph's load is silent ~8-12 s per
+            # virtual key. 10s × 18 = 180s outlasts both.
             timeoutSeconds: 10
-            failureThreshold: 6
+            failureThreshold: 18
+          lifecycle:
+            # A master hands its slots to its most caught-up ONLINE replica
+            # before SIGTERM, so a planned stop (drain, roll) is a coordinated
+            # CLUSTER FAILOVER — no lost writes, no node-timeout outage — and
+            # the demoted node then saves and restarts as a replica that
+            # PSYNCs. Waits up to ~30s to see itself demoted, and always exits
+            # 0: a failed hand-over still stops cleanly, and the cluster then
+            # fails over the slow way.
+            #
+            # The STANDBY is preferred, whatever the offsets: the -2 read
+            # replica takes the slots only when no standby is online. A -2
+            # master leaves its shard no replica FALKORDB_REPLICA_READ_HOSTS
+            # matches (the same regex, in patches/cluster-config.yaml — keep
+            # them in step), so every read of that shard lands on the master,
+            # which one write behind a long read freezes past the failover
+            # window; picked by offset alone, an idle tie went to whichever
+            # replica INFO listed first. CLUSTER FAILOVER waits for the chosen
+            # replica's offset to match, so preferring the standby loses no
+            # write. INFO names replicas by ip:port, CLUSTER NODES by
+            # hostname; a replica the join misses counts as a standby.
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    [ -n "$REDISCLI_AUTH" ] || unset REDISCLI_AUTH
+                    ROLE=`timeout 5 redis-cli role 2>/dev/null | head -n 1`
+                    [ "$ROLE" = master ] || exit 0
+                    READERS=`timeout 5 redis-cli cluster nodes 2>/dev/null | awk '{ split($2, a, "[@,]"); if (a[3] ~ /^falkordb-shard-[0-9]+-2\./) printf "%s ", a[1] }'`
+                    BEST=`timeout 5 redis-cli info replication 2>/dev/null | tr -d '\r' | awk -F, -v readers="$READERS" '
+                      BEGIN { best = -1; rbest = -1; n = split(readers, r, " "); for (i = 1; i <= n; i++) reader[r[i]] = 1 }
+                      /^slave[0-9]+:/ {
+                        sub(/^slave[0-9]+:/, "")
+                        ip = ""; port = ""; state = ""; offset = -1
+                        for (i = 1; i <= NF; i++) {
+                          split($i, kv, "=")
+                          if (kv[1] == "ip") ip = kv[2]
+                          else if (kv[1] == "port") port = kv[2]
+                          else if (kv[1] == "state") state = kv[2]
+                          else if (kv[1] == "offset") offset = kv[2] + 0
+                        }
+                        if (state != "online") next
+                        if ((ip ":" port) in reader) { if (offset > rbest) { rbest = offset; rtarget = ip " " port } }
+                        else if (offset > best) { best = offset; target = ip " " port }
+                      }
+                      END { if (target == "") target = rtarget; if (target != "") print target }'`
+                    [ -n "$BEST" ] || exit 0
+                    set -- $BEST
+                    timeout 10 redis-cli -h "$1" -p "$2" cluster failover >/dev/null 2>&1
+                    i=0
+                    while [ "$i" -lt 30 ]; do
+                      ROLE=`timeout 2 redis-cli role 2>/dev/null | head -n 1`
+                      [ "$ROLE" = slave ] && break
+                      sleep 1
+                      i=`expr "$i" + 1`
+                    done
+                    exit 0
           volumeMounts:
             - name: falkordb-data
               mountPath: /data
@@ -212,8 +419,8 @@ spec:
         name: falkordb-data
       spec:
         accessModes: ["ReadWriteOnce"]
-        # n4 machines require Hyperdisk. 250 Gi ≈ 6× maxmemory for
-        # AOF/RDB growth between rewrites (doc §7.2).
+        # n4 machines require Hyperdisk. 250 Gi ≈ 9× maxmemory: the RDB,
+        # a full sync's temp file beside it, and headroom (doc §7.2).
         storageClassName: hyperdisk-balanced
         resources:
           requests:
@@ -230,7 +437,10 @@ metadata:
     app.kubernetes.io/component: graph-database
 spec:
   serviceName: falkordb-cluster
-  replicas: 2
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: falkordb-shard-1
@@ -242,7 +452,8 @@ spec:
         app.kubernetes.io/component: graph-database
     spec:
       serviceAccountName: synodic-infra
-      terminationGracePeriodSeconds: 120
+      priorityClassName: falkordb-cluster
+      terminationGracePeriodSeconds: 300
       nodeSelector:
         dedicated: falkordb
       tolerations:
@@ -267,6 +478,18 @@ spec:
       containers:
         - name: falkordb
           image: REGISTRY/falkordb:latest
+          command:
+            - sh
+            - -c
+            - |
+              if [ -f /data/nodes.conf ] && awk '/myself,master/ && NF > 8 { found = 1 } END { exit !found }' /data/nodes.conf; then
+                echo "nodes.conf: this node was a master owning slots; holding 45s so its replica is promoted before this dataset rejoins"
+                trap 'exit 0' TERM
+                sleep 45 & wait $!
+                trap - TERM
+              fi
+              rm -f /data/temp-*.rdb
+              exec /var/lib/falkordb/bin/run.sh
           ports:
             - containerPort: 6379
               name: falkordb
@@ -277,8 +500,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: FALKORDB_DATA_PATH
+              value: /data
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
+              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0 VKEY_MAX_ENTITY_COUNT 100000000 DELAY_INDEXING yes"
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
@@ -286,21 +511,21 @@ spec:
                 --cluster-node-timeout 15000
                 --cluster-require-full-coverage no
                 --cluster-migration-barrier 1
+                --cluster-allow-replica-migration no
                 --cluster-announce-hostname $(POD_NAME).falkordb-cluster.synodic.svc.cluster.local
                 --cluster-preferred-endpoint-type hostname
-                --maxmemory 32gb
+                --maxmemory 28gb
                 --maxmemory-policy noeviction
-                --appendonly yes
-                --appendfsync everysec
-                --aof-load-truncated yes
-                --auto-aof-rewrite-min-size 512mb
+                --appendonly no
                 --save 21600 1
+                --shutdown-on-sigterm save
                 --replica-lazy-flush yes
                 --lazyfree-lazy-server-del yes
-                --repl-backlog-size 1gb
+                --repl-backlog-size 4gb
                 --repl-diskless-sync yes
                 --repl-timeout 300
-                --client-output-buffer-limit replica 2gb 1gb 300
+                --client-output-buffer-limit replica 4gb 0 0
+                --replica-full-sync-buffer-limit 4gb
             # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
             # empty-guarded so unauthenticated shards are unchanged; set
             # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
@@ -315,22 +540,75 @@ spec:
             requests:
               cpu: "7"
               memory: 56Gi
+              ephemeral-storage: 2Gi
             limits:
               cpu: "7"
               memory: 56Gi
+              ephemeral-storage: 8Gi
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
           readinessProbe:
             exec:
-              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
+              command:
+                - sh
+                - -c
+                - |
+                  [ -n "$REDISCLI_AUTH" ] || unset REDISCLI_AUTH
+                  redis-cli ping 2>/dev/null | grep -q PONG || exit 1
+                  INFO=`redis-cli info replication 2>/dev/null`
+                  echo "$INFO" | grep -q '^role:master' || echo "$INFO" | grep -q '^master_link_status:up'
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
           livenessProbe:
             exec:
               command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
-            initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 10
-            failureThreshold: 6
+            failureThreshold: 18
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    [ -n "$REDISCLI_AUTH" ] || unset REDISCLI_AUTH
+                    ROLE=`timeout 5 redis-cli role 2>/dev/null | head -n 1`
+                    [ "$ROLE" = master ] || exit 0
+                    READERS=`timeout 5 redis-cli cluster nodes 2>/dev/null | awk '{ split($2, a, "[@,]"); if (a[3] ~ /^falkordb-shard-[0-9]+-2\./) printf "%s ", a[1] }'`
+                    BEST=`timeout 5 redis-cli info replication 2>/dev/null | tr -d '\r' | awk -F, -v readers="$READERS" '
+                      BEGIN { best = -1; rbest = -1; n = split(readers, r, " "); for (i = 1; i <= n; i++) reader[r[i]] = 1 }
+                      /^slave[0-9]+:/ {
+                        sub(/^slave[0-9]+:/, "")
+                        ip = ""; port = ""; state = ""; offset = -1
+                        for (i = 1; i <= NF; i++) {
+                          split($i, kv, "=")
+                          if (kv[1] == "ip") ip = kv[2]
+                          else if (kv[1] == "port") port = kv[2]
+                          else if (kv[1] == "state") state = kv[2]
+                          else if (kv[1] == "offset") offset = kv[2] + 0
+                        }
+                        if (state != "online") next
+                        if ((ip ":" port) in reader) { if (offset > rbest) { rbest = offset; rtarget = ip " " port } }
+                        else if (offset > best) { best = offset; target = ip " " port }
+                      }
+                      END { if (target == "") target = rtarget; if (target != "") print target }'`
+                    [ -n "$BEST" ] || exit 0
+                    set -- $BEST
+                    timeout 10 redis-cli -h "$1" -p "$2" cluster failover >/dev/null 2>&1
+                    i=0
+                    while [ "$i" -lt 30 ]; do
+                      ROLE=`timeout 2 redis-cli role 2>/dev/null | head -n 1`
+                      [ "$ROLE" = slave ] && break
+                      sleep 1
+                      i=`expr "$i" + 1`
+                    done
+                    exit 0
           volumeMounts:
             - name: falkordb-data
               mountPath: /data
@@ -355,7 +633,10 @@ metadata:
     app.kubernetes.io/component: graph-database
 spec:
   serviceName: falkordb-cluster
-  replicas: 2
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
   selector:
     matchLabels:
       app.kubernetes.io/name: falkordb-shard-2
@@ -367,7 +648,8 @@ spec:
         app.kubernetes.io/component: graph-database
     spec:
       serviceAccountName: synodic-infra
-      terminationGracePeriodSeconds: 120
+      priorityClassName: falkordb-cluster
+      terminationGracePeriodSeconds: 300
       nodeSelector:
         dedicated: falkordb
       tolerations:
@@ -392,6 +674,18 @@ spec:
       containers:
         - name: falkordb
           image: REGISTRY/falkordb:latest
+          command:
+            - sh
+            - -c
+            - |
+              if [ -f /data/nodes.conf ] && awk '/myself,master/ && NF > 8 { found = 1 } END { exit !found }' /data/nodes.conf; then
+                echo "nodes.conf: this node was a master owning slots; holding 45s so its replica is promoted before this dataset rejoins"
+                trap 'exit 0' TERM
+                sleep 45 & wait $!
+                trap - TERM
+              fi
+              rm -f /data/temp-*.rdb
+              exec /var/lib/falkordb/bin/run.sh
           ports:
             - containerPort: 6379
               name: falkordb
@@ -402,8 +696,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: FALKORDB_DATA_PATH
+              value: /data
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
+              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0 VKEY_MAX_ENTITY_COUNT 100000000 DELAY_INDEXING yes"
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
@@ -411,21 +707,21 @@ spec:
                 --cluster-node-timeout 15000
                 --cluster-require-full-coverage no
                 --cluster-migration-barrier 1
+                --cluster-allow-replica-migration no
                 --cluster-announce-hostname $(POD_NAME).falkordb-cluster.synodic.svc.cluster.local
                 --cluster-preferred-endpoint-type hostname
-                --maxmemory 32gb
+                --maxmemory 28gb
                 --maxmemory-policy noeviction
-                --appendonly yes
-                --appendfsync everysec
-                --aof-load-truncated yes
-                --auto-aof-rewrite-min-size 512mb
+                --appendonly no
                 --save 21600 1
+                --shutdown-on-sigterm save
                 --replica-lazy-flush yes
                 --lazyfree-lazy-server-del yes
-                --repl-backlog-size 1gb
+                --repl-backlog-size 4gb
                 --repl-diskless-sync yes
                 --repl-timeout 300
-                --client-output-buffer-limit replica 2gb 1gb 300
+                --client-output-buffer-limit replica 4gb 0 0
+                --replica-full-sync-buffer-limit 4gb
             # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
             # empty-guarded so unauthenticated shards are unchanged; set
             # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
@@ -440,22 +736,75 @@ spec:
             requests:
               cpu: "7"
               memory: 56Gi
+              ephemeral-storage: 2Gi
             limits:
               cpu: "7"
               memory: 56Gi
+              ephemeral-storage: 8Gi
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
           readinessProbe:
             exec:
-              command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -q PONG"]
+              command:
+                - sh
+                - -c
+                - |
+                  [ -n "$REDISCLI_AUTH" ] || unset REDISCLI_AUTH
+                  redis-cli ping 2>/dev/null | grep -q PONG || exit 1
+                  INFO=`redis-cli info replication 2>/dev/null`
+                  echo "$INFO" | grep -q '^role:master' || echo "$INFO" | grep -q '^master_link_status:up'
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
           livenessProbe:
             exec:
               command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
-            initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 10
-            failureThreshold: 6
+            failureThreshold: 18
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    [ -n "$REDISCLI_AUTH" ] || unset REDISCLI_AUTH
+                    ROLE=`timeout 5 redis-cli role 2>/dev/null | head -n 1`
+                    [ "$ROLE" = master ] || exit 0
+                    READERS=`timeout 5 redis-cli cluster nodes 2>/dev/null | awk '{ split($2, a, "[@,]"); if (a[3] ~ /^falkordb-shard-[0-9]+-2\./) printf "%s ", a[1] }'`
+                    BEST=`timeout 5 redis-cli info replication 2>/dev/null | tr -d '\r' | awk -F, -v readers="$READERS" '
+                      BEGIN { best = -1; rbest = -1; n = split(readers, r, " "); for (i = 1; i <= n; i++) reader[r[i]] = 1 }
+                      /^slave[0-9]+:/ {
+                        sub(/^slave[0-9]+:/, "")
+                        ip = ""; port = ""; state = ""; offset = -1
+                        for (i = 1; i <= NF; i++) {
+                          split($i, kv, "=")
+                          if (kv[1] == "ip") ip = kv[2]
+                          else if (kv[1] == "port") port = kv[2]
+                          else if (kv[1] == "state") state = kv[2]
+                          else if (kv[1] == "offset") offset = kv[2] + 0
+                        }
+                        if (state != "online") next
+                        if ((ip ":" port) in reader) { if (offset > rbest) { rbest = offset; rtarget = ip " " port } }
+                        else if (offset > best) { best = offset; target = ip " " port }
+                      }
+                      END { if (target == "") target = rtarget; if (target != "") print target }'`
+                    [ -n "$BEST" ] || exit 0
+                    set -- $BEST
+                    timeout 10 redis-cli -h "$1" -p "$2" cluster failover >/dev/null 2>&1
+                    i=0
+                    while [ "$i" -lt 30 ]; do
+                      ROLE=`timeout 2 redis-cli role 2>/dev/null | head -n 1`
+                      [ "$ROLE" = slave ] && break
+                      sleep 1
+                      i=`expr "$i" + 1`
+                    done
+                    exit 0
           volumeMounts:
             - name: falkordb-data
               mountPath: /data

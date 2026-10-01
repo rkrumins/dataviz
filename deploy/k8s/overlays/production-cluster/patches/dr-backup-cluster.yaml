@@ -1,12 +1,22 @@
 # DR for the sharded topology: one backup pod per shard (Indexed Job), each
-# snapshotting its shard's REPLICA rather than the master.
+# snapshotting one of its shard's REPLICAS rather than the master.
 #
-# Why the replica: `redis-cli --rdb` issues a SYNC, which forks the server. Forking
+# Why a replica: `redis-cli --rdb` issues a SYNC, which forks the server. Forking
 # a 40 GB master under live query load costs copy-on-write memory exactly when the
-# master can least afford it; the replica holds the same data and is otherwise idle.
-# If a shard's replica is down the run FAILS for that shard (and alerts) rather than
-# silently falling back to forking the master — a missed snapshot is cheap here
-# (graphs rebuild from Cloud SQL), a destabilized master is not.
+# master can least afford it; a replica holds the same data.
+#
+# Why every ordinal is listed: this used to name only the -1 pods, assuming they
+# were the replicas — after any failover a -1 is the master and the backup forked
+# it. Each field now lists all three pods of a shard and the script SYNCs the
+# first whose live INFO says replica + link up + not loading + no fork running
+# (FALKORDB_BACKUP_REPLICA_ONLY=1 makes a master ineligible). Order: the no-read
+# standbys (-1, -0) first, the -2 read replica last — it serves replica reads and
+# may be frozen behind a long one (FalkorDB's graph lock holds the main thread).
+# The master is never forked; with 2 replicas per master one may be down or
+# resyncing and the shard is still snapshotted. If no replica is eligible the run
+# FAILS for that shard (and alerts) rather than falling back to the master — a
+# missed snapshot is cheap here (graphs rebuild from Cloud SQL), a destabilized
+# master is not.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -23,4 +33,6 @@ spec:
             - name: snapshot
               env:
                 - name: FALKORDB_BACKUP_TARGETS
-                  value: "falkordb-shard-0-1.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-1-1.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-2-1.falkordb-cluster.synodic.svc.cluster.local:6379"
+                  value: "falkordb-shard-0-1.falkordb-cluster.synodic.svc.cluster.local:6379|falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local:6379|falkordb-shard-0-2.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-1-1.falkordb-cluster.synodic.svc.cluster.local:6379|falkordb-shard-1-0.falkordb-cluster.synodic.svc.cluster.local:6379|falkordb-shard-1-2.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-2-1.falkordb-cluster.synodic.svc.cluster.local:6379|falkordb-shard-2-0.falkordb-cluster.synodic.svc.cluster.local:6379|falkordb-shard-2-2.falkordb-cluster.synodic.svc.cluster.local:6379"
+                - name: FALKORDB_BACKUP_REPLICA_ONLY
+                  value: "1"

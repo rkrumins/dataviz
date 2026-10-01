@@ -207,6 +207,19 @@ def replication_stats(info: Dict[str, Any]) -> Dict[str, Any]:
     still to absorb. On a replica: the master it follows, whether the link
     is ``up``, and whether it is mid-sync (a full resync shows as
     ``masterSyncInProgress`` and is the expensive case).
+
+    The top-level ``lagBytes`` on a REPLICA is NOT a lag. It is this node's
+    own ``master_repl_offset - slave_repl_offset``, and Redis advances both
+    together as each command from the master is applied (networking.c
+    ``commandProcessed`` → ``replicationFeedStreamFromMasterStream``), so at
+    best it shows bytes received and not yet applied and in practice it is
+    0 — measured 0 on a Redis 8.6.3 replica its master saw 31 MB behind,
+    and 0 again the instant a 14 s stall ended. Kept for compatibility,
+    not to be read as a lag. A lag is the MASTER's ``replOffset`` minus
+    this one, and only on one replication history: ``replId``
+    (``master_replid``) has to be the master's ``replId`` or ``replId2``
+    (the history it continued from after a failover) before the two
+    offsets mean anything together.
     """
     role = info.get("role")
     master_offset = as_int(info.get("master_repl_offset"))
@@ -235,6 +248,8 @@ def replication_stats(info: Dict[str, Any]) -> Dict[str, Any]:
         "masterSyncInProgress": _as_bool(info.get("master_sync_in_progress")),
         "masterLastIoS": as_int(info.get("master_last_io_seconds_ago")),
         "replOffset": master_offset if role == "master" else replica_offset,
+        "replId": info.get("master_replid"),
+        "replId2": info.get("master_replid2"),
         "lagBytes": lag_bytes,
         "connectedReplicas": as_int(info.get("connected_slaves")),
         "replicas": replicas,

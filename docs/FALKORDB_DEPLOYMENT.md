@@ -96,6 +96,12 @@ Because this is a multi-tenant environment, entire tenant graphs are distributed
 2. **Client Routing:** The cluster-aware application client hashes the graph name to a specific hash slot (e.g., falling in Shard 2).
 3. **Zero-Hop Writes:** The client routes write commands directly to the Master of Shard 2 (Zone B).
 4. **Read Scaling:** Analytical read queries (`GRAPH.RO_QUERY`) are automatically load-balanced by the client to the Replicas in Zone A and Zone C.
+   **The production-cluster overlay narrows this deliberately.**
+   * Reads prefer ONE designated replica per shard, ordinal `-2`
+     (`FALKORDB_REPLICA_READ_HOSTS`); the standby answers only while `-2` cannot.
+   * The master takes none (`FALKORDB_MASTER_READ_SHARE "0"`).
+   * The other replica is a no-read hot standby: it never waits on a reader's graph lock
+     (§5aa), so it stays in step and wins the failover.
 
 ---
 
@@ -130,7 +136,7 @@ time, long after the promotion had finished.
 3. **Cluster State:** After failover, **every single Shard (1, 2, and 3) still has exactly 1 Master and 1 Replica active in the surviving zones.**
 4. **Read Preservation:** Because replicas still exist for every shard, read-only queries keep being spread across them and do not all fall back onto the Masters. (Read-only Cypher is offered to a replica that is in step with its master, within a lag threshold, and never inside the window after this process's own write to that graph — see `AGGREGATION_PIPELINE.md`. A provider can be pinned to master-only reads.)
 
-*Downtime: < 1 second for Shard 3 writes. Slight read latency increase as capacity drops from 6 replicas to 3 across the cluster.*
+*Downtime for Shard 3 writes: `cluster-node-timeout` (15 s) for the failure to be detected, plus the election. "< 1 second" holds only for a planned hand-over (`CLUSTER FAILOVER`, which the production-cluster `preStop` runs). On the production-cluster overlay, every shard whose read replica (`-2`) was in the lost zone has its reads served by its master until `-2` is back.*
 
 ---
 
@@ -162,18 +168,66 @@ the replica applies directly, which is orders of magnitude cheaper than
 re-running the query. Admin → Graph store flags any master that has replicas
 and a threshold above 0, and can set it at runtime.
 
-Three settings back that up:
+These settings back that up (production-cluster values):
 
 | Setting | Shipped | Why |
 | --- | --- | --- |
-| `--repl-backlog-size 1gb` | was 256mb | The window a disconnected replica can catch up through without a full resync. A rebuild fills 256 MB in seconds. |
-| `--client-output-buffer-limit replica 2gb 1gb 300` | was the 256 MB default | When a replica's output buffer overflows, the master **drops it** and it comes back with a full resync — a fork and a whole-dataset transfer, under the same write load that caused it. |
+| `--repl-backlog-size 4gb` | was 1gb, and 256mb before that | The window a disconnected replica can catch up through without a full resync. A rebuild fills 256 MB in seconds. 4gb bridges what the 4 GB buffers below let through. |
+| `--client-output-buffer-limit replica 4gb 0 0` | was `replica 2gb 1gb 300`, and the 256 MB default before that | When a replica's output buffer overflows, the master **drops it** and it comes back with a full resync — a fork and a whole-dataset transfer, under the same write load that caused it. The soft limit is off (`0`), so a replica is not dropped for being 1 GB behind for five minutes of a rebuild. |
+| `--replica-full-sync-buffer-limit 4gb` | was unset, inheriting the replica's own 2 GB hard limit | What a LOADING replica may buffer of the master's live stream during a full sync. Past it, the replica stops reading and the master's buffer for it grows instead. |
 | `--repl-timeout 300` | was 60 | A full resync of a large shard takes longer than a minute; timing it out mid-transfer starts it over. |
 | `--cluster-node-timeout 15000` | was 5000 | How long a node may be silent before the cluster calls it failed and elects a replacement. A node busy applying replication is silent for seconds at a time, and a 5s window turned that into an election — a promotion no one needed, and a slot map churn every client had to follow. The cost of 15s is that a genuinely dead master is replaced three times slower; the application covers that window (reads fail fast with a retry hint and keep serving cached data, a rebuild waits and resumes), so the trade is worth it. |
 
-And the liveness probe gets room to be slow: `timeoutSeconds: 10`,
-`failureThreshold: 6`. A busy main thread is not a dead process, and the
-readiness probe (strict, 3s) already takes a busy node out of rotation.
+And the liveness probe gets room to be slow. On the production cluster, a
+`startupProbe` (10 s × 60, `PONG` or `LOADING`) gates it, and then it allows
+`timeoutSeconds: 10` × `failureThreshold: 18`. A busy main thread is not a dead
+process, and the graph lock below can keep one busy for as long as a read runs.
+The readiness probe (3 s) takes a busy node out of rotation. On a replica it also
+requires `master_link_status:up`, because a replica answers PONG all through a
+full sync.
+
+### The full-resync loop
+
+On the old limits (`replica 2gb 1gb 300`, a 1 GB backlog, a 2 GB replica-side
+full-sync buffer), a replica that fell behind during a rebuild entered a loop:
+
+1. It was dropped, and the 1 GB backlog could not bridge the gap, so it full-synced.
+2. During the hour-long load, writes overran its 2 GB full-sync buffer and the
+   master's 2 GB buffer for it (~4 GB of lag).
+3. The partial resync after the load failed for the same reason, so it full-synced
+   again.
+
+Each load ran to the end, and then the next one started from 0, with no pod
+restart. (A load cut off part-way, like the ~90% reported, is a new pod instead:
+release notes §1.3.) The 4 GB limits above let a load absorb about 8 GB of
+writes and bridge 4 GB. A rebuild that writes more during one load still loops:
+watch the master for a second `Full resync requested by replica` for the same
+replica (`master_current_sync_attempts` on the replica also counts reconnects).
+The evidence is in `RELEASE_NOTES_2026-10-01_falkordb-cluster-stability.md`
+§1.3.
+
+### A read can freeze a node: FalkorDB's graph lock
+
+On FalkorDB 4.20.6 a long read and a write **to the same graph** freeze the
+whole node for the rest of the read: PING, INFO, every other graph, the
+replication stream and the cluster bus.
+
+* **On a replica.** The replicated write (`GRAPH.EFFECT`) takes the graph's write
+  lock with an untimed `pthread_rwlock_wrlock` on the Redis main thread. A read
+  holds the read lock through execution and reply formatting.
+  * Measured: a 15 s read plus one write stalled the replica 13.5–13.9 s.
+  * A 70 s read stalled it 69 s, and the master dropped it at `repl-timeout`.
+* **On a master.** A write queued behind the read waits for the lock while holding
+  the module GIL.
+  * Measured: 17.8 s, longer than the 15 s `cluster-node-timeout`.
+  * A master frozen that long is failed over.
+* **No timeout bounds it, and there is no upstream fix.** `TIMEOUT` is cooperative,
+  and the lock is released only after the reply. v4.20.7 and v4.22.0 have the
+  same code.
+* **What the production cluster does about it.**
+  * The masters and one replica per shard serve no reads.
+  * The liveness budget outlasts a freeze.
+  * The router measures a replica's lag against its master, not against itself.
 
 Finally, the application does not rely on any of this alone: a rebuild asks
 the master how many replicas have acknowledged its writes (`WAIT`) and holds
@@ -278,15 +332,55 @@ fast — keep the incremental small (see the auto-rewrite thresholds in
 the compose files) or restarts of a large instance take tens of
 minutes, during which liveness MUST NOT kill the process (see below).
 
-## 5b. Local Durability: AOF Is Mandatory
+## 5b. Local Durability: AOF on a Single Instance, RDB + PSYNC on the Cluster
 
-> **Important:** Snapshot-only persistence is **not** sufficient — a restart reloads the
-> last RDB and silently drops every write since it. Every shipped topology must run with
-> AOF on (`--appendonly yes --appendfsync everysec --aof-load-truncated yes`), which
-> bounds the loss window to ~1 second and tolerates a torn AOF tail after a crash.
+> **Important:** On a **single instance**, snapshot-only persistence is **not** sufficient.
+> A restart reloads the last RDB and silently drops every write since it, and there is no
+> replica to take over. So the single-instance topologies run with AOF on
+> (`--appendonly yes --appendfsync everysec --aof-load-truncated yes`). That bounds the loss
+> window to ~1 second and tolerates a torn AOF tail after a crash.
 
-Every shipped topology (compose files, k8s manifests) runs FalkorDB with
+The compose files, the Helm chart and the k8s base StatefulSet run FalkorDB with
 `--appendonly yes --appendfsync everysec --aof-load-truncated yes`.
+
+**The production cluster runs with AOF off** (`--appendonly no`). Its recovery path is a
+replica plus a partial resync (PSYNC), which an AOF breaks:
+
+* **An AOF restart can never PSYNC.** The AOF stores replication offsets but not the
+  replication ID, so the restarted node asks with a fresh random ID. The master refuses
+  (`Replication ID mismatch`) and the node does a full resync: a fork on the master and an
+  hour-long load on a 15 GB shard. Measured on Redis 8.6.3 + FalkorDB 4.20.6: every AOF
+  restart full-synced.
+* **An RDB carries both the ID and the offset.** With `--shutdown-on-sigterm save`, these
+  all resumed by partial resync, in about 0.1 s after start on a 200k-node graph:
+  * a replica restart;
+  * a `CLUSTER FAILOVER` hand-over, and the demoted master's restart.
+* **A replica keeps the RDB of its last full sync.** So even a `kill -9` replica restart
+  resumes by PSYNC while the 4 GB backlog covers the gap.
+* **A master's writes since its last RDB live on its replicas,** and the shard fails over to
+  one of them. Cloud SQL is the source of truth for every graph (§6).
+
+The one RDB that must not be served is a **killed master's**: it is older than its replica's
+data.
+
+* **Restarted at once, it is a hazard.** It rejoins as master before the cluster fails it
+  over, and its replica full-syncs the stale set. Reproduced: the writes since its last
+  save were lost on both nodes.
+* **The production-cluster entrypoint therefore holds** a node whose `nodes.conf` says
+  `myself,master` with slots for 45 s (3 × `cluster-node-timeout`). The replica is promoted
+  first, and the old master rejoins as its replica.
+* **A planned stop avoids the hold.** `preStop` hands the slots to the no-read standby
+  first (to the `-2` read replica only when no standby is online), so a planned stop is
+  never held.
+
+**The data directory must be the PVC.** The image's `run.sh` passes
+`--dir "$FALKORDB_DATA_PATH"` *after* `REDIS_ARGS`, so a `--dir` there is silently ignored.
+Set the env var instead: the production cluster sets `FALKORDB_DATA_PATH=/data`. Without it,
+the data directory is the image default `/var/lib/falkordb/data` on the container's writable
+layer, and every new container starts **empty**. Only `nodes.conf`, an absolute path,
+reaches the PVC. The k8s base single instance still has this gap.
+
+The rest of this section is the single-instance reasoning.
 
 Snapshot-only persistence is NOT sufficient: a restart reloads the last
 RDB and silently drops every write since it. Observed live (2026-07-11):
@@ -312,13 +406,16 @@ pipeline now **holds its writes for the whole fork** (`AGGREGATION_HOLD_MAX_SECS
 see `AGGREGATION_PIPELINE.md`), which makes a fork survivable. It does not make
 one free, and it cannot hold through a fork the node takes on its own schedule.
 
-* **`--save 21600 1`, not `--save 3600 1`.** The RDB here is a *floor*, not the
-  recovery path: AOF is, and an RDB is read only when the appendonlydir is
-  missing or quarantined, or across an engine upgrade (§5c). Its value does not
-  decay in six hours — Cloud SQL is the source of truth for every graph (§6) —
-  while an hourly save forked the node every hour whatever else it was doing.
-* **`--auto-aof-rewrite-min-size 512mb`.** The default 64 MB rewrites a small
-  AOF repeatedly for nothing. The *percentage* is deliberately left at its
+* **`--save 21600 1`, not `--save 3600 1`.** On a single instance the RDB is a
+  *floor*, not the recovery path: AOF is, and an RDB is read only when the
+  appendonlydir is missing or quarantined, or across an engine upgrade (§5c).
+  On the production cluster the recovery RDB is the one written at shutdown
+  (`--shutdown-on-sigterm save`, §5b) and the one a replica keeps from its last
+  full sync, so `save 21600 1` is a floor there too. Its value does not decay in
+  six hours — Cloud SQL is the source of truth for every graph (§6) — while an
+  hourly save forked the node every hour whatever else it was doing.
+* **`--auto-aof-rewrite-min-size 512mb`** (AOF topologies only). The default
+  64 MB rewrites a small AOF repeatedly for nothing. The *percentage* is deliberately left at its
   default: lowering it shortens restart time by bounding the incremental tail,
   but only in proportion — on a 13 GB base even 80% leaves 10 GB to replay —
   and it buys that by forking more often, which is the wrong direction. If
@@ -331,8 +428,8 @@ one free, and it cannot hold through a fork the node takes on its own schedule.
   was restarted, turning one node's trouble into two. Freed in the background it
   answers throughout.
 
-The liveness probe already accepts `LOADING`, so a node replaying its AOF is not
-killed for taking an hour; readiness stays strict, so it takes no traffic while
+The liveness probe already accepts `LOADING`, so a node loading its AOF or RDB is
+not killed for taking an hour; readiness stays strict, so it takes no traffic while
 it does. `backend/tests/test_graph_store_fork_settings.py` parses the manifests
 and fails if any of this drifts, including across the three duplicated shard
 blocks in the production-cluster overlay.
@@ -634,17 +731,26 @@ is **10Gi**. The previous 8Gi booked the entire non-`maxmemory` remainder for
 fragmentation and left nothing for query memory at all.
 
 **Worked example 2 — the production cluster overlay** (3 shards x 1 master +
-2 replicas, `n4-highmem-8`, `limits.memory` **56Gi**, `THREAD_COUNT 6`):
+2 replicas, `n4-highmem-8`, `limits.memory` **56Gi**, `THREAD_COUNT 6`). A test
+evaluates `container_memory_needed` against the manifest's own arguments:
 
 | Term | Figure | GiB |
 | :--- | :--- | ---: |
-| Dataset | `1.25 x 32gb` | 40.0 |
+| Dataset | `1.25 x 28gb` | 35.0 |
 | Query memory | `6 x 1.3 x 1gb` | 7.8 |
-| Replication backlog | `repl-backlog-size 1gb` | 1.0 |
-| Replica buffers | `2 replicas x 2gb hard` | 4.0 |
-| Server overhead | instance >= 32Gi | 1.0 |
-| **Needed** | | **53.8** |
+| Replication backlog | `repl-backlog-size 4gb` | 4.0 |
+| Replica buffers | `2 replicas x 4gb hard` | 8.0 |
+| Server overhead | instance < 32Gi | 0.25 |
+| **Needed** | | **55.05** |
 | **Limit** | | **56.0** |
+
+It was `32gb` / `1gb` / `2 x 2gb` = 53.8 GiB until 2026-10-01. The larger replication
+limits (§5aa) cost 4 GiB of `maxmemory`.
+
+* The same buffers at `32gb` would need **60.8 GiB**.
+* There is no thread of headroom left: `THREAD_COUNT 7` needs 56.35 GiB.
+* The 4 GiB backlog counts *against* `maxmemory` once it has filled. A shard therefore needs
+  `used_memory + 4 GiB < 28 GiB`.
 
 Two pairings that do NOT fit, and why they are worth knowing:
 
@@ -653,7 +759,8 @@ Two pairings that do NOT fit, and why they are worth knowing:
   replication. A shard under load could be OOM-killed by the kubelet while
   every figure inside Redis looked healthy.
 - `maxmemory 32gb` with `QUERY_MEM_CAPACITY 1.5gb` needs 52.7 GiB by the first
-  three lines and **57.7 GiB** once the replication buffers are counted. It is
+  three lines and **57.7 GiB** once the replication buffers are counted (at the
+  1 GiB backlog and 2 x 2 GiB buffers of the time). It is
   the near miss this table exists to catch: raising replication buffers is a
   memory decision, not just a durability one.
 
@@ -664,14 +771,14 @@ Two pairings that do NOT fit, and why they are worth knowing:
 > the replica output-buffer hard limit from that node's own `INFO` and
 > `CONFIG GET` into the formula. **Do not subtract the replication terms from
 > the container figure you type in** — an earlier revision of this callout said
-> to, and doing it now double-subtracts ~5 GiB on a cluster shard and refuses a
-> ceiling that fits.
+> to, and doing it now double-subtracts ~12 GiB on a cluster shard (the 4 GiB
+> backlog plus 2 x 4 GiB buffers) and refuses a ceiling that fits.
 >
 > The residual gap is silent, which is why it is stated here. All three
 > replication inputs default to **zero**: a node whose `INFO`/`CONFIG` read
 > fails or is blocked — a managed instance, a permissions change, a timeout
 > mid-sweep — is planned by the single-instance rule alone, under-booking by
-> those same ~5 GiB, and the refusal (or approval) names no reason for the
+> those same ~12 GiB, and the refusal (or approval) names no reason for the
 > difference. Before trusting a raise that only just fits, check that the node
 > shows its replicas and its buffer limits on Admin → Graph store; if it shows
 > neither, size with the table above by hand.
