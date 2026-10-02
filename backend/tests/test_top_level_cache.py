@@ -7,9 +7,11 @@ Redis is a plain AsyncMock (mirrors test_graph_cache.py's approach).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import AsyncMock
 
@@ -104,6 +106,33 @@ def test_containment_digest_changes_when_type_added():
     d1 = top_level_cache.containment_digest(["CONTAINS"], ["Domain"])
     d2 = top_level_cache.containment_digest(["CONTAINS", "HAS_CHILD"], ["Domain"])
     assert d1 != d2
+
+
+def test_containment_digest_changes_with_assigned_entity_types():
+    """A reassigned ontology (same containment/roots, other vocabulary) must
+    not keep serving the old one's payload."""
+    d1 = top_level_cache.containment_digest(CONTAINMENT, ROOT_TYPES, ["Layer"])
+    d2 = top_level_cache.containment_digest(CONTAINMENT, ROOT_TYPES, ["Layer", "Object"])
+    assert d1 != d2
+    assert d1 == top_level_cache.containment_digest(CONTAINMENT, ROOT_TYPES, ["Layer", "Layer"])
+
+
+def test_assigned_entity_types_ignores_introspected():
+    resolved = SimpleNamespace(
+        entity_type_definitions={"Layer": {}, "X": {}},
+        resolution_sources={"Layer": "assigned", "X": "introspection"},
+    )
+    assert top_level_cache.assigned_entity_types(resolved) == ["Layer"]
+
+
+def test_a_payload_digest_from_before_entity_types_misses():
+    """Every payload stored before the vocabulary joined the digest — some
+    carrying types decoded through a dead graph's id tables — misses once."""
+    legacy = hashlib.sha1(json.dumps(
+        {"containment": sorted(CONTAINMENT), "rootTypes": sorted(ROOT_TYPES)},
+        sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    assert legacy != top_level_cache.containment_digest(CONTAINMENT, ROOT_TYPES)
 
 
 # ── should_rematerialize ─────────────────────────────────────────────
@@ -346,6 +375,24 @@ async def test_try_serve_digest_mismatch_enqueues(monkeypatch):
 
     result, total = await top_level_cache.try_serve_top_level(
         session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1", limit=10, cursor=None,
+    )
+    assert (result, total) == (None, None)
+    enqueue.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_try_serve_payload_built_under_another_vocabulary_misses_and_enqueues(monkeypatch):
+    """Same containment/roots, but the data source's assigned ontology now
+    declares a vocabulary the stored payload was not built under."""
+    payload = _stored_payload(["Alpha"], digest=DIGEST)
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
+    enqueue = _patch(monkeypatch, row=row)
+    resolved = _FakeResolved(CONTAINMENT, ROOT_TYPES)
+    resolved.entity_type_definitions = {"Layer": {}, "X": {}}
+    resolved.resolution_sources = {"Layer": "assigned", "X": "introspection"}
+
+    result, total = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_FakeEngine(resolved), ds_id="ds1", ws_id="ws1", limit=10, cursor=None,
     )
     assert (result, total) == (None, None)
     enqueue.assert_awaited_once()

@@ -282,22 +282,23 @@ class AssignmentEngine:
         entity_scope: Optional[str] = None,
     ) -> Optional[EntityAssignment]:
         """Precedence (curated scope = explicit assignment + containment
-        inheritance ONLY; tiers 3-5 are open-scope-only and gated below):
+        inheritance ONLY; tiers 3-4 are open-scope-only and gated below):
 
         1. Explicit assignment (instances index: request-level `assignments`
            map, unioned with legacy per-layer `entity_assignments`) — all scopes.
         2. Containment inheritance from the parent's resolved layer — all
            scopes, UNLESS the parent's own winning entry was itself an explicit
            assignment with `inheritsChildren == False`, in which case this
-           entity falls through to 3-5 instead of inheriting.
+           entity falls through to 3-4 instead of inheriting.
         3. The node's own persisted `layerAssignment` property hint — open
            scope only (skipped entirely in curated scope).
         4. Generic rules (type/tag/pattern) — open scope only.
-        5. Default `layers[0]` — open scope only.
 
-        In curated scope, anything that falls through tiers 1-2 gets no
-        assignment (`None`) — the caller already treats a `None` result as
-        "unassigned" (see `unassignedEntityIds` in `compute_assignments`).
+        Anything that matches none of the tiers in force gets no assignment
+        (`None`) — in curated scope after tiers 1-2, in open scope after tiers
+        1-4. The caller treats `None` as "unassigned" (see `unassignedEntityIds`
+        in `compute_assignments`); the canvas renders such an entity only in a
+        layer that opts in with `showUnassigned`.
         """
         entity_id = node.urn
         entity_type = node.entity_type
@@ -331,8 +332,8 @@ class AssignmentEngine:
                 )
 
         # Curated scope: explicit assignment + containment inheritance only.
-        # Node hints, generic rules, and the layers[0] default do not place
-        # entities in curated scope — unassigned entities drop out.
+        # Node hints and generic rules do not place entities in curated
+        # scope — unassigned entities drop out.
         if entity_scope == "curated":
             return None
 
@@ -388,14 +389,6 @@ class AssignmentEngine:
                 layerId=winner_layer_id,
                 ruleId=winner_rule.id,
                 confidence=1.0
-            )
-
-        # 5. Default (open scope only)
-        if layers:
-            return EntityAssignment(
-                entityId=entity_id,
-                layerId=layers[0].id,
-                confidence=0.5 # Default fallback
             )
 
         return None

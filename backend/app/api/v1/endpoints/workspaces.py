@@ -610,6 +610,10 @@ async def update_data_source(
         # resolve — invalidate the process-wide resolved-ontology cache.
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
         await bump_ontology_generation(workspace_id, ds_id)
+        # Cached hierarchy reads were answered under the old ontology / name
+        # mapping (entity types, display names) — drop them. Never raises.
+        from backend.app.services.graph_cache import invalidate_hierarchy_reads
+        await invalidate_hierarchy_reads(workspace_id, ds_id)
 
     # A mapping change makes the materialized AGGREGATED edges stale, and the
     # stamp's NULL-only fill means a re-run is required to rewrite them.

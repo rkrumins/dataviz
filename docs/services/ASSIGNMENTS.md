@@ -40,8 +40,9 @@ Placement follows a fixed **precedence**:
    explicit create/move actions (open scope only).
 4. **Generic rules** — type / tag / URN-pattern rules, highest priority wins
    (open scope only).
-5. **Default** — `layers[0]` (open scope only).
 
+In **open scope**, an entity that matches none of tiers 1–4 is left unassigned;
+the canvas shows it only in a layer that opts in with `showUnassigned`.
 In **curated scope**, only tiers 1–2 apply; anything that falls through is left
 unassigned. Containment direction comes from the resolved ontology's
 **containment edge types** (not hardcoded), which is why the engine resolves the
@@ -54,7 +55,6 @@ flowchart TD
     T2{"2. Containment<br/>inheritance?"}
     T3{"3. Persisted<br/>layerAssignment?<br/>(open scope)"}
     T4{"4. Generic rule?<br/>type / tag / URN<br/>(open scope)"}
-    T5["5. Default → layers[0]<br/>(open scope)"]
     U["Unassigned"]
     A["Assigned to layer"]
 
@@ -67,7 +67,7 @@ flowchart TD
     T3 -->|yes| A
     T3 -->|no| T4
     T4 -->|yes| A
-    T4 -->|no| T5 --> A
+    T4 -->|no| U
 
 ```
 
