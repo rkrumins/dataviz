@@ -6,6 +6,8 @@ in what the payload says and, more importantly, what it refuses to say.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -20,7 +22,9 @@ from backend.app.db.models import (
     ProviderORM,
     WorkspaceDataSourceORM,
 )
-from backend.app.db.repositories import profiling_repo, stats_history_repo
+from backend.app.db.repositories import (
+    count_alerts_repo, profiling_repo, stats_history_repo,
+)
 from backend.app.services.permission_service import PermissionClaims
 
 
@@ -78,11 +82,13 @@ async def _snap(
     types: dict | None = None, edge_types: dict | None = None,
     workspace: str = "ws_1", provider: str = "prov_1",
     node_delta: int | None = None, reason: str = "changed",
+    property_keys: int | None = None,
 ):
     session.add(DataSourceCountSnapshotORM(
         id=f"snp_{ds_id}_{at}", data_source_id=ds_id, captured_at=at,
         workspace_id=workspace, provider_id=provider, graph_name=f"g-{ds_id}",
         node_count=nodes, edge_count=edges,
+        property_key_count=property_keys,
         entity_type_counts=json.dumps(types or {"Table": nodes}),
         edge_type_counts=json.dumps(edge_types or {}),
         counts_digest=f"d{nodes}", lane="probe", capture_reason=reason,
@@ -1029,4 +1035,289 @@ async def test_a_legitimate_csv_filename_is_still_readable(
     assert (
         resp.headers["content-disposition"]
         == 'attachment; filename="profiling-workspace-ws_1-raw.csv"'
+    )
+
+
+# ── marking a whole set seen ─────────────────────────────────────────
+
+
+async def _alert(session, ds_id: str, *, workspace: str = "ws_1", alert_id: str):
+    """One open finding, minimally shaped — enough for the acknowledge path."""
+    from backend.app.db.models import DataSourceCountAlertORM
+
+    session.add(DataSourceCountAlertORM(
+        id=alert_id,
+        data_source_id=ds_id,
+        workspace_id=workspace,
+        provider_id="prov_1",
+        graph_name=f"g-{ds_id}",
+        detected_at=_iso(1),
+        observed_at=_iso(1),
+        severity="severe",
+        direction="drop",
+        node_delta=-100,
+        node_count=900,
+        baseline=25,
+        metric="nodes",
+        finding="movement",
+    ))
+    await session.flush()
+
+
+async def _open_ids(session) -> set:
+    from sqlalchemy import select
+
+    from backend.app.db.models import DataSourceCountAlertORM
+
+    return set((await session.execute(
+        select(DataSourceCountAlertORM.id)
+        .where(DataSourceCountAlertORM.acknowledged_at.is_(None))
+    )).scalars().all())
+
+
+async def test_a_workspace_caller_cannot_acknowledge_another_tenants_finding(
+    db_session: AsyncSession,
+):
+    """THE test. ``notification_repo.mark_read`` can filter on ids alone
+    because ``user_id`` is already in its WHERE; there is no such column on a
+    finding, so without the tenant clause on the ids path a workspace user
+    acknowledges — and silences, for everyone — another tenant's finding by
+    guessing an id."""
+    await _source(db_session, "ds_mine", workspace="ws_1")
+    await _source(db_session, "ds_theirs", workspace="ws_2")
+    await _alert(db_session, "ds_mine", workspace="ws_1", alert_id="al_mine")
+    await _alert(db_session, "ds_theirs", workspace="ws_2", alert_id="al_theirs")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(ids=["al_mine", "al_theirs"]),
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    assert out["data"]["acknowledged"] == 1
+    assert await _open_ids(db_session) == {"al_theirs"}
+
+
+async def test_a_caller_bound_to_no_workspace_acknowledges_nothing(
+    db_session: AsyncSession,
+):
+    """``_visible`` returns None for a platform operator and a possibly-EMPTY
+    list for everyone else. Conflating the two is the difference between "you
+    may see no sources" and "you may see all of them"."""
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _alert(db_session, "ds_a", alert_id="al_a")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(),
+        session=db_session, claims=NOBODY,
+    )
+    assert out["data"]["acknowledged"] == 0
+    assert await _open_ids(db_session) == {"al_a"}
+
+
+async def test_an_operator_clears_every_source_at_once(db_session: AsyncSession):
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _source(db_session, "ds_b", workspace="ws_2")
+    await _alert(db_session, "ds_a", workspace="ws_1", alert_id="al_a")
+    await _alert(db_session, "ds_b", workspace="ws_2", alert_id="al_b")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(),
+        session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["acknowledged"] == 2
+    # The response IS the caller's next cache entry — the count has to be
+    # right without a second GET, or the band re-renders the number it just
+    # cleared.
+    assert out["data"]["openCount"] == 0
+    assert await _open_ids(db_session) == set()
+
+
+async def test_one_source_leaves_the_others_alone(db_session: AsyncSession):
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _source(db_session, "ds_b", workspace="ws_1")
+    await _alert(db_session, "ds_a", alert_id="al_a")
+    await _alert(db_session, "ds_b", alert_id="al_b")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(dataSourceId="ds_a"),
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    assert out["data"]["acknowledged"] == 1
+    assert await _open_ids(db_session) == {"al_b"}
+
+
+async def test_an_explicit_empty_list_is_nothing_not_everything(
+    db_session: AsyncSession,
+):
+    """Omitted means all; ``[]`` means none. The same contract
+    ``POST /me/notifications/read`` already carries, and the difference
+    between a no-op and clearing a fleet."""
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _alert(db_session, "ds_a", alert_id="al_a")
+
+    out = await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(ids=[]),
+        session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["acknowledged"] == 0
+    assert await _open_ids(db_session) == {"al_a"}
+
+
+async def test_the_first_acknowledgement_wins_across_a_bulk_clear(
+    db_session: AsyncSession,
+):
+    """No bulk verb may rewrite who actually looked at something. Matches
+    ``acknowledge``, which has always been first-wins."""
+    from backend.app.db.models import DataSourceCountAlertORM
+
+    await _source(db_session, "ds_a", workspace="ws_1")
+    await _alert(db_session, "ds_a", alert_id="al_a")
+    await count_alerts_repo.acknowledge(db_session, "al_a", actor_id="alice")
+
+    await profiling.acknowledge_alerts(
+        body=profiling.BulkAcknowledgeRequest(),
+        session=db_session, claims=OPERATOR,
+    )
+    row = await db_session.get(DataSourceCountAlertORM, "al_a")
+    assert row.acknowledged_by == "alice"
+
+
+async def test_acknowledging_a_set_does_not_touch_the_bell(
+    db_session: AsyncSession,
+):
+    """Deliberate, and the reason is stated where it would otherwise read as
+    an omission: the single-finding verb has never marked notifications read,
+    notifications are per-user rows while findings are global, and there is no
+    FK between them — only a kind + title match a one-shot migration can
+    justify and a request path cannot. The two verbs must mean the same
+    thing."""
+    import inspect
+
+    src = inspect.getsource(count_alerts_repo.acknowledge_many)
+    assert "notification" in src.lower(), "the decision is undocumented"
+    assert "NotificationORM" not in src
+    assert "read_at" not in src
+
+
+# ── showing the rollup is a setting, with a sane default ─────────────
+
+
+async def test_the_rollup_shows_without_anyone_configuring_anything(
+    db_session: AsyncSession,
+):
+    """Default on. A deployment that has never opened the settings page still
+    gets a breakdown that adds up to its store."""
+    await _source(db_session, "ds_a")
+    await _snap(
+        db_session, "ds_a", _iso(2), nodes=10, edges=100,
+        edge_types={"FLOWS_TO": 60, "AGGREGATED": 40},
+    )
+    out = await profiling.get_series(
+        scope="source", id="ds_a", window="30d", frm=None, to=None, grain="raw",
+        metric="edges", breakdown="edge_type", top=8, compare=False,
+        includeDerivedEdges=None, session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["include_derived_edges"] is True
+    assert {s["key"] for s in out["data"]["series"]} == {"FLOWS_TO", "AGGREGATED"}
+
+
+async def test_an_operator_can_switch_it_off_for_the_deployment(
+    db_session: AsyncSession,
+):
+    await _source(db_session, "ds_a")
+    await _snap(
+        db_session, "ds_a", _iso(2), nodes=10, edges=100,
+        edge_types={"FLOWS_TO": 60, "AGGREGATED": 40},
+    )
+    await profiling_repo.persist_policy(
+        db_session, {"includeDerivedEdges": False},
+    )
+    out = await profiling.get_series(
+        scope="source", id="ds_a", window="30d", frm=None, to=None, grain="raw",
+        metric="edges", breakdown="edge_type", top=8, compare=False,
+        includeDerivedEdges=None, session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["include_derived_edges"] is False
+    assert {s["key"] for s in out["data"]["series"]} == {"FLOWS_TO"}
+
+
+async def test_the_query_param_overrides_the_deployment_setting(
+    db_session: AsyncSession,
+):
+    """A display decision, so one reader may differ from the default without
+    changing it for everyone."""
+    await _source(db_session, "ds_a")
+    await _snap(
+        db_session, "ds_a", _iso(2), nodes=10, edges=100,
+        edge_types={"FLOWS_TO": 60, "AGGREGATED": 40},
+    )
+    await profiling_repo.persist_policy(
+        db_session, {"includeDerivedEdges": False},
+    )
+    out = await profiling.get_series(
+        scope="source", id="ds_a", window="30d", frm=None, to=None, grain="raw",
+        metric="edges", breakdown="edge_type", top=8, compare=False,
+        includeDerivedEdges=True, session=db_session, claims=OPERATOR,
+    )
+    assert {s["key"] for s in out["data"]["series"]} == {"FLOWS_TO", "AGGREGATED"}
+
+
+async def test_the_setting_reads_back_on_the_policy_page(db_session: AsyncSession):
+    before = await profiling.get_policy(session=db_session, claims=OPERATOR)
+    assert before["data"]["includeDerivedEdges"] is True
+    assert before["data"]["defaults"]["includeDerivedEdges"] is True
+
+    await profiling_repo.persist_policy(
+        db_session, {"includeDerivedEdges": False},
+    )
+    after = await profiling.get_policy(session=db_session, claims=OPERATOR)
+    assert after["data"]["includeDerivedEdges"] is False
+    # The DEFAULT is what the deployment would use with nothing persisted, so
+    # the editor can offer "back to the default" without pinning today's.
+    assert after["data"]["defaults"]["includeDerivedEdges"] is True
+
+
+async def test_a_settings_row_that_cannot_be_read_still_draws_a_chart(
+    db_session: AsyncSession,
+):
+    """A policy lookup must never be able to fail a chart."""
+    class _Broken:
+        async def get(self, *a, **kw):
+            raise RuntimeError("settings unreadable")
+
+    assert await profiling_repo.resolve_include_derived_edges(_Broken()) is True
+
+
+async def test_the_csv_puts_each_reading_on_its_own_bucket(
+    db_session: AsyncSession,
+):
+    """The writer used to index each series by POSITION, assuming one point
+    per bucket. ``property_keys`` breaks that assumption on purpose: a bucket
+    nothing measured draws no point rather than a zero
+    (profiling_series skips a None). So the Nth point was not the Nth
+    bucket — every reading after a gap was written against the wrong date,
+    and a series shorter than the window ran off the end of the list.
+
+    Here the middle capture has no property-key reading, so a positional
+    writer would slide the later value one row up."""
+    await _source(db_session, "ds_csv", workspace="ws_1")
+    await _snap(db_session, "ds_csv", _iso(3), nodes=10, property_keys=100)
+    await _snap(db_session, "ds_csv", _iso(2), nodes=10, property_keys=None)
+    await _snap(db_session, "ds_csv", _iso(1), nodes=10, property_keys=300)
+
+    resp = await profiling.export_csv(
+        scope="workspace", id="ws_1", window="7d", frm=None, to=None,
+        grain="raw", breakdown="none", metric="property_keys",
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    body = resp.body.decode()
+    rows = [r for r in csv.reader(io.StringIO(body))][1:]
+
+    # Every emitted value sits on the bucket it was measured in, and the
+    # unmeasured bucket is blank rather than 0 — the CSV analogue of the
+    # chart drawing no point there. A 0 would claim the graph had no
+    # property names at all, which is the opposite of "we did not look".
+    measured = {r[0]: r[1] for r in rows if r[1] != ""}
+    assert set(measured.values()) == {"100", "300"}, rows
+    assert any(r[1] == "" for r in rows), (
+        "the unmeasured bucket must be an empty cell, not a fabricated zero"
     )

@@ -89,12 +89,27 @@ def assurance_for(kind: str, settings: dict | None = None) -> str:
         # which accepts browser-written claims unverified and is rated
         # accordingly. (Server mode refuses the flag at validation, so
         # the mode check below is belt-and-braces for out-of-band rows.)
-        if (
-            str(s.get("exchange_mode") or "server").strip().lower()
-            == "browser"
-            and _as_bool(s.get("trust_unsigned"))
-        ):
+        mode = str(s.get("exchange_mode") or "server").strip().lower()
+        if mode == "browser" and _as_bool(s.get("trust_unsigned")):
             return UNVERIFIED
+        # Server mode's VERIFIED rests on the transport: "came back over
+        # TLS from the provider's own endpoint" is only true when that
+        # TLS is verified. With ``tls_verify`` off, anyone on the path
+        # can be the endpoint. PASTED signing material still vouches —
+        # a signature checked against a key the operator typed survives
+        # an unverifiable channel. A JWKS does not: the key set itself
+        # arrives over the channel we just declined to verify.
+        if not _as_bool(s.get("tls_verify", True)):
+            pasted = bool(
+                s.get("jwt_public_key") or s.get("jwt_shared_secret")
+            )
+            signature_checked = (
+                mode == "browser"
+                or str(s.get("claims_format") or "json").strip().lower()
+                == "jwt"
+            )
+            if not (pasted and signature_checked):
+                return UNVERIFIED
         return VERIFIED
 
     if kind == "custom_profile":

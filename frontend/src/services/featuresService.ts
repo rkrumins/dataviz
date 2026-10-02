@@ -278,7 +278,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     // Read the body exactly ONCE. Reading it twice (res.json() then res.text()) throws the
     // browser's native "Response body is already used" TypeError, which used to mask the real
     // error on every failed toggle. Parse to an object when it's JSON; keep `undefined` for an
-    // empty or non-JSON body (e.g. a text/plain 500 or proxy HTML) so it never lands in a toast.
+    // empty or non-JSON body (e.g. a text/plain 500 or proxy HTML) so it never lands in a notification.
     const text = await res.text()
     let body: unknown
     try {

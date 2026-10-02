@@ -288,3 +288,184 @@ async def test_the_platform_sweep_endpoint_covers_every_sso_row(
     assert real.json()["usersAffected"] == 1
     assert all(r.revoked_at for r in await _rows_for(db_session, "usr_a"))
     assert all(not r.revoked_at for r in await _rows_for(db_session, "usr_c"))
+
+
+# ── the everyone sweep (end-all-sessions) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_revoke_all_tokens_spares_system_accounts(db_session):
+    """The platform sweep marks password AND SSO rows — and skips every
+    row belonging to a system account, whatever kind it is."""
+    from backend.app.db.repositories.refresh_token_repo import (
+        count_active_users,
+        revoke_all_tokens,
+    )
+
+    for uid in ("usr_pw", "usr_sso", "usr_sys"):
+        await _seed_user(db_session, uid)
+    await user_repo.set_system_account(db_session, "usr_sys", True)
+    await _mint(db_session, user_id="usr_pw", provider_id=None)
+    await _mint(db_session, user_id="usr_sso", provider_id=PROVIDER_X)
+    await _mint(db_session, user_id="usr_sys", provider_id=None)
+    await _mint(db_session, user_id="usr_sys", provider_id=PROVIDER_X)
+
+    system_ids = await user_repo.system_account_ids(db_session)
+    assert system_ids == {"usr_sys"}
+    assert await count_active_users(db_session) == 3
+    assert await count_active_users(
+        db_session, exclude_user_ids=system_ids,
+    ) == 2
+
+    users, rows = await revoke_all_tokens(
+        db_session, exclude_user_ids=system_ids,
+    )
+    assert users == {"usr_pw", "usr_sso"}
+    assert rows == 2
+    assert all(r.revoked_at for r in await _rows_for(db_session, "usr_pw"))
+    assert all(r.revoked_at for r in await _rows_for(db_session, "usr_sso"))
+    assert all(not r.revoked_at for r in await _rows_for(db_session, "usr_sys"))
+
+
+@pytest.mark.asyncio
+async def test_the_bulk_cutoff_stamps_everyone_but_system_accounts(db_session):
+    """The rotation half of the pair: every non-deleted user gets
+    ``sessions_valid_from``, except the excluded system accounts."""
+    for uid in ("usr_pw", "usr_sys"):
+        await _seed_user(db_session, uid)
+    await user_repo.set_system_account(db_session, "usr_sys", True)
+
+    cutoff = await user_repo.revoke_sessions_from_now_for_all(
+        db_session,
+        exclude_user_ids=await user_repo.system_account_ids(db_session),
+    )
+    assert cutoff
+
+    ordinary = (await db_session.execute(
+        select(m.UserORM).where(m.UserORM.id == "usr_pw")
+    )).scalar_one()
+    system = (await db_session.execute(
+        select(m.UserORM).where(m.UserORM.id == "usr_sys")
+    )).scalar_one()
+    assert ordinary.sessions_valid_from == cutoff
+    assert system.sessions_valid_from is None
+
+
+@pytest.mark.asyncio
+async def test_end_all_sessions_endpoint_counts_sweeps_and_audits(
+    test_client, db_session,
+):
+    """Dry run answers the dialog (affected + how many system accounts
+    stay signed in) and writes nothing; the real run stamps rows and the
+    per-user cutoff, spares the system account, and leaves one audit
+    event."""
+    await _seed_user(db_session, "usr_a")
+    await _seed_user(db_session, "usr_sys")
+    await user_repo.set_system_account(db_session, "usr_sys", True)
+    await _make_provider_row(db_session)
+    await _mint(db_session, user_id="usr_a", provider_id=PROVIDER_X)
+    await _mint(db_session, user_id="usr_a", provider_id=None)
+    await _mint(db_session, user_id="usr_sys", provider_id=None)
+    await db_session.commit()
+
+    dry = await test_client.post(
+        "/api/v1/admin/sso/config/end-all-sessions", json={"dryRun": True},
+    )
+    assert dry.status_code == 200, dry.text
+    body = dry.json()
+    assert body["usersAffected"] == 1
+    assert body["systemAccountsSkipped"] == 1
+    assert body["tokensRevoked"] == 0
+    assert body["dryRun"] is True
+    assert all(not r.revoked_at for r in await _rows_for(db_session, "usr_a"))
+
+    real = await test_client.post(
+        "/api/v1/admin/sso/config/end-all-sessions", json={},
+    )
+    assert real.status_code == 200, real.text
+    body = real.json()
+    assert body["usersAffected"] == 1
+    assert body["tokensRevoked"] == 2
+    assert body["systemAccountsSkipped"] == 1
+    assert all(r.revoked_at for r in await _rows_for(db_session, "usr_a"))
+    assert all(not r.revoked_at for r in await _rows_for(db_session, "usr_sys"))
+
+    ordinary = (await db_session.execute(
+        select(m.UserORM).where(m.UserORM.id == "usr_a")
+    )).scalar_one()
+    system = (await db_session.execute(
+        select(m.UserORM).where(m.UserORM.id == "usr_sys")
+    )).scalar_one()
+    assert ordinary.sessions_valid_from is not None
+    assert system.sessions_valid_from is None
+
+    events = (await db_session.execute(
+        select(m.OutboxEventORM).where(
+            m.OutboxEventORM.event_type == "auth.config.all_sessions_ended",
+        )
+    )).scalars().all()
+    assert len(events) == 1
+
+
+# ── unlinking an identity ends what it minted ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_person_scoped_sweep_spares_everyone_else(db_session):
+    for uid in ("usr_a", "usr_b"):
+        await _seed_user(db_session, uid)
+    await _mint(db_session, user_id="usr_a", provider_id=PROVIDER_X)
+    await _mint(db_session, user_id="usr_a", provider_id=PROVIDER_Y)
+    await _mint(db_session, user_id="usr_a", provider_id=None)
+    await _mint(db_session, user_id="usr_b", provider_id=PROVIDER_X)
+
+    users, rows = await revoke_provider_tokens(
+        db_session, provider_id=PROVIDER_X, user_id="usr_a",
+    )
+
+    assert (users, rows) == ({"usr_a"}, 1)
+    revoked = {
+        (r.user_id, r.idp_provider_id)
+        for uid in ("usr_a", "usr_b") for r in await _rows_for(db_session, uid)
+        if r.revoked_at
+    }
+    assert revoked == {("usr_a", PROVIDER_X)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("who", ["self", "admin"])
+async def test_unlinking_an_identity_ends_the_sessions_it_minted(
+    test_client, db_session, who,
+):
+    from backend.app.db.repositories import idp_provider_repo, user_identity_repo
+    from backend.auth_service.core.password import hash_password
+
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug=f"unlink-{who}", display_name="Corp", kind="oidc",
+        settings={},
+    )
+    if who == "self":
+        # The test client's own user, so the self-service route applies;
+        # a password keeps the unlink from being its last way in.
+        user_id = "usr_test000000"
+        user = await user_repo.get_user_by_id(db_session, user_id)
+        user.password_hash = hash_password("Still-Has-1-Password")
+    else:
+        await _seed_user(db_session, "usr_unlinked")
+        user_id = "usr_unlinked"
+    ident = await user_identity_repo.create_identity(
+        db_session, user_id=user_id, provider_id=provider.id,
+        external_id=f"e-{who}",
+    )
+    await _mint(db_session, user_id=user_id, provider_id=provider.id)
+    await _mint(db_session, user_id=user_id, provider_id=None)
+    await db_session.commit()
+
+    url = (f"/api/v1/me/identities/{ident.id}" if who == "self"
+           else f"/api/v1/admin/users/{user_id}/identities/{ident.id}")
+    resp = await test_client.delete(url)
+    assert resp.status_code == 204, resp.text
+
+    rows = await _rows_for(db_session, user_id)
+    by_provider = {r.idp_provider_id: bool(r.revoked_at) for r in rows}
+    assert by_provider == {provider.id: True, None: False}

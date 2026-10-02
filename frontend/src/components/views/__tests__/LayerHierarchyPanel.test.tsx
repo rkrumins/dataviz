@@ -12,7 +12,7 @@
  *    the wizard, which is why assigned rows used to render as raw URN fragments
  *    and could never expand. These tests deliberately never seed a canvas.
  */
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ViewLayerConfig, LayerAssignmentEntry } from '@/types/schema'
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
@@ -24,7 +24,7 @@ const fakeLogicalNodes: UseLogicalNodesReturn = {
   addNode: vi.fn(),
   renameNode: vi.fn(),
   deleteNode: vi.fn(),
-  moveNode: vi.fn(),
+  moveNode: vi.fn(), moveNodeToLayer: vi.fn(), layerChoices: () => [], nameTaken: () => false, parentOf: () => null, ungroupNode: vi.fn(), moveContents: vi.fn(),
   toggleCollapse: vi.fn(),
   nodesForLayer: (layerId: string) => (layers.find(l => l.id === layerId)?.logicalNodes ?? []),
   nodePathLabel: (_layerId: string, nodeId: string) => nodeId,
@@ -57,7 +57,9 @@ function makeIndex(
     resolve: (urn: string) => directory[urn],
     childrenOf: (urn: string) => children[urn] ?? [],
     loadChildren,
+    loadMoreChildren: vi.fn().mockResolvedValue(undefined),
     isLoading: () => false,
+    childPageState: () => ({ hasMore: undefined, failed: false }),
   }
 }
 
@@ -234,5 +236,168 @@ describe('LayerHierarchyPanel — in-step layer CRUD', () => {
   it('offers no bulk-clear on a layer that holds nothing', () => {
     renderPanel({}, makeIndex({}))
     expect(screen.queryByTitle(/Remove all/)).not.toBeInTheDocument()
+  })
+})
+
+describe('LayerHierarchyPanel — rule-placed roots', () => {
+  // A layer's `entityTypes` rule places roots with no assignment entry. The rail
+  // has to list them, or a rule-driven column reads "empty" here while the
+  // canvas renders it full.
+  const index = makeIndex({
+    'urn:ruled': { name: 'Finance', type: 'domain', childCount: 3 },
+    'urn:explicit': { name: 'Risk', type: 'domain', childCount: 0 },
+  })
+
+  /** What the Layer Studio hands down: the column's roots, already ordered,
+   *  with rule-placed rows flagged. Explicit entries come first here. */
+  const rowsForL1 = (assignments: Record<string, LayerAssignmentEntry>) => {
+    const explicit = Object.keys(assignments)
+      .filter(urn => assignments[urn].layerId === 'l1')
+      .map(urn => ({ id: urn, urn, name: '', typeId: 'domain', childCount: 0, rulePlaced: false }))
+    const ruled = assignments['urn:ruled']
+      ? []
+      : [{ id: 'urn:ruled', urn: 'urn:ruled', name: 'Finance', typeId: 'domain', childCount: 3, rulePlaced: true }]
+    return new Map([['l1', [...explicit, ...ruled]]])
+  }
+
+  function renderWithRules(
+    assignments: Record<string, LayerAssignmentEntry> = {},
+    handlers: Parameters<typeof renderPanel>[2] = {},
+  ) {
+    return render(
+      <LayerHierarchyPanel
+        layers={layers}
+        assignments={assignments}
+        rootsByLayer={rowsForL1(assignments)}
+        activeTarget={null}
+        logicalNodes={fakeLogicalNodes}
+        entityIndex={index}
+        onSetActiveTarget={vi.fn()}
+        onDrop={vi.fn()}
+        onUnassign={handlers.onUnassign ?? vi.fn()}
+        onReorderLayers={vi.fn()}
+        onAddLayer={vi.fn()}
+        onRenameLayer={vi.fn()}
+        onDeleteLayer={vi.fn()}
+        onClearLayer={vi.fn()}
+      />
+    )
+  }
+
+  it('lists a rule-placed root under its layer, marked "by type"', () => {
+    renderWithRules()
+    expect(screen.getByText('Finance')).toBeInTheDocument()
+    expect(screen.getByTestId('rail-rule-placed-marker')).toHaveTextContent('by type')
+    expect(screen.getByText('In this column (1)')).toBeInTheDocument()
+  })
+
+  it('offers no unassign on a rule-placed row — there is no entry to remove', () => {
+    const onUnassign = vi.fn()
+    renderWithRules({}, { onUnassign })
+    expect(screen.queryByTitle('Remove assignment')).not.toBeInTheDocument()
+    expect(onUnassign).not.toHaveBeenCalled()
+  })
+
+  it('keeps it DRAGGABLE, carrying the same payload the tree emits', () => {
+    renderWithRules()
+    const row = screen.getByText('Finance').closest('[draggable]') as HTMLElement
+    expect(row).toHaveAttribute('draggable', 'true')
+
+    const setData = vi.fn()
+    fireEvent.dragStart(row, { dataTransfer: { setData, effectAllowed: '' } })
+    expect(setData).toHaveBeenCalledWith(
+      'application/x-entity-assignment',
+      expect.stringContaining('urn:ruled'),
+    )
+  })
+
+  it('counts rule-placed roots in the layer badge alongside explicit ones', () => {
+    renderWithRules({ 'urn:explicit': { layerId: 'l1', inheritsChildren: true } })
+    // 1 explicit + 1 by rule.
+    expect(screen.getByTestId('layer-count-l1')).toHaveTextContent('2')
+  })
+
+  it('drops a rule-placed row once the same urn gains an explicit entry', () => {
+    renderWithRules({ 'urn:ruled': { layerId: 'l1', inheritsChildren: true } })
+    // Listed once, as an explicit placement — never twice.
+    expect(screen.queryByTestId('rail-rule-placed-marker')).not.toBeInTheDocument()
+    expect(screen.getAllByText('Finance')).toHaveLength(1)
+    expect(screen.getByTitle('Remove assignment')).toBeInTheDocument()
+  })
+})
+
+describe('LayerHierarchyPanel — a column holding far more than it draws', () => {
+  // The rail is one scroller wrapping a Reorder.Group, so a column cannot own a
+  // virtualized viewport without breaking layer drag-reorder. It draws a window
+  // instead — the guarantee is that the DOM stays bounded however many rows a
+  // column holds.
+  const MANY = 1000
+  const manyRows = Array.from({ length: MANY }, (_, i) => ({
+    id: `urn:e${i}`, urn: `urn:e${i}`, name: `Entity ${i}`,
+    typeId: 'domain', childCount: 0, rulePlaced: true,
+  }))
+  const index = makeIndex(Object.fromEntries(
+    manyRows.map(r => [r.urn, { name: r.name, type: 'domain', childCount: 0 }]),
+  ))
+
+  const renderMany = () => render(
+    <LayerHierarchyPanel
+      layers={layers}
+      assignments={{}}
+      rootsByLayer={new Map([['l1', manyRows]])}
+      activeTarget={null}
+      logicalNodes={fakeLogicalNodes}
+      entityIndex={index}
+      onSetActiveTarget={vi.fn()}
+      onDrop={vi.fn()}
+      onUnassign={vi.fn()}
+      onReorderLayers={vi.fn()}
+      onAddLayer={vi.fn()}
+      onRenameLayer={vi.fn()}
+      onDeleteLayer={vi.fn()}
+      onClearLayer={vi.fn()}
+    />
+  )
+
+  it('draws a bounded window, not a row per entity', () => {
+    renderMany()
+    const drawn = screen.getByTestId('layer-rows-l1').querySelectorAll('[draggable]')
+    expect(drawn.length).toBeLessThanOrEqual(50)
+    expect(drawn[0]).toHaveTextContent('Entity 0')
+  })
+
+  it('states the whole count rather than the window', () => {
+    renderMany()
+    expect(screen.getByText(`In this column (${MANY.toLocaleString()})`)).toBeInTheDocument()
+    expect(screen.getByText(/950 left/)).toBeInTheDocument()
+  })
+
+  it('reveals another window on demand', () => {
+    renderMany()
+    fireEvent.click(within(screen.getByTestId('layer-rows-l1')).getByRole('button', { name: /Show 50 more/ }))
+    const drawn = screen.getByTestId('layer-rows-l1').querySelectorAll('[draggable]')
+    expect(drawn.length).toBe(100)
+  })
+
+  it('offers nothing when the column fits in one window', () => {
+    render(
+      <LayerHierarchyPanel
+        layers={layers}
+        assignments={{}}
+        rootsByLayer={new Map([['l1', manyRows.slice(0, 3)]])}
+        activeTarget={null}
+        logicalNodes={fakeLogicalNodes}
+        entityIndex={index}
+        onSetActiveTarget={vi.fn()}
+        onDrop={vi.fn()}
+        onUnassign={vi.fn()}
+        onReorderLayers={vi.fn()}
+        onAddLayer={vi.fn()}
+        onRenameLayer={vi.fn()}
+        onDeleteLayer={vi.fn()}
+        onClearLayer={vi.fn()}
+      />
+    )
+    expect(screen.queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument()
   })
 })

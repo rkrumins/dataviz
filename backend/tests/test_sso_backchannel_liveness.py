@@ -76,6 +76,9 @@ class _Probe(BackchannelProvider):
             raise BackchannelUnavailable("idp_status:503")
         if self._outcome == "boom":
             raise RuntimeError("a provider bug")
+        if self._outcome == "hang":
+            import asyncio
+            await asyncio.sleep(60)
 
 
 class _OtherKindProvider:
@@ -211,6 +214,44 @@ async def test_an_outage_inside_the_grace_window_lets_the_refresh_through(
     )
     assert user.id == "usr_1"
     assert store.revoked_family is None
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_gateway_is_cut_off_and_read_as_an_outage(
+    registry, monkeypatch,
+):
+    """Liveness runs AFTER the rotation has committed. A gateway that
+    hangs past the refresh route's own deadline turned into a 504, and
+    the client's retry — carrying the token that was already consumed —
+    arrived outside the rotation grace and read as token reuse: the family
+    revoked, the user signed out for the gateway being slow. The probe now
+    has a deadline well inside that window, and running out of it is an
+    outage like any other: the grace window decides."""
+    monkeypatch.setattr(
+        "backend.auth_service.service._LIVENESS_DEADLINE_SECONDS", 0.05,
+    )
+    registry.providers[PROVIDER_ID] = _Probe(outcome="hang")
+    store = InMemoryRefreshStore()
+    token, _ = await _mint(store, checked_at=int(time.time()) - 60)
+
+    user, _tokens = await _service(store).refresh(
+        token, ambient_cookies=COOKIES,
+    )
+    assert user.id == "usr_1"
+    assert store.revoked_family is None
+
+
+@pytest.mark.asyncio
+async def test_a_hang_past_the_grace_window_still_ends_it(registry, monkeypatch):
+    monkeypatch.setattr(
+        "backend.auth_service.service._LIVENESS_DEADLINE_SECONDS", 0.05,
+    )
+    registry.providers[PROVIDER_ID] = _Probe(outcome="hang")
+    store = InMemoryRefreshStore()
+    token, _ = await _mint(store, checked_at=int(time.time()) - GRACE - 60)
+
+    with pytest.raises(SsoReauthRequired):
+        await _service(store).refresh(token, ambient_cookies=COOKIES)
 
 
 @pytest.mark.asyncio

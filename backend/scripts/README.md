@@ -130,6 +130,30 @@ python backend/scripts/seed_large_lineage.py --scale 10.0 --push-falkordb
 
 ---
 
+### `seed_search_bench.py` + `bench_search_engine.py` — Search Engine Benchmark
+
+`seed_search_bench.py` writes a graph built to test property search at scale. It has:
+
+- a `Domain → Container → Dataset → SchemaField` hierarchy, plus `TRANSFORMS` lineage;
+- typed properties of every kind a search compares: int64 ids, numeric text, floats, booleans and their text, ISO dates, lists, mixed kinds, and missing keys.
+
+`bench_search_engine.py` times the search engine's statements on that graph and prints a Markdown report. It uses the real compiler. `docs/search-engine/S0_FINDINGS.md` quotes one run.
+
+```bash
+python -m backend.scripts.seed_search_bench --nodes 1000000 --graph search_bench
+python -m backend.scripts.bench_search_engine --graph search_bench --width 50000
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--nodes` | `1000000` | Total nodes (seeder) |
+| `--owners` | `5000` | Distinct `owner` values (seeder) |
+| `--seed` | `42` | Random seed (seeder); the graph is dropped first |
+| `--width` | `200000` | ID-range width per chunk (benchmark) |
+| `--host` / `--port` / `--graph` | `localhost` / `6379` / `search_bench` | Target (both) |
+
+---
+
 ### `seed_neo4j.py` — Neo4j Seeder
 
 Same generation logic as `seed_falkordb.py` but pushes to Neo4j via the `Neo4jProvider`.
@@ -345,6 +369,60 @@ regardless of the fingerprint.
 
 External connectors that can't shell out should call the authenticated admin
 API instead: `POST /api/v1/admin/data-sources/{id}/source-changed`.
+
+---
+
+## View library scripts
+
+A view's **library** is its display rules and saved queries. It travels between
+views as a pack file (`*.library.json`). The format, the endpoints and more
+recipes are in `docs/features/search-and-rules-reference.md`. Example packs are
+in `docs/examples/search-and-rules/packs/`.
+
+### `publish_view_library.py` — Publish a pack to one view, or every view of a data source
+
+There is no data-source-level library. Publishing to a data source lists every
+view of it that you can read, and imports the pack into each one. The script
+signs in with an email and password, since there are no API tokens, and echoes
+the `nx_csrf` cookie as `X-CSRF-Token`. It uses only the standard library.
+
+```bash
+export SYNODIC_BASE_URL=https://lineage.example.com SYNODIC_EMAIL=you@example.com
+export SYNODIC_PASSWORD=…        # or --password; prompted when neither is set; never printed
+
+# Dry run (the default): what each view would add, skip or refuse
+python -m backend.scripts.publish_view_library governance.library.json --data-source ds_abc
+
+# Import
+python -m backend.scripts.publish_view_library governance.library.json --data-source ds_abc --apply
+python -m backend.scripts.publish_view_library governance.library.json --view view_abc --apply
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--view` / `--data-source` | one is required | One view, or every view of the data source you can read |
+| `--strategy` | `merge` | `merge` adds what a view doesn't have; `copy` adds everything; `replace` removes a view's rules and saved queries first |
+| `--apply` | off | Import. Without it nothing changes |
+| `--branch` | — | Write the display rules to this draft of each view |
+| `--base-url` | `$SYNODIC_BASE_URL`, else `http://localhost:8000` | The API |
+| `--email` / `--password` | `$SYNODIC_EMAIL` / `$SYNODIC_PASSWORD` | Who signs in |
+
+It prints one row per view (added, skipped, refused, removed, warnings), then
+every refused item and warning with its reason. The exit status is `0` when
+nothing was refused, `1` when a view refused an item or answered with an HTTP
+error (a view you can read but not edit answers `403`), and `2` for a bad
+argument, a file that isn't a pack, or a failed sign-in.
+
+### `export_view_library_schema.py` — The pack's JSON Schema
+
+This script writes `backend/common/schema/view-library.v1.json` from the models
+the import reads. Run it after changing `backend/common/models/view_library.py`.
+`tests/test_view_library_schema.py` fails while the committed file is out of date.
+
+```bash
+python -m backend.scripts.export_view_library_schema          # rewrite the file
+python -m backend.scripts.export_view_library_schema --check  # exit 1 if it is out of date
+```
 
 ---
 

@@ -1,12 +1,15 @@
 import { create } from 'zustand'
 import type { Node, Edge, Viewport } from '@xyflow/react'
 import type { HydrationPhase, HydrationStatus } from '@/hooks/useGraphHydration'
+import { useStagedChangesStore } from './stagedChangesStore'
+import { filterIncomingEdges, overlayOnReplace } from './stagedOverlay'
+import { toCanvasEdge, toCanvasNode } from '@/lib/canvasNodeMapper'
+import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 
 export interface LineageNode extends Node {
   data: {
     label: string
     businessLabel?: string
-    technicalLabel?: string
     /** The entity's description (mapped from GraphNode.description in toCanvasNode). */
     description?: string
     urn: string
@@ -35,6 +38,10 @@ export interface LineageNode extends Node {
     /** Reconstructed committed-deletion node (draft-vs-main). Read-only; rendered as a rose ghost
      *  until the draft is merged or the deletion is restored. See features/versioning/canvas/deletionGhosts. */
     isGhost?: boolean
+    /** Primed out of band by a search reveal (`useRevealSearchHit`) rather than
+     *  delivered by a child page. `loadChildren` excludes these from its page
+     *  offset and clears the flag once a real page delivers the child. */
+    viaReveal?: boolean
   }
 }
 
@@ -56,12 +63,97 @@ export interface LineageEdge extends Edge {
   }
 }
 
+/** One relationship a drawn line stands for, with its ORIGINAL endpoints (a
+ *  rolled-up line is drawn between ancestors of the real ones). */
+export interface EdgeMemberRef {
+  id: string
+  source: string
+  target: string
+  edgeType: string
+  /** A materialized AGGREGATED roll-up, not an authored relationship. */
+  rollup: boolean
+}
+
+/** What the relationship drawer shows: one relationship, or a drawn line that
+ *  stands for several (a connection). `lineId` is the line it was opened from,
+ *  so the canvas can mark it. */
+export type DrawerEdgeTarget =
+  | { kind: 'relationship'; id: string; source: string; target: string; edgeType: string; lineId?: string }
+  | {
+      kind: 'connection'
+      /** The drawn line's id. */
+      id: string
+      source: string
+      target: string
+      types: string[]
+      /** How many flows the line stands for — its drawn weight, not a member count. */
+      weight: number
+      bidirectional?: boolean
+      /** The line carries no member list (a trace summary wire, a roll-up line). */
+      summaryOnly?: boolean
+      members: EdgeMemberRef[]
+    }
+
+export type DrawerEntry = { kind: 'node'; id: string } | { kind: 'edge'; target: DrawerEdgeTarget }
+
+/**
+ * Where one parent's child pager stands: `offset` is where the next page starts
+ * and `hasMore` whether there is one — both as the SERVER said on the last page,
+ * never a client count (a draft overlay adds and drops rows around each page).
+ * `direction` is the order the offsets are in: a different order restarts at 0.
+ * `lastUrn` is the last child delivered: if it is no longer in the store, the
+ * graph was replaced under the pager and it restarts. So does a pager whose
+ * parent's `childCount` has since changed — a "no more" verdict must not outlive
+ * children that appeared later.
+ */
+export interface ChildPageState {
+  offset: number
+  hasMore: boolean
+  direction: 'asc' | 'desc'
+  lastUrn: string | null
+  childCount: number
+}
+
+/**
+ * Where one feed of entities-by-type stands: the entity types it queries, where
+ * its next page starts and whether there is one — as the server said (see
+ * ChildPageState). An open Context View keeps one feed per visible type; the
+ * Hierarchy and Graph views keep a roots feed and an orphans feed.
+ */
+export interface TypeFeedState {
+  entityTypes: string[]
+  offset: number
+  hasMore: boolean
+}
+
 interface CanvasState {
   // Nodes and Edges
   nodes: LineageNode[]
   edges: LineageEdge[]
   _nodeIndex: Set<string>
   _edgeIndex: Set<string>
+  /** Bumped by every setGraph. A page fetched before a new graph was set belongs
+   *  to the OLD graph: a pager compares it and drops the page instead of landing
+   *  it on the new graph and adopting a position it never earned. */
+  graphGeneration: number
+  /** Child pagers by parent id — one source of truth for every
+   *  useGraphHydration instance (hydration seeds anchors; the canvas pages on
+   *  scroll/expand). Cleared by setGraph. Never persisted. */
+  childPaging: Record<string, ChildPageState>
+  setChildPage: (parentId: string, page: ChildPageState) => void
+  /** Land one child page — its nodes, its edges AND the pager's new position —
+   *  as ONE store update, so a page costs one render, not two. */
+  addChildPage: (parentId: string, page: ChildPageState, nodes: LineageNode[], edges: LineageEdge[]) => void
+  /** Entity feeds by key (a type id in an open Context View; '__roots__' /
+   *  '__orphans__' in the Hierarchy and Graph views). Cleared by setGraph.
+   *  Never persisted. */
+  typeFeeds: Record<string, TypeFeedState>
+  setTypeFeed: (feedKey: string, feed: TypeFeedState) => void
+  /** Land one feed page (nodes, edges, feed position) as ONE store update. */
+  addFeedPage: (feedKey: string, feed: TypeFeedState, nodes: LineageNode[], edges: LineageEdge[]) => void
+  /** Seed many pager and feed positions as ONE store update — every store update
+   *  re-renders the whole canvas, so seeding 56 anchors one by one was 56 renders. */
+  seedPositions: (childPages: Record<string, ChildPageState>, typeFeeds: Record<string, TypeFeedState>) => void
   /** Monotonic counter — incremented on every node/edge mutation. */
   _version: number
   setNodes: (nodes: LineageNode[]) => void
@@ -97,6 +189,30 @@ interface CanvasState {
    *  result was almost certainly truncated server-side. */
   edgesTruncated: boolean
   setEdgesTruncated: (edgesTruncated: boolean) => void
+  /** Rows whose lineage was read only in part, by direction: priming them
+   *  came back at its cap (primeLineageFor), so the flows past it are
+   *  unknown and their ports never claim that lineage only leaves the view.
+   *  Cleared by setGraph. */
+  lineagePartial: { in: ReadonlySet<string>; out: ReadonlySet<string> }
+  markLineagePartial: (partial: { in: readonly string[]; out: readonly string[] }) => void
+
+  // Node-fetch integrity — some batches of the initial load failed after
+  // their retries while others succeeded. The canvas renders what arrived
+  // and SAYS so (and keeps retrying), rather than a silently incomplete
+  // view. `missingEntityCount` is the number of assigned entities in the
+  // failed batches (0 when the failed batches were type-shaped, whose
+  // size is unknown until they load).
+  nodeFetchFailures: number
+  missingEntityCount: number
+  noteNodeFetchFailure: (batches: number, entities: number) => void
+  clearNodeFetchFailures: () => void
+
+  // Placements that point at nothing: assigned entities the load ASKED FOR, by URN, and the
+  // graph didn't return (failed batches are left out, since those are unknown rather than
+  // absent). A view brought in from another environment keeps these, marked not found.
+  // `null` = not checked yet.
+  placementsNotFound: { viewId: string; urns: string[] } | null
+  setPlacementsNotFound: (found: { viewId: string; urns: string[] } | null) => void
 
   // One-shot pulse highlight — populated after a "jump to node" reveal so
   // the user sees a visible confirmation of where they landed. A Set
@@ -113,6 +229,17 @@ interface CanvasState {
   selectedNodeIds: string[]
   selectedEdgeIds: string[]
   selectNode: (id: string, multi?: boolean) => void
+  /** Replace the whole node selection — what a shift-range and every bulk
+   *  action need. Logical groupings are filtered out: a group is a visual
+   *  container, not an entity, and bulk actions have nothing to walk from. */
+  setSelection: (ids: string[]) => void
+  /**
+   * Multi-select armed from the UI. Cmd/Ctrl-click is the shortcut for it,
+   * but a modifier nobody is told about is not a feature — with this on, a
+   * plain click adds to the selection instead of replacing it.
+   */
+  multiSelectArmed: boolean
+  setMultiSelectArmed: (armed: boolean) => void
   selectEdge: (id: string, multi?: boolean) => void
   clearSelection: () => void
   /** Last selectNode() call. `drawerNodeId` is sticky, so click observers (the
@@ -126,7 +253,44 @@ interface CanvasState {
   // don't close it; only an explicit close (X) does.
   drawerNodeId: string | null
   openNodeDrawer: (id: string) => void
+  /** Closes THE drawer — whichever of node or relationship it shows — and its trail. */
   closeNodeDrawer: () => void
+  /**
+   * The relationship the drawer shows instead of a node (the two are exclusive).
+   * A SNAPSHOT taken when the line was clicked, not a line id: drawn-line ids are
+   * rebuilt on every expand, drill and filter, so an id would stop resolving the
+   * moment the reader followed the relationship anywhere.
+   */
+  drawerEdge: DrawerEdgeTarget | null
+  openEdgeDrawer: (target: DrawerEdgeTarget, opts?: { edit?: boolean }) => void
+  /** Set by an "edit this relationship" entry point; the drawer takes it once. */
+  drawerEdgeEditRequest: boolean
+  consumeDrawerEdgeEditRequest: () => boolean
+  /**
+   * The drawer's own back/forward trail. Following lineage from the drawer —
+   * a consumer, then its consumer, then back — is a WALK, and a walk you
+   * cannot retrace is one people stop taking. `cursor` indexes `entries`;
+   * -1 is an empty trail.
+   */
+  drawerHistory: { entries: DrawerEntry[]; cursor: number }
+  drawerBack: () => void
+  drawerForward: () => void
+  /**
+   * The drawer on screen has edits it has not staged (it says so via `setDrawerDirty`). While
+   * it does, any move of the drawer — to another entity or relationship, along its trail, or
+   * shut — is HELD rather than carried out (`pendingDrawerMove`), whole: a click on another
+   * node neither swaps the drawer nor selects the node until the reader chooses. The drawer
+   * shows the choice; `resolveDrawerMove` settles it.
+   */
+  drawerDirty: boolean
+  setDrawerDirty: (dirty: boolean) => void
+  pendingDrawerMove: DrawerMove | null
+  /** Run a multi-step move (open + reveal, a trace, the builder) now — or hold all of it. */
+  requestDrawerMove: (move: () => void) => void
+  /** `proceed`: the edits were discarded or staged, replay the held move. `keep`: drop it. */
+  resolveDrawerMove: (choice: 'proceed' | 'keep') => void
+  /** Close the drawer whatever it holds — for a canvas or view that is going away. */
+  forceCloseDrawer: () => void
 
   // Viewport
   viewport: Viewport
@@ -145,7 +309,7 @@ interface CanvasState {
   hydrationPhase: HydrationPhase
   setHydrationPhase: (phase: HydrationPhase) => void
   /** Authoritative hydration status, mirrored from CanvasRouter so downstream
-   *  canvas components (empty-state, toasts, ghosts) derive their UI from ONE
+   *  canvas components (empty-state, notifications, ghosts) derive their UI from ONE
    *  source and never render a failed/loading load as an empty graph. */
   hydrationStatus: HydrationStatus
   setHydrationStatus: (status: HydrationStatus) => void
@@ -174,6 +338,13 @@ interface CanvasState {
 
   // Node/Edge CRUD (Manual)
   updateNode: (id: string, data: Partial<LineageNode['data']>) => void
+  /** Replace the server-owned fields (name, description, properties, `version`, …) of the nodes
+   *  the canvas holds with the server's — after a save, so the canvas shows exactly what was
+   *  stored and the next edit's token is current. Client state (position, pending flags) and the
+   *  reader-stamped `childCount` stay, unless the server sends one. One store write. */
+  applyServerNodes: (nodes: readonly GraphNode[]) => void
+  /** The same for edges: `version`, confidence and the roll-up flags. */
+  applyServerEdges: (edges: readonly GraphEdge[]) => void
   removeNode: (id: string) => void
   removeEdge: (id: string) => void
   removeNodes: (ids: string[]) => void
@@ -233,10 +404,75 @@ const withVersion: (
     return config(wrappedSet, get, api)
   }
 
+/** The graph after adding `newNodes`/`newEdges` (deduped by id), or null when
+ *  nothing changed. Shared by addGraph and the page-landing actions, so a page
+ *  that brings a node the store already holds fills in what that copy is
+ *  missing (see enrichNode) exactly as addGraph does. */
+function mergeGraph(
+  state: CanvasState, newNodes: LineageNode[], newEdges: LineageEdge[],
+): Pick<CanvasState, 'nodes' | 'edges' | '_nodeIndex' | '_edgeIndex'> | null {
+  // Unique against the store AND within the batch: a page read from two sides
+  // (lineage out of and into it) brings an edge inside the page twice.
+  const batchNodes = new Set<string>()
+  const batchEdges = new Set<string>()
+  const uniqueNodes: LineageNode[] = []
+  const dupes = new Map<string, LineageNode>()
+  for (const n of newNodes) {
+    if (state._nodeIndex.has(n.id)) dupes.set(n.id, n)
+    else if (!batchNodes.has(n.id)) {
+      batchNodes.add(n.id)
+      uniqueNodes.push(n)
+    }
+  }
+  // A page never brings back a relationship the user's pending edits removed (see stagedOverlay).
+  const uniqueEdges = filterIncomingEdges(newEdges, useStagedChangesStore.getState().changes)
+    .filter((e) => !state._edgeIndex.has(e.id) && !batchEdges.has(e.id) && !!batchEdges.add(e.id))
+  const enriched = dupes.size > 0 ? enrichAll(state.nodes, dupes) : null
+  if (uniqueNodes.length === 0 && uniqueEdges.length === 0 && !enriched) return null
+  const nodeIndex = uniqueNodes.length > 0 ? new Set(state._nodeIndex) : state._nodeIndex
+  const edgeIndex = uniqueEdges.length > 0 ? new Set(state._edgeIndex) : state._edgeIndex
+  batchNodes.forEach((id) => nodeIndex.add(id))
+  batchEdges.forEach((id) => edgeIndex.add(id))
+  return {
+    nodes: [...(enriched ?? state.nodes), ...uniqueNodes],
+    edges: [...state.edges, ...uniqueEdges],
+    _nodeIndex: nodeIndex,
+    _edgeIndex: edgeIndex,
+  }
+}
+
+/** A drawer move held while the drawer has unsaved edits: every store call that moved it in one
+ *  tick (a click selects AND opens; a trail step moves AND selects), replayed in order. */
+export interface DrawerMove {
+  steps: Array<() => void>
+}
+
+/** Moves replayed from a settled prompt, and nested moves of a replay, pass the gate. */
+let drawerGateBypass = 0
+/** Calls held within one tick join one move; a later one replaces it (the latest wins). */
+let drawerMoveBatchOpen = false
+
+/** Trail entries kept — a long walk forgets its oldest steps, not the recent ones. */
+export const DRAWER_TRAIL_MAX = 50
+
 export const useCanvasStore = create<CanvasState>()(
   persist(
     withVersion(
-    (set, get) => ({
+    (set, get) => {
+    /** Hold `replay` instead of running the move it stands for — when it `moves` the drawer
+     *  and the drawer has unsaved edits. Returns whether it was held. */
+    const holdDrawerMove = (moves: boolean, replay: () => void): boolean => {
+      const s = get()
+      if (!moves || !s.drawerDirty || drawerGateBypass > 0) return false
+      const pending = s.pendingDrawerMove
+      set({ pendingDrawerMove: { steps: pending && drawerMoveBatchOpen ? [...pending.steps, replay] : [replay] } })
+      if (!drawerMoveBatchOpen) {
+        drawerMoveBatchOpen = true
+        queueMicrotask(() => { drawerMoveBatchOpen = false })
+      }
+      return true
+    }
+    return ({
       // Nodes and Edges
       nodes: [],
       edges: [],
@@ -257,6 +493,26 @@ export const useCanvasStore = create<CanvasState>()(
       clearEdgeFetchFailures: () => set({ edgeFetchFailures: 0, lastEdgeError: null }),
       edgesTruncated: false,
       setEdgesTruncated: (edgesTruncated) => set({ edgesTruncated }),
+      lineagePartial: { in: new Set(), out: new Set() },
+      markLineagePartial: (partial) => {
+        // Nothing to mark is no update: every update re-renders the canvas.
+        if (partial.in.length === 0 && partial.out.length === 0) return
+        set((state) => ({
+          lineagePartial: {
+            in: partial.in.length > 0 ? new Set([...state.lineagePartial.in, ...partial.in]) : state.lineagePartial.in,
+            out: partial.out.length > 0 ? new Set([...state.lineagePartial.out, ...partial.out]) : state.lineagePartial.out,
+          },
+        }))
+      },
+      nodeFetchFailures: 0,
+      missingEntityCount: 0,
+      noteNodeFetchFailure: (batches, entities) => set({
+        nodeFetchFailures: batches,
+        missingEntityCount: entities,
+      }),
+      clearNodeFetchFailures: () => set({ nodeFetchFailures: 0, missingEntityCount: 0 }),
+      placementsNotFound: null,
+      setPlacementsNotFound: (placementsNotFound) => set({ placementsNotFound }),
       pulseNodeIds: new Set(),
       pulseNode: (id) => {
         // Add to the pulsing set; each id auto-clears after the
@@ -279,11 +535,17 @@ export const useCanvasStore = create<CanvasState>()(
       },
       addNodes: (newNodes) => set((state) => {
         const existingIds = state._nodeIndex
-        const uniqueNodes = newNodes.filter((n) => !existingIds.has(n.id))
-        if (uniqueNodes.length === 0) return state // No-op: prevent unnecessary re-render
-        const nextIndex = new Set(existingIds)
+        const uniqueNodes: LineageNode[] = []
+        const dupes = new Map<string, LineageNode>()
+        for (const n of newNodes) {
+          if (existingIds.has(n.id)) dupes.set(n.id, n)
+          else uniqueNodes.push(n)
+        }
+        const enriched = dupes.size > 0 ? enrichAll(state.nodes, dupes) : null
+        if (uniqueNodes.length === 0 && !enriched) return state
+        const nextIndex = uniqueNodes.length > 0 ? new Set(existingIds) : existingIds
         uniqueNodes.forEach((n) => nextIndex.add(n.id))
-        return { nodes: [...state.nodes, ...uniqueNodes], _nodeIndex: nextIndex }
+        return { nodes: [...(enriched ?? state.nodes), ...uniqueNodes], _nodeIndex: nextIndex }
       }),
       addEdges: (newEdges) => set((state) => {
         const existingIds = state._edgeIndex
@@ -293,7 +555,13 @@ export const useCanvasStore = create<CanvasState>()(
         uniqueEdges.forEach((e) => nextIndex.add(e.id))
         return { edges: [...state.edges, ...uniqueEdges], _edgeIndex: nextIndex }
       }),
-      setGraph: (nodes, edges) => set(() => {
+      setGraph: (serverNodes, serverEdges) => set((state) => {
+        // The server's view ⊕ the user's pending edits — a reload never wipes unsaved work.
+        const { nodes, edges } = overlayOnReplace(
+          { nodes: serverNodes, edges: serverEdges },
+          { nodes: state.nodes, edges: state.edges },
+          useStagedChangesStore.getState().changes,
+        )
         // Dedup by id to prevent React duplicate-key warnings when callers
         // pass arrays with overlapping entries (e.g. assigned + child nodes).
         const seenNodes = new Set<string>()
@@ -317,32 +585,54 @@ export const useCanvasStore = create<CanvasState>()(
           edges: dedupedEdges,
           _nodeIndex: seenNodes,
           _edgeIndex: seenEdges,
+          // A new graph invalidates every pager and feed position — and every
+          // page still in flight for the old one.
+          graphGeneration: state.graphGeneration + 1,
+          childPaging: {},
+          typeFeeds: {},
+          lineagePartial: { in: new Set(), out: new Set() },
         }
       }),
-      addGraph: (newNodes, newEdges) => set((state) => {
-        const uniqueNodes = newNodes.filter((n) => !state._nodeIndex.has(n.id))
-        const uniqueEdges = newEdges.filter((e) => !state._edgeIndex.has(e.id))
-        if (uniqueNodes.length === 0 && uniqueEdges.length === 0) return state
-        const nodeIndex = new Set(state._nodeIndex)
-        const edgeIndex = new Set(state._edgeIndex)
-        uniqueNodes.forEach((n) => nodeIndex.add(n.id))
-        uniqueEdges.forEach((e) => edgeIndex.add(e.id))
-        return {
-          nodes: [...state.nodes, ...uniqueNodes],
-          edges: [...state.edges, ...uniqueEdges],
-          _nodeIndex: nodeIndex,
-          _edgeIndex: edgeIndex,
-        }
-      }),
+
+      graphGeneration: 0,
+      childPaging: {},
+      setChildPage: (parentId, page) => set((state) => ({
+        childPaging: { ...state.childPaging, [parentId]: page },
+      })),
+      addChildPage: (parentId, page, newNodes, newEdges) => set((state) => ({
+        ...(mergeGraph(state, newNodes, newEdges) ?? {}),
+        childPaging: { ...state.childPaging, [parentId]: page },
+      })),
+      typeFeeds: {},
+      setTypeFeed: (feedKey, feed) => set((state) => ({
+        typeFeeds: { ...state.typeFeeds, [feedKey]: feed },
+      })),
+      addFeedPage: (feedKey, feed, newNodes, newEdges) => set((state) => ({
+        ...(mergeGraph(state, newNodes, newEdges) ?? {}),
+        typeFeeds: { ...state.typeFeeds, [feedKey]: feed },
+      })),
+      seedPositions: (childPages, typeFeeds) => set((state) => ({
+        childPaging: { ...state.childPaging, ...childPages },
+        typeFeeds: { ...state.typeFeeds, ...typeFeeds },
+      })),
+      addGraph: (newNodes, newEdges) => set((state) => mergeGraph(state, newNodes, newEdges) ?? state),
 
       // Selection
       selectedNodeIds: [],
       selectedEdgeIds: [],
-      selectNode: (id, multi = false) => set((state) => ({
+      selectNode: (id, multi = false) => {
+        const s = get()
+        const swapsDrawer = !multi && !id.startsWith('logical:') && (s.drawerNodeId !== id || !!s.drawerEdge)
+        if (holdDrawerMove(swapsDrawer, () => get().selectNode(id, multi))) return
+        set((state) => ({
         selectedNodeIds: multi
-          ? state.selectedNodeIds.includes(id)
-            ? state.selectedNodeIds.filter((nid) => nid !== id)
-            : [...state.selectedNodeIds, id]
+          // A logical grouping is a container, not an entity — it can be
+          // clicked, but it never joins a selection a bulk action reads.
+          ? isSelectableNode(id)
+            ? state.selectedNodeIds.includes(id)
+              ? state.selectedNodeIds.filter((nid) => nid !== id)
+              : [...state.selectedNodeIds, id]
+            : state.selectedNodeIds
           : state.selectedNodeIds.length === 1 && state.selectedNodeIds[0] === id
             ? [] // Toggle off: clicking the already-selected node deselects it
             : [id],
@@ -353,9 +643,18 @@ export const useCanvasStore = create<CanvasState>()(
         // Single-select of a real entity opens (or swaps) the sticky drawer.
         // Toggle-off keeps it open — only the X button closes it. Logical
         // groupings and multi-select never touch the drawer.
-        ...(!multi && !id.startsWith('logical:') ? { drawerNodeId: id } : {}),
-      })),
-      selectEdge: (id, multi = false) => set((state) => ({
+        // A single-select click opens the drawer on that entity, so it is a
+        // move like any other — otherwise Back would skip the steps taken on
+        // the canvas. A multi-selection never touches the drawer, so it is
+        // not a move.
+        ...(!multi && !id.startsWith('logical:')
+          ? { drawerNodeId: id, drawerEdge: null, drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }) }
+          : {}),
+        }))
+      },
+      selectEdge: (id, multi = false) => {
+        if (holdDrawerMove(!!get().drawerNodeId, () => get().selectEdge(id, multi))) return
+        set((state) => ({
         selectedEdgeIds: multi
           ? state.selectedEdgeIds.includes(id)
             ? state.selectedEdgeIds.filter((eid) => eid !== id)
@@ -365,14 +664,120 @@ export const useCanvasStore = create<CanvasState>()(
         // Mutual exclusion: selecting an edge swaps the right rail to the
         // edge drawer.
         drawerNodeId: null,
-      })),
-      clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [] }),
+        }))
+      },
+      setSelection: (ids) => {
+        const next = [...new Set(ids.filter(isSelectableNode))]
+        const s = get()
+        const swapsDrawer = next.length === 1 && (s.drawerNodeId !== next[0] || !!s.drawerEdge)
+        if (holdDrawerMove(swapsDrawer, () => get().setSelection(ids))) return
+        set(() => ({
+          selectedNodeIds: next,
+          // Node and edge selections are mutually exclusive, as in selectNode.
+          selectedEdgeIds: [],
+          // One node set this way reads as a plain click and opens the sticky
+          // drawer; a set of several must not, because the drawer shows ONE
+          // entity and a selection of five is not one entity.
+          ...(next.length === 1 ? { drawerNodeId: next[0], drawerEdge: null } : {}),
+        }))
+      },
+      multiSelectArmed: false,
+      setMultiSelectArmed: (multiSelectArmed) => set({ multiSelectArmed }),
+      clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [], multiSelectArmed: false }),
       lastNodeClick: { nodeId: null, seq: 0 },
 
       // Sticky entity drawer
       drawerNodeId: null,
-      openNodeDrawer: (id) => set({ drawerNodeId: id }),
-      closeNodeDrawer: () => set({ drawerNodeId: null }),
+      drawerEdge: null,
+      drawerEdgeEditRequest: false,
+      drawerHistory: { entries: [], cursor: -1 },
+      openNodeDrawer: (id) => {
+        const s = get()
+        if (holdDrawerMove(s.drawerNodeId !== id || !!s.drawerEdge, () => get().openNodeDrawer(id))) return
+        set((state) => ({
+          drawerNodeId: id,
+          drawerEdge: null,
+          drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }),
+        }))
+      },
+      openEdgeDrawer: (target, opts) => {
+        const s = get()
+        const same = !s.drawerNodeId && !!s.drawerEdge && sameDrawerEntry({ kind: 'edge', target: s.drawerEdge }, { kind: 'edge', target })
+        if (holdDrawerMove(!same, () => get().openEdgeDrawer(target, opts))) return
+        set((state) => ({
+          drawerEdge: target,
+          drawerNodeId: null,
+          drawerEdgeEditRequest: opts?.edit === true,
+          drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'edge', target }),
+        }))
+      },
+      consumeDrawerEdgeEditRequest: () => {
+        const requested = get().drawerEdgeEditRequest
+        if (requested) set({ drawerEdgeEditRequest: false })
+        return requested
+      },
+      closeNodeDrawer: () => {
+        const s = get()
+        if (holdDrawerMove(!!s.drawerNodeId || !!s.drawerEdge, () => get().closeNodeDrawer())) return
+        set({
+          drawerNodeId: null,
+          drawerEdge: null,
+          drawerEdgeEditRequest: false,
+          drawerHistory: { entries: [], cursor: -1 },
+        })
+      },
+      drawerBack: () => {
+        if (holdDrawerMove(get().drawerHistory.cursor > 0, () => get().drawerBack())) return
+        set((state) => {
+          const cursor = state.drawerHistory.cursor - 1
+          if (cursor < 0) return {}
+          return {
+            ...showDrawerEntry(state.drawerHistory.entries[cursor]!),
+            drawerHistory: { ...state.drawerHistory, cursor },
+          }
+        })
+      },
+      drawerForward: () => {
+        const h = get().drawerHistory
+        if (holdDrawerMove(h.cursor < h.entries.length - 1, () => get().drawerForward())) return
+        set((state) => {
+          const cursor = state.drawerHistory.cursor + 1
+          if (cursor >= state.drawerHistory.entries.length) return {}
+          return {
+            ...showDrawerEntry(state.drawerHistory.entries[cursor]!),
+            drawerHistory: { ...state.drawerHistory, cursor },
+          }
+        })
+      },
+      drawerDirty: false,
+      pendingDrawerMove: null,
+      setDrawerDirty: (dirty) => {
+        if (get().drawerDirty === dirty) return
+        // A drawer that has nothing to lose (staged, discarded, gone) leaves nothing to ask about.
+        set(dirty ? { drawerDirty: true } : { drawerDirty: false, pendingDrawerMove: null })
+      },
+      requestDrawerMove: (move) => {
+        if (!holdDrawerMove(true, move)) move()
+      },
+      resolveDrawerMove: (choice) => {
+        const pending = get().pendingDrawerMove
+        set(choice === 'proceed' ? { pendingDrawerMove: null, drawerDirty: false } : { pendingDrawerMove: null })
+        if (choice !== 'proceed' || !pending) return
+        drawerGateBypass++
+        try {
+          pending.steps.forEach((step) => step())
+        } finally {
+          drawerGateBypass--
+        }
+      },
+      forceCloseDrawer: () => set({
+        drawerDirty: false,
+        pendingDrawerMove: null,
+        drawerNodeId: null,
+        drawerEdge: null,
+        drawerEdgeEditRequest: false,
+        drawerHistory: { entries: [], cursor: -1 },
+      }),
 
       // Viewport
       viewport: { x: 0, y: 0, zoom: 1 },
@@ -432,6 +837,31 @@ export const useCanvasStore = create<CanvasState>()(
           n.id === id ? { ...n, data: { ...n.data, ...data } } : n
         )
       })),
+      applyServerNodes: (fresh) => set((state) => {
+        if (fresh.length === 0) return state
+        const byUrn = new Map(fresh.map((g) => [g.urn, g]))
+        let changed = false
+        const nodes = state.nodes.map((n) => {
+          const g = byUrn.get(n.id) ?? byUrn.get(n.data.urn as string)
+          if (!g) return n
+          changed = true
+          const { childCount, ...server } = toCanvasNode(g).data
+          return { ...n, data: { ...n.data, ...server, ...(g.childCount != null ? { childCount } : {}) } }
+        })
+        return changed ? { nodes } : state
+      }),
+      applyServerEdges: (fresh) => set((state) => {
+        if (fresh.length === 0) return state
+        const byId = new Map(fresh.map((g) => [g.id, g]))
+        let changed = false
+        const edges = state.edges.map((e) => {
+          const g = byId.get(e.id)
+          if (!g) return e
+          changed = true
+          return { ...e, data: { ...e.data, ...toCanvasEdge(g).data } }
+        })
+        return changed ? { edges } : state
+      }),
       removeNode: (id) => set((state) => {
         const nextNodeIndex = new Set(state._nodeIndex)
         nextNodeIndex.delete(id)
@@ -511,7 +941,8 @@ export const useCanvasStore = create<CanvasState>()(
         if (remainingEdges.length === state.edges.length) return state
         return { edges: remainingEdges, _edgeIndex: nextEdgeIndex }
       }),
-    })),
+    })
+    }),
     {
       name: 'canvas-storage',
       storage: createJSONStorage(() => localStorage),
@@ -522,6 +953,87 @@ export const useCanvasStore = create<CanvasState>()(
     }
   )
 )
+
+/**
+ * Fill in what the store is MISSING about a node it already holds.
+ *
+ * `addNodes`/`addGraph` keep the first version of an id they are given, which
+ * is right for position and for anything the user has since edited — but it
+ * also meant a node first seen in a LEAN shape could never be completed. The
+ * ancestors `/ancestors` returns carry `childCount: null`, so a container
+ * first met that way kept no child count for the rest of the session: no `+N`
+ * badge, no chevron, no way to open it. That is a container losing its
+ * containment tree, and no amount of re-fetching fixed it.
+ *
+ * Fill-only, never overwrite: a value the store already has wins, so a richer
+ * earlier read, a live edit and a node's position are all safe. Returns the
+ * SAME object when nothing was missing, so React sees no change.
+ */
+function enrichNode(existing: LineageNode, incoming: LineageNode): LineageNode {
+  const from = incoming.data as Record<string, unknown> | undefined
+  if (!from) return existing
+  const have = existing.data as unknown as Record<string, unknown>
+  let filled: Record<string, unknown> | null = null
+  for (const key in from) {
+    const v = from[key]
+    if (v === undefined || v === null) continue
+    if (have[key] !== undefined && have[key] !== null) continue
+    filled ??= { ...have }
+    filled[key] = v
+  }
+  return filled ? ({ ...existing, data: filled } as LineageNode) : existing
+}
+
+/**
+ * One pass over the held nodes, filling whatever the incoming duplicates can
+ * complete. Returns null when nothing changed — the caller then keeps the
+ * existing array and React re-renders nothing. O(nodes + dupes), the same
+ * order as the copy the caller was doing anyway.
+ */
+function enrichAll(
+  nodes: LineageNode[],
+  dupes: Map<string, LineageNode>,
+): LineageNode[] | null {
+  let changed = false
+  const next = nodes.map((n) => {
+    const incoming = dupes.get(n.id)
+    if (!incoming) return n
+    const merged = enrichNode(n, incoming)
+    if (merged !== n) changed = true
+    return merged
+  })
+  return changed ? next : null
+}
+
+/** Record a drawer move. A move from the middle of the trail drops whatever
+ *  was ahead of it, the way every back/forward history does; re-opening the
+ *  entity already shown is not a move. */
+function pushDrawerHistory(
+  history: { entries: DrawerEntry[]; cursor: number },
+  entry: DrawerEntry,
+): { entries: DrawerEntry[]; cursor: number } {
+  if (sameDrawerEntry(history.entries[history.cursor], entry)) return history
+  const entries = [...history.entries.slice(0, history.cursor + 1), entry].slice(-DRAWER_TRAIL_MAX)
+  return { entries, cursor: entries.length - 1 }
+}
+
+const drawerEntryKey = (e: DrawerEntry): string =>
+  e.kind === 'node' ? `node:${e.id}` : `edge:${e.target.kind}:${e.target.id}`
+
+const sameDrawerEntry = (a: DrawerEntry | undefined, b: DrawerEntry): boolean =>
+  !!a && drawerEntryKey(a) === drawerEntryKey(b)
+
+/** What the drawer shows for a trail entry — a node or a relationship, never both. */
+function showDrawerEntry(e: DrawerEntry): Pick<CanvasState, 'drawerNodeId' | 'drawerEdge' | 'drawerEdgeEditRequest'> {
+  return e.kind === 'node'
+    ? { drawerNodeId: e.id, drawerEdge: null, drawerEdgeEditRequest: false }
+    : { drawerNodeId: null, drawerEdge: e.target, drawerEdgeEditRequest: false }
+}
+
+/** A logical grouping (`logical:<id>`) is a visual container the view config
+ *  declares, not an entity in the graph. It has no urn to trace, expand or
+ *  link, so it never belongs in a selection that bulk actions read. */
+export const isSelectableNode = (id: string): boolean => !id.startsWith('logical:')
 
 // Selector hooks
 export const useNodes = () => useCanvasStore((s) => s.nodes)

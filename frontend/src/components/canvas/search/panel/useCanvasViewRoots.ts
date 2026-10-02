@@ -8,17 +8,13 @@
  * top-level containers visible at the tree's first level: SILVER,
  * INTERMEDIATE_T1, INTERMEDIATE_T2, GOLD, REPORTING, Tableau, etc.
  *
- * Used by two consumers:
- *   1. ``useAdvancedSearch.stampScope`` — when scope_mode = 'view'
- *      and the view's persisted ``rootUrns`` are empty, the FE
- *      attaches these as the scope-narrowing hint so the BE applies
- *      its containment-expansion clamp instead of running unscoped.
- *      Fixes the bug where "All nodes in this view" was returning
- *      results from outside the view (e.g. Legacy_Archive nodes).
+ * Used by the "Root nodes in view" filter (renamed from "Layer") — the
+ * filter editor lists these URNs by display name; selecting one or more
+ * emits a DescendantOf predicate.
  *
- *   2. The "Root nodes in view" filter (renamed from "Layer") — the
- *      filter editor lists these URNs by display name; selecting one
- *      or more emits a DescendantOf predicate.
+ * Search and display rules are NOT consumers any more: both used to ship
+ * these URNs as ``scope.rootUrns``, but the backend resolves the view's
+ * roots from ``scope.viewId`` itself.
  *
  * The logic mirrors EntityAssignmentPanel.tsx (the view wizard's
  * assignment step), which is the canonical place where the
@@ -49,9 +45,7 @@ export interface CanvasViewRoot {
 
 
 /**
- * Pure helper — used both by the hook (React render path) and by
- * ``useAdvancedSearch.stampScope`` which reads canvas state inside a
- * ``useCallback`` and therefore can't call hooks.
+ * Pure helper behind the hook, testable without React.
  */
 export function computeViewRoots(
     nodes: ReadonlyArray<LineageNode>,
@@ -97,21 +91,6 @@ export function computeViewRoots(
     }
     roots.sort((a, b) => a.displayName.localeCompare(b.displayName))
     return roots
-}
-
-
-/**
- * Convenience for callback consumers that need just the URN list and
- * have access to the live canvas + schema state via ``getState()``.
- */
-export function computeViewRootUrns(
-    nodes: ReadonlyArray<LineageNode>,
-    edges: ReadonlyArray<LineageEdge>,
-    containmentEdgeTypes: ReadonlyArray<string>,
-    rootEntityTypes: ReadonlyArray<string>,
-): string[] {
-    return computeViewRoots(nodes, edges, containmentEdgeTypes, rootEntityTypes)
-        .map((r) => r.urn)
 }
 
 

@@ -52,4 +52,5 @@ def resolved_ontology_to_rules(resolved: ResolvedOntology) -> OntologyRules:
             t.upper() for t in (resolved.containment_edge_types or [])
         ),
         edge_type_canonical=edge_type_canonical,
+        root_entity_types=frozenset(resolved.root_entity_types or []),
     )

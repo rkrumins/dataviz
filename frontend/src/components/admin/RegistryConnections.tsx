@@ -8,7 +8,9 @@ import { cn } from '@/lib/utils'
 import { useBrand } from '@/store/branding'
 import { providerService, friendlyError, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
 import { usePermission } from '@/store/auth'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmissionEditor'
+import { ProviderTopologyBlock, ProviderTopologyLine } from './AdminGraphStore/ProviderTopologyBlock'
 import { StatusChip } from '@/components/insights/StatusChip'
 import type { InsightsMeta, ProviderHealth as InsightsProviderHealth } from '@/types/insights'
 import { useProviderHealthSweep } from '@/hooks/useProviderHealthSweep'
@@ -123,9 +125,17 @@ function ConnectionCard({ provider, health, canManage, justChecked, lastCheckedA
                     detail — only managers see it. Readers see name, type,
                     and status only. */}
                 {canManage && (
-                    <div className="flex items-center gap-4 text-xs text-ink-muted mb-4">
-                        {provider.host && <div className="flex items-center gap-1.5"><Globe className="w-3 h-3" /><span className="font-mono">{provider.host}:{provider.port || '—'}</span></div>}
-                        {provider.tlsEnabled && <div className="flex items-center gap-1 text-emerald-500"><Shield className="w-3 h-3" /><span>TLS</span></div>}
+                    <div className="mb-4 space-y-1">
+                        <div className="flex items-center gap-4 text-xs text-ink-muted">
+                            {provider.host && <div className="flex items-center gap-1.5"><Globe className="w-3 h-3" /><span className="font-mono">{provider.host}:{provider.port || '—'}</span></div>}
+                            {provider.tlsEnabled && <div className="flex items-center gap-1 text-emerald-500"><Shield className="w-3 h-3" /><span>TLS</span></div>}
+                        </div>
+                        {/* The line above is what was CONFIGURED. This one is
+                            what the connection actually reaches — the count a
+                            provider card never had. */}
+                        {provider.providerType === 'falkordb' && (
+                            <ProviderTopologyLine providerId={provider.id} />
+                        )}
                     </div>
                 )}
                 {health.status === 'unhealthy' && health.error && (
@@ -175,6 +185,9 @@ function ConnectionCard({ provider, health, canManage, justChecked, lastCheckedA
                     {/* Admission control hits a system:admin-only endpoint —
                         only render it for managers (also avoids a 403 per
                         expanded card for readers). */}
+                    {canManage && provider.providerType === 'falkordb' && (
+                        <ProviderTopologyBlock providerId={provider.id} />
+                    )}
                     {canManage && <ProviderAdmissionEditor providerId={provider.id} />}
                 </div>
             )}
@@ -189,6 +202,7 @@ export function RegistryConnections() {
     // but write paths (register / edit / delete / test / discover) stay
     // platform-admin-only because the rows carry credentials.
     const canManage = usePermission('system:admin')
+    const { notify } = useAppNotifications()
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
     // Backend-published per-provider status — populated by the global
@@ -244,8 +258,22 @@ export function RegistryConnections() {
 
     const deleteProvider = async () => {
         if (!deleteTarget) return
+        const name = deleteTarget.name
+        // The dialog just warned about these by name. Say which way it went — a
+        // rejection is reported by the dialog itself, which stays open with it.
+        // `null` is a third state, not a zero: the impact probe failed, so the
+        // dialog showed neither the blast radius nor "Safe to delete" and nobody
+        // established what depended on this. Say only what was actually done.
+        const dependents = deleteImpact
+            ? deleteImpact.catalogItems.length + deleteImpact.workspaces.length + deleteImpact.views.length
+            : null
         await providerService.delete(deleteTarget.id)
         await loadProviders()
+        notify('success', dependents === null
+            ? `Deleted “${name}”.`
+            : dependents > 0
+                ? `Deleted “${name}” and the ${dependents} ${dependents === 1 ? 'asset' : 'assets'} that depended on it.`
+                : `Deleted “${name}”. Nothing else depended on it.`)
     }
 
     const handleEditProvider = (p: ProviderResponse) => {

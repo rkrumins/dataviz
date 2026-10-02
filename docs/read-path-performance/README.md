@@ -429,8 +429,11 @@ status machine (which must never render a failed load as an empty canvas).
 - **`ORDER BY` is silently discarded around an aggregating `RETURN`** — the top-level
   and children readers re-sort defensively in Python before deriving a keyset cursor,
   or pagination skips rows.
-- **`THREAD_COUNT=4`** — a few heavy queries starve every worker; saturation must be
-  shed as 429 *before* the DB (WS7), never surfaced as `ProviderUnavailable`/503.
+- **`THREAD_COUNT`** — the read tier's real concurrency limit: a few heavy queries starve
+  every worker, and saturation must be shed as 429 *before* the DB (WS7), never surfaced
+  as `ProviderUnavailable`/503. Raised from 4 to 8 (with the pod's CPU limit, which it
+  must track, and its memory limit, which pays for `QUERY_MEM_CAPACITY` per concurrent
+  query) — the incident above happened at 4.
 - **Composite edge index** on `(r.sourceDepth, r.targetDepth)` **is** supported and used
   (WS0 spike); an unlabeled node-URN `CREATE INDEX` is a syntax error.
 - **`graph_name` defaults to `nexus_lineage`** and is unique only per

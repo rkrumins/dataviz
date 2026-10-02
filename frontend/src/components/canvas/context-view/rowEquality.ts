@@ -1,14 +1,14 @@
 /**
  * Value-equality for the flow overlay's computed arrays.
  *
- * `updateFlow` rebuilds `computedEdges` / `overflowBadges` / `proxyEdges` from
+ * `updateFlow` rebuilds `computedEdges` / `overflowBadges` from
  * scratch on every measure pass, and a measure pass runs on scroll (per frame),
  * window resize, ResizeObserver, IntersectionObserver, MutationObserver and
  * selection change. Writing the fresh array unconditionally re-rendered EVERY
  * edge even when nothing had moved — O(edges) of wasted render per scroll frame,
  * which is why the canvas flickered harder the more was loaded onto it.
  * `setComputedRibbons` in the same file already guarded itself this way; the
- * three expensive writes never got the same treatment.
+ * expensive writes never got the same treatment.
  *
  * A shallow per-row comparison is EXACT for these types, not an approximation:
  * every entry is a flat record of primitives plus a couple of string arrays
@@ -20,7 +20,8 @@
  * optimisation, so failing open is the right direction.
  */
 
-function sameRow<T extends object>(a: T, b: T): boolean {
+/** True when two rows carry the same values — also the overlay's per-line memo test. */
+export function sameRow<T extends object>(a: T, b: T): boolean {
   if (a === b) return true
   const keys = Object.keys(a) as Array<keyof T>
   if (keys.length !== Object.keys(b).length) return false

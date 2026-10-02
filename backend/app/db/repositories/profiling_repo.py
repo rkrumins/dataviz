@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.common.derived_artifacts import strip_derived_counts
 from backend.app.db.models import (
     DataSourceCountRollupORM,
     DataSourceCountSnapshotORM,
@@ -200,6 +201,33 @@ def validate_policy(values: Dict[str, Any], current: "RetentionPolicy") -> None:
         )
 
 
+#: Shown unless an operator turns it off. The rolled-up lineage is what every
+#: view draws and a large share of the graph, so a breakdown without it does
+#: not add up to the store it describes — which is a chart lying quietly
+#: rather than a chart being tidy.
+_INCLUDE_DERIVED_EDGES_DEFAULT = True
+
+
+async def resolve_include_derived_edges(session: AsyncSession) -> bool:
+    """Whether profiling breakdowns SHOW the platform's own rollup types.
+
+    EDGE types only. Derived node labels are never shown and have no switch —
+    see ``_counts``.
+
+    Never raises: an unreadable settings row degrades to the default, because
+    a policy lookup must not be able to fail a chart.
+    """
+    from backend.app.db.models import PlatformSettingsORM
+
+    try:
+        row = await session.get(PlatformSettingsORM, 1)
+    except Exception:  # noqa: BLE001 — policy must never break a read
+        logger.warning("profiling: platform settings unreadable; showing rollups")
+        return _INCLUDE_DERIVED_EDGES_DEFAULT
+    value = getattr(row, "profiling_include_derived_edges", None) if row else None
+    return _INCLUDE_DERIVED_EDGES_DEFAULT if value is None else bool(value)
+
+
 async def resolve_retention_policy(
     session: AsyncSession,
 ) -> Tuple[RetentionPolicy, Dict[str, Any]]:
@@ -260,6 +288,11 @@ class _Bucket:
     edge_count: int
     entity_type_counts: str
     edge_type_counts: str
+    #: The bucket's CLOSING property-name count, or None when nothing in the
+    #: bucket measured one. Closing rather than max because the figure is a
+    #: ratchet — it cannot fall, so the last reading IS the high-water mark,
+    #: and taking a max would paper over a recreate that legitimately reset it.
+    property_key_count: Optional[int]
     node_min: int
     node_max: int
     edge_min: int
@@ -351,6 +384,16 @@ async def _buckets_from_raw(
             func.sum(
                 case((_SNAP.capture_reason.in_(_EVENTFUL), 1), else_=0)
             ),
+            # COALESCE fodder, not a replacement reducer. The closing
+            # snapshot of a bucket often carries NO property-key reading —
+            # _persist_probe_counts cannot supply one (its input,
+            # GraphSchemaStats, has no property-key field), so every probe
+            # sweep writes a NULL — and a NULL closing row erased the whole
+            # bucket from the chart and left a blank CSV cell. Taking max
+            # OUTRIGHT would be wrong: the count resets DOWN when a graph is
+            # recreated, and max would hold the pre-drop high for a bucket.
+            # So: closing value when it exists, else the bucket's high.
+            func.max(_SNAP.property_key_count),
         )
         .where(_SNAP.captured_at >= since, _SNAP.captured_at < until)
         .group_by(_SNAP.data_source_id, bucket)
@@ -362,6 +405,11 @@ async def _buckets_from_raw(
         (r[0], r[1]): (
             int(r[2] or 0), int(r[3] or 0), int(r[4] or 0), int(r[5] or 0),
             int(r[6] or 0), int(r[7] or 0),
+            # Deliberately NOT ``int(... or 0)`` like its neighbours: None
+            # must survive as None. A zero here would draw the floor on a
+            # ceiling chart — "this graph has no property names" instead of
+            # "nothing measured it".
+            r[8],
         )
         for r in extremes
     }
@@ -373,6 +421,7 @@ async def _buckets_from_raw(
             _SNAP.workspace_id, _SNAP.provider_id, _SNAP.graph_name,
             _SNAP.node_count, _SNAP.edge_count,
             _SNAP.entity_type_counts, _SNAP.edge_type_counts,
+            _SNAP.property_key_count,
             func.row_number().over(
                 partition_by=(_SNAP.data_source_id, bucket),
                 order_by=_SNAP.captured_at.desc(),
@@ -388,8 +437,10 @@ async def _buckets_from_raw(
     out: List[_Bucket] = []
     for r in closing:
         key = (r.data_source_id, r.bucket)
-        n_min, n_max, e_min, e_max, obs, changed = agg.get(
-            key, (r.node_count, r.node_count, r.edge_count, r.edge_count, 1, 0),
+        n_min, n_max, e_min, e_max, obs, changed, pk_max = agg.get(
+            key,
+            (r.node_count, r.node_count, r.edge_count, r.edge_count, 1, 0,
+             r.property_key_count),
         )
         out.append(_Bucket(
             data_source_id=r.data_source_id,
@@ -401,6 +452,10 @@ async def _buckets_from_raw(
             edge_count=int(r.edge_count or 0),
             entity_type_counts=r.entity_type_counts or "{}",
             edge_type_counts=r.edge_type_counts or "{}",
+            property_key_count=(
+                r.property_key_count if r.property_key_count is not None
+                else pk_max
+            ),
             node_min=n_min, node_max=n_max, edge_min=e_min, edge_max=e_max,
             observations=obs, changed_observations=changed,
         ))
@@ -423,6 +478,9 @@ async def _buckets_from_hourly(
             func.min(_ROLL.node_min), func.max(_ROLL.node_max),
             func.min(_ROLL.edge_min), func.max(_ROLL.edge_max),
             func.sum(_ROLL.observations), func.sum(_ROLL.changed_observations),
+            # Same COALESCE fodder as the raw tier: an hour whose closing
+            # rollup has no reading must not erase the day.
+            func.max(_ROLL.property_key_count),
         )
         .where(
             _ROLL.grain == "hour",
@@ -437,6 +495,7 @@ async def _buckets_from_hourly(
         (r[0], r[1]): (
             int(r[2] or 0), int(r[3] or 0), int(r[4] or 0), int(r[5] or 0),
             int(r[6] or 0), int(r[7] or 0),
+            r[8],   # None must survive as None — see the raw tier.
         )
         for r in extremes
     }
@@ -447,6 +506,7 @@ async def _buckets_from_hourly(
             _ROLL.workspace_id, _ROLL.provider_id, _ROLL.graph_name,
             _ROLL.node_count, _ROLL.edge_count,
             _ROLL.entity_type_counts, _ROLL.edge_type_counts,
+            _ROLL.property_key_count,
             func.row_number().over(
                 partition_by=(_ROLL.data_source_id, bucket),
                 order_by=_ROLL.bucket_start.desc(),
@@ -465,8 +525,10 @@ async def _buckets_from_hourly(
     out: List[_Bucket] = []
     for r in closing:
         key = (r.data_source_id, r.bucket)
-        n_min, n_max, e_min, e_max, obs, changed = agg.get(
-            key, (r.node_count, r.node_count, r.edge_count, r.edge_count, 1, 0),
+        n_min, n_max, e_min, e_max, obs, changed, pk_max = agg.get(
+            key,
+            (r.node_count, r.node_count, r.edge_count, r.edge_count, 1, 0,
+             r.property_key_count),
         )
         out.append(_Bucket(
             data_source_id=r.data_source_id,
@@ -478,6 +540,10 @@ async def _buckets_from_hourly(
             edge_count=int(r.edge_count or 0),
             entity_type_counts=r.entity_type_counts or "{}",
             edge_type_counts=r.edge_type_counts or "{}",
+            property_key_count=(
+                r.property_key_count if r.property_key_count is not None
+                else pk_max
+            ),
             node_min=n_min, node_max=n_max, edge_min=e_min, edge_max=e_max,
             observations=obs, changed_observations=changed,
         ))
@@ -563,6 +629,7 @@ async def _upsert(
             "edge_count": b.edge_count,
             "entity_type_counts": b.entity_type_counts,
             "edge_type_counts": b.edge_type_counts,
+            "property_key_count": b.property_key_count,
             "node_min": b.node_min, "node_max": b.node_max,
             "edge_min": b.edge_min, "edge_max": b.edge_max,
             "node_delta": None if prev is None else b.node_count - prev[0],
@@ -587,6 +654,7 @@ async def _upsert(
                     "workspace_id", "provider_id", "graph_name",
                     "node_count", "edge_count",
                     "entity_type_counts", "edge_type_counts",
+                    "property_key_count",
                     "node_min", "node_max", "edge_min", "edge_max",
                     "node_delta", "edge_delta",
                     "observations", "changed_observations", "compacted_at",
@@ -937,6 +1005,12 @@ class Observation:
     edge_max: Optional[int]
     node_delta: Optional[int]
     edge_delta: Optional[int]
+    #: Distinct property NAMES the graph had registered, or None when this
+    #: observation did not measure one. None is not zero: every row captured
+    #: before the figure was collected, every provider that cannot answer and
+    #: every probe that failed all read None, and the series drops those
+    #: points rather than drawing them on the floor.
+    property_key_count: Optional[int] = None
 
 
 #: Ceiling on rows a single read will assemble. Reached only by a very wide
@@ -961,6 +1035,7 @@ async def read_observations(
                 _SNAP.node_count, _SNAP.edge_count,
                 _SNAP.entity_type_counts, _SNAP.edge_type_counts,
                 _SNAP.node_delta, _SNAP.edge_delta,
+                _SNAP.property_key_count,
             )
             .where(_SNAP.captured_at >= frm, _SNAP.captured_at <= to, *conditions)
             # Newest-first then reversed, so a window that hits the cap loses
@@ -978,6 +1053,7 @@ async def read_observations(
                 node_min=int(r[2] or 0), node_max=int(r[2] or 0),
                 edge_min=int(r[3] or 0), edge_max=int(r[3] or 0),
                 node_delta=r[6], edge_delta=r[7],
+                property_key_count=r[8],
             )
             for r in rows
         ], truncated
@@ -992,6 +1068,7 @@ async def read_observations(
             _ROLL.entity_type_counts, _ROLL.edge_type_counts,
             _ROLL.node_min, _ROLL.node_max, _ROLL.edge_min, _ROLL.edge_max,
             _ROLL.node_delta, _ROLL.edge_delta,
+            _ROLL.property_key_count,
         )
         .where(
             _ROLL.grain == grain,
@@ -1011,6 +1088,7 @@ async def read_observations(
             entity_type_counts=r[4] or "{}", edge_type_counts=r[5] or "{}",
             node_min=r[6], node_max=r[7], edge_min=r[8], edge_max=r[9],
             node_delta=r[10], edge_delta=r[11],
+            property_key_count=r[12],
         )
         for r in rows
     ], truncated
@@ -1381,8 +1459,13 @@ async def observations_for_source(
             "edge_count": int(r.edge_count or 0),
             "node_delta": r.node_delta,
             "edge_delta": r.edge_delta,
-            "entity_type_counts": loads_counts(r.entity_type_counts),
-            "edge_type_counts": loads_counts(r.edge_type_counts),
+            # Derived artifacts stripped on READ so snapshots captured before
+            # the providers stopped recording them stop showing the platform's
+            # own bookkeeping as a type that appears and disappears.
+            "entity_type_counts": strip_derived_counts(
+                loads_counts(r.entity_type_counts)),
+            "edge_type_counts": strip_derived_counts(
+                loads_counts(r.edge_type_counts), edges=True),
             "type_deltas": r.type_deltas,
             "significance": significance,
         })
@@ -1512,6 +1595,7 @@ _POLICY_COLUMNS = {
     "alertsEnabled": "history_alerts_enabled",
     "alertMinSeverity": "history_alert_min_severity",
     "alertCooldownSecs": "history_alert_cooldown_secs",
+    "includeDerivedEdges": "profiling_include_derived_edges",
 }
 
 #: Sentinel meaning "clear this override and inherit the environment default".

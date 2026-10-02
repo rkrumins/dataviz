@@ -43,6 +43,25 @@ describe('branding store', () => {
         expect(document.documentElement.style.getPropertyValue('--nx-accent-lineage')).toBe('#123456')
     })
 
+    it('applyBranding writes the meta description', () => {
+        applyBranding(branding({ description: 'Lineage for Acme' }))
+        const meta = document.querySelectorAll<HTMLMetaElement>("meta[name='description']")
+        expect(meta).toHaveLength(1)
+        expect(meta[0].content).toBe('Lineage for Acme')
+
+        // Upserted, not appended: a second apply updates the same tag.
+        applyBranding(branding({ description: 'Lineage for Beta' }))
+        const again = document.querySelectorAll<HTMLMetaElement>("meta[name='description']")
+        expect(again).toHaveLength(1)
+        expect(again[0].content).toBe('Lineage for Beta')
+    })
+
+    it('applyBranding drops the meta description when it is cleared', () => {
+        applyBranding(branding({ description: 'Lineage for Acme' }))
+        applyBranding(branding({ description: '' }))
+        expect(document.querySelector("meta[name='description']")).toBeNull()
+    })
+
     it('setBranding replaces branding and re-applies side-effects', () => {
         useBrandingStore.getState().setBranding(branding({ appName: 'Beta Corp' }))
         expect(useBrandingStore.getState().branding.appName).toBe('Beta Corp')

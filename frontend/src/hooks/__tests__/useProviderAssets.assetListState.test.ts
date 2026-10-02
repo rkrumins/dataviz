@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { assetListState } from '../useProviderAssets'
+import { assetListIsBuilding, assetListState } from '../useProviderAssets'
 import type { Envelope, AssetListPayload, InsightsMeta } from '@/types/insights'
 
 function meta(overrides: Partial<InsightsMeta> = {}): InsightsMeta {
@@ -73,5 +73,44 @@ describe('assetListState', () => {
     expect(assetListState(envelope({ assets: [] }))).toBe('ready')
     expect(assetListState(envelope({ assets: ['graph_a'] }, { status: 'stale' })))
       .toBe('ready')
+  })
+})
+
+/**
+ * `assetListIsBuilding` is the asset-list query's poll signal.
+ *
+ * The reported bug: clicking Refresh queued a list-all discovery job, but the
+ * list query only polled while `status === 'computing'`. A provider that
+ * already has a cached list is never `computing` — it is served verbatim as
+ * `fresh`/`stale` with `refreshing: true` — so nothing re-fetched while the
+ * job ran, the post-refresh invalidation raced it and usually landed on the
+ * same stale payload, and a newly-created graph stayed invisible.
+ */
+describe('assetListIsBuilding', () => {
+  it('polls while a re-list is in flight over an existing list', () => {
+    expect(assetListIsBuilding(envelope({ assets: ['g1'] }, {
+      status: 'fresh', refreshing: true,
+    }))).toBe(true)
+    expect(assetListIsBuilding(envelope({ assets: ['g1'] }, {
+      status: 'stale', refreshing: true,
+    }))).toBe(true)
+  })
+
+  it('polls while a cold cache is being computed', () => {
+    expect(assetListIsBuilding(envelope(null, { status: 'computing' }))).toBe(true)
+  })
+
+  it('stops once the list has landed', () => {
+    expect(assetListIsBuilding(envelope({ assets: ['g1'] }, {
+      status: 'fresh', refreshing: false,
+    }))).toBe(false)
+    expect(assetListIsBuilding(envelope(null, {
+      status: 'unavailable', refreshing: false,
+    }))).toBe(false)
+  })
+
+  it('does not poll before the first envelope arrives', () => {
+    expect(assetListIsBuilding(undefined)).toBe(false)
+    expect(assetListIsBuilding(null)).toBe(false)
   })
 })

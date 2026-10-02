@@ -67,7 +67,7 @@ export function ExplorerListHeader({
   return (
     <div
       className={cn(
-        'sticky top-0 z-10 bg-canvas-elevated/95 backdrop-blur-sm',
+        'sticky top-0 z-10 bg-canvas-elevated',
         'grid items-center gap-3 px-4 py-2.5',
         'border-b border-glass-border/50',
         'text-[10px] uppercase tracking-wider text-ink-muted font-bold',

@@ -63,6 +63,9 @@ class _Svc:
                 child, cur = cur, self.parent.get(cur)
         return seen, edges
 
+    # The projector's rollup prefetch climbs incoming containment only — same contract.
+    _containment_parents_climb = _containment_ancestors
+
 
 def _projector(resolver):
     p = FalkorProjector(

@@ -50,8 +50,8 @@ async def _run() -> None:
     P = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="alice")
     pg, pmain = P["graph_id"], P["main_branch_id"]
     await _edit_publish(svc, pg, "alice", [
-        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f": 1}},
-        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": {"displayName": "B"}},
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": {"entityType": "Dataset", "displayName": "A", "f": 1}},
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": {"entityType": "Dataset", "displayName": "B"}},
         {"op": "create", "entity_kind": "edge", "entity_id": "E1", "payload": {"edgeType": "R", "sourceEntityId": "A", "targetEntityId": "B"}},
     ], "seed")
 
@@ -66,7 +66,7 @@ async def _run() -> None:
     # ── 3. fork diverges: A.f 1->10, +C (intra-fork publish) ─────────────
     await _edit_publish(svc, fg, "bob", [
         {"op": "update", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f": 10}},
-        {"op": "create", "entity_kind": "node", "entity_id": "C", "payload": {"displayName": "C"}},
+        {"op": "create", "entity_kind": "node", "entity_id": "C", "payload": {"entityType": "Dataset", "displayName": "C"}},
     ], "fork work")
     fst = await svc.materialize_state(graph_id=fg, branch_id=fmain)
     assert fst["nodes"]["A"]["f"] == 10 and set(fst["nodes"]) == {"A", "B", "C"}, fst
@@ -77,7 +77,7 @@ async def _run() -> None:
     # ── 4. parent advances independently: B->B2, +D ──────────────────────
     await _edit_publish(svc, pg, "alice", [
         {"op": "update", "entity_kind": "node", "entity_id": "B", "payload": {"displayName": "B2"}},
-        {"op": "create", "entity_kind": "node", "entity_id": "D", "payload": {"displayName": "D"}},
+        {"op": "create", "entity_kind": "node", "entity_id": "D", "payload": {"entityType": "Dataset", "displayName": "D"}},
     ], "parent work")
 
     # ── 5. PR fork -> parent: non-overlapping, auto-merges clean ─────────

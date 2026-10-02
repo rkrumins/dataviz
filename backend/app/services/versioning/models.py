@@ -350,8 +350,9 @@ class JobORM(VersioningBase):
             # 'bootstrap' = "enable version control" (bootstrap_worker). Deliberately NOT
             # 'ingest': that is the file-import worker's type, and a worker claims by
             # job_type — sharing one would have the two run each other's jobs. Existing
-            # DBs get it via migration 20260713_1400_jobs_bootstrap.
-            "job_type IN ('ingest','projection','rebuild','export','bootstrap')",
+            # DBs get it via migration 20260713_1400_jobs_bootstrap. 'publish' = a large draft's
+            # publish on the transfer runner (20260928_1000_jobs_publish).
+            "job_type IN ('ingest','projection','rebuild','export','bootstrap','publish')",
             name="ck_jobs_type",
         ),
     )
@@ -383,6 +384,7 @@ class ImportRowORM(VersioningBase):
         PrimaryKeyConstraint("job_id", "row_index", name="pk_import_rows"),
         Index("ix_import_rows_match", "job_id", "kind", "match_key"),
         Index("ix_import_rows_status", "job_id", "status"),
+        Index("ix_import_rows_matched", "job_id", "matched_entity_id"),   # a replace's absence check
         CheckConstraint("kind IN ('node','edge')", name="ck_import_rows_kind"),
     )
 
@@ -463,6 +465,7 @@ class NodeVersionORM(VersioningBase):
         Index("ix_nv_content_hash", "graph_id", "content_hash"),
         Index("ix_nv_commit", "graph_id", "commit_id"),
         Index("ix_nv_urn", "graph_id", "urn"),
+        Index("ix_nv_qname", "graph_id", "qualified_name"),     # a windowed import's lookups
         Index("ix_nv_seq_brin", "commit_seq", postgresql_using="brin"),
         CheckConstraint("op IN ('create','update','delete')", name="ck_nv_op"),
     )

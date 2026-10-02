@@ -26,7 +26,7 @@ import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { ReconcileFinding, ReconcileRun } from '@/services/freshnessService'
 import { DRIFT_SPEC, REASON_LABEL } from './DriftStateBadge'
 import { EvidencePair, reconcileEvidenceRows } from './reconcileEvidence'
@@ -87,7 +87,7 @@ export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
     fleetTotal?: number | null
 }) {
     const dialogRef = useModalA11y(open, onClose)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const preview = useReconcileNow()
     const [findings, setFindings] = useState<ReconcileFinding[] | null>(null)
     const [scanned, setScanned] = useState(0)
@@ -114,11 +114,11 @@ export function ReconcilePreviewDialog({ open, onClose, fleetTotal }: {
                     : '')
             },
             onError: (e) => {
-                showToast('error', e.message || 'Could not run the preview.')
+                notify('error', e.message || 'Could not run the preview.')
                 onClose()
             },
         })
-        // preview/showToast/onClose are stable enough for this one-shot; adding
+        // preview/notify/onClose are stable enough for this one-shot; adding
         // them re-fires the sweep on every render.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open])

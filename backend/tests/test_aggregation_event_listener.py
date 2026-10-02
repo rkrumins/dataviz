@@ -9,6 +9,8 @@ pre-run (often empty) answers for up to the LKG TTL.
 """
 import asyncio
 import json
+
+import pytest
 import types
 from unittest.mock import AsyncMock
 
@@ -92,8 +94,12 @@ def test_job_completed_invalidates_aggregated_cache(monkeypatch):
 
     assert synced["ds"] == "ds_1"
     assert synced["aggregation_edge_count"] == 1840
-    cache.bump_generation.assert_awaited_once()
-    scope = cache.bump_generation.await_args.args[0]
+    # The ROLLUP counter: a completed run rewrites the :AGGREGATED layer and
+    # moves no node, edge or containment relationship, so the hierarchy reads
+    # it does not touch must stay cached.
+    cache.bump_rollup_generation.assert_awaited_once()
+    cache.bump_generation.assert_not_awaited()
+    scope = cache.bump_rollup_generation.await_args.args[0]
     assert (scope.workspace_id, scope.data_source_id) == ("ws_1", "ds_1")
     cache.purge_lkg.assert_awaited_once()
     assert cache.purge_lkg.await_args.args[1] == gc_module.ENDPOINT_AGGREGATED
@@ -159,7 +165,7 @@ def test_purge_completed_syncs_and_invalidates(monkeypatch):
 
     assert synced["ds"] == "ds_1"
     assert synced["aggregation_status"] == "none"
-    cache.bump_generation.assert_awaited_once()
+    cache.bump_rollup_generation.assert_awaited_once()
     cache.purge_lkg.assert_awaited_once()
 
 
@@ -427,3 +433,49 @@ def test_job_failed_origin_lookup_failure_falls_back_to_api(monkeypatch):
     assert len(lst._events) == 1
     assert lst._events[0]["origin"] == "api"
     assert lst._events[0]["actor"] == "internal"
+
+
+# ── The identity stamp decides how much of the cache a rebuild drops ────
+
+@pytest.mark.asyncio
+async def test_a_rebuild_that_stamped_identity_invalidates_the_hierarchy_too(
+    monkeypatch,
+):
+    """A rollup rebuild normally touches only the :AGGREGATED layer, so the
+    choke point leaves top-level, children and the canvas bootstrap warm —
+    that is what stops a source's cache going cold on every rebuild. But
+    stamp_identity_urns writes ``urn`` and ``displayName`` onto the NODES,
+    which those endpoints render. A run that stamped anything has changed
+    more than the rollup layer."""
+    seen: list = []
+
+    async def _fake(ws, ds, identity_stamped=0):
+        seen.append((ws, ds, identity_stamped))
+
+    monkeypatch.setattr(
+        "backend.app.services.graph_cache.invalidate_aggregated_reads", _fake,
+    )
+    listener = _listener(monkeypatch)
+    await listener._invalidate_aggregated_cache("ws1", "ds1", identity_stamped=4200)
+    assert seen == [("ws1", "ds1", 4200)]
+
+
+@pytest.mark.asyncio
+async def test_a_conforming_source_keeps_the_narrow_invalidation(monkeypatch):
+    """Stamping is a complete no-op for a source that already keys on urn —
+    the common case, and the one the split exists for. Absent reads as 0 for
+    the same reason: the stamp is fill-only, so a missed hint costs a stale
+    display name until the next bump, never a wrong graph."""
+    seen: list = []
+
+    async def _fake(ws, ds, identity_stamped=0):
+        seen.append(identity_stamped)
+
+    monkeypatch.setattr(
+        "backend.app.services.graph_cache.invalidate_aggregated_reads", _fake,
+    )
+    listener = _listener(monkeypatch)
+    await listener._invalidate_aggregated_cache("ws1", "ds1", identity_stamped=0)
+    await listener._invalidate_aggregated_cache("ws1", "ds1")
+    await listener._invalidate_aggregated_cache("ws1", "ds1", identity_stamped="junk")
+    assert seen == [0, 0, 0]

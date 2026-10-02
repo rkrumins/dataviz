@@ -54,6 +54,7 @@ import type {
     HasIncomingPredicate as GenHasIncomingPredicate,
     HasOutgoingPredicate as GenHasOutgoingPredicate,
     PathPredicate as GenPathPredicate,
+    MatchAllPredicate as GenMatchAllPredicate,
     GroupPredicate as GenGroupPredicate,
     EdgePropertyPredicate as GenEdgePropertyPredicate,
     EdgeHasPropertyPredicate as GenEdgeHasPropertyPredicate,
@@ -61,7 +62,24 @@ import type {
     Predicate as GenPredicate,
     SearchExplainResult as GenSearchExplainResult,
     SearchDiscoverResult as GenSearchDiscoverResult,
+    SearchValuesResult as GenSearchValuesResult,
+    SearchValueSuggestion as GenSearchValueSuggestion,
     ScopeDiagnostics as GenScopeDiagnostics,
+    SearchMembershipRequest as GenSearchMembershipRequest,
+    SearchMembershipResult as GenSearchMembershipResult,
+    SearchCountsRequest as GenSearchCountsRequest,
+    SearchCountsResult as GenSearchCountsResult,
+    SearchAncestorCountsRequest as GenSearchAncestorCountsRequest,
+    SearchAncestorCountsResult as GenSearchAncestorCountsResult,
+    SearchAncestorCount as GenSearchAncestorCount,
+    SearchCatalogRequest as GenSearchCatalogRequest,
+    SearchCatalogResult as GenSearchCatalogResult,
+    SearchCatalogProperty as GenSearchCatalogProperty,
+    SearchCatalogValue as GenSearchCatalogValue,
+    SearchCatalogTag as GenSearchCatalogTag,
+    SearchRuleCount as GenSearchRuleCount,
+    SearchExportRequest as GenSearchExportRequest,
+    SearchExportResult as GenSearchExportResult,
 } from './generated/searchquery'
 
 
@@ -84,6 +102,7 @@ export type IsRootPredicate = GenIsRootPredicate
 export type HasIncomingPredicate = GenHasIncomingPredicate
 export type HasOutgoingPredicate = GenHasOutgoingPredicate
 export type PathPredicate = GenPathPredicate
+export type MatchAllPredicate = GenMatchAllPredicate
 export type GroupPredicate = GenGroupPredicate
 export type EdgePropertyPredicate = GenEdgePropertyPredicate
 export type EdgeHasPropertyPredicate = GenEdgeHasPropertyPredicate
@@ -195,6 +214,53 @@ export type SearchDiscoverResult = RequireKeys<
 // ---------------------------------------------------------------------------
 
 export type SearchDiscoverLabel = SearchDiscoverLabelInfo
+
+
+/** `GET /search/values` — a property's most common values in a view. The
+ *  server always sends every field. */
+export type SearchValueSuggestion = RequireKeys<GenSearchValueSuggestion, 'count'>
+/** ``POST /search/membership`` — which on-screen entities match which rules. */
+export type SearchMembershipRequest = GenSearchMembershipRequest
+export type SearchMembershipResult = RequireKeys<GenSearchMembershipResult, 'matches' | 'errors'>
+
+/** ``POST /search/counts`` — each rule's exact total in the view. */
+export type SearchCountsRequest = GenSearchCountsRequest
+export type SearchRuleCount = GenSearchRuleCount
+export type SearchCountsResult = RequireKeys<GenSearchCountsResult, 'counts'>
+export type SearchAncestorCountsRequest = GenSearchAncestorCountsRequest
+export type SearchAncestorCount = RequireKeys<GenSearchAncestorCount, 'typeCounts'>
+export type SearchAncestorCountsResult = Omit<GenSearchAncestorCountsResult, 'counts'> & {
+    counts: Record<string, SearchAncestorCount>
+}
+export type SearchCatalogRequest = GenSearchCatalogRequest
+export type SearchCatalogValue = GenSearchCatalogValue
+export type SearchCatalogTag = GenSearchCatalogTag
+export type SearchCatalogProperty = RequireKeys<
+    Omit<GenSearchCatalogProperty, 'values' | 'min' | 'max'> & {
+        values: SearchCatalogValue[]
+        // An integer too large for a double arrives as its exact digits
+        // (lib/losslessJson), so a bound can be a string.
+        min?: number | string | null
+        max?: number | string | null
+    },
+    'byEntityType' | 'kinds' | 'values' | 'residual'
+>
+export type SearchCatalogResult = RequireKeys<
+    Omit<GenSearchCatalogResult, 'properties' | 'tags'> & {
+        properties: SearchCatalogProperty[]
+        tags: SearchCatalogTag[]
+    },
+    'entities' | 'entityTypes' | 'properties' | 'tags' | 'stale'
+>
+
+/** ``POST /search/exports`` — every match of a search, written to a file. */
+export type SearchExportRequest = GenSearchExportRequest
+export type SearchExportResult = RequireKeys<GenSearchExportResult, 'rows' | 'columns' | 'format'>
+
+export type SearchValuesResult = RequireKeys<
+    Omit<GenSearchValuesResult, 'values'> & { values: SearchValueSuggestion[] },
+    'values' | 'complete' | 'truncated'
+>
 
 
 // ---------------------------------------------------------------------------

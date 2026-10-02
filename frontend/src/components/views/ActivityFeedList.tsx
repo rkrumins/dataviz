@@ -291,7 +291,7 @@ export function ActivityFeedList({ entries, isLoading, emptyText, skeletonRows =
         <div className="py-1">
             {groups.map(group => (
                 <section key={group.key} className="relative">
-                    <h3 className="sticky top-0 z-10 bg-canvas-elevated/95 backdrop-blur-sm py-2 text-[10px] font-bold uppercase tracking-wider text-ink-muted/70">
+                    <h3 className="sticky top-0 z-10 bg-canvas-elevated py-2 text-[10px] font-bold uppercase tracking-wider text-ink-muted/70">
                         {group.label}
                     </h3>
 

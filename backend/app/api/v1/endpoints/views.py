@@ -15,9 +15,11 @@ reverts scoping to legacy behaviour (auth requirements stay).
 """
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,10 +44,20 @@ from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services import view_access
+from backend.app.services import view_access, view_library
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
+from backend.common.models.view_library import (
+    DisplayRule,
+    ImportStrategy,
+    LibraryImportResult,
+    LibraryOrder,
+    LibraryPack,
+    SavedQuery,
+    SavedQueryInput,
+    ViewLibrary,
+)
 from backend.common.models.management import (
     ViewAccessInfo,
     ViewAudience,
@@ -586,6 +598,60 @@ async def list_views(
     return response
 
 
+async def authorize_view_create(
+    claims: PermissionClaims,
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    data_source_id: Optional[str],
+    visibility: Optional[str],
+) -> None:
+    """Refuse a new view the caller may not create. Every way a view is born goes through
+    here (``POST /views`` and the import), so the rules cannot drift between them.
+
+    ``workspace:view:create`` in the target workspace; creating straight to ``enterprise``
+    additionally needs ``workspace:view:publish`` (the same gate as the visibility endpoint —
+    a birth certificate is not a bypass).
+    """
+    if visibility is not None and visibility not in (
+        "private", "workspace", "enterprise",
+    ):
+        # Validate before the DB CHECK constraint turns this into a 500.
+        raise HTTPException(
+            status_code=422,
+            detail="visibility must be one of: private, workspace, enterprise",
+        )
+
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        from backend.app.services.permission_service import has_permission
+        if not has_permission(
+            claims, "workspace:view:create", workspace_id=workspace_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Missing permission: workspace:view:create",
+            )
+        if visibility == "enterprise":
+            # The platform ceiling binds everyone, including the people who
+            # hold the publish permission — a limit only non-admins obey is
+            # not a limit. Below it, an 'open' workspace lets any creator
+            # publish, unless the source itself is restricted.
+            platform = await resolve_enterprise_view_policy(session)
+            if platform == "off":
+                raise feature_disabled("enterpriseViewPolicy")
+            has_perm = view_access.can_publish_in_workspace(claims, workspace_id)
+            if not has_perm:
+                open_ws = await _publish_policy(session, workspace_id) == "open"
+                restricted = await _source_is_restricted(
+                    session, workspace_id, data_source_id,
+                )
+                if platform == "request" or not open_ws or restricted:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Missing permission: workspace:view:publish",
+                    )
+
+
 @router.post("/", response_model=ViewResponse, status_code=201)
 async def create_view(
     req: ViewCreateRequest = Body(...),
@@ -604,43 +670,10 @@ async def create_view(
     requires ``workspace:view:publish`` (the same gate as the
     visibility endpoint — a birth certificate is not a bypass).
     """
-    if req.visibility is not None and req.visibility not in (
-        "private", "workspace", "enterprise",
-    ):
-        # Validate before the DB CHECK constraint turns this into a 500.
-        raise HTTPException(
-            status_code=422,
-            detail="visibility must be one of: private, workspace, enterprise",
-        )
-
-    if rbac_flag("RBAC_ENFORCE_VIEWS"):
-        from backend.app.services.permission_service import has_permission
-        if not has_permission(
-            claims, "workspace:view:create", workspace_id=req.workspace_id,
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail="Missing permission: workspace:view:create",
-            )
-        if req.visibility == "enterprise":
-            # The platform ceiling binds everyone, including the people who
-            # hold the publish permission — a limit only non-admins obey is
-            # not a limit. Below it, an 'open' workspace lets any creator
-            # publish, unless the source itself is restricted.
-            platform = await resolve_enterprise_view_policy(session)
-            if platform == "off":
-                raise feature_disabled("enterpriseViewPolicy")
-            has_perm = view_access.can_publish_in_workspace(claims, req.workspace_id)
-            if not has_perm:
-                open_ws = await _publish_policy(session, req.workspace_id) == "open"
-                restricted = await _source_is_restricted(
-                    session, req.workspace_id, req.data_source_id,
-                )
-                if platform == "request" or not open_ws or restricted:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Missing permission: workspace:view:publish",
-                    )
+    await authorize_view_create(
+        claims, session, workspace_id=req.workspace_id,
+        data_source_id=req.data_source_id, visibility=req.visibility,
+    )
 
     # Admin → Features → View modes. The admin picks which layouts this deployment offers; the
     # wizard hides the rest. Enforced here too, because a hidden button is not a rule.
@@ -842,6 +875,16 @@ async def update_view_layout(
         raise HTTPException(status_code=422, detail=str(e))
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    # A wizard save asks for its result to be recorded as a version, in this same
+    # transaction. A draft write never is: the draft isn't the view yet, and its design
+    # becomes a version when the draft is promoted.
+    if req.checkpoint is not None and not branch_id:
+        from backend.app.db.repositories import view_version_repo
+        view_orm = await _load_view_orm(session, view_id)
+        await view_version_repo.checkpoint(
+            session, view_orm, source=req.checkpoint.source,
+            actor=_user_id(user), message=req.checkpoint.message,
+        )
     return view
 
 
@@ -918,6 +961,22 @@ async def restore_view(
     return view
 
 
+_WAITING_IN_DRAFT = ("This view is waiting in a draft. It goes live, with the visibility chosen when "
+                     "it was imported, when the draft is published.")
+
+
+async def _refuse_while_in_draft(session: AsyncSession, view_id: str) -> None:
+    """A view staged in a draft stays private until the draft goes live, and then takes the
+    visibility chosen at import; its sharing tier can't be changed or requested meanwhile
+    (explicit grants still can, to show it to the draft's reviewers)."""
+    from sqlalchemy import select
+    staged = (await session.execute(
+        select(ViewORM.draft_branch_id).where(ViewORM.id == view_id)
+    )).scalar_one_or_none()
+    if staged:
+        raise HTTPException(status_code=409, detail=_WAITING_IN_DRAFT)
+
+
 @router.put("/{view_id}/visibility", response_model=ViewResponse)
 async def update_view_visibility(
     view_id: str = Path(...),
@@ -935,6 +994,7 @@ async def update_view_visibility(
     """
     if visibility not in ("private", "workspace", "enterprise"):
         raise HTTPException(status_code=422, detail="visibility must be one of: private, workspace, enterprise")
+    await _refuse_while_in_draft(session, view_id)
 
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
@@ -1050,6 +1110,8 @@ async def request_publication(
         )
     if view_orm.visibility == "enterprise":
         raise HTTPException(status_code=409, detail="This view is already published")
+    if view_orm.draft_branch_id:
+        raise HTTPException(status_code=409, detail=_WAITING_IN_DRAFT)
 
     view_orm.publish_requested_by = user.id
     view_orm.publish_requested_at = datetime.now(timezone.utc).isoformat()
@@ -1465,3 +1527,199 @@ async def record_visit(
         if not await view_access.can_read_view(session, ctx, view_orm):
             raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     await view_repo.record_view_visit(session, view_id, _user_id(user))
+
+
+# ---------------------------------------------------------------------------
+# The view's library: display rules and saved queries, and their pack
+# ---------------------------------------------------------------------------
+
+async def _library_view(
+    session: AsyncSession, view_id: str, user, claims: PermissionClaims,
+    *, edit: bool,
+) -> tuple[ViewORM, bool]:
+    """The view, if the caller may read it (404 otherwise, as ``get_view``),
+    and whether they may edit it — a write refuses with 403 when they may
+    not. With ``RBAC_ENFORCE_VIEWS`` off, anyone may do both, as for the
+    view's layout."""
+    view_orm = await _load_view_orm(session, view_id)
+    if not rbac_flag("RBAC_ENFORCE_VIEWS"):
+        return view_orm, True
+    ctx = await _viewer_context(session, user, claims)
+    if not await view_access.can_read_view(session, ctx, view_orm):
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    can_edit = await view_access.can_edit_view(session, ctx, view_orm)
+    if edit and not can_edit:
+        raise HTTPException(status_code=403, detail="Missing permission: workspace:view:edit")
+    return view_orm, can_edit
+
+
+def _library_refusal(exc: view_library.LibraryError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+@router.get("/{view_id}/library", response_model=ViewLibrary)
+async def get_view_library(
+    view_id: str = Path(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The view's display rules — a draft's own on ``branchId`` once it has
+    changed its layout, else the published ones — and its saved queries,
+    with whether the caller may change them."""
+    view_orm, can_edit = await _library_view(session, view_id, user, claims, edit=False)
+    return await view_library.read_library(session, view_orm, branch_id, can_edit=can_edit)
+
+
+@router.put("/{view_id}/library/rules/{rule_id}", response_model=List[dict])
+async def put_view_rule(
+    view_id: str = Path(...),
+    rule_id: str = Path(..., min_length=1, max_length=128),
+    rule: DisplayRule = Body(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Add a display rule, or replace the one with this id where it stands.
+    Only this rule is written: rules others changed meanwhile are kept.
+    Returns the view's rules."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.put_rule(
+            session, view_id, branch_id, rule.model_copy(update={"id": rule_id}),
+        )
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)
+
+
+@router.delete("/{view_id}/library/rules/{rule_id}", response_model=List[dict])
+async def delete_view_rule(
+    view_id: str = Path(...),
+    rule_id: str = Path(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Remove a display rule (no error when it is already gone). Returns the
+    view's rules."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.delete_rule(session, view_id, branch_id, rule_id)
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)
+
+
+@router.put("/{view_id}/library/rules", response_model=List[dict])
+async def order_view_rules(
+    view_id: str = Path(...),
+    order: LibraryOrder = Body(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Put the view's display rules in the order ``ids`` names them; rules
+    it leaves out (added meanwhile) follow, in their order. Returns the
+    view's rules."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.order_rules(session, view_id, branch_id, order.ids)
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)
+
+
+@router.put("/{view_id}/library/queries/{query_id}", response_model=SavedQuery)
+async def put_view_query(
+    view_id: str = Path(...),
+    query_id: str = Path(..., min_length=1, max_length=128),
+    body: SavedQueryInput = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Save a query in the view's library under this id — a new one, or a
+    new name, description or search for one it has. Saved queries belong
+    to the view, whichever branch is open."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.put_query(
+            session, view_id, query_id, body, actor=_user_id(user),
+        )
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)
+
+
+@router.delete("/{view_id}/library/queries/{query_id}", status_code=204)
+async def delete_view_query(
+    view_id: str = Path(...),
+    query_id: str = Path(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Remove a saved query (no error when it is already gone)."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    await view_library.delete_query(session, view_id, query_id)
+
+
+@router.put("/{view_id}/library/queries", response_model=List[SavedQuery])
+async def order_view_queries(
+    view_id: str = Path(...),
+    order: LibraryOrder = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Put the view's saved queries in the order ``ids`` names them; any it
+    leaves out follow. Returns the view's saved queries."""
+    await _library_view(session, view_id, user, claims, edit=True)
+    await view_library.order_queries(session, view_id, order.ids)
+    return await view_library.read_queries(session, view_id)
+
+
+@router.get("/{view_id}/library/export")
+async def export_view_library(
+    view_id: str = Path(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The view's display rules and saved queries as a pack — a JSON file to
+    import into another view. Anyone who can open the view can export it."""
+    view_orm, _ = await _library_view(session, view_id, user, claims, edit=False)
+    pack = await view_library.export_pack(session, view_orm, branch_id)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", view_orm.name or "").strip("-.") or "view"
+    return JSONResponse(
+        content=pack.model_dump(by_alias=True, mode="json", exclude_none=True),
+        headers={"Content-Disposition": f'attachment; filename="{stem[:80]}.library.json"'},
+    )
+
+
+@router.post("/{view_id}/library/import", response_model=LibraryImportResult)
+async def import_view_library(
+    view_id: str = Path(...),
+    pack: LibraryPack = Body(...),
+    strategy: ImportStrategy = Query("merge"),
+    dry_run: bool = Query(True, alias="dryRun"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What importing a pack would do, item by item (``dryRun``, the
+    default) — or do it. ``merge`` adds what the view doesn't have, ``copy``
+    adds everything, ``replace`` removes the view's rules and queries first.
+    Every item is checked as its kind is when saved; one that fails is
+    refused, and the rest still import."""
+    view_orm, can_edit = await _library_view(session, view_id, user, claims, edit=True)
+    try:
+        return await view_library.import_pack(
+            session, view_orm, branch_id, pack, strategy=strategy, dry_run=dry_run,
+            actor=_user_id(user), can_edit=can_edit,
+        )
+    except view_library.LibraryError as exc:
+        raise _library_refusal(exc)

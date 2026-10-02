@@ -7,6 +7,7 @@ import { motion } from 'framer-motion'
 import { X, History } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ViewActivityTimeline } from '@/components/views/ViewActivityTimeline'
+import { MOTION } from '@/lib/motion'
 
 export function ViewActivityDrawer({ viewId, viewName, isOpen, onClose }: {
     viewId: string | null
@@ -23,7 +24,7 @@ export function ViewActivityDrawer({ viewId, viewName, isOpen, onClose }: {
                     <motion.aside
                         initial={{ x: '100%' }}
                         animate={{ x: 0 }}
-                        transition={{ type: 'spring', stiffness: 360, damping: 38 }}
+                        transition={MOTION.drawerSlide}
                         className="fixed right-0 top-0 bottom-0 z-[71] w-full max-w-lg bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col"
                     >
                         <div className="flex items-center gap-3 px-5 py-4 border-b border-glass-border shrink-0">

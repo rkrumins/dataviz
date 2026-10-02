@@ -3,13 +3,15 @@
 OIDC specifies epoch seconds. Corporate gateways do not read that spec:
 the same field arrives as epoch milliseconds, as a decimal string, or as
 an ISO-8601 timestamp (``lastLogin``). The regression this file pins:
-an ISO string parsed to ``None``, and with ``require_auth_time`` on —
-the back-channel default — that ``None`` hard-failed every login on the
-connection while the gateway was, in fact, answering correctly.
+an ISO string parsed to ``None``, and back then a back-channel login
+without one was refused by default — so that ``None`` hard-failed every
+login on the connection while the gateway was, in fact, answering
+correctly. (Missing times are no longer refused; the ceiling measures
+from the sign-in. Reading the real value still matters.)
 
-A value that parses under none of the readings is still ``None``; the
-caller decides whether that is fatal. Guessing would be worse — a wrong
-instant silently disarms the daily re-authentication ceiling.
+A value that parses under none of the readings is still ``None``.
+Guessing would be worse — a wrong instant silently disarms the daily
+re-authentication ceiling.
 """
 import pytest
 

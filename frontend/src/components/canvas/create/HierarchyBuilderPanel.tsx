@@ -34,7 +34,7 @@ import {
   type AllowedEdgeOption,
 } from '@/services/ontologyPreflightService'
 import { relationshipLabel } from '@/lib/relationshipLabel'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { parseIndentedOutline, type ParsedOutlineRow, type OutlineParseContext } from './outlineParser'
 import { useCreateLinkStore } from '../edge-create/createLinkStore'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
@@ -121,7 +121,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const relationshipTypes = useViewRelationshipTypes()
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const canvasNodes = useCanvasStore((s) => s.nodes)
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
 
   const typeById = useMemo(() => new Map(entityTypes.map((t) => [t.id, t])), [entityTypes])
   const activeType = active.typeId ? typeById.get(active.typeId) : undefined
@@ -471,7 +471,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
               containmentEdgeTypes={containmentEdgeTypes}
               onAdd={() => {
                 const n = stageRows(parseIndentedOutline(pasteText, parseCtx), active.parentUrn)
-                showToast('success', `Added ${n} items — save when you're done`)
+                notify('success', `Added ${n} items — save when you're done`)
                 setPasteText('')
                 setMode('outline')
               }}
@@ -483,7 +483,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
               typeById={typeById}
               onCreate={(rows) => {
                 const n = stageRows(rows, active.parentUrn)
-                showToast('success', `Added ${n} entities — save when you're done`)
+                notify('success', `Added ${n} entities — save when you're done`)
                 setTemplateChain(null)
               }}
               onBack={() => setTemplateChain(null)}
@@ -886,7 +886,8 @@ function RowDetails({ type, node, onSave }: { type?: EntityTypeSchema; node?: Li
     const fieldValues: Record<string, unknown> = {}
     for (const f of customFields) if (f.id in props) fieldValues[f.id] = props[f.id]
     return {
-      description: (props.description as string) ?? '',
+      // A node field; rows staged before it was one kept it among the properties.
+      description: (node?.data?.description as string | undefined) ?? (props.description as string | undefined) ?? '',
       tags: (node?.data?.classifications ?? []).join(', '),
       fieldValues,
     }

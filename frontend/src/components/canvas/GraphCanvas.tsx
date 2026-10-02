@@ -37,6 +37,7 @@ import { AnimatePresence } from 'framer-motion'
 import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { generateColorFromType } from '@/lib/type-visuals'
+import { FeedMoreChip } from './FeedMoreChip'
 
 // Node/Edge components
 import { GhostNode } from './nodes/GhostNode'
@@ -45,11 +46,15 @@ import { LineageEdge } from './edges/LineageEdge'
 import { AggregatedEdge } from './edges/AggregatedEdge'
 import { CanvasControls } from './CanvasControls'
 import { EdgeLegend } from './EdgeLegend'
-import { EntityDrawer } from '../panels/EntityDrawer'
+import { EntityDrawer } from '../panels/entity/EntityDrawer'
+import { RelationshipDrawer } from '../panels/RelationshipDrawer'
+import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
 import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
+import { useViewLibrary } from '@/hooks/useViewLibrary'
+import { useEffectiveBranchId } from '@/store/branchStore'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
@@ -79,7 +84,7 @@ import { useSemanticZoom } from '@/hooks/useSemanticZoom'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
-import { useLoadingToast, useToast } from '@/components/ui/toast'
+import { useLoadingNotification, useAppNotifications } from '@/components/ui/notifications'
 import { EdgeTypePickerPopover } from './edge-create/EdgeTypePickerPopover'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
 import { useCreateLinkStore } from './edge-create/createLinkStore'
@@ -95,6 +100,7 @@ import {
   useViewEntityTypes,
   useViewSchemaIsReady,
 } from '@/hooks/useViewSchema'
+import { useShallow } from 'zustand/react/shallow'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { useSearchStore } from '@/store/searchStore'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
@@ -124,9 +130,13 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 1. Schema readiness guard
   const isSchemaReady = useViewSchemaIsReady()
 
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   // 2. Canvas store
-  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges } = useCanvasStore()
+  // Actions only (stable) — never the whole store, which re-rendered this canvas on every write.
+  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges } = useCanvasStore(useShallow((s) => ({
+    setNodes: s.setNodes, setEdges: s.setEdges, selectNode: s.selectNode, selectEdge: s.selectEdge,
+    clearSelection: s.clearSelection, addEdges: s.addEdges,
+  })))
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
@@ -138,6 +148,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  const drawerEdge = useCanvasStore((s) => s.drawerEdge)
+  const openEdgeDrawer = useCanvasStore((s) => s.openEdgeDrawer)
   // 3. Schema / ontology
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
@@ -167,6 +179,16 @@ export function GraphCanvas({ className }: { className?: string }) {
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   useDisplayRuleEngine(activeView?.id ?? null)
+  // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
+  const libraryBranchId = useEffectiveBranchId(
+    activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
+  useViewLibrary(activeView?.id ?? null, libraryBranchId)
+  // A relationship the drawer shows was resolved from THIS view's lines —
+  // leaving the view (or this canvas) closes it, trail and all.
+  useEffect(() => () => {
+    const s = useCanvasStore.getState()
+    if (s.drawerEdge || s.drawerHistory.entries.some((e) => e.kind === 'edge')) s.forceCloseDrawer()
+  }, [activeView?.id])
 
   // Viewport-aware node filtering for large graphs
   const [viewportBounds, setViewportBounds] = useState<{ x: number; y: number; zoom: number } | null>(null)
@@ -285,13 +307,13 @@ export function GraphCanvas({ className }: { className?: string }) {
   // handles visibility by projecting to visible ancestors, not filtering.
 
   // 7. Progressive loading
-  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes } = useGraphHydration()
-  useLoadingToast('graph-children', isLoadingChildren, 'Expanding hierarchy')
+  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, loadMoreFeeds } = useGraphHydration()
+  useLoadingNotification('graph-children', isLoadingChildren, 'Expanding hierarchy')
   const provider = useGraphProvider()
 
   // Reveal a search hit on this canvas — same flow as ContextViewCanvas
   // (walk ancestor chain, expand each step, then select + scroll).
-  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // 8. Trace system (shared hook)
   const trace = useCanvasTrace({
@@ -335,7 +357,7 @@ export function GraphCanvas({ className }: { className?: string }) {
     fetchAggregated,
     isLoading: isLoadingAggEdges,
   } = useAggregatedLineage({ granularity: null })
-  useLoadingToast('graph-agg', isLoadingAggEdges, 'Loading lineage')
+  useLoadingNotification('graph-agg', isLoadingAggEdges, 'Loading lineage')
 
   // Stable ref for nodes (avoids effect dependency on nodes array)
   const nodesRef = useRef(rawNodes)
@@ -409,6 +431,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   const allVisibleEdges = useMemo(() => {
     const result: Array<typeof rawEdges[0] & { _isContainment: boolean; _isProjected: boolean }> = []
     const seen = new Set<string>() // Deduplicate projected edges
+    const linesByKey = new Map<string, (typeof result)[number]>()
 
     for (const edge of rawEdges) {
       const edgeType = normalizeEdgeType(edge)
@@ -425,20 +448,29 @@ export function GraphCanvas({ className }: { className?: string }) {
         const visibleTarget = findVisibleAncestor(edge.target)
 
         if (visibleSource && visibleTarget && visibleSource !== visibleTarget) {
-          // Deduplicate: multiple underlying edges may project to the same visible pair
+          // Deduplicate: multiple underlying edges may project to the same visible pair.
+          // The line keeps every one of them as a member, so it can say which
+          // relationships it stands for (the relationship drawer lists them).
           const projectedKey = `${visibleSource}->${visibleTarget}:${edgeType}`
-          if (seen.has(projectedKey)) continue
+          const drawn = linesByKey.get(projectedKey)
+          if (drawn) {
+            (drawn.data as { members: LineageEdgeType[] }).members.push(edge)
+            continue
+          }
           seen.add(projectedKey)
 
           const isProjected = visibleSource !== edge.source || visibleTarget !== edge.target
-          result.push({
+          const line = {
             ...edge,
             id: isProjected ? `proj:${edge.id}` : edge.id,
             source: visibleSource,
             target: visibleTarget,
+            data: { ...edge.data, members: [edge] },
             _isContainment: false,
             _isProjected: isProjected,
-          })
+          }
+          linesByKey.set(projectedKey, line)
+          result.push(line)
         }
       }
     }
@@ -531,6 +563,12 @@ export function GraphCanvas({ className }: { className?: string }) {
   const mergedHighlightEdges = isClickHighlightActive
     ? highlightState.edges
     : hoverHighlight.edges
+  // The line the relationship drawer is open on shows as selected for as long as the drawer is
+  // open on it. Nothing else dims for it.
+  const openLine = useMemo(
+    () => (drawerEdge ? lineForTarget(drawerEdge, allVisibleEdges as DrawnLine[]) : null),
+    [drawerEdge, allVisibleEdges],
+  )
 
   // 13. Edge filters
   const { isOpen: isEdgePanelOpen, toggle: toggleEdgePanel, close: closeEdgePanel } =
@@ -869,6 +907,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           target: edge.target,
           // Use 'aggregated' edge component for rolled-up edges (shows edge count badge)
           type: isAggregated ? 'aggregated' as const : 'lineage' as const,
+          selected: edge.id === openLine?.id,
           animated: !isProjected && !isAggregated && (!isHighlightActive || mergedHighlightEdges.has(edge.id)),
           style: {
             opacity: isHighlightActive && !mergedHighlightEdges.has(edge.id) ? 0.15 : (isProjected ? 0.7 : 1),
@@ -885,7 +924,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           },
         }
       })
-  }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges, enabledEdgeTypes, directionEdgeIds, isolateMode, highlightedEdgeIds])
+  }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges, enabledEdgeTypes, directionEdgeIds, isolateMode, highlightedEdgeIds, openLine])
   // (trace.isTracing/trace.result kept in deps because the map step inside reads them for isTraced flagging)
 
   // 16. Display nodes with visual state — only VISIBLE nodes (expand/collapse aware)
@@ -1013,9 +1052,15 @@ export function GraphCanvas({ className }: { className?: string }) {
   const onPaneClick = useCallback(() => clearSelection(), [clearSelection])
 
   // Edge click
+  // A click opens what the line stands for in the relationship drawer — one
+  // relationship, or the several a projected line folds together.
   const onEdgeClick: EdgeMouseHandler = useCallback(
-    (_, edge) => selectEdge(edge.id),
-    [selectEdge],
+    (_, edge) => {
+      selectEdge(edge.id)
+      const line = allVisibleEdges.find((e) => e.id === edge.id) ?? edge
+      openEdgeDrawer(targetFromLine(line as DrawnLine, (id) => rawEdges.find((e) => e.id === id)))
+    },
+    [selectEdge, openEdgeDrawer, allVisibleEdges, rawEdges],
   )
 
   // Edge context menu — uses ref because interactions is defined later
@@ -1068,7 +1113,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         entityTypes: schemaEntityTypes,
       })
       if (!verdict.allowed) {
-        showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+        notify('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
         setEdgePicker(null)
         return
       }
@@ -1082,7 +1127,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       }])
       setEdgePicker(null)
     },
-    [rawNodes, addEdges, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, showToast],
+    [rawNodes, addEdges, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, notify],
   )
 
   // Create edge by dragging between node handles — ontology-aware
@@ -1100,7 +1145,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       const validTypes = getValidEdgeTypes(sourceType, targetType)
 
       if (validTypes.length === 0) {
-        showToast('info', 'No relationship is allowed between these entities. Use “Add child” to nest one inside the other.')
+        notify('info', 'No relationship is allowed between these entities. Use “Add child” to nest one inside the other.')
         return
       }
 
@@ -1120,7 +1165,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           : { x: window.innerWidth / 2, y: window.innerHeight / 2 },
       })
     },
-    [rawNodes, getValidEdgeTypes, createEdgeWithType, showToast],
+    [rawNodes, getValidEdgeTypes, createEdgeWithType, notify],
   )
 
   // Edge reconnection — ontology-aware. Containment can't be re-drawn (route to "Move to"); a
@@ -1131,7 +1176,7 @@ export function GraphCanvas({ className }: { className?: string }) {
 
       const originalType = (oldEdge.data?.edgeType ?? oldEdge.data?.relationship ?? '') as string
       if (containmentEdgeTypes.some(t => t.toUpperCase() === originalType.toUpperCase())) {
-        showToast('info', 'Containment can’t be reconnected — use “Move to” to change an entity’s parent.')
+        notify('info', 'Containment can’t be reconnected — use “Move to” to change an entity’s parent.')
         return
       }
 
@@ -1146,7 +1191,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       const validTypes = getValidEdgeTypes(sourceType, targetType)
       const edgeType = validTypes.find(o => o.edgeType.toUpperCase() === originalType.toUpperCase())?.edgeType
       if (!edgeType) {
-        showToast('error', `“${originalType || 'This relationship'}” isn’t allowed between these entities.`)
+        notify('error', `“${originalType || 'This relationship'}” isn’t allowed between these entities.`)
         return
       }
 
@@ -1158,7 +1203,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         entityTypes: schemaEntityTypes,
       })
       if (!verdict.allowed) {
-        showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+        notify('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
         return
       }
 
@@ -1173,7 +1218,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         animated: true,
       }])
     },
-    [rawNodes, getValidEdgeTypes, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, showToast],
+    [rawNodes, getValidEdgeTypes, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, notify],
   )
 
   // Connection validation — checks ALL ontology relationship types
@@ -1249,13 +1294,21 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
     },
     onCloseEdgePanel: () => {
-      if (isEdgePanelOpen) {
+      // Hidden behind the relationship drawer, the Explorer is not what Esc closes.
+      if (isEdgePanelOpen && !drawerEdge) {
         closeEdgePanel()
         return true
       }
       return false
     },
     onCloseEntityDrawer: () => {
+      if (drawerEdge) {
+        useCanvasStore.getState().requestDrawerMove(() => {
+          useCanvasStore.getState().closeNodeDrawer()
+          clearSelection()
+        })
+        return true
+      }
       if (selectedNodeId) {
         clearSelection()
         return true
@@ -1474,6 +1527,8 @@ export function GraphCanvas({ className }: { className?: string }) {
           )}
         </ReactFlow>
         {rawNodes.length === 0 && !isHydratingInitial && <BuilderEmptyState />}
+        {/* Roots/orphans beyond the first page — above the stats bar. */}
+        <FeedMoreChip loadingNodes={loadingNodes} failedNodes={failedNodes} onLoadMore={keys => void loadMoreFeeds(keys)} bottomClass="bottom-16" />
       </div>
 
       {/* Stats Bar */}
@@ -1545,7 +1600,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         <BuildPanel onClose={() => useHierarchyBuilderStore.getState().close()} />
       )}
       <AnimatePresence>
-        {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && isEdgePanelOpen && (
           <EdgeDetailPanel
             isOpen={isEdgePanelOpen}
             onClose={closeEdgePanel}
@@ -1556,16 +1611,20 @@ export function GraphCanvas({ className }: { className?: string }) {
       </AnimatePresence>
       {!builderOpen && !buildOpen && (
         <EntityDrawer
-          onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
-          onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
-          onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
+          onTraceUp={trace.traceUpstream}
+          onTraceDown={trace.traceDownstream}
+          onFullTrace={trace.traceFullLineage}
           onFocusNode={revealAndFocus}
           onLocateMany={locateManyOnCanvas}
         />
       )}
+      {/* Read-only here: this canvas has no save path for graph edits. */}
+      {!builderOpen && !buildOpen && drawerEdge && (
+        <RelationshipDrawer onFocusNode={revealAndFocus} onLocateMany={locateManyOnCanvas} />
+      )}
       </div>{/* end canvas + right-rail row */}
 
-      {/* Advanced search trigger + panel. The trigger handles ⌘K
+      {/* Advanced search trigger + panel. The trigger handles ⌘⇧F
           globally; the panel mounts as a flex-sibling drawer (parity
           with ContextViewCanvas). Disabled when no view is active. */}
       <CanvasSearchTrigger

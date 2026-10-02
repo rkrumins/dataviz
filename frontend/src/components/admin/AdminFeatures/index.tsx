@@ -37,6 +37,7 @@ import { AlertCircle, BookOpen, HelpCircle, Pencil, RotateCcw, Search, ToggleLef
 import { featuresService, type FeatureCategory, type FeatureDefinition } from '@/services/featuresService'
 import { useAdminFeatures, SEARCH_MIN_FEATURES } from '@/hooks/useAdminFeatures'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ConfirmTurnOff } from './ConfirmTurnOff'
 import { ExperimentalNoticeBanner } from './ExperimentalNoticeBanner'
 import { FeatureHero } from './FeatureHero'
@@ -44,8 +45,17 @@ import { FeatureList } from './FeatureList'
 import { FeatureSpec } from './FeatureSpec'
 import { ResetConfirmModal, EffectFocusCancel } from './ResetConfirmModal'
 import { SkeletonCards } from './SkeletonCards'
-import { Toast } from './Toast'
 import { isOn } from './featureState'
+
+/**
+ * How long the "what you just changed" notification lives.
+ *
+ * Longer than the app's ordinary 4.5s, because this one carries an Undo. What stops people using a
+ * page like this isn't difficulty, it's fear: every switch changes what EVERYBODY can do, and a
+ * mistake is visible to your users long before it's visible to you. An escape hatch that expires
+ * before it can be read and reached is worse than none — it was visibly there, and then gone.
+ */
+const UNDO_LIFETIME_MS = 8000
 
 export function AdminFeatures() {
   const {
@@ -55,11 +65,6 @@ export function AdminFeatures() {
     load,
     handleChange,
     savingKey,
-    toastVisible,
-    setToastVisible,
-    errorToastVisible,
-    setErrorToastVisible,
-    errorToastMessage,
     resetConfirmOpen,
     setResetConfirmOpen,
     handleReset,
@@ -72,21 +77,13 @@ export function AdminFeatures() {
     cancelButtonRef,
     updateNotice,
   } = useAdminFeatures()
+  const { notify } = useAppNotifications()
 
   const [editNoticeOpen, setEditNoticeOpen] = useState(false)
   /** Which feature the spec pane is explaining. Null means "the first one". */
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   /** The feature we are about to turn OFF, pending confirmation. */
   const [pendingOff, setPendingOff] = useState<FeatureDefinition | null>(null)
-  /**
-   * The last change, kept so it can be taken back.
-   *
-   * What stops people using a page like this isn't difficulty, it's fear: every switch changes what
-   * EVERYBODY can do, and a mistake is visible to your users long before it's visible to you. An
-   * Undo sitting in the toast is worth more reassurance than any amount of confirmation copy,
-   * because it makes the click cheap rather than merely well-explained.
-   */
-  const [undo, setUndo] = useState<{ key: string; name: string; to: unknown; from: unknown } | null>(null)
 
   const schema = data?.schema ?? featuresService.getSchema()
   const categories: FeatureCategory[] = data?.categories ?? featuresService.getCategories()
@@ -137,6 +134,12 @@ export function AdminFeatures() {
     : null
   const isUsingDefaults = !data?.updatedAt && !defaultsHintDismissed
 
+  /** Save, then say so — in the app's one notification stack, never a second pop-up of its own. */
+  const save = async (key: string, value: unknown, message: string, undo?: () => void) => {
+    if (!(await handleChange(key, value))) return
+    notify('success', message, undo && { label: 'Undo', onClick: undo }, undo && UNDO_LIFETIME_MS)
+  }
+
   /**
    * ON is instant. OFF asks first.
    *
@@ -144,13 +147,15 @@ export function AdminFeatures() {
    * the consequence of what they are about to do to every user at once.
    */
   const applyChange = (feature: FeatureDefinition, next: unknown) => {
-    setUndo({
-      key: feature.key,
-      name: feature.name,
-      to: next,
-      from: values[feature.key] ?? feature.default,
-    })
-    return handleChange(feature.key, next)
+    const from = values[feature.key] ?? feature.default
+    return save(
+      feature.key,
+      next,
+      `${feature.name} — ${next === false ? 'turned off' : 'updated'}`,
+      // Put it back exactly as it was. Not a fresh decision — a reversal, so it asks nothing, and
+      // it does not offer to undo the undo.
+      () => void save(feature.key, from, 'Saved'),
+    )
   }
 
   const requestToggle = (feature: FeatureDefinition, next: boolean) => {
@@ -165,13 +170,6 @@ export function AdminFeatures() {
     if (!pendingOff) return
     await applyChange(pendingOff, false)
     setPendingOff(null)
-  }
-
-  /** Put it back exactly as it was. Not a fresh decision — a reversal, so it asks nothing. */
-  const undoLastChange = () => {
-    if (!undo) return
-    handleChange(undo.key, undo.from)
-    setUndo(null)
   }
 
   return (
@@ -351,22 +349,6 @@ export function AdminFeatures() {
         cancelRef={cancelButtonRef}
       />
       {resetConfirmOpen && <EffectFocusCancel cancelRef={cancelButtonRef} />}
-
-      <Toast
-        message={undo ? `${undo.name} — ${undo.to === false ? 'turned off' : 'updated'}` : 'Saved'}
-        visible={toastVisible}
-        onDismiss={() => {
-          setToastVisible(false)
-          setUndo(null)
-        }}
-        action={undo ? { label: 'Undo', onClick: undoLastChange } : undefined}
-      />
-      <Toast
-        message={errorToastMessage}
-        visible={errorToastVisible}
-        onDismiss={() => setErrorToastVisible(false)}
-        variant="error"
-      />
     </PageContainer>
   )
 }

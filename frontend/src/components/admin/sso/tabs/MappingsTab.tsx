@@ -24,6 +24,7 @@ import { workspaceService, type WorkspaceResponse } from '@/services/workspaceSe
 import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { SsoCard, SsoEmpty, SsoSectionLabel } from '../ui/SsoCard'
 import { SsoMappingsSkeleton, SsoLoading } from '../ui/SsoSkeleton'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ErrorBanner } from './ErrorBanner'
 import { MappingComposer } from './mappings/MappingComposer'
 import { MappingGroupCard, groupMappings } from './mappings/MappingGroupCard'
@@ -33,9 +34,15 @@ export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
     const [providers, setProviders] = useState<IdpProvider[]>([])
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([])
     const [groups, setGroups] = useState<GroupResponse[]>([])
+    // Only the list read writes this. A rule created or removed just
+    // happened, and says so in the app's one notification stack.
     const [error, setError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
     const [loaded, setLoaded] = useState(false)
+    // One rule open for editing at a time: its row morphs into the same
+    // composer the New-rule card uses, pre-filled, in place.
+    const [editingId, setEditingId] = useState<string | null>(null)
+    const { notify } = useAppNotifications()
 
     const refresh = useCallback(async () => {
         try {
@@ -47,7 +54,9 @@ export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
             setProviders(p)
             setError(null)
         } catch (err) {
-            setError((err as Error).message)
+            setError(err instanceof Error && err.message
+                ? err.message
+                : 'The access rules could not be read.')
         } finally {
             setLoaded(true)
         }
@@ -62,13 +71,23 @@ export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
     const grouped = useMemo(() => groupMappings(rows), [rows])
 
     async function remove(id: string) {
+        // Named before the delete: afterwards the row is gone from `rows`
+        // and the message could only say "a rule".
+        const row = rows.find(r => r.id === id)
+        const named = row ? `“${row.idpGroup}”` : 'that group'
         setBusy(true)
         try {
             await ssoAdminService.deleteMapping(id)
             await refresh()
             onChanged?.()
+            notify('success',
+                `Rule removed — anyone in ${named} stops getting it as `
+                + 'their sessions refresh.',
+            )
         } catch (err) {
-            setError((err as Error).message)
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not remove the rule for ${named}.`)
         } finally {
             setBusy(false)
         }
@@ -98,7 +117,6 @@ export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
                     <MappingComposer
                         providers={providers}
                         onCreated={async () => { await refresh(); onChanged?.() }}
-                        onError={setError}
                     />
                 </SsoCard>
 
@@ -130,6 +148,20 @@ export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
                                     busy={busy}
                                     index={i}
                                     onDelete={id => { void remove(id) }}
+                                    editingId={editingId}
+                                    onEdit={id => setEditingId(id)}
+                                    editor={row => (
+                                        <MappingComposer
+                                            key={row.id}
+                                            providers={providers}
+                                            editing={row}
+                                            onCreated={async () => {
+                                                await refresh()
+                                                onChanged?.()
+                                            }}
+                                            onCancel={() => setEditingId(null)}
+                                        />
+                                    )}
                                 />
                             ))}
                         </div>

@@ -45,6 +45,19 @@ import type {
 import { useSearchStore } from '@/store/searchStore'
 
 import { UnifiedPicker } from '../builder/editors/UnifiedPicker'
+import type { ValueSuggester } from '../builder/useDiscovery'
+import { inputClass } from '../typed/fieldStyles'
+import {
+    arityOf,
+    autoTypeOf,
+    comparesAs,
+    isNegative,
+    operatorsFor,
+} from '../typed/operators'
+import { TypedValueEditor } from '../typed/TypedValueEditor'
+import { useValueSuggestions } from '../typed/useValueSuggestions'
+import { parseDuration, recode, valueProblem } from '../typed/valueCodec'
+import { TYPE_META, VALUE_TYPES, type ValueType, observeType } from '../typed/valueTypes'
 
 import { OperatorMenu } from './OperatorMenu'
 import { RowCard } from './builder-atoms/RowCard'
@@ -76,6 +89,8 @@ export interface ConditionRowProps {
         keysByEntityType: Record<string, string[]>
         tagValues: string[]
         getValueSamples: (key: string) => unknown[]
+        /** Counted suggestions across the view; samples when absent. */
+        suggestValues?: ValueSuggester
     }
     knownEntityTypes: string[]
     activeEntityTypes: string[]
@@ -84,7 +99,8 @@ export interface ConditionRowProps {
     autoFocus?: boolean
     onChange: (next: Predicate) => void
     onRemove: () => void
-    onOpenAdvanced: () => void
+    /** Omitted where there is no Advanced drawer (the rule editor). */
+    onOpenAdvanced?: () => void
     /** Pressing Enter inside a scalar value field fires this. The
      *  panel wires it to the same dispatch the Run button uses. */
     onSubmit?: () => void
@@ -215,7 +231,7 @@ interface EditorCtx {
     discoveredLayers: LayerOption[]
     isRunning: boolean
     autoFocus: boolean
-    onOpenAdvanced: () => void
+    onOpenAdvanced?: () => void
     /** Fires when the user presses Enter inside a scalar editor —
      *  signals "run this query now." Optional; rows that don't have
      *  an Enter-able input ignore it. */
@@ -259,11 +275,13 @@ function renderEditor(ctx: EditorCtx): ReactNode {
         case 'isRoot':
         case 'hasIncoming':
         case 'hasOutgoing':
+        case 'all':
             // Boolean rows: the header label + description already
             // says everything. No editor body needed.
             return null
         case 'withinHops':
         case 'path':
+        case 'degree':
             // No visual editor — these predicate kinds are Code-only.
             // Saved queries that still contain them render this banner;
             // editing happens via the JSON view in the Advanced drawer.
@@ -306,7 +324,9 @@ const TEXT_TARGET_OPTIONS: { value: TextTarget; label: string; description?: str
 // rejects both with CompileError until the server opts them in).
 type TextUiMode = TextMatchMode | 'wildcard'
 
-const TEXT_MATCH_OPTIONS: { value: TextUiMode; label: string; description?: string }[] = [
+/** Shared with the canvas header's Match menu, so one match mode is
+ *  spelled one way across the builder and the quick search box. */
+export const TEXT_MATCH_OPTIONS: { value: TextUiMode; label: string; description?: string }[] = [
     { value: 'substring', label: 'Contains',     description: 'Substring match anywhere in the field' },
     { value: 'prefix',    label: 'Starts with',  description: 'Leading-edge match' },
     { value: 'suffix',    label: 'Ends with',    description: 'Trailing-edge match' },
@@ -624,70 +644,134 @@ const HAS_PROPERTY_OP_OPTIONS: { value: 'has' | 'no'; label: string }[] = [
     { value: 'no',  label: 'Does not have property' },
 ]
 
+type KeyMatch = NonNullable<HasPropertyPredicate['keyMatch']>
+
+const KEY_MATCH_OPTIONS: { value: KeyMatch; label: string; description: string }[] = [
+    { value: 'exact',    label: 'Named',            description: 'This exact property' },
+    { value: 'prefix',   label: 'Name starts with', description: 'Any property whose name starts with the text' },
+    { value: 'contains', label: 'Name contains',    description: 'Any property whose name contains the text' },
+]
+
 
 function HasPropertyEditor({
     value, onChange, discovery, activeEntityTypes, autoFocus,
 }: Omit<EditorCtx, 'value'> & { value: HasPropertyPredicate }) {
     const keys = pickKeyOptions(discovery, activeEntityTypes)
+    const match: KeyMatch = value.keyMatch ?? 'exact'
+    const needle = value.key.trim().toLowerCase()
+    const matching = match === 'exact' || !needle ? [] : keys.filter((k) => (
+        match === 'prefix' ? k.toLowerCase().startsWith(needle) : k.toLowerCase().includes(needle)
+    ))
     return (
         <div className="flex flex-col gap-3">
-            <Field label="Presence">
-                <OperatorMenu
-                    value={value.negate ? 'no' : 'has'}
-                    onChange={(v) => onChange({ ...value, negate: v === 'no' })}
-                    options={HAS_PROPERTY_OP_OPTIONS}
-                    ariaLabel="Property presence"
-                />
+            <div className="grid grid-cols-2 gap-3">
+                <Field label="Presence">
+                    <OperatorMenu
+                        value={value.negate ? 'no' : 'has'}
+                        onChange={(v) => onChange({ ...value, negate: v === 'no' })}
+                        options={HAS_PROPERTY_OP_OPTIONS}
+                        ariaLabel="Property presence"
+                    />
+                </Field>
+                <Field label="Match">
+                    <OperatorMenu
+                        value={match}
+                        onChange={(m) => onChange({ ...value, keyMatch: m })}
+                        options={KEY_MATCH_OPTIONS}
+                        ariaLabel="Match property names"
+                    />
+                </Field>
+            </div>
+            <Field label={match === 'exact' ? 'Property key' : 'Part of the name'}>
+                {match === 'exact' ? (
+                    <UnifiedPicker
+                        value={value.key}
+                        onChange={(next) => onChange({ ...value, key: next })}
+                        options={keys.map((k) => ({ value: k }))}
+                        placeholder="pick a property key…"
+                        emptyHint="No property keys discovered."
+                        mono
+                        autoFocus={autoFocus}
+                        portal
+                    />
+                ) : (
+                    <input
+                        type="text"
+                        value={value.key}
+                        onChange={(e) => onChange({ ...value, key: e.target.value })}
+                        placeholder="e.g. owner"
+                        autoFocus={autoFocus}
+                        className={cn(inputClass, 'font-mono')}
+                    />
+                )}
             </Field>
-            <Field label="Property key">
-                <UnifiedPicker
-                    value={value.key}
-                    onChange={(next) => onChange({ ...value, key: next })}
-                    options={keys.map((k) => ({ value: k }))}
-                    placeholder="pick a property key…"
-                    emptyHint="No property keys discovered."
-                    mono
-                    autoFocus={autoFocus}
-                    portal
-                />
-            </Field>
+            {match !== 'exact' && needle && (
+                <p className="text-[11px] text-ink-muted -mt-1">
+                    {matching.length === 0
+                        ? 'No discovered property matches yet — every entity is still checked.'
+                        : <>Matches {matching.length === 1 ? 'the known property' : `${matching.length} known properties`}{' '}
+                            <span className="font-mono text-ink">{matching.slice(0, 5).join(', ')}</span>
+                            {matching.length > 5 && ` and ${matching.length - 5} more`}.</>}
+                </p>
+            )}
         </div>
     )
 }
 
 
-const PROPERTY_OP_OPTIONS: { value: PropertyOp; label: string }[] = [
-    { value: 'eq',         label: 'Equals (=)' },
-    { value: 'neq',        label: 'Does not equal (≠)' },
-    { value: 'contains',   label: 'Contains' },
-    { value: 'startsWith', label: 'Starts with' },
-    { value: 'endsWith',   label: 'Ends with' },
-    { value: 'gt',         label: 'Greater than (>)' },
-    { value: 'gte',        label: 'Greater than or equal (≥)' },
-    { value: 'lt',         label: 'Less than (<)' },
-    { value: 'lte',        label: 'Less than or equal (≤)' },
-    { value: 'in',         label: 'Is one of (IN)' },
-    { value: 'notIn',      label: 'Is not one of' },
-    { value: 'between',    label: 'Between two values' },
-]
+const TYPE_NOUNS: Record<ValueType, string> = {
+    string: 'text', number: 'numbers', boolean: 'true or false', date: 'dates',
+}
+
+const TYPE_OPTIONS = VALUE_TYPES.map((t) => ({
+    value: t, label: TYPE_META[t].label, description: TYPE_META[t].description,
+}))
 
 
+/** One property compared to a value — typed. The row compares as a TYPE
+ *  (text, number, true/false, date): guessed from the property's values,
+ *  overridable, and stamped on the predicate so a saved query keeps its
+ *  meaning. The operator menu, the value editor and the checks follow it. */
 function PropertyEditor({
     value, onChange, discovery, activeEntityTypes, autoFocus, onSubmit,
 }: Omit<EditorCtx, 'value'> & { value: PropertyPredicate }) {
     const keys = pickKeyOptions(discovery, activeEntityTypes)
     const op: PropertyOp = value.op ?? 'eq'
     const samples = value.key ? discovery.getValueSamples(value.key) : []
-    const sampleStrings = samples
-        .map((v) => (typeof v === 'string' ? v : JSON.stringify(v)))
-        .filter((s) => s.length > 0)
+    const observed = observeType(samples)
+    const declared = value.valueType && value.valueType !== 'auto' ? value.valueType : null
+    // A row from before types runs as its value decides — show that.
+    const type: ValueType = declared
+        ?? (valueProblem(op, 'auto', value.value) === null && arityOf(op) !== 'none'
+            ? autoTypeOf(op, value.value) : observed.type)
+    const kind = comparesAs(op, type)
+    const arity = arityOf(op)
+    const problem = value.key.trim() ? valueProblem(op, type, value.value) : null
+    // The most common values across the whole view, for what is typed —
+    // the discovery sample alone showed a handful.
+    const [valueQuery, setValueQuery] = useState('')
+    const suggested = useValueSuggestions(discovery.suggestValues, value.key, valueQuery)
+
+    const update = (patch: Partial<PropertyPredicate>, nextType: ValueType = type) =>
+        onChange({ ...value, ...patch, valueType: nextType })
+    // A new property or type keeps the operator when it still applies and
+    // re-reads the value in the new type ("15" ↔ 15).
+    const retype = (patch: Partial<PropertyPredicate>, nextType: ValueType, list: boolean) => {
+        const keep = operatorsFor(nextType, { list }).some((o) => o.value === op)
+        const nextOp: PropertyOp = keep ? op : 'eq'
+        update({ ...patch, op: nextOp, value: reshapeValue(recode(value.value, nextType), op, nextOp) }, nextType)
+    }
+
     return (
         <div className="flex flex-col gap-3">
             <div className="grid grid-cols-2 gap-3">
                 <Field label="Property">
                     <UnifiedPicker
                         value={value.key}
-                        onChange={(next) => onChange({ ...value, key: next })}
+                        onChange={(next) => {
+                            const seen = observeType(next ? discovery.getValueSamples(next) : [])
+                            retype({ key: next }, seen.type, seen.list)
+                        }}
                         options={keys.map((k) => ({ value: k }))}
                         placeholder="property…"
                         emptyHint="No property keys discovered."
@@ -699,53 +783,103 @@ function PropertyEditor({
                 <Field label="Operator">
                     <OperatorMenu
                         value={op}
-                        onChange={(v) => onChange({ ...value, op: v })}
-                        options={PROPERTY_OP_OPTIONS}
+                        onChange={(v) => update({ op: v, value: reshapeValue(value.value, op, v) })}
+                        options={operatorsFor(type, { list: observed.list, current: op })}
                         ariaLabel="Property operator"
                     />
                 </Field>
             </div>
-            <Field label="Value">
-                {sampleStrings.length > 0 ? (
-                    <UnifiedPicker
-                        value={value.value == null ? '' : String(value.value)}
-                        onChange={(next) => onChange({ ...value, value: coerceValue(next) })}
-                        options={sampleStrings.map((s) => ({ value: s }))}
-                        placeholder="pick or type a value…"
-                        emptyHint="No samples discovered — type a value."
-                        portal
+            {arity !== 'none' && (
+                <Field label={arity === 'many' ? 'Values' : arity === 'pair' ? 'Range'
+                    : arity === 'duration' ? 'Within the last' : 'Value'}>
+                    <TypedValueEditor
+                        op={op}
+                        type={type}
+                        value={value.value}
+                        onChange={(next) => update({ value: next })}
+                        samples={samples}
+                        suggestions={suggested?.values}
+                        onQueryChange={discovery.suggestValues ? setValueQuery : undefined}
+                        onSubmit={onSubmit}
                     />
-                ) : (
-                    <input
-                        type="text"
-                        value={value.value == null ? '' : String(value.value)}
-                        onChange={(e) => onChange({ ...value, value: coerceValue(e.target.value) })}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && onSubmit) {
-                                e.preventDefault()
-                                onSubmit()
-                            }
-                        }}
-                        placeholder="type a value…"
-                        className={inputClass}
-                    />
+                </Field>
+            )}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <OperatorMenu
+                    value={type}
+                    onChange={(t) => retype({}, t, observed.list)}
+                    options={TYPE_OPTIONS}
+                    chipPrefix="Compare as"
+                    size="sm"
+                    ariaLabel="Compare as"
+                />
+                {kind === 'string' && arity !== 'none' && (
+                    <CheckToggle
+                        checked={!!value.caseSensitive}
+                        onChange={(on) => update({ caseSensitive: on })}
+                    >
+                        Match case
+                    </CheckToggle>
                 )}
-            </Field>
+                {isNegative(op) && (
+                    <CheckToggle
+                        checked={!!value.includeMissing}
+                        onChange={(on) => update({ includeMissing: on })}
+                    >
+                        Include entities without {value.key.trim() ? <span className="font-mono">{value.key}</span> : 'it'}
+                    </CheckToggle>
+                )}
+            </div>
+            {suggested && !suggested.complete && arity !== 'none' && (
+                <p className="text-[11px] text-ink-muted -mt-1">
+                    Values listed from part of this view — it is large. Any value can still be typed.
+                </p>
+            )}
+            {observed.mixed && kind !== 'string' && arity !== 'none' && (
+                <p className="text-[11px] text-ink-muted -mt-1">
+                    Some values of this property are not {TYPE_NOUNS[kind]} — those entities
+                    never match this comparison.
+                </p>
+            )}
+            {problem && (
+                <p className="text-[11px] text-ink-muted -mt-1">
+                    Not applied yet — {problem}.
+                </p>
+            )}
         </div>
     )
 }
 
 
-function CodeOnlyHint({ onOpen }: { onOpen: () => void }) {
+function CheckToggle({
+    checked, onChange, children,
+}: { checked: boolean; onChange: (on: boolean) => void; children: ReactNode }) {
+    return (
+        <label className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-muted hover:text-ink cursor-pointer select-none">
+            <input
+                type="checkbox"
+                checked={checked}
+                onChange={(e) => onChange(e.target.checked)}
+                className="w-3.5 h-3.5 accent-accent-lineage"
+            />
+            {children}
+        </label>
+    )
+}
+
+
+function CodeOnlyHint({ onOpen }: { onOpen?: () => void }) {
     return (
         <div className={cn(
             'rounded-lg border border-glass-border/60 bg-canvas-base/30',
             'px-3 py-2.5 flex items-center justify-between gap-3',
         )}>
             <span className="text-[11.5px] text-ink-muted">
-                This filter lives in Code mode — open the JSON view to edit it.
+                {onOpen
+                    ? 'This filter lives in Code mode — open the JSON view to edit it.'
+                    : "This filter is edited as JSON in Advanced Search — it can't be changed here."}
             </span>
-            <button
+            {onOpen && <button
                 type="button"
                 onClick={onOpen}
                 className={cn(
@@ -756,7 +890,7 @@ function CodeOnlyHint({ onOpen }: { onOpen: () => void }) {
             >
                 <ExternalLink className="w-3 h-3" />
                 Open in Code
-            </button>
+            </button>}
         </div>
     )
 }
@@ -764,7 +898,7 @@ function CodeOnlyHint({ onOpen }: { onOpen: () => void }) {
 
 function GroupRowHint({
     op, count, onOpen,
-}: { op: string; count: number; onOpen: () => void }) {
+}: { op: string; count: number; onOpen?: () => void }) {
     return (
         <div className={cn(
             'rounded-lg border border-glass-border/60 bg-canvas-base/30',
@@ -774,7 +908,7 @@ function GroupRowHint({
                 <span className="font-mono uppercase font-semibold text-ink">{op}</span>{' '}
                 group · {count} condition{count === 1 ? '' : 's'}
             </span>
-            <button
+            {onOpen && <button
                 type="button"
                 onClick={onOpen}
                 className={cn(
@@ -785,7 +919,7 @@ function GroupRowHint({
             >
                 <ExternalLink className="w-3 h-3" />
                 Edit in Advanced
-            </button>
+            </button>}
         </div>
     )
 }
@@ -872,16 +1006,6 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 
-const inputClass = cn(
-    'w-full px-3 py-2 rounded-lg',
-    'bg-canvas-elevated/60 border border-glass-border',
-    'text-[13px] text-ink placeholder:text-ink-muted/55',
-    'focus:outline-none focus:border-accent-lineage/55',
-    'focus:ring-2 focus:ring-accent-lineage/20',
-    'hover:border-glass-border/80 transition-all',
-)
-
-
 // ---------------------------------------------------------------------------
 // Meta + helpers
 // ---------------------------------------------------------------------------
@@ -915,11 +1039,12 @@ function getKindMeta(p: Predicate): KindMeta {
         }
         case 'hasProperty': return {
             icon: '⚑', label: 'Property is set',
-            description: 'Whether a specific property key is present on the node.',
+            description: 'Whether a property is present — by its exact key, or by part of its name.',
         }
         case 'property': return {
             icon: '⊜', label: 'Property value',
-            description: 'Compare a property against a value with =, ≠, <, >, contains, etc.',
+            description: 'Compare a property as text, a number, true/false or a date — equals, '
+                + 'contains, greater than, between, within the last, is empty and more.',
         }
         case 'isOrphan': return {
             icon: '⊘', label: 'No lineage edges',
@@ -970,6 +1095,14 @@ function getKindMeta(p: Predicate): KindMeta {
             icon: '⤇', label: 'Path between two nodes',
             description: 'Lineage paths from a source URN to a target URN.',
         }
+        case 'degree': return {
+            icon: '#', label: 'Number of edges',
+            description: 'Entities with more, fewer or exactly N edges of a class.',
+        }
+        case 'all': return {
+            icon: '∗', label: 'Every entity',
+            description: 'Every entity in the view.',
+        }
         case 'group': return {
             icon: '⊕', label: 'Composite group',
             description: 'OR / NOT composition — edit in Advanced builder.',
@@ -994,13 +1127,19 @@ function pickKeyOptions(
 }
 
 
-function coerceValue(s: string): unknown {
-    const t = s.trim()
-    if (t === '') return ''
-    if (t === 'true') return true
-    if (t === 'false') return false
-    if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t)
-    return s
+/** Carry the value across an operator change instead of dropping it: one
+ *  value becomes a one-item list, a list's first item becomes the value, a
+ *  pair keeps its first bound. A duration only means something to
+ *  "within the last", and presence operators take no value. */
+function reshapeValue(v: unknown, from: PropertyOp, to: PropertyOp): unknown {
+    const arity = arityOf(to)
+    if (arity === 'none') return undefined
+    if (arity === 'duration') return parseDuration(v) ? v : ''
+    const items = arityOf(from) === 'duration' ? []
+        : (Array.isArray(v) ? v : [v]).filter((x) => x !== null && x !== undefined && x !== '')
+    if (arity === 'many') return items
+    if (arity === 'pair') return [items[0] ?? '', items[1] ?? '']
+    return items[0] ?? ''
 }
 
 
@@ -1011,7 +1150,7 @@ function isIncomplete(p: Predicate): boolean {
         case 'tag':          return p.values.length === 0
         case 'layer':        return !p.layerAssignment.trim()
         case 'hasProperty':  return !p.key.trim()
-        case 'property':     return !p.key.trim()
+        case 'property':     return !p.key.trim() || valueProblem(p.op ?? 'eq', p.valueType ?? 'auto', p.value) !== null
         case 'descendantOf': return p.urns.length === 0
         case 'withinHops':   return p.urns.length === 0
         case 'path':         return p.sourceUrns.length === 0 || p.targetUrns.length === 0

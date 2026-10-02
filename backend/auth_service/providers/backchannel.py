@@ -74,6 +74,7 @@ from .base import ProviderCredentials, ProviderIdentity
 from .claim_mapper import (
     apply_claim_mapping,
     ClaimMappingError,
+    hoist_nested,
     resolve_path,
     resolved_sources,
 )
@@ -86,6 +87,7 @@ from .outbound import (
     request_json,
 )
 from .registry import ProviderConfigSnapshot
+from ..core.config import CLOCK_SKEW_LEEWAY_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -131,43 +133,28 @@ _JWKS_TTL_SECONDS = 300.0
 _UNSIGNED_REPLAY_FLOOR_SECONDS = 900
 _UNSIGNED_REPLAY_CAP_SECONDS = 86_400
 
-#: One level of nesting hoisted so an operator maps ``firstName`` rather
-#: than ``user.firstName``. An API JSON body is exactly the shape that
-#: benefits. Mirrors ``custom_profile._NESTED_CONTAINERS``.
+#: Hoisted FIRST, in this order, so precedence between the well-known
+#: container names stays exactly what it always was. Every OTHER
+#: object-valued key hoists after these — the container can be called
+#: anything. Mirrors ``custom_profile._NESTED_CONTAINERS``.
 _NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile",
-                      "data", "result", "attributes")
-
-#: Top-level values a populated nested one may overwrite during the
-#: hoist. Membership is by equality, so ``0`` and ``False`` — values a
-#: gateway can mean — are NOT emptyish.
-_EMPTYISH = (None, "", [], {})
-
+                      "data", "result", "attributes", "entitlements")
 
 def hoist_nested_containers(claims: dict) -> dict:
-    """One level of container nesting flattened, so mappings can say
-    ``firstName`` instead of ``profile.firstName``.
+    """One level of container nesting flattened — whatever the
+    container is called — so mappings can say ``firstName`` instead of
+    ``profile.firstName``, and ``groups`` even when the gateway nests
+    membership under a name nobody predicted.
 
-    A top-level key wins over a hoisted one — except when its value is
-    emptyish (``None``, ``""``, ``[]``, ``{}``) and the nested one is
-    not. Real gateways emit exactly that shape: a vestigial top-level
-    ``groups: []`` beside ``profile.groups`` carrying the real list,
-    and "present but empty shadows populated" silently turned group
-    mapping off.
+    The merge rules (top-level wins unless emptyish; the well-known
+    names above hoist first, everything else in payload order) live in
+    :func:`claim_mapper.hoist_nested`, shared with the portal kind.
 
     Exported because the admin preview must run the very same hoist —
     a preview that skipped it disagreed with the sign-in it was
     supposed to predict.
     """
-    flat = {**claims}
-    for container in _NESTED_CONTAINERS:
-        nested = claims.get(container)
-        if isinstance(nested, dict):
-            for k, v in nested.items():
-                if k not in flat:
-                    flat[k] = v
-                elif flat[k] in _EMPTYISH and v not in _EMPTYISH:
-                    flat[k] = v
-    return flat
+    return hoist_nested(claims, priority=_NESTED_CONTAINERS)
 
 #: Async callable returning the ``host:port`` entries an operator has
 #: permitted. Injected rather than imported so ``auth_service`` keeps
@@ -361,7 +348,21 @@ class BackchannelSettings:
 
     timeout_seconds: float = 5.0
     max_response_bytes: int = MAX_JSON_BYTES
-    require_auth_time: bool = True
+    #: Verify the TLS identity of every server-side call this row makes
+    #: — gateway, exchange, liveness, JWKS, and the avatar fetches its
+    #: sign-ins trigger. Off is the warned escape hatch for endpoints
+    #: signed by a corporate CA that cannot be mounted; the supported
+    #: path is ``SSO_OUTBOUND_TLS_CA_CERTS``.
+    #: With verification off the transport vouches for nothing, so the
+    #: row rates Unverified unless its claims are signed against PASTED
+    #: material (see ``assurance.py``).
+    tls_verify: bool = True
+    #: (``require_auth_time`` is retired. It refused every sign-in whose
+    #: gateway reply carried no authentication time — one renamed field
+    #: upstream locked out everyone on the connection. A missing time is
+    #: now measured from the sign-in, like one too old to use; see
+    #: ``complete_sso_login``. A stored row that still carries the key
+    #: parses unchanged — nothing reads it.)
     #: Whether the connection's mapped avatar claim participates at all.
     #: Off — the default — strips ``avatar_url`` from the identity, so
     #: nothing downstream fetches, stores or locks an image. On, the
@@ -388,6 +389,15 @@ class BackchannelSettings:
 
     claim_mapping_override: dict = field(default_factory=dict)
     linking_policy: str = "strict"
+
+
+#: The most any single gateway call may wait. Every call runs inside a
+#: request with a deadline of its own — a sign-in, or a renewal whose
+#: liveness check has a tighter one still — and a per-phase timeout past
+#: it only turns a slow gateway into a 504. Applied where the setting is
+#: read rather than refused by ``validate_settings``, which runs whenever
+#: a row is built: refusing would take a live connection down on upgrade.
+_MAX_TIMEOUT_SECONDS = 30.0
 
 
 def _as_bool(v: Any) -> bool:
@@ -474,9 +484,13 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         trust_unsigned=_as_bool(s.get("trust_unsigned")),
         jwt_issuer=str(s.get("jwt_issuer") or "").strip(),
         jwt_audience=str(s.get("jwt_audience") or "").strip(),
-        timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
+        # Capped here, not refused by validation — see
+        # ``_MAX_TIMEOUT_SECONDS``.
+        timeout_seconds=min(
+            _as_float(s.get("timeout_seconds"), 5.0), _MAX_TIMEOUT_SECONDS,
+        ),
         max_response_bytes=_as_int(s.get("max_response_bytes"), MAX_JSON_BYTES),
-        require_auth_time=_as_bool(s.get("require_auth_time", True)),
+        tls_verify=_as_bool(s.get("tls_verify", True)),
         map_avatar=_as_bool(s.get("map_avatar")),
         trust_gateway_email=_as_bool(s.get("trust_gateway_email", True)),
         liveness_on_refresh=_as_bool(s.get("liveness_on_refresh", True)),
@@ -835,6 +849,9 @@ class BackchannelProvider:
                 max_bytes=self._s.max_response_bytes,
                 allow_hosts=await self._allow_hosts(),
                 accept_jwt=accept_jwt,
+                # None defers to the deployment CA bundle; False is
+                # this row's explicit opt-out.
+                verify=None if self._s.tls_verify else False,
             )
         except OutboundStatusError as exc:
             if exc.status_code in _AUTHORITATIVE_REJECTIONS:
@@ -993,7 +1010,18 @@ class BackchannelProvider:
         else:
             key = await self._verification_key(header.get("kid"))
 
-        options: dict[str, Any] = {"require": ["exp"]}
+        options: dict[str, Any] = {
+            "require": ["exp"],
+            # ``iat`` / ``nbf`` are checked below instead. pyjwt judges them
+            # with ZERO tolerance, and the browser posts the assertion
+            # milliseconds after the gateway mints it — so a corporate
+            # clock one second ahead of ours refused a share of every
+            # sign-in. Its ``leeway`` knob would loosen ``exp`` too, which
+            # this single-use token should not get; the same split as
+            # ``custom_profile``.
+            "verify_iat": False,
+            "verify_nbf": False,
+        }
         kwargs: dict[str, Any] = {}
         if s.jwt_audience:
             kwargs["audience"] = s.jwt_audience
@@ -1002,7 +1030,7 @@ class BackchannelProvider:
         if s.jwt_issuer:
             kwargs["issuer"] = s.jwt_issuer
         try:
-            return pyjwt.decode(
+            claims = pyjwt.decode(
                 token, key=key, algorithms=list(allowed),
                 options=options, **kwargs,
             )
@@ -1019,6 +1047,25 @@ class BackchannelProvider:
                 f"jwt_refused:{type(exc).__name__}",
                 code="backchannel_jwt_invalid",
             ) from exc
+        # A token from further in the future than clock drift explains is
+        # still refused — tolerance is for skew, not for post-dated tokens.
+        now = time.time()
+        for claim in ("iat", "nbf"):
+            value = claims.get(claim) if isinstance(claims, dict) else None
+            if value is None:
+                continue
+            try:
+                ahead = float(value) - now
+            except (TypeError, ValueError):
+                raise BackchannelError(
+                    f"jwt_refused:bad_{claim}", code="backchannel_jwt_invalid",
+                ) from None
+            if ahead > CLOCK_SKEW_LEEWAY_SECONDS:
+                raise BackchannelError(
+                    f"jwt_refused:future_{claim}",
+                    code="backchannel_jwt_invalid",
+                )
+        return claims
 
     async def _verification_key(self, kid: Any):
         """The key *kid* names, from the configured JWKS.
@@ -1050,6 +1097,9 @@ class BackchannelProvider:
                 self._s.jwks_url, timeout=self._s.timeout_seconds,
                 max_bytes=self._s.max_response_bytes,
                 allow_hosts=await self._allow_hosts(),
+                # None defers to the deployment CA bundle; False is
+                # this row's explicit opt-out.
+                verify=None if self._s.tls_verify else False,
             )
         except OutboundError as exc:
             # The key set not answering is an outage, same as the IdP
@@ -1140,13 +1190,10 @@ class BackchannelProvider:
                 raw_claims={**identity.raw_claims, "email_verified": True},
             )
 
-        if self._s.require_auth_time and not getattr(identity, "auth_time", None):
-            # Without one, ``complete_sso_login`` falls back to "now"
-            # with a warning — which quietly disables the 24h SSO
-            # re-auth ceiling for every session this provider mints.
-            raise BackchannelError(
-                "auth_time_absent", code="backchannel_auth_time_absent",
-            )
+        # No authentication time is not refused. ``complete_sso_login``
+        # measures the re-auth ceiling from this sign-in, warns, and
+        # records ``auth_time_asserted: false`` on the login — and the
+        # session stays bound to the gateway, re-asked on every renewal.
         return identity
 
     def _unverified_claims(self, text: str) -> dict:

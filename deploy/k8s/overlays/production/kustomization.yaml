@@ -18,6 +18,37 @@ patches:
   # Managed data tier: Cloud SQL + Memorystore replace in-cluster postgres/redis,
   # and set DB_POOLER_MODE=transaction. Operator supplies endpoints via .env.deploy.
   - path: patches/managed-data-tier.yaml
+  # ...and remove the in-cluster postgres/redis they replace. One delete per
+  # patch: kustomize (v5.4-5.6) panics on a file holding several
+  # `$patch: delete` documents.
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: postgres
+        namespace: synodic
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: postgres
+        namespace: synodic
+  - patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: redis
+        namespace: synodic
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: redis
+        namespace: synodic
   # Override LOG_LEVEL to WARNING
   - target:
       kind: ConfigMap

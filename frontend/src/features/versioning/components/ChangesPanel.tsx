@@ -10,6 +10,7 @@
 import { useMemo, useState } from 'react'
 import { ChevronRight, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { ChangeKind, ChangeSet, ChangeStatus, GraphChange } from '../model/changeModel'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
@@ -43,13 +44,19 @@ function ChangeRow({
           </span>
         </button>
         {canDiscard && (
-          <button
-            onClick={() => onDiscard!((change.origin as { stagedChangeId: string }).stagedChangeId)}
-            className="p-1 rounded-md text-ink-muted/60 hover:text-rose-500 hover:bg-rose-500/10 transition-colors shrink-0"
-            title="Discard this change"
+          <HoverTip
+            className="inline-flex shrink-0"
+            label="Throw this edit away"
+            detail="Only this one — everything else stays staged"
           >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+            <button
+              onClick={() => onDiscard!((change.origin as { stagedChangeId: string }).stagedChangeId)}
+              aria-label="Discard this change"
+              className="p-1 rounded-md text-ink-muted/60 hover:text-rose-500 hover:bg-rose-500/10 transition-colors shrink-0"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </HoverTip>
         )}
       </div>
       {open && (

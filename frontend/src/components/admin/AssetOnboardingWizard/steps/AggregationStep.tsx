@@ -23,6 +23,7 @@ import {
 import { cn } from '@/lib/utils'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
 import type { CatalogItemResponse } from '@/services/catalogService'
+import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
 import {
     AggregationOverridesForm,
     PRESET_TIMEOUT_MINUTES,
@@ -37,6 +38,10 @@ interface AggregationStepProps {
     formData: OnboardingFormData
     updateFormData: (updates: Partial<OnboardingFormData> | ((prev: OnboardingFormData) => Partial<OnboardingFormData>)) => void
     catalogItems: CatalogItemResponse[]
+    /** What the fleet resolves for Rollup storage when the job says nothing. */
+    defaultFinePairs?: 'auto' | 'true' | 'false'
+    envDefaults?: EnvTuningDefaults | null
+    storedGlobal?: AggregationTuning | null
 }
 
 // ============================================
@@ -109,7 +114,9 @@ const TIMEOUT_DEFAULT_MINUTES = PRESET_TIMEOUT_MINUTES
 // Component
 // ============================================
 
-export function AggregationStep({ formData, updateFormData, catalogItems }: AggregationStepProps) {
+export function AggregationStep({
+    formData, updateFormData, catalogItems, defaultFinePairs, envDefaults, storedGlobal,
+}: AggregationStepProps) {
     const selected = formData.projectionMode
 
     // Auto-populate dedicated graph name when switching to dedicated mode
@@ -451,6 +458,9 @@ export function AggregationStep({ formData, updateFormData, catalogItems }: Aggr
                             value={overridesValue}
                             onChange={handleOverridesChange}
                             hideProjectionMode
+                            defaultFinePairs={defaultFinePairs}
+                            envDefaults={envDefaults}
+                            storedGlobal={storedGlobal}
                         />
                     </motion.div>
                 )}

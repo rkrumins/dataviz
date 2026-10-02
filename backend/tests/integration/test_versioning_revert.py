@@ -24,7 +24,7 @@ async def _edit_publish(svc, gid, actor, ops, msg):
 
 def _n(eid, **kw):
     return {"op": "create", "entity_kind": "node", "entity_id": eid,
-            "payload": {"displayName": eid, **kw}}
+            "payload": {"entityType": "Dataset", "displayName": eid, **kw}}
 
 
 def _upd(eid, **kw):

@@ -391,6 +391,27 @@ SSO_SESSION_MAX_AGE_HOURS: float = float(
 SSO_SESSION_MAX_AGE_SECONDS: int = int(SSO_SESSION_MAX_AGE_HOURS * 3600)
 
 
+def sso_auth_time_is_stale(auth_time: int, *, now: int) -> bool:
+    """Whether a session measured from *auth_time* dies at its first rotation.
+
+    The ceiling above is checked at /refresh, and a session's first
+    refresh comes roughly one access lifetime after it is minted. An IdP
+    authentication instant older than ``ceiling - access lifetime`` is
+    therefore a session born dead: it works for a few minutes, is refused
+    at its first renewal, and that refusal is the user's whole experience
+    of signing in. A gateway reporting the corporate portal's original
+    login (``lastLogin``) — days old for anyone whose portal session
+    outlives a day — produced exactly that on every single sign-in.
+
+    One helper, read by the SSO callback (which asks the IdP for a fresh
+    authentication while it still can) and by ``complete_sso_login``
+    (which measures from this sign-in when it cannot), so the two cannot
+    disagree about which sign-ins need it. Reads the module values at call
+    time, so a test that patches them is honoured.
+    """
+    return auth_time + SSO_SESSION_MAX_AGE_SECONDS <= now + JWT_EXPIRY_MINUTES * 60
+
+
 # Hostnames this deployment answers to, comma-separated. Empty = accept
 # whatever the request claims, which is the historical behaviour.
 #

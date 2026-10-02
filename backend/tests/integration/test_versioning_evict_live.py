@@ -43,7 +43,10 @@ def _falkordb_available() -> bool:
 
 
 async def _count(factory, name: str) -> int:
-    res = await factory(name).query("MATCH (n) RETURN count(n)")
+    graph = factory(name)
+    if asyncio.iscoroutine(graph):                       # the factory resolves topology async
+        graph = await graph
+    res = await graph.query("MATCH (n) RETURN count(n)")
     rows = res.result_set or []
     return int(rows[0][0]) if rows else 0
 
@@ -117,7 +120,10 @@ async def _run() -> None:
     finally:
         for n in (n1, n2):
             try:
-                await factory(n).delete()               # free the real FalkorDB graphs
+                graph = factory(n)
+                if asyncio.iscoroutine(graph):
+                    graph = await graph
+                await graph.delete()                    # free the real FalkorDB graphs
             except Exception:
                 pass
         # drop our own rows so reruns and peer tests see a clean resident set

@@ -140,3 +140,60 @@ def test_emit_after_load_async_swallows_errors(monkeypatch):
     monkeypatch.setattr(sdc, "signal_data_changed", _boom)
     monkeypatch.delenv("DATAVIZ_SKIP_LOAD_SIGNAL", raising=False)
     assert _run(sdc.emit_after_load_async(graph_name="g")) is False
+
+
+# ── invalidate once per change, not once per detection ──────────────────
+#
+# `graph_fingerprint` only advances when a rebuild COMPLETES. While one is
+# deferred by the rebuild cooldown the change gate keeps answering "changed"
+# on every reconcile sweep, and each pass used to bump the cache generation
+# again — making every entry re-warmed since unreachable. Against a 30s tick
+# and a 900s cooldown that is thirty invalidations for one change, and a
+# cache whose effective life is the detection cadence rather than its TTL.
+
+
+def test_the_same_change_is_only_invalidated_for_once():
+    import inspect
+
+    from backend.app.services.aggregation.service import AggregationService
+
+    src = inspect.getsource(AggregationService.signal_source_changed)
+    flat = " ".join(src.split())
+
+    # The decision reads what we already threw the cache away for…
+    assert "already = getattr(state, \"invalidated_fingerprint\", None)" in flat
+    assert "reinvalidate = force or not fingerprints_match(already, current_fp)" in flat
+    # …and BOTH cache-clearing actions are gated on it.
+    assert "if provider is not None and reinvalidate:" in flat
+    assert "if workspace_id and reinvalidate:" in flat
+    # …and the fingerprint is recorded when we do invalidate, or the next
+    # tick repeats it.
+    assert "state.invalidated_fingerprint = current_fp" in flat
+
+
+def test_a_forced_signal_still_invalidates():
+    """`force` is the operator saying "do it anyway" — it bypasses the
+    cooldown, and it has to bypass this too or a manual Refresh caches on an
+    unchanged source would do nothing."""
+    import inspect
+
+    from backend.app.services.aggregation.service import AggregationService
+
+    flat = " ".join(inspect.getsource(AggregationService.signal_source_changed).split())
+    assert "reinvalidate = force or not" in flat
+
+
+def test_the_marker_and_the_rebuild_are_not_gated_on_it():
+    """Only the cache bump is skipped. The stale marker must stay set and the
+    rebuild must still be queued when the cooldown allows, or a deferred
+    source would stop being honestly stale."""
+    import inspect
+
+    from backend.app.services.aggregation.service import AggregationService
+
+    src = inspect.getsource(AggregationService.signal_source_changed)
+    gate = src.index("reinvalidate = force or not")
+    assert src.index("mark_source_stale") < gate, "the marker is set before the gate"
+    assert src.index("self._within_rebuild_cooldown") > gate, (
+        "the rebuild decision is downstream and untouched"
+    )

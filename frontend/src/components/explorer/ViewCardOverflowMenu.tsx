@@ -2,19 +2,23 @@
  * ViewCardOverflowMenu — "..." overflow menu on view cards with
  * lifecycle actions: Delete, Change Visibility, Share.
  */
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useContext } from 'react'
 import {
-  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2,
+  MoreHorizontal, Pencil, Trash2, Share2, Eye, History, Settings2, Loader2, FileDown, FileUp, Milestone,
 } from 'lucide-react'
 import {
   buildVisibilityOptions, visibilityDescription, VISIBILITY_ACCENT,
 } from '@/lib/viewVisibility'
 import { usePublishGate } from '@/hooks/usePublishGate'
 import { useBrand } from '@/store/branding'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
+import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 
 interface ViewCardOverflowMenuProps {
   viewId: string
@@ -49,9 +53,16 @@ export function ViewCardOverflowMenu({
   const [isOpen, setIsOpen] = useState(false)
   const [visibilitySubmenu, setVisibilitySubmenu] = useState(false)
   const [saving, setSaving] = useState<string | null>(null)
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const { appName } = useBrand()
   const [activityOpen, setActivityOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [versionsOpen, setVersionsOpen] = useState(false)
+  const portability = useViewPortability()
+  const exportEnabled = portability.canExport
+  // Updating a view from a file runs in the wizard, which only exists inside the app layout.
+  const viewEditor = useContext(ViewEditorContext)
+  const importEnabled = portability.canImport && viewEditor !== null
   const menuRef = useRef<HTMLDivElement>(null)
 
   // Close on click outside
@@ -76,7 +87,7 @@ export function ViewCardOverflowMenu({
       // reader checking the card to find out what they just agreed to —
       // and until the parent wired this callback, the card still showed
       // the old tier, so there was nothing to check against.
-      showToast(
+      notify(
         'success',
         `"${viewName}" — ${visibilityDescription(newVisibility, { appName })
           .replace(/^Only you/, 'only you')}`,
@@ -85,7 +96,7 @@ export function ViewCardOverflowMenu({
     } catch (err) {
       // A silent console.error left the menu claiming success on a 403.
       const detail = err instanceof Error ? err.message : 'Failed to update visibility'
-      showToast(
+      notify(
         'error',
         detail.includes('workspace:view:publish')
           ? 'Publishing to everyone needs approval — open Share to ask.'
@@ -96,7 +107,7 @@ export function ViewCardOverflowMenu({
     }
     setIsOpen(false)
     setVisibilitySubmenu(false)
-  }, [viewId, viewName, visibility, appName, onVisibilityChange, showToast])
+  }, [viewId, viewName, visibility, appName, onVisibilityChange, notify])
 
   // The same ladder every other surface resolves — permission, workspace
   // policy, restricted source, platform ceiling — so a tier this person
@@ -120,6 +131,18 @@ export function ViewCardOverflowMenu({
         isOpen={activityOpen}
         onClose={() => setActivityOpen(false)}
       />
+      {exportOpen && (
+        <ExportViewDialog views={[{ id: viewId, name: viewName }]} onClose={() => setExportOpen(false)} />
+      )}
+      {versionsOpen && (
+        <ViewVersionsDrawer
+          viewId={viewId}
+          viewName={viewName}
+          isOpen
+          onClose={() => setVersionsOpen(false)}
+          canEdit={!!onEditLayout && !editDisabled}
+        />
+      )}
       <button
         onClick={e => { e.preventDefault(); e.stopPropagation(); setIsOpen(!isOpen) }}
         className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
@@ -194,6 +217,36 @@ export function ViewCardOverflowMenu({
                 <History className="w-3.5 h-3.5" />
                 Activity
               </button>
+              {portability.versions && (
+                <button
+                  onClick={() => { setVersionsOpen(true); setIsOpen(false) }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <Milestone className="w-3.5 h-3.5" />
+                  Versions
+                </button>
+              )}
+              {exportEnabled && (
+                <button
+                  onClick={() => { setExportOpen(true); setIsOpen(false) }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  Export…
+                </button>
+              )}
+              {importEnabled && !editDisabled && (
+                <button
+                  onClick={() => { setIsOpen(false); viewEditor?.openViewEditor(undefined, { journey: 'import', importIntoViewId: viewId }) }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <FileUp className="w-3.5 h-3.5" />
+                  Update from file…
+                </button>
+              )}
               <div className="border-t border-glass-border/50 my-1" />
               <button
                 onClick={() => { onDelete(); setIsOpen(false) }}

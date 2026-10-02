@@ -29,7 +29,7 @@ import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDraw
 import {
     Eye, Search, Plus, Compass, LayoutGrid, List as ListIcon,
     Lock, Users, Globe, AlertTriangle, UserRound, Clock, X, History, ChevronDown,
-    Check, Loader2,
+    Check, Loader2, FileUp,
 } from 'lucide-react'
 import { WorkspaceActivityFeed } from '@/components/views/WorkspaceActivityFeed'
 import { cn } from '@/lib/utils'
@@ -47,7 +47,7 @@ import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { timeAgo } from '@/lib/timeAgo'
@@ -59,6 +59,8 @@ import { useViewUsage } from '@/hooks/useContentInsights'
 import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
 import { ExplorerCardSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
+import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
+import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
@@ -94,7 +96,7 @@ export default function WorkspaceViewsSection({
 }: WorkspaceViewsSectionProps) {
     const currentUser = useAuthStore(s => s.user)
     const { openViewEditor } = useViewEditorModal()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const { appName } = useBrand()
     const { resolve: resolveProvider } = useDataSourceProviderMap()
     const canAnswerPublishRequests = usePermission('workspace:view:publish', wsId)
@@ -177,6 +179,8 @@ export default function WorkspaceViewsSection({
 
     // ─── Selection + management handlers ─────────────────────────────
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+    const [exportSelection, setExportSelection] = useState<Array<{ id: string; name: string }> | null>(null)
+    const { canExport: exportEnabled, canImport: importEnabled } = useViewPortability()
     const [shareView, setShareView] = useState<{ id: string; name: string; visibility: string } | null>(null)
     const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number } | null>(null)
     const [showBulkDelete, setShowBulkDelete] = useState(false)
@@ -202,16 +206,16 @@ export default function WorkspaceViewsSection({
         setDeleteView(null)
         removeView(id)
         setSelectedIds(prev => { const n = new Set(prev); n.delete(id); return n })
-        showToast('success', `"${name}" has been deleted`)
+        notify('success', `"${name}" has been deleted`)
     }
 
     const handleRestore = async (view: View) => {
         try {
             await restoreViewApi(view.id)
             refetch()
-            showToast('success', `"${view.name}" has been restored`)
+            notify('success', `"${view.name}" has been restored`)
         } catch {
-            showToast('error', `Failed to restore "${view.name}"`)
+            notify('error', `Failed to restore "${view.name}"`)
         }
     }
 
@@ -232,9 +236,9 @@ export default function WorkspaceViewsSection({
             await Promise.all(ids.map(id => updateViewVisibility(id, visibility)))
             setSelectedIds(new Set())
             refetch()
-            showToast('success', `Set ${ids.length} view${ids.length !== 1 ? 's' : ''} to "${visibility}"`)
+            notify('success', `Set ${ids.length} view${ids.length !== 1 ? 's' : ''} to "${visibility}"`)
         } catch {
-            showToast('error', 'Some views could not be updated')
+            notify('error', 'Some views could not be updated')
         }
     }
 
@@ -271,9 +275,9 @@ export default function WorkspaceViewsSection({
             setConfirmingId(null)
             refetch()
             onWorkspaceChanged?.()
-            showToast('success', successMessage)
+            notify('success', successMessage)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Could not answer the request')
+            notify('error', err instanceof Error ? err.message : 'Could not answer the request')
         } finally {
             setBusyRequestId(null)
         }
@@ -285,11 +289,11 @@ export default function WorkspaceViewsSection({
         try {
             await workspaceService.update(wsId, { publishPolicy: policy })
             onWorkspaceChanged?.()
-            showToast('success', policy === 'open'
+            notify('success', policy === 'open'
                 ? 'Members can now publish views directly'
                 : 'Members must request approval to publish')
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Could not change the policy')
+            notify('error', err instanceof Error ? err.message : 'Could not change the policy')
         } finally {
             setPolicySaving(false)
         }
@@ -300,11 +304,11 @@ export default function WorkspaceViewsSection({
         try {
             await workspaceService.updateDataSource(wsId, dsId, { isRestricted })
             onWorkspaceChanged?.()
-            showToast('success', isRestricted
+            notify('success', isRestricted
                 ? 'Views over this source now need a publisher\u2019s approval'
                 : 'Members can publish views over this source directly')
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Could not change the source')
+            notify('error', err instanceof Error ? err.message : 'Could not change the source')
         } finally {
             setRestrictingDsId(null)
         }
@@ -315,7 +319,7 @@ export default function WorkspaceViewsSection({
         ids.forEach(id => removeView(id))
         setSelectedIds(new Set())
         setShowBulkDelete(false)
-        showToast('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
+        notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     }
 
     const hasActiveFilters = !!search || dsFilter !== 'all' || visFilter !== 'all' || ownerFilter !== 'all' || attentionOnly
@@ -601,6 +605,15 @@ export default function WorkspaceViewsSection({
                     >
                         <Compass className="w-4 h-4" /> Browse in Explorer
                     </Link>
+                    {importEnabled && (
+                        <button
+                            onClick={() => openViewEditor(undefined, { journey: 'import' })}
+                            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-glass-border text-ink-muted hover:text-ink hover:border-indigo-500/30 text-sm font-medium transition-colors"
+                            title="Import a view exported from another environment"
+                        >
+                            <FileUp className="w-4 h-4" /> Import view
+                        </button>
+                    )}
                     <button
                         onClick={() => openViewEditor()}
                         className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors"
@@ -744,8 +757,16 @@ export default function WorkspaceViewsSection({
                 selectedCount={selectedIds.size}
                 onDelete={canBulkDelete ? () => setShowBulkDelete(true) : undefined}
                 onChangeVisibility={handleBulkVisibility}
+                onExport={exportEnabled
+                    ? () => setExportSelection(Array.from(selectedIds, id => ({
+                        id, name: views.find(v => v.id === id)?.name ?? id,
+                    })))
+                    : undefined}
                 onClearSelection={() => setSelectedIds(new Set())}
             />
+            {exportSelection && (
+                <ExportViewDialog views={exportSelection} onClose={() => setExportSelection(null)} />
+            )}
 
             {/* ── Detail drawer (view + edit details), reused from Explorer ── */}
             <ExplorerPreviewDrawer
@@ -758,7 +779,6 @@ export default function WorkspaceViewsSection({
                     ? () => setDeleteView({ id: previewView!.id, name: previewView!.name, favouriteCount: previewView!.favouriteCount })
                     : undefined}
                 healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
-                providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
                 initialEditMode={previewEditMode}
                 onSaved={() => refetch()}
             />

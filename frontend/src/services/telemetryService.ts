@@ -30,6 +30,8 @@ export type TelemetryType =
   | 'graph.search'
   | 'graph.search_miss'
   | 'graph.export'
+  | 'view.export'
+  | 'view.import'
   | 'version.published'
   | 'ontology.published'
 

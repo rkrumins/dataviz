@@ -24,7 +24,10 @@ from backend.auth_service.app_auth_config import (
     AuthConfigSnapshot,
     StaticAuthConfigProvider,
 )
-from backend.auth_service.core.password import disabled_password_hash
+from backend.auth_service.core.password import (
+    disabled_password_hash,
+    hash_password,
+)
 from backend.auth_service.interface import (
     InvalidCredentials,
     LocalLoginDisabled,
@@ -315,6 +318,54 @@ async def test_login_refused_when_local_login_disabled(provider, db_session):
 
 
 @pytest.mark.asyncio
+async def test_system_account_keeps_the_password_door(db_session):
+    """Break-glass: ``allow_local_login=False`` refuses everyone EXCEPT
+    an account marked as a system account — and the carve-out skips the
+    kill-switch only, never the credential check."""
+    svc, _ = _svc(db_session, posture={
+        "sso_enabled": True,
+        "allow_local_login": False,
+        "allow_jit_provisioning": True,
+    })
+    user = await user_repo.create_user(
+        db_session, email="breakglass@corp.com",
+        password_hash=hash_password("s3cret-Pass!42"),
+        first_name="Sys", last_name="Admin", status="active",
+    )
+    await user_repo.set_system_account(db_session, user.id, True)
+    await db_session.flush()
+
+    logged_in, tokens = await svc.login("breakglass@corp.com", "s3cret-Pass!42")
+    assert logged_in.id == user.id
+    assert tokens.access_token
+
+    with pytest.raises(InvalidCredentials):
+        await svc.login("breakglass@corp.com", "wrong-password")
+
+
+@pytest.mark.asyncio
+async def test_unknown_email_and_ordinary_account_refused_identically(db_session):
+    """With passwords off, an unknown email and an unmarked account get
+    the same ``LocalLoginDisabled`` — the carve-out is not an oracle."""
+    svc, _ = _svc(db_session, posture={
+        "sso_enabled": True,
+        "allow_local_login": False,
+        "allow_jit_provisioning": True,
+    })
+    await user_repo.create_user(
+        db_session, email="ordinary@corp.com",
+        password_hash=hash_password("s3cret-Pass!42"),
+        first_name="O", last_name="User", status="active",
+    )
+    await db_session.flush()
+
+    with pytest.raises(LocalLoginDisabled):
+        await svc.login("ordinary@corp.com", "s3cret-Pass!42")
+    with pytest.raises(LocalLoginDisabled):
+        await svc.login("nobody@corp.com", "s3cret-Pass!42")
+
+
+@pytest.mark.asyncio
 async def test_sso_refused_when_master_kill_switch_off(provider, db_session):
     svc, _ = _svc(db_session, posture={
         "sso_enabled": False,
@@ -391,8 +442,33 @@ async def test_config_update_bumps_version(db_session):
         db_session, allow_jit_provisioning=False, updated_by="usr_test",
     )
     assert row.allow_jit_provisioning is False
-    assert row.version >= 2  # default is 1, bump goes to 2
+    assert row.version == 1  # created inline at 0, bumped to 1
     # Re-update with stale expected_version -> conflict.
+    from backend.app.db.repositories.app_auth_config_repo import (
+        ConflictingVersion,
+    )
+    with pytest.raises(ConflictingVersion):
+        await app_auth_config_repo.update_config(
+            db_session, expected_version=0, sso_enabled=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_config_first_write_with_snapshot_version_on_missing_row(db_session):
+    """The admin page sends the version it loaded — the snapshot's 0
+    sentinel when the row is missing — so the inline-created row must
+    match it rather than 409 every save on an unseeded DB."""
+    snap = await app_auth_config_repo.get_snapshot(db_session)
+    assert snap.version == 0
+    row = await app_auth_config_repo.update_config(
+        db_session, expected_version=snap.version, sso_enabled=False,
+    )
+    assert row.version == 1
+    assert row.sso_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_config_stale_version_on_missing_row_conflicts(db_session):
     from backend.app.db.repositories.app_auth_config_repo import (
         ConflictingVersion,
     )

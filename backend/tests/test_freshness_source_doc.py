@@ -292,3 +292,79 @@ def test_freshness_row_kwargs_leaks_doc_only_keys_but_row_ignores_them():
 
     row = FreshnessRow(**kwargs)
     assert not hasattr(row, "last_finding_reason")
+
+
+@pytest.mark.asyncio
+async def test_rollup_storage_override_round_trips_and_reports_its_source(session_factory):
+    """The drawer's "Would not fit" guidance sends an operator to set THIS
+    source's Rollup storage; the setting must exist before a first build,
+    survive a re-read, and say where the effective value came from."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.services.aggregation.models import (
+        AggregationDataSourceStateORM,
+    )
+    from backend.app.services.aggregation.service import (
+        AggregationService, _state_map, resolve_rollup_storage,
+        rollup_storage_to_tuning,
+    )
+
+    async with session_factory() as s:
+        s.add(WorkspaceDataSourceORM(id="ds_1", workspace_id="ws_1", provider_id="p_1"))
+        await s.commit()
+
+    svc = AggregationService.__new__(AggregationService)
+    # Never built — no state row yet — and settable all the same.
+    async with session_factory() as s:
+        assert await s.get(AggregationDataSourceStateORM, "ds_1") is None
+        assert await svc.set_source_rollup_storage("ds_1", s, "auto") == "auto"
+    async with session_factory() as s:
+        assert (await _state_map(s, ["ds_1"]))["ds_1"]["rollup_storage"] == "auto"
+    async with session_factory() as s:
+        assert await svc.set_source_rollup_storage("ds_1", s, None) is None
+    async with session_factory() as s:
+        assert (await _state_map(s, ["ds_1"]))["ds_1"]["rollup_storage"] is None
+    async with session_factory() as s:
+        with pytest.raises(ValueError):
+            await svc.set_source_rollup_storage("ds_1", s, "cube")
+
+    # Resolution: override → stored global → env; the wire word becomes the
+    # pipeline's value only at the freeze point.
+    assert resolve_rollup_storage("auto", "true", "true") == ("auto", "custom")
+    assert resolve_rollup_storage(None, "auto", "true") == ("auto", "global")
+    assert resolve_rollup_storage(None, None, "true") == ("true", "default")
+    assert resolve_rollup_storage(None, True, "auto") == ("true", "global")
+    assert rollup_storage_to_tuning("false") is False
+    assert rollup_storage_to_tuning("auto") == "auto"
+    assert rollup_storage_to_tuning(None) is None
+
+
+@pytest.mark.asyncio
+async def test_latest_completed_stats_reads_one_row_per_source(session_factory):
+    """The capacity view needs each source's newest completed run_stats and
+    nothing older: a source with a long history must cost one row."""
+    import json
+    from backend.app.services.aggregation.capacity import latest_completed_stats_map
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    def job(id, ds, status, at, stats=None):
+        return AggregationJobORM(
+            id=id, data_source_id=ds, workspace_id="ws_1", status=status,
+            created_at="2026-09-01T00:00:00+00:00", updated_at=at,
+            run_stats=json.dumps(stats) if stats is not None else None,
+        )
+
+    async with session_factory() as s:
+        s.add_all([
+            job("j1", "ds_1", "completed", "2026-09-01T10:00:00+00:00", {"cube_estimate": 10, "regime": "cube"}),
+            job("j2", "ds_1", "completed", "2026-09-03T10:00:00+00:00", {"cube_estimate": 30, "regime": "boundary"}),
+            job("j3", "ds_1", "failed", "2026-09-05T10:00:00+00:00", None),
+            job("j4", "ds_2", "completed", "2026-09-02T10:00:00+00:00", "not json"),
+            job("j5", "ds_3", "running", "2026-09-04T10:00:00+00:00", None),
+        ])
+        await s.commit()
+
+    async with session_factory() as s:
+        out = await latest_completed_stats_map(s, ["ds_1", "ds_2", "ds_3", "ds_none"])
+    assert out["ds_1"] == {"cube_estimate": 30, "regime": "boundary"}   # newest COMPLETED, not the failed one
+    assert out["ds_2"] == {}                                             # unparseable degrades to empty
+    assert "ds_3" not in out and "ds_none" not in out

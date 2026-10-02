@@ -17,6 +17,7 @@ from ..models import (
     ViewORM,
     RoleBindingORM,
     RoleORM,
+    view_is_live,
 )
 from backend.common.models.management import (
     WorkspaceCreateRequest,
@@ -164,7 +165,7 @@ async def _counts_by_workspace(session: AsyncSession) -> tuple[dict, dict]:
 
     views = dict((await session.execute(
         select(ViewORM.workspace_id, func.count())
-        .where(ViewORM.deleted_at.is_(None))
+        .where(view_is_live())
         .group_by(ViewORM.workspace_id)
     )).all())
 

@@ -769,10 +769,12 @@ async def revoke_every_session_for_user(
 
 async def revoke_provider_sessions(
     provider_id: Optional[str], *, session, reason: str,
+    user_id: Optional[str] = None,
 ) -> dict:
     """End every session minted through one identity provider — or, when
     ``provider_id`` is None, through any SSO provider at all (the master
-    switch's sweep).
+    switch's sweep). ``user_id`` narrows it to one person: what unlinking
+    their identity with that provider has to end.
 
     Two halves, the same pairing the liveness path uses when it ends a
     session: the refresh families die at the row
@@ -795,7 +797,7 @@ async def revoke_provider_sessions(
     from backend.app.db.repositories import refresh_token_repo
 
     user_ids, rows_marked = await refresh_token_repo.revoke_provider_tokens(
-        session, provider_id=provider_id,
+        session, provider_id=provider_id, user_id=user_id,
     )
     svc = get_revocation_service()
     for uid in user_ids:
@@ -806,6 +808,42 @@ async def revoke_provider_sessions(
             logger.warning(
                 "revoke_provider_sessions(%s, user=%s) failed: %s",
                 provider_id, uid, exc,
+            )
+    return {"users": len(user_ids), "tokens": rows_marked}
+
+
+async def revoke_platform_sessions(*, session, reason: str) -> dict:
+    """End every session on the platform, except the system accounts'.
+
+    The "require everyone to sign in again" sweep behind SSO
+    enforcement. Both halves of the durable pair, platform-wide: the
+    bulk ``sessions_valid_from`` stamp stops every next rotation, the
+    row sweep (``revoke_all_tokens``) refuses the refresh tokens
+    already out there, and the ``sid`` tombstones end the access
+    tokens still live. System accounts are subtracted from all three —
+    they are the break-glass that must survive exactly this sweep.
+
+    Best-effort per user on the tombstone half, matching
+    ``revoke_provider_sessions``. Returns
+    ``{"users": <distinct users touched>, "tokens": <rows marked>}``.
+    """
+    from backend.app.db.repositories import refresh_token_repo, user_repo
+
+    exclude = await user_repo.system_account_ids(session)
+    await user_repo.revoke_sessions_from_now_for_all(
+        session, exclude_user_ids=exclude,
+    )
+    user_ids, rows_marked = await refresh_token_repo.revoke_all_tokens(
+        session, exclude_user_ids=exclude,
+    )
+    svc = get_revocation_service()
+    for uid in user_ids:
+        try:
+            await svc.revoke_all_user_sessions(uid)
+            await _emit_session_revoked(session, user_id=uid, reason=reason)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "revoke_platform_sessions(user=%s) failed: %s", uid, exc,
             )
     return {"users": len(user_ids), "tokens": rows_marked}
 

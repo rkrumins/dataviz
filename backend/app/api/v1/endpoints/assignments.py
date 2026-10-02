@@ -10,6 +10,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Response
 
 from backend.app.api.v1.endpoints.graph import (
     _cache_scope,
+    _compute_budget,
     _provider_health_header,
     get_context_engine,
 )
@@ -19,6 +20,41 @@ from backend.app.services.context_engine import ContextEngine
 from backend.app.services.graph_cache import ENDPOINT_LAYER_ASSIGNMENT, get_graph_cache
 
 router = APIRouter()
+
+
+def _cache_params(request: LayerAssignmentRequest) -> dict:
+    """What this compute actually depends on — not the raw request.
+
+    Dumping the request made two things part of the key that have no bearing
+    on the answer, and between them the endpoint could barely cache at all.
+
+    ``assignedAt`` is a REQUIRED field on every assignment, and the client
+    stamps rule-derived entries with ``new Date().toISOString()`` at request
+    time because the rules themselves carry no timestamp. So a view with a
+    single rule-derived assignment produced a brand-new key on every call:
+    a guaranteed miss, an entry written and never read, and unbounded key
+    growth at a 3600s TTL. ``assignment_engine`` never reads the field —
+    grep returns nothing — so it is dropped here rather than from the wire,
+    which keeps the contract and the audit trail intact.
+
+    ``urns`` is the canvas's loaded set, and the compute is per URN and so
+    order-insensitive. Sorting it means two people who reached the same
+    canvas by expanding in a different order share one entry instead of
+    fragmenting into two, which is what every neighbouring endpoint already
+    does.
+    """
+    dumped = request.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assignments = dumped.get("assignments")
+    if isinstance(assignments, dict):
+        dumped["assignments"] = {
+            key: {k: v for k, v in value.items() if k != "assignedAt"}
+            if isinstance(value, dict) else value
+            for key, value in assignments.items()
+        }
+    urns = dumped.get("urns")
+    if isinstance(urns, list):
+        dumped["urns"] = sorted(urns)
+    return dumped
 
 
 @router.post("/compute", response_model=LayerAssignmentResult)
@@ -68,9 +104,13 @@ async def compute_assignments(
         return await get_graph_cache().get_or_compute(
             scope=scope,
             endpoint=ENDPOINT_LAYER_ASSIGNMENT,
-            params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
+            params=_cache_params(request),
             compute=compute,
             model_cls=LayerAssignmentResult,
+            # Without this the cross-pod election falls back to its flat
+            # default wait, which is shorter than this compute — so every pod
+            # gives up watching and issues the same query anyway, late.
+            expected_compute_s=_compute_budget(ENDPOINT_LAYER_ASSIGNMENT),
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
         )
     except HTTPException:

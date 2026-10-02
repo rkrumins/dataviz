@@ -56,6 +56,7 @@ class _FakeEngine:
         self._agg_for = agg_for or (lambda req: _agg([]))
         self.agg_requests = []
         self.edge_requests = []
+        self.node_queries = []
         self.provider = object()
 
     async def get_top_level_or_orphan_nodes(self, **kw):
@@ -63,6 +64,10 @@ class _FakeEngine:
             nodes=self._roots, totalCount=len(self._roots), hasMore=False,
             rootTypeCount=len(self._roots), orphanCount=0,
         )
+
+    async def get_nodes_query(self, query):
+        self.node_queries.append(query)
+        return list(self._roots)
 
     async def get_edges(self, query):
         self.edge_requests.append(query)
@@ -89,12 +94,15 @@ def _run(coro):
 
 def test_merge_dedupes_and_ors_stale():
     a = _agg([("x", "y", 2)], stale=False, regime="boundary", stampVersion=2)
-    b = _agg([("x", "y", 2), ("z", "y", 3)], stale=True, staleReason="unmaterialized")
+    b = _agg([("x", "y", 2), ("z", "y", 3)], stale=True, staleReason="unmaterialized",
+             degradedDetail={"kind": "query_memory", "endpoint": "10.0.0.1:6379"})
     merged = _merge_aggregated([a, b])
     pairs = {(e.source_urn, e.target_urn): e.edge_count for e in merged.aggregated_edges}
     assert pairs == {("x", "y"): 2, ("z", "y"): 3}  # deduped
     assert merged.stale is True and merged.stale_reason == "unmaterialized"
     assert merged.regime == "boundary"
+    # The first pressure detail rides along, so the canvas can say what to do.
+    assert merged.degraded_detail == {"kind": "query_memory", "endpoint": "10.0.0.1:6379"}
 
 
 def test_merge_all_none_returns_none():
@@ -117,6 +125,75 @@ def test_bootstrap_returns_roots_edges_and_aggregated_in_one_payload():
         ("urn:a", "urn:b")}
     assert result.freshness.regime == "boundary"
     assert result.freshness.stale is False
+
+
+def test_bootstrap_can_ask_for_the_nodes_the_caller_names():
+    """The canvas does not ask "what has no incoming containment edge" — it
+    loads roots with getNodes({entityTypes, limit, offset}), by explicit URN
+    for a curated view and by entity type for an open one, INCLUDING non-root
+    types. Routing that through the structural query would change which nodes
+    the canvas paints, so the batched endpoint has to be able to ask the
+    question the client actually asks."""
+    from backend.common.models.graph import NodeQuery
+
+    roots = [_node("urn:a"), _node("urn:b")]
+    eng = _FakeEngine(roots=roots)
+    result = _run(canvas_bootstrap(
+        Response(),
+        CanvasBootstrapRequest(rootQuery=NodeQuery(
+            entityTypes=["Table", "Column"], limit=50, offset=100,
+        )),
+        eng, session=None,
+    ))
+    assert [n.urn for n in result.roots.nodes] == ["urn:a", "urn:b"]
+    # The structural query was never asked.
+    assert len(eng.node_queries) == 1
+    q = eng.node_queries[0]
+    assert q.entity_types == ["Table", "Column"] and q.limit == 50 and q.offset == 100
+    # A short page means the end of the list, as it does for the client today.
+    assert result.roots.has_more is False
+
+
+def test_bootstrap_covers_what_is_already_on_screen():
+    """A root page loaded into a populated canvas needs the edges BETWEEN the
+    two. The client's own getEdgesBetween(new ∪ existing) asks for exactly
+    that, and one request cannot replace three without preserving it."""
+    eng = _FakeEngine(roots=[_node("urn:new")])
+    result = _run(canvas_bootstrap(
+        Response(),
+        CanvasBootstrapRequest(visibleUrns=["urn:old", "urn:new"]),
+        eng, session=None,
+    ))
+    # One root, but the edges leg still runs: the set has two members.
+    assert result.edges
+    assert eng.edge_requests[0].source_urns == ["urn:new", "urn:old"], (
+        "the visible set must join the roots, deduplicated and in order"
+    )
+    assert eng.agg_requests[0].source_urns == ["urn:new", "urn:old"]
+    # ...and only the roots come back as nodes: the caller already has the rest.
+    assert [n.urn for n in result.roots.nodes] == ["urn:new"]
+
+
+def test_the_bootstrap_cache_key_treats_both_new_fields_as_sets():
+    """Two users who reached the identical view by different routes must
+    share one entry. The canvas builds these lists by expansion order, so
+    hashing them raw gives one compute two keys — on the endpoint that
+    contains the most expensive read in the app."""
+    from backend.app.api.v1.endpoints.canvas import _root_query_params
+    from backend.common.models.graph import NodeQuery
+
+    one = _root_query_params(NodeQuery(urns=["b", "a"], entityTypes=["Y", "X"]))
+    two = _root_query_params(NodeQuery(urns=["a", "b"], entityTypes=["X", "Y"]))
+    assert one == two
+    assert _root_query_params(None) is None
+
+    import inspect
+
+    from backend.app.api.v1.endpoints import canvas as canvas_mod
+
+    src = inspect.getsource(canvas_mod.canvas_bootstrap)
+    assert '"visibleUrns": sorted(request.visible_urns) or None' in src
+    assert '"rootQuery": _root_query_params(request.root_query)' in src
 
 
 def test_bootstrap_skips_edges_leg_for_single_root():

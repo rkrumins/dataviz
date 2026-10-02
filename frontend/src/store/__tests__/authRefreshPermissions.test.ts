@@ -12,7 +12,15 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest'
 
 vi.mock('@/services/authService', () => ({
-    authService: { myPermissions: vi.fn(), refresh: vi.fn() },
+    authService: { myPermissions: vi.fn() },
+}))
+
+// The rotation goes through the one shared refresh path. Partial mock: the
+// store imports other things from this module that must stay real.
+const { refresh } = vi.hoisted(() => ({ refresh: vi.fn() }))
+vi.mock('@/services/fetchWithTimeout', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/services/fetchWithTimeout')>()),
+    refreshNow: refresh,
 }))
 
 import { useAuthStore, resetClaimRecovery } from '@/store/auth'
@@ -20,7 +28,6 @@ import { authService } from '@/services/authService'
 
 const REAL_CLAIMS = { sid: 's1', global: ['system:admin'], ws: {} }
 const myPermissions = authService.myPermissions as ReturnType<typeof vi.fn>
-const refresh = authService.refresh as ReturnType<typeof vi.fn>
 
 describe('refreshPermissions', () => {
     beforeEach(() => {
@@ -75,7 +82,7 @@ describe('refreshPermissions', () => {
         myPermissions
             .mockResolvedValueOnce(reduced)   // looks empty…
             .mockResolvedValueOnce(reduced)   // …and still empty after rotation → real
-        refresh.mockResolvedValueOnce({ user: { id: 'u1' } })
+        refresh.mockResolvedValueOnce('ok')
 
         await useAuthStore.getState().refreshPermissions()
 
@@ -109,7 +116,7 @@ describe('a claimless access token self-heals', () => {
         myPermissions
             .mockResolvedValueOnce({ sid: 's1', global: [], ws: {} })          // claimless token
             .mockResolvedValueOnce({ sid: 's2', global: ['system:admin'], ws: {} })  // after rotation
-        refresh.mockResolvedValueOnce({ user: { id: 'u1' } })
+        refresh.mockResolvedValueOnce('ok')
 
         await useAuthStore.getState().refreshPermissions()
 
@@ -131,7 +138,7 @@ describe('a claimless access token self-heals', () => {
         myPermissions
             .mockResolvedValueOnce({ sid: 's1', global: [], ws: {} })
             .mockResolvedValueOnce({ sid: 's2', global: [], ws: {} })
-        refresh.mockResolvedValueOnce({ user: { id: 'u1' } })
+        refresh.mockResolvedValueOnce('ok')
 
         await useAuthStore.getState().refreshPermissions()
         await useAuthStore.getState().refreshPermissions()
@@ -142,10 +149,27 @@ describe('a claimless access token self-heals', () => {
 
     it('keeps the empty claims when the rotation itself fails', async () => {
         myPermissions.mockResolvedValueOnce({ sid: 's1', global: [], ws: {} })
-        refresh.mockRejectedValueOnce(new Error('refresh failed'))
+        refresh.mockResolvedValueOnce('expired')
 
         await useAuthStore.getState().refreshPermissions()
 
         expect(useAuthStore.getState().permissions.global).toEqual([])
+    })
+
+    it('leaves an SSO re-auth to the shared refresh path instead of consuming it', async () => {
+        // This rotation used to be a private POST of its own. When that POST
+        // was the one to receive `sso_reauth_required`, the server had already
+        // revoked the family and cleared the cookies — so the shared path's
+        // silent gateway re-sign-in (or the IdP bounce) never saw the
+        // envelope, and the user landed on /login instead of staying put.
+        // Through `refreshNow` the envelope is handled where it belongs; a
+        // 'reauth' outcome is not a session to read claims from.
+        myPermissions.mockResolvedValueOnce({ sid: 's1', global: [], ws: {} })
+        refresh.mockResolvedValueOnce('reauth')
+
+        await useAuthStore.getState().refreshPermissions()
+
+        expect(refresh).toHaveBeenCalledTimes(1)
+        expect(myPermissions).toHaveBeenCalledTimes(1)
     })
 })

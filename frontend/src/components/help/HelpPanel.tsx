@@ -11,7 +11,8 @@
  * tab rather than rendering in the narrow drawer.
  *
  * Overlay model mirrors ExplorerPreviewDrawer: a portal to <body>, a plain-CSS
- * <Backdrop> (never inside AnimatePresence), and a framer-motion panel.
+ * <Backdrop> (never inside AnimatePresence) as a SIBLING of an inert
+ * full-viewport wrapper, and a framer-motion panel inside it.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -32,6 +33,8 @@ import {
   Sparkles,
   Check,
   Rocket,
+  LifeBuoy,
+  Mail,
 } from 'lucide-react'
 import { useFeature } from '@/store/features'
 import { useTourStore } from '@/features/tour/tourStore'
@@ -119,42 +122,49 @@ export function HelpPanel() {
     <>
       <Backdrop open={open} onClick={close} zClassName="z-[60]" />
 
-      <AnimatePresence>
-        {open && (
-          <motion.aside
-            key="help-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Help"
-            className={cn(
-              'fixed right-0 top-0 h-full w-[440px] max-w-[92vw] z-[61]',
-              'bg-canvas border-l border-glass-border',
-              'flex flex-col overflow-hidden',
-              'shadow-lg',
-            )}
-            initial={{ x: 440 }}
-            animate={{ x: 0 }}
-            exit={{ x: 440 }}
-            transition={MOTION.drawerSlide}
-          >
-            {view === 'article' && articleSlug ? (
-              <ArticleView
-                slug={articleSlug}
-                onBack={() => setView('home')}
-                onClose={close}
-              />
-            ) : view === 'getting-started' ? (
-              <GettingStartedView onBack={() => setView('home')} onClose={close} />
-            ) : (
-              <HomeView
-                onSelectGuide={openArticle}
-                onOpenGettingStarted={() => setView('getting-started')}
-                onClose={close}
-              />
-            )}
-          </motion.aside>
-        )}
-      </AnimatePresence>
+      {/* The full-viewport wrapper is INERT and lives OUTSIDE the presence tree:
+          the drawer genuinely animates out on close, and an interrupted exit
+          (StrictMode, a rapid toggle, a parent re-render mid-flight) must never
+          be able to leave a click-eating node in the body. Only the drawer
+          itself is interactive. */}
+      <div className="fixed inset-0 z-[61] pointer-events-none">
+        <AnimatePresence>
+          {open && (
+            <motion.aside
+              key="help-panel"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Help"
+              className={cn(
+                'pointer-events-auto absolute right-0 top-0 h-full w-[440px] max-w-[92vw]',
+                'bg-canvas border-l border-glass-border',
+                'flex flex-col overflow-hidden',
+                'shadow-lg',
+              )}
+              initial={{ x: 440 }}
+              animate={{ x: 0 }}
+              exit={{ x: 440 }}
+              transition={MOTION.drawerSlide}
+            >
+              {view === 'article' && articleSlug ? (
+                <ArticleView
+                  slug={articleSlug}
+                  onBack={() => setView('home')}
+                  onClose={close}
+                />
+              ) : view === 'getting-started' ? (
+                <GettingStartedView onBack={() => setView('home')} onClose={close} />
+              ) : (
+                <HomeView
+                  onSelectGuide={openArticle}
+                  onOpenGettingStarted={() => setView('getting-started')}
+                  onClose={close}
+                />
+              )}
+            </motion.aside>
+          )}
+        </AnimatePresence>
+      </div>
     </>
   )
 
@@ -390,6 +400,23 @@ function HomeView({
               Browse the full user guide
               <ArrowUpRight className="w-4 h-4" />
             </Link>
+
+            {/* Set under Admin → Branding; hidden when blank. */}
+            {brand.supportEmail && (
+              <a
+                href={`mailto:${brand.supportEmail}`}
+                className="group mt-2 flex items-center gap-3 rounded-lg border border-glass-border bg-canvas-elevated px-3 py-2.5 text-left transition-colors hover:border-accent-lineage/40 hover:bg-accent-lineage/[0.04]"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-lineage/10 text-accent-lineage">
+                  <LifeBuoy className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-ink">Contact support</p>
+                  <p className="truncate text-xs text-ink-muted">{brand.supportEmail}</p>
+                </div>
+                <Mail className="h-4 w-4 shrink-0 text-ink-muted group-hover:text-accent-lineage" />
+              </a>
+            )}
           </div>
         )}
       </div>

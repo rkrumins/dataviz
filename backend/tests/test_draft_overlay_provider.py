@@ -81,11 +81,23 @@ class StubMain:
 
 
 class FakeSvc:
-    def __init__(self, delta, adjust=None):
+    def __init__(self, delta, adjust=None, payloads=None):
         self._delta, self._adjust = delta, adjust or {}
+        self._payloads = payloads or {}            # entity id -> the draft's value, reader-shaped
+        self.version = (object(),)                 # a fresh draft per stub: nothing cached is shared
+        self.builds = 0
+        self.loads = []
+
+    async def overlay_version(self, *, graph_id, branch_id):
+        return self.version
 
     async def branch_overlay_delta(self, *, graph_id, branch_id):
+        self.builds += 1
         return self._delta
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids):
+        self.loads.append(list(entity_ids))
+        return [self._payloads[e] for e in entity_ids if e in self._payloads]
 
     async def aggregated_overlay_adjust(self, **kw):
         return self._adjust
@@ -200,6 +212,231 @@ def test_set_node_identity_reaches_the_base_provider():
 
     p.set_node_identity(None, None)
     assert base.identity == (None, None)
+
+
+def test_a_lineage_delta_keeps_the_base_answers_freshness():
+    """With a lineage delta the overlay rebuilt the result from four fields,
+    dropping the rest: a base that gave up part of its read lost its
+    degraded detail and truncation reason, was cached as complete for the
+    full TTL, and an unmaterialized base never told the draft canvas so."""
+    from backend.app.services.graph_cache import _is_incomplete_result
+
+    class _ShortMain(StubMain):
+        async def get_aggregated_edges_between(self, *a, **kw):
+            base = await super().get_aggregated_edges_between(*a, **kw)
+            return base.model_copy(update={
+                "truncated": True, "stale": True, "stale_reason": "unmaterialized",
+                "stamp_version": 2, "regime": "boundary", "truncation_reason": "timeout",
+                "degraded_detail": {"kind": "timeout", "degradedBatches": 1},
+            })
+
+    p = _mk(_ShortMain(), {**_EMPTY, "edgesUpsert": [
+        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},
+        adjust={("A", "B"): {"weight": +1, "types": {"LINEAGE"}}})
+    agg = asyncio.run(p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"]))
+
+    assert {(e.source_urn, e.target_urn): e.edge_count for e in agg.aggregated_edges} == {("A", "B"): 2}
+    assert agg.total_source_edges == 2
+    assert (agg.truncated, agg.stale, agg.stale_reason) == (True, True, "unmaterialized")
+    assert (agg.stamp_version, agg.regime, agg.last_materialized_at) == (2, "boundary", "t0")
+    assert agg.truncation_reason == "timeout" and agg.degraded_detail == {"kind": "timeout", "degradedBatches": 1}
+    assert _is_incomplete_result(agg)
+
+
+class _CountingMain(StubMain):
+    """Main's degree counts for its one flow, A.c → B.c: the columns count it,
+    and the tables hold its roll-up cells (A out, B in)."""
+
+    def __init__(self):
+        super().__init__()
+        self.asked = []
+        self.urns_asked = []
+
+    async def get_node_degrees(self, urns, edge_types=None, *, include_rollups=False):
+        self.asked.append(include_rollups)
+        self.urns_asked.append(list(urns))
+        flows = {"A.c": (0, 1), "B.c": (1, 0)}
+        cells = {"A": (0, 1), "B": (1, 0), "A.c": (0, 1), "B.c": (1, 0)}
+        out = {}
+        for u in urns:
+            if u == "lost" or u not in self.nodes:
+                continue                                     # its bucket failed: unknown
+            i, o = flows.get(u, (0, 0))
+            out[u] = {"in": i, "out": o}
+            if include_rollups:
+                ri, ro = cells.get(u, (0, 0))
+                out[u].update(rollupIn=ri, rollupOut=ro)
+        return out
+
+
+class _ChainSvc(FakeSvc):
+    """The draft's containment chains, as the branch reader walks them."""
+
+    CHAINS = {"A.c": ["A"], "B.c": ["B"], "A": [], "B": [], "N.c": ["N"], "N": []}
+
+    def __init__(self, delta):
+        super().__init__(delta)
+        self.chains_asked = []
+
+    async def ancestor_chains(self, *, graph_id, branch_id, urns, containment_edge_types, as_of_seq=None):
+        self.chains_asked.append(sorted(urns))
+        return {u: self.CHAINS[u] for u in urns if u in self.CHAINS}
+
+
+def _lin(eid, s, t, etype="LINEAGE"):
+    return {"id": eid, "sourceUrn": s, "targetUrn": t, "edgeType": etype, "confidence": 1.0, "properties": {}}
+
+
+def _counting_draft(delta):
+    svc = _ChainSvc(delta)
+    p = DraftOverlayProvider(_CountingMain(), svc=svc, graph_id="g", branch_id="d")
+    p.set_containment_edge_types(["CONTAINS"])
+    return p, svc
+
+
+URNS = ["A", "B", "A.c", "B.c", "lost"]
+
+
+def test_a_draft_counts_lineage_through_its_base():
+    """/nodes/degree was a 501 on every draft, so on a draft no card had a
+    lineage marker unless a line of it was drawn. A draft that changed no
+    lineage reads main's counts exactly, roll-up presence and unknowns included."""
+    p, svc = _counting_draft(_EMPTY)
+    got = asyncio.run(p.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True))
+    assert got == asyncio.run(_CountingMain().get_node_degrees(URNS, ["LINEAGE"], include_rollups=True))
+    assert "lost" not in got                                  # absent stays unknown
+    assert svc.chains_asked == []                              # nothing to roll up, nothing walked
+    # A plain ask is passed on plain: a base that knows no roll-ups still answers it.
+    assert asyncio.run(p.get_node_degrees(["A.c"], ["LINEAGE"])) == {"A.c": {"in": 0, "out": 1}}
+    assert p._base.asked == [True, False]
+
+
+def test_a_draft_counts_its_own_flows_on_top_of_main():
+    """The draft removed main's A.c → B.c and added B.c → A.c: the columns'
+    counts move by those flows, and each added flow gives its ends and their
+    containers a roll-up that way. A removed flow leaves main's flag alone —
+    other flows may hold that cell, and a flag left set keeps a marker solid,
+    never falsely hollow. A flow of a type not counted moves nothing."""
+    p, svc = _counting_draft({**_EMPTY,
+                              "edgesUpsert": [_lin("lin2", "B.c", "A.c"), _lin("x", "A.c", "B.c", "OTHER")],
+                              "edgesRemove": [_lin("lin1", "A.c", "B.c")]})
+    got = asyncio.run(p.get_node_degrees(URNS, ["lineage"], include_rollups=True))
+    assert got == {
+        "A.c": {"in": 1, "out": 0, "rollupIn": 1, "rollupOut": 1},
+        "B.c": {"in": 0, "out": 1, "rollupIn": 1, "rollupOut": 1},
+        "A": {"in": 0, "out": 0, "rollupIn": 1, "rollupOut": 1},
+        "B": {"in": 0, "out": 0, "rollupIn": 1, "rollupOut": 1},
+    }
+    assert svc.chains_asked == [["A.c", "B.c"]]              # one walk, for the added flow's ends
+
+
+def test_a_draft_answers_what_it_created_from_its_own_flows():
+    """The draft created N, N.c inside it, and a flow A.c -> N.c. They are
+    not in main's graph, so asking main about them cost a full-scan degree
+    query on FalkorDB, which on a large graph passed its deadline and left
+    them out: unknown, asked again on the canvas's backoff for as long as the
+    draft was open. Their only lineage is the draft's own, so the draft
+    answers them itself and never asks main."""
+    new = {"urn": "N", "entityType": "Table", "displayName": "N"}
+    p, svc = _counting_draft({**_EMPTY,
+                              "nodesNew": ["N", "N.c"],
+                              "nodesUpsert": [new, {**new, "urn": "N.c", "entityType": "Column"}],
+                              "edgesUpsert": [_lin("lin2", "A.c", "N.c"),
+                                              _lin("n>c", "N", "N.c", "CONTAINS")]})
+    got = asyncio.run(p.get_node_degrees([*URNS, "N", "N.c"], ["LINEAGE"], include_rollups=True))
+    assert p._base.urns_asked == [URNS]
+    assert got["N.c"] == {"in": 1, "out": 0, "rollupIn": 1, "rollupOut": 0}
+    assert got["N"] == {"in": 0, "out": 0, "rollupIn": 1, "rollupOut": 0}
+    assert got["A.c"] == {"in": 0, "out": 2, "rollupIn": 0, "rollupOut": 1}
+    assert "lost" not in got
+
+    got = asyncio.run(p.get_node_degrees(["N", "N.c"], ["LINEAGE"]))
+    assert got == {"N": {"in": 0, "out": 0}, "N.c": {"in": 1, "out": 0}}
+    assert len(p._base.urns_asked) == 1                      # nothing of main's to ask
+
+
+def test_a_failed_rollup_walk_keeps_the_counts():
+    """The walk that places the draft's added flows under their containers
+    failed, and the whole /nodes/degree chunk was a 500: the counts main had
+    answered were lost with it, and the canvas marked every card of the chunk
+    missed. As when main's own probe fails, the counts stand and only the
+    roll-up flags are left out, so the canvas asks for them again."""
+    class _WalkFails(_ChainSvc):
+        async def ancestor_chains(self, **kw):
+            raise RuntimeError("connection reset")
+
+    p = DraftOverlayProvider(_CountingMain(), svc=_WalkFails({**_EMPTY, "edgesUpsert": [_lin("lin2", "B.c", "A.c")]}),
+                             graph_id="g", branch_id="d")
+    p.set_containment_edge_types(["CONTAINS"])
+    got = asyncio.run(p.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True))
+    assert got == {"A": {"in": 0, "out": 0}, "B": {"in": 0, "out": 0},
+                   "A.c": {"in": 1, "out": 1}, "B.c": {"in": 1, "out": 1}}
+
+
+def test_a_draft_over_a_base_that_cannot_count_says_so():
+    """A draft on a stale projection is served by the versioned reader, which
+    cannot count: the draft says so as its other unsupported reads do (a 501
+    at the route), rather than an AttributeError."""
+    p = _mk(StubMain(), _EMPTY)
+    with pytest.raises(NotImplementedError):
+        asyncio.run(p.get_node_degrees(["A"], ["LINEAGE"], include_rollups=True))
+
+
+# ── A large draft: modified nodes come by name, and a read loads just the ones it serves ─────
+_MODIFIED = {**_EMPTY, "nodesModified": [
+    {"urn": "A", "entityId": "e0"}, {"urn": "A.c", "entityId": "e1"}, {"urn": "B.c", "entityId": "e2"}]}
+_DRAFT_VALUES = {"e0": {"urn": "A", "entityType": "Table", "displayName": "A v2"},
+                 "e1": {"urn": "A.c", "entityType": "Column", "displayName": "A.c v2"},
+                 "e2": {"urn": "B.c", "entityType": "Column", "displayName": "B.c v2"}}
+
+
+def _prov(svc):
+    p = DraftOverlayProvider(StubMain(), svc=svc, graph_id="g", branch_id="d")
+    p.set_containment_edge_types(["CONTAINS"])
+    return p
+
+
+def test_a_read_loads_only_the_modified_nodes_it_serves():
+    """A draft that modified 100k nodes must not load 100k payloads to serve one page."""
+    async def run():
+        svc = FakeSvc(_MODIFIED, payloads=_DRAFT_VALUES)
+        p = _prov(svc)
+        kids = (await p.get_children_with_edges("A")).children
+        assert [(c.urn, c.display_name) for c in kids] == [("A.c", "A.c v2")]
+        assert svc.loads == [["e1"]]
+        assert (await p.get_node("B.c")).display_name == "B.c v2"
+        assert (await p.get_node("B.c")).display_name == "B.c v2"
+        assert svc.loads == [["e1"], ["e2"]], "a request loads a node once"
+        assert (await p.get_node("B")).display_name == "B"
+        assert svc.loads == [["e1"], ["e2"]], "an unmodified node loads nothing"
+    asyncio.run(run())
+
+
+def test_every_read_serves_the_drafts_value_of_a_modified_node():
+    async def run():
+        p = _prov(FakeSvc(_MODIFIED, payloads=_DRAFT_VALUES))
+        names = {n.urn: n.display_name for n in await p.get_nodes(NodeQuery())}
+        assert names == {"A": "A v2", "B": "B", "A.c": "A.c v2", "B.c": "B.c v2"}
+        assert [n.display_name for n in await p.search_nodes("B.c")] == ["B.c v2"]
+        top = {n.urn: n for n in (await p.get_top_level_or_orphan_nodes()).nodes}
+        assert (top["A"].display_name, top["A"].child_count) == ("A v2", 1), "keeps main's childCount"
+        assert (await p.get_node("A")).child_count == 1
+        assert (await p.resolve_identities(["A.c", "B"]))["A.c"]["name"] == "A.c v2"
+    asyncio.run(run())
+
+
+def test_reads_share_one_delta_until_the_draft_moves():
+    """Rebuilding the delta per read cost every read of a large draft seconds and a gigabyte."""
+    async def run():
+        svc = FakeSvc(_MODIFIED, payloads=_DRAFT_VALUES)
+        await asyncio.gather(*(_prov(svc).get_node("A") for _ in range(5)))
+        assert svc.builds == 1, "five reads at once build it once"
+        await _prov(svc).get_node("A")
+        assert svc.builds == 1, "a later read reuses it"
+        svc.version = (object(),)                        # the draft took a commit
+        await _prov(svc).get_node("A")
+        assert svc.builds == 2
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

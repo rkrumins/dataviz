@@ -111,11 +111,82 @@ async def count_active_provider_users(
     ).scalar_one()
 
 
+async def count_active_users(
+    session: AsyncSession, *, exclude_user_ids: frozenset[str] | set[str] = frozenset(),
+) -> int:
+    """Distinct users currently holding ANY live refresh token —
+    password and SSO alike. The platform sweep's confirm-dialog number.
+
+    ``exclude_user_ids`` subtracts the system accounts the sweep will
+    skip; calling this twice (with and without the set) and taking the
+    difference answers "how many system accounts stay signed in".
+    Same drift caveat as :func:`count_active_provider_users`.
+    """
+    clauses = [
+        RefreshTokenORM.revoked_at.is_(None),
+        RefreshTokenORM.consumed_at.is_(None),
+        RefreshTokenORM.expires_at > _now_iso(),
+    ]
+    if exclude_user_ids:
+        clauses.append(RefreshTokenORM.user_id.not_in(exclude_user_ids))
+    return (
+        await session.execute(
+            select(func.count(func.distinct(RefreshTokenORM.user_id)))
+            .where(*clauses)
+        )
+    ).scalar_one()
+
+
+async def revoke_all_tokens(
+    session: AsyncSession, *, exclude_user_ids: frozenset[str] | set[str] = frozenset(),
+) -> tuple[set[str], int]:
+    """Stamp ``revoked_at`` on every un-revoked refresh row — password
+    AND SSO — except rows belonging to ``exclude_user_ids`` (the system
+    accounts a platform sweep must leave signed in).
+
+    Multi-pass for the same mid-sweep-rotation reason as
+    :func:`revoke_provider_tokens`, and with the same deliberate
+    absence of a consumed/expiry filter: marking an already-dead row
+    revoked can only ever cause a refusal.
+
+    Returns ``(distinct user_ids touched, rows marked)``.
+    """
+    def _clauses():
+        clauses = [RefreshTokenORM.revoked_at.is_(None)]
+        if exclude_user_ids:
+            clauses.append(RefreshTokenORM.user_id.not_in(exclude_user_ids))
+        return clauses
+
+    users: set[str] = set()
+    rows_marked = 0
+    for _ in range(_REVOKE_FAMILY_PASSES):
+        touched = (
+            await session.execute(
+                select(func.distinct(RefreshTokenORM.user_id))
+                .where(*_clauses())
+            )
+        ).scalars().all()
+        users.update(u for u in touched if u)
+        result = await session.execute(
+            update(RefreshTokenORM)
+            .where(*_clauses())
+            .values(revoked_at=_now_iso())
+        )
+        marked = int(result.rowcount or 0)
+        rows_marked += marked
+        if marked == 0:
+            break
+    await session.flush()
+    return users, rows_marked
+
+
 async def revoke_provider_tokens(
     session: AsyncSession, *, provider_id: Optional[str],
+    user_id: Optional[str] = None,
 ) -> tuple[set[str], int]:
     """Stamp ``revoked_at`` on every un-revoked refresh row minted by
     this provider (None = every SSO row), and report who was touched.
+    ``user_id`` narrows it to one person's sessions through that provider.
 
     Multi-pass for the same reason ``revoke_family`` is: a rotation in
     flight when the sweep starts can commit its successor after a
@@ -132,21 +203,19 @@ async def revoke_provider_tokens(
     users: set[str] = set()
     rows_marked = 0
     for _ in range(_REVOKE_FAMILY_PASSES):
+        scope = [_provider_predicate(provider_id),
+                 RefreshTokenORM.revoked_at.is_(None)]
+        if user_id is not None:
+            scope.append(RefreshTokenORM.user_id == user_id)
         touched = (
             await session.execute(
-                select(func.distinct(RefreshTokenORM.user_id)).where(
-                    _provider_predicate(provider_id),
-                    RefreshTokenORM.revoked_at.is_(None),
-                )
+                select(func.distinct(RefreshTokenORM.user_id)).where(*scope)
             )
         ).scalars().all()
         users.update(u for u in touched if u)
         result = await session.execute(
             update(RefreshTokenORM)
-            .where(
-                _provider_predicate(provider_id),
-                RefreshTokenORM.revoked_at.is_(None),
-            )
+            .where(*scope)
             .values(revoked_at=_now_iso())
         )
         marked = int(result.rowcount or 0)

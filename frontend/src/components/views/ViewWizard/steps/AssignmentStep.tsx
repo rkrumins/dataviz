@@ -14,6 +14,9 @@ import type { WizardFormData } from '../ViewWizard'
 export interface AssignmentStepProps {
     formData: WizardFormData
     updateFormData: (updates: Partial<WizardFormData>) => void
+    /** The scope the view being EDITED already stores, so the Layer Studio shows
+     *  rule placements only where the canvas will actually make them. */
+    viewEntityScope?: 'all' | 'curated'
 }
 
 export function AssignmentStep(props: AssignmentStepProps) {

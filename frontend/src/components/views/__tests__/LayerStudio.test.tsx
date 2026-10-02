@@ -26,8 +26,27 @@ beforeAll(() => {
 // Same stub the other store-touching suites use.
 vi.mock('@/lib/queryClient', () => ({ getQueryClient: () => ({ removeQueries: vi.fn(), invalidateQueries: vi.fn() }) }))
 
-vi.mock('@/providers/GraphProviderContext', () => ({
-  useGraphProvider: () => ({ getNode: vi.fn().mockResolvedValue(null) }),
+// ONE stable provider: the wizard's entity index resets its caches when the
+// provider identity changes. Lookups are batched through getNodes; an empty
+// answer = "not in the graph".
+vi.mock('@/providers/GraphProviderContext', () => {
+  const provider = { getNodes: vi.fn().mockResolvedValue([]) }
+  return { useGraphProvider: () => provider }
+})
+
+// LayerStudio reads the data source's ontology to offer Auto-layer's candidate
+// top-level types. That hook is react-query backed and this suite renders without
+// a QueryClientProvider, so stub it — same approach as the two mocks above.
+vi.mock('@/hooks/useDataSourceSchema', () => ({
+  useDataSourceSchema: () => ({
+    entityTypes: [],
+    relationshipTypes: [],
+    containmentEdgeTypes: [],
+    lineageEdgeTypes: [],
+    rootEntityTypes: [],
+    isLoading: false,
+    isError: false,
+  }),
 }))
 
 const fakeBrowser = {
@@ -40,7 +59,7 @@ const fakeBrowser = {
       childIds: [],
       totalChildren: 0,
       hasMore: false,
-      nextCursor: null,
+      nextOffset: 0,
       loaded: true,
     }],
   ]),
@@ -58,6 +77,7 @@ const fakeBrowser = {
   topLevelHasMore: false,
   topLevelTotalCount: 1,
   topLevelMetadata: { rootTypeCount: 1, orphanCount: 0 },
+  failedIds: new Set<string>(),
   loadingNodes: new Set<string>(),
 }
 
@@ -69,15 +89,19 @@ vi.mock('@/hooks/useEntityBrowser', () => ({
 // Here it is a stub that exposes just the CRUD callbacks so we can assert what
 // the Studio commits (and that one undo restores it).
 vi.mock('../LayerHierarchyPanel', () => ({
-  LayerHierarchyPanel: ({ onAddLayer, onDeleteLayer, onClearLayer }: {
+  LayerHierarchyPanel: ({ onAddLayer, onDeleteLayer, onClearLayer, onDrop }: {
     onAddLayer: (name: string) => void
     onDeleteLayer: (layerId: string) => void
     onClearLayer: (layerId: string) => void
+    onDrop: (layerId: string, nodeId: string | undefined, payload: { entityId: string; entityName: string }) => void
   }) => (
     <div data-testid="layer-hierarchy-panel-stub">
       <button onClick={() => onAddLayer('Curated')}>stub-add-layer</button>
       <button onClick={() => onDeleteLayer('l1')}>stub-delete-l1</button>
       <button onClick={() => onClearLayer('l1')}>stub-clear-l1</button>
+      <button onClick={() => onDrop('l2', undefined, { entityId: 'urn:child', entityName: 'Node Child' })}>
+        stub-drop-child-l2
+      </button>
     </div>
   ),
 }))
@@ -118,6 +142,29 @@ describe('LayerStudio — assignment writes go to formData.assignments', () => {
     const call = updateFormData.mock.calls[0][0]
     expect(call.assignments).toMatchObject({ 'urn:a': { layerId: 'l2' } })
     expect(call.layers.every((l: ViewLayerConfig) => !l.entityAssignments)).toBe(true)
+  })
+
+  it('a child whose parent sits in another layer CAN be explicitly assigned (containment lock removed)', () => {
+    // The browser KNOWS the parentage here (parentMap has it), the parent is
+    // already placed in l1, and the user drops the child onto l2. This used to
+    // be filtered out of the placement plan with an "Assignment blocked"
+    // warning; explicit placements now always persist — the canvas renders the
+    // child as a root of its own column (see useLayerAssignment.inherit.test.ts).
+    const updateFormData = vi.fn()
+    fakeBrowser.parentMap.set('urn:child', 'urn:a')
+    try {
+      const formData = makeFormData({ assignments: { 'urn:a': { layerId: 'l1', inheritsChildren: true } } })
+      render(<LayerStudio formData={formData} updateFormData={updateFormData} />)
+
+      fireEvent.click(screen.getByText('stub-drop-child-l2'))
+
+      expect(updateFormData).toHaveBeenCalledTimes(1)
+      const call = updateFormData.mock.calls[0][0]
+      expect(call.assignments['urn:child']).toMatchObject({ layerId: 'l2' })
+      expect(call.assignments['urn:a']).toMatchObject({ layerId: 'l1' })
+    } finally {
+      fakeBrowser.parentMap.clear()
+    }
   })
 
   it('remove-assignment deletes the entry from formData.assignments', () => {

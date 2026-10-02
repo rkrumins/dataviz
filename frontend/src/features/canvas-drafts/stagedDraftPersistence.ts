@@ -44,8 +44,14 @@ export interface StagedDraftSnapshot {
   phase: 'staged' | 'committing'
   savedAt: number
   changes: SerializableChange[]
+  /** The canvas copies of every node / edge the unsaved work touches — new ones AND existing ones
+   *  it edited (a rename carries no pending marker). */
   pendingNodes: LineageNode[]
   pendingEdges: LineageEdge[]
+  /** Layer pins of unsaved top-level entities (urn → layer id). The view layout's own copy may not
+   *  have reached the server before the refresh; without it a restored entity belonged to no
+   *  column and was invisible. Absent in snapshots written before it existed. */
+  pins?: Record<string, string>
 }
 
 function storageKey(scopeKey: string): string {

@@ -1,0 +1,138 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadtest-master
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: loadtest-master
+    app.kubernetes.io/component: load-generator
+    app.kubernetes.io/part-of: loadtest
+spec:
+  # Exactly one. Two masters is not a bigger test, it is two smaller
+  # unrelated tests whose numbers cannot be added together.
+  replicas: 1
+  strategy:
+    # Never two masters at once: a surging replacement would steal worker
+    # connections from the run in flight.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loadtest-master
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loadtest-master
+        app.kubernetes.io/component: load-generator
+        app.kubernetes.io/part-of: loadtest
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        # The results volume is mounted into a container that runs as 10001.
+        # Without an fsGroup the emptyDir's ownership is the node's business,
+        # and the first thing that fails is the CSV write at the END of a run
+        # — after the load has been generated and the window has closed.
+        fsGroup: 10001
+      affinity:
+        podAntiAffinity:
+          # The master aggregates stats rather than generating load, but it
+          # still should not sit on a node it is measuring.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values: [viz-service, falkordb, aggregation-worker]
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: master
+          # Built from loadtest/Dockerfile. `IfNotPresent` suits an image
+          # sideloaded onto the nodes; retag to REGISTRY/loadtest:<sha> and
+          # use `Always` if it comes from a registry, because `latest` plus
+          # `IfNotPresent` means a rebuilt harness silently does not run.
+          image: synodic/loadtest:latest
+          imagePullPolicy: IfNotPresent
+          command: ["locust"]
+          args:
+            - "--master"
+            # Bind the web UI to the pod IP so a port-forward can reach it.
+            - "--web-host=0.0.0.0"
+            - "-f"
+            - "/loadtest/locustfile.py"
+            # Written incrementally, so the CSVs are readable mid-run and
+            # survive as long as the volume below does.
+            - "--csv"
+            - "/results/run"
+            - "--html"
+            - "/results/run.html"
+          ports:
+            - containerPort: 5557
+              name: worker
+            - containerPort: 8089
+              name: web
+          env:
+            # Every locust option is also settable as LOCUST_<OPTION>, so the
+            # run parameters live here rather than in args — changing the
+            # concurrency is an env edit, not an arg-list edit.
+            - name: LOCUST_USERS
+              value: "300"
+            - name: LOCUST_SPAWN_RATE
+              value: "20"
+            - name: LOCUST_RUN_TIME
+              value: "10m"
+            # WAIT FOR EVERY WORKER BEFORE RAMPING. Without this the master
+            # starts the moment the first worker connects, so the early part
+            # of the ramp is served by a fraction of the generators and the
+            # run reports a latency knee that is the harness arriving late.
+            - name: LOCUST_EXPECT_WORKERS
+              value: "3"
+            # Start on its own once the workers are up. Set to "false" to
+            # drive the run by hand from the web UI instead.
+            - name: LOCUST_AUTOSTART
+              value: "true"
+            # Deliberately NO --autoquit: the master stays up after the run so
+            # the summary can be read and the CSVs copied off. A master that
+            # exited would be restarted by the Deployment, which would start
+            # the whole run again — quietly, and against a system somebody had
+            # already begun investigating.
+            - name: SYNODIC_HOST
+              value: "http://viz-service:8000"
+            - name: SYNODIC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: loadtest-credentials
+                  key: username
+                  optional: true
+            - name: SYNODIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: loadtest-credentials
+                  key: password
+                  optional: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: results
+              mountPath: /results
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        # Dies with the pod. Fine for reading the summary off the log; useless
+        # for keeping a result. For a run worth keeping, either
+        # `kubectl cp` /results before deleting, or replace this with the PVC
+        # below (and add the matching PersistentVolumeClaim to kustomization).
+        - name: results
+          emptyDir: {}
+        # - name: results
+        #   persistentVolumeClaim:
+        #     claimName: loadtest-results

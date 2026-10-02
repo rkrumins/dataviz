@@ -40,6 +40,7 @@
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router-dom'
 import { ProviderOverride } from '@/providers/GraphProviderContext'
 import { ContextViewCanvas } from '@/components/canvas/context-view/ContextViewCanvas'
 import { toCanvasNode } from '@/lib/canvasNodeMapper'
@@ -48,7 +49,7 @@ import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import { useBranchStore } from '@/store/branchStore'
 import { useFeaturesStore } from '@/store/features'
-import type { GraphDataProvider, GraphNode, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
+import type { GraphDataProvider, GraphNode, NodeDegree, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
 
@@ -57,6 +58,10 @@ export interface TraceEstate {
   model: LensWalkModel
   layers: ViewLayerConfig[]
   assignments: Record<string, { layerId: string }>
+  /** Each seed's OWN walk, for a combined trace: the closure for a urn named
+   *  here answers with that seed's model alone, as the server walks each
+   *  seed on its own. Any other urn is answered with the whole estate. */
+  seedModels?: Record<string, LensWalkModel>
 }
 
 export interface TraceCanvasHarness {
@@ -64,6 +69,9 @@ export interface TraceCanvasHarness {
    *  With `deferTrace`, returns as soon as the session is open — the closure
    *  is still pending until `resolveTrace()`. */
   startTrace(urn: string): Promise<void>
+  /** Select every urn — the first a plain click, the rest added to it — and
+   *  press the header's "Trace N Entities": one COMBINED trace. */
+  startTraceMany(urns: readonly string[]): Promise<void>
   /** `deferTrace` only: let the pending `traceClosure` resolve, then settle.
    *  Lets a test look at the canvas DURING the walk. */
   resolveTrace(): Promise<void>
@@ -80,8 +88,8 @@ export interface TraceCanvasHarness {
   /** Click that magnifier, opening the column's inline search box. */
   openChildSearch(id: string): Promise<void>
   /** Type a query into an open child-search box AND SUBMIT it — the real
-   *  keystroke path into the canvas's `onSearchChildren`. The box keeps its
-   *  own local value and only commits on Enter/blur, so a change event alone
+   *  keystroke path into the canvas's search session. The box keeps its own
+   *  local value and only commits on Enter/blur, so a change event alone
    *  reaches nothing. Returns false if no box is open. */
   typeChildSearch(query: string): Promise<boolean>
   /** Click a card's expand chevron. */
@@ -90,6 +98,21 @@ export interface TraceCanvasHarness {
    *  view-only control must never move: direction, view depth and expansion
    *  are all re-projections of the walk the session already holds. */
   providerCalls(): number
+  /** The `granularity` every `/edges/aggregated` request carried, in order.
+   *  The aggregated fan-out is DEBOUNCED 300 ms, so a test that only calls
+   *  `settle()` (which barely advances the clock) will read an empty list —
+   *  wait past the debounce first. */
+  aggregatedGranularities(): Array<string | null>
+  /** The `sourceUrns` every `/edges/aggregated` request carried, in order —
+   *  the entities the canvas asked for roll-ups of. Debounced like the
+   *  granularities above. */
+  aggregatedSources(): string[][]
+  /** The `targetUrns` every `/edges/aggregated` request carried, in order
+   *  (empty when it named none). Debounced like the sources above. */
+  aggregatedTargets(): string[][]
+  /** The URNs every `/nodes/ancestor-chains` request carried, in order.
+   *  Recorded only with `ancestorChains`, and debounced like the above. */
+  chainRequests(): string[][]
   /** Click one of the dock's direction radios. */
   setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
   /** Open the header's Depth chip and click a preset by label. */
@@ -202,7 +225,7 @@ function installClipboard(): void {
   })
 }
 
-function installJsdomLayout(): void {
+export function installJsdomLayout(): void {
   if (typeof globalThis.IntersectionObserver === 'undefined') {
     globalThis.IntersectionObserver = class {
       observe() {}
@@ -306,15 +329,45 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number; getNodes: number },
+  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null>; aggregatedSources: string[][]; aggregatedTargets: string[][]; chains: string[][] },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
    *  only the fine page, so the coarse cells land alone first (Part G). */
   gateFineOnly?: boolean,
+  /** Extra fields merged onto every aggregated-edge answer — `staleReason`
+   *  and friends. The canvas reads these to decide what it tells the reader
+   *  about the completeness of the wires it drew, and that decision has no
+   *  other observable. */
+  aggregatedExtra?: Record<string, unknown>,
+  /** Totals `/nodes/degree` answers with (see `renderCanvasWithTrace`). */
+  nodeDegrees?: Record<string, NodeDegree | 'fail'>,
+  /** Answer `/nodes/ancestor-chains` from the estate's containment. */
+  ancestorChains?: boolean,
+  /** Parents whose children page never answers (see `renderCanvasWithTrace`). */
+  holdChildren?: readonly string[],
+  /** Roll-up cells `/edges/aggregated` answers with (see `renderCanvasWithTrace`). */
+  aggregatedCells?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>,
+  /** Flows `getEdges` answers with (see `renderCanvasWithTrace`). */
+  flows?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
+  // PER URN for a combined trace: each seed named in `seedModels` is walked
+  // on its own, so its answer is its own model — the union is the canvas's
+  // job, and the one thing a combined-trace test has to see it do.
+  const seedPages = new Map<string, { fine: ReturnType<typeof closureFor>; coarse: ReturnType<typeof closureFor> }>()
+  const pagesFor = (urn: string | undefined) => {
+    const seedModel = urn ? estate.seedModels?.[urn] : undefined
+    if (!urn || !seedModel) return { fine: closure, coarse: coarsePage }
+    let pages = seedPages.get(urn)
+    if (!pages) {
+      const seedEstate = { ...estate, model: seedModel }
+      pages = { fine: closureFor(seedEstate, urn, stall), coarse: closureFor(seedEstate, urn, stall, 'coarse') }
+      seedPages.set(urn, pages)
+    }
+    return pages
+  }
   const nodes = wireNodes(estate)
   const byUrn = new Map(nodes.map(n => [n.urn, n]))
   const kids = childrenOf(estate)
@@ -330,14 +383,15 @@ function stubProvider(
   ]))
   return {
     scopeKey: 'harness',
-    traceClosure: async (req?: { grain?: string }) => {
+    traceClosure: async (req?: { urn?: string; grain?: string }) => {
       calls.traceClosure += 1
+      const pages = pagesFor(req?.urn)
       // THE COARSE LEG (Part G) answers at once with the estate's cells —
       // the window in which a deferred fine page is still out is exactly
       // the coarse-first picture a test wants to read.
       if (req?.grain === 'coarse') {
         if (gate && !gateFineOnly) await gate.promise
-        return coarsePage
+        return pages.coarse
       }
       if (gate) await gate.promise
       // A STALLED WALK. The first answer reports a frontier, every frontier op
@@ -347,19 +401,22 @@ function stubProvider(
       // the canvas sits in the state where `continueWalk` is the ONLY thing
       // that would go back to the network.
       if (stall && calls.traceClosure > 1) throw new Error('frontier op refused (harness)')
-      return closure
+      return pages.fine
     },
     getChildren: async (parentUrn: string) => childrenFor(parentUrn),
-    getChildrenWithEdges: async (parentUrn: string) => ({
-      children: childrenFor(parentUrn),
-      containmentEdges: (kids.get(parentUrn) ?? []).map(child => ({
-        id: `c:${parentUrn}>${child}`, sourceUrn: parentUrn, targetUrn: child, edgeType: 'CONTAINS',
-      })),
-      lineageEdges: [],
-      totalChildren: (kids.get(parentUrn) ?? []).length,
-      hasMore: false,
-      nextCursor: null,
-    }),
+    getChildrenWithEdges: async (parentUrn: string) => {
+      if (holdChildren?.includes(parentUrn)) await new Promise<never>(() => {})
+      return {
+        children: childrenFor(parentUrn),
+        containmentEdges: (kids.get(parentUrn) ?? []).map(child => ({
+          id: `c:${parentUrn}>${child}`, sourceUrn: parentUrn, targetUrn: child, edgeType: 'CONTAINS',
+        })),
+        lineageEdges: [],
+        totalChildren: (kids.get(parentUrn) ?? []).length,
+        hasMore: false,
+        nextCursor: null,
+      }
+    },
     getParent: async (childUrn: string) => byUrn.get(parentMap.get(childUrn) ?? '') ?? null,
     // The NAME LOOKUP the server serves: exactly the urns asked for, and
     // counted — a caller that asks twice for the same name is a defect.
@@ -369,7 +426,61 @@ function stubProvider(
       if (!urns) return nodes
       return urns.map(u => byUrn.get(u)).filter((n): n is GraphNode => !!n)
     },
-    getEdges: async () => [],
+    // One-sided flow reads (lineage priming, the external preview): those
+    // from one of its sources, or into one of its targets.
+    getEdges: async (query?: { sourceUrns?: string[]; targetUrns?: string[] }) => (flows ?? [])
+      .filter(f => query?.sourceUrns?.includes(f.sourceUrn) || query?.targetUrns?.includes(f.targetUrn))
+      .map(f => ({ id: `f:${f.sourceUrn}>${f.targetUrn}`, sourceUrn: f.sourceUrn, targetUrn: f.targetUrn, edgeType: 'TRANSFORMS' })),
+    // Containment among the URNs asked — what a reveal primes its paths with.
+    getEdgesBetween: async (urns: string[]) => {
+      const asked = new Set(urns)
+      return estate.model.containmentEdges
+        .filter(c => asked.has(c.sourceUrn) && asked.has(c.targetUrn))
+        .map(c => ({ id: `c:${c.sourceUrn}>${c.targetUrn}`, sourceUrn: c.sourceUrn, targetUrn: c.targetUrn, edgeType: 'CONTAINS' }))
+    },
+    // The aggregated fan-out the browse canvas fires for its visible
+    // containers. It answers nothing — what a test reads is what the canvas
+    // asked for: the LEVEL, which is the whole blast radius of the
+    // granularity it auto-selects, and the entities it asked about.
+    getAggregatedEdges: async (request: { granularity?: string | null; sourceUrns?: string[]; targetUrns?: string[] }) => {
+      calls.aggregated.push(request?.granularity ?? null)
+      calls.aggregatedSources.push([...(request?.sourceUrns ?? [])])
+      calls.aggregatedTargets.push([...(request?.targetUrns ?? [])])
+      const S = new Set(request?.sourceUrns ?? [])
+      const T = request?.targetUrns ? new Set(request.targetUrns) : null
+      // Naming no source asks for everything into the targets.
+      const cells = (aggregatedCells ?? []).filter(c => (S.size === 0 ? !!T : S.has(c.sourceUrn)) && (!T || T.has(c.targetUrn)))
+      return { aggregatedEdges: cells, totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
+    },
+    // The server answers every URN it could count, so every URN asked about
+    // is answered here: one the test did not list has no lineage (nor any
+    // roll-up cell, when asked), and one listed as 'fail' is left out, as a
+    // URN the server could not count is. Asked, the server always says
+    // whether a URN holds roll-up cells; a test that wants the flags left
+    // out (the server's check failed) takes them out with `wrapProvider`.
+    ...(nodeDegrees ? {
+      getNodeDegrees: async (urns: string[], _types?: string[], options?: { includeRollups?: boolean }) => {
+        const none = options?.includeRollups ? { in: 0, out: 0, rollupIn: 0, rollupOut: 0 } : { in: 0, out: 0 }
+        return Object.fromEntries(urns
+          .filter(urn => nodeDegrees[urn] !== 'fail')
+          .map(urn => [urn, { ...none, ...(nodeDegrees[urn] as NodeDegree | undefined) }]))
+      },
+    } : {}),
+    // Parent first, root last. A URN the estate does not hold is left out —
+    // unknown, as the server leaves out a URN it could not answer.
+    ...(ancestorChains ? {
+      getAncestorChains: async (urns: string[]) => {
+        calls.chains.push([...urns])
+        const chains: Record<string, string[]> = {}
+        for (const urn of urns) {
+          if (!byUrn.has(urn)) continue
+          const chain: string[] = []
+          for (let up = parentMap.get(urn); up; up = parentMap.get(up)) chain.push(up)
+          chains[urn] = chain
+        }
+        return chains
+      },
+    } : {}),
     computeLayerAssignments: async () => ({
       assignments,
       parentMap,
@@ -385,18 +496,22 @@ function stubProvider(
  *  ERR_INVALID_URL (a relative path with no origin) swallowed into a
  *  `console.error`. Answer it with the layout the store already holds, so the
  *  effect finds nothing to change and returns. */
-function stubFetch(estate: TraceEstate): () => void {
+function stubFetch(estate: TraceEstate, entityScope: 'all' | 'curated' = 'curated'): () => void {
   const original = globalThis.fetch
   const view = {
     id: 'harness-view',
     config: {
       layout: { type: 'reference', referenceLayout: { layers: estate.layers, assignments: estate.assignments } },
-      content: { entityScope: 'curated' },
+      content: { entityScope },
     },
   }
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-    const body = url.includes('/api/v1/views/') ? view : {}
+    // The view's library (display rules, saved queries): empty, and editable.
+    const library = { viewId: view.id, displayRules: [], savedQueries: [], canEdit: true }
+    const body = url.includes('/api/v1/views/')
+      ? (url.includes('/library') ? library : view)
+      : {}
     return new Response(JSON.stringify(body), {
       status: 200, headers: { 'content-type': 'application/json' },
     })
@@ -446,19 +561,30 @@ function seedBrowse(estate: TraceEstate, holds?: readonly string[]): void {
   store.clearSelection()
 }
 
-function seedView(estate: TraceEstate): void {
+/** `dataSourceId` is OPT-IN and defaults to absent, exactly as it was before
+ *  this parameter existed. Several canvas hooks (branch resolution, graph
+ *  resolve, the readiness loops) only run once the view names a data source,
+ *  so setting it unconditionally would have changed what all nine harness
+ *  modules exercise. Only a test that needs those paths asks for it. */
+function seedView(
+  estate: TraceEstate,
+  entityTypes: readonly unknown[] = [],
+  dataSourceId?: string,
+  entityScope: 'all' | 'curated' = 'curated',
+): void {
   useSchemaStore.setState({
     activeViewId: 'harness-view',
     schema: {
       id: 'harness', name: 'harness', version: '1',
-      entityTypes: [], relationshipTypes: [], globalVisuals: {},
+      entityTypes, relationshipTypes: [], globalVisuals: {},
       containmentEdgeTypes: ['CONTAINS'], lineageEdgeTypes: ['TRANSFORMS', 'AGGREGATED'],
       rootEntityTypes: [], defaultViewId: 'harness-view',
       views: [{
         id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws',
+        ...(dataSourceId ? { dataSourceId } : {}),
         content: {
           visibleEntityTypes: [], visibleRelationshipTypes: [],
-          defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated',
+          defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope,
         },
         layout: {
           type: 'reference',
@@ -485,6 +611,44 @@ export async function renderCanvasWithTrace(
     /** The search string the canvas mounts on — `?trace=…` for a shared
      *  trace link, exactly as a recipient's browser would present it. */
     search?: string
+    /** The ontology's entity types, in place BEFORE the first render. The
+     *  canvas picks its aggregation granularity from them on mount and the
+     *  fan-out is debounced behind that, so a test that installs the schema
+     *  after this call returns can miss the round it exists to read. */
+    entityTypes?: readonly unknown[]
+    /** Extra fields on every aggregated-edge answer (e.g. `staleReason`),
+     *  so a test can put the canvas in a degraded-rollup state. */
+    aggregatedExtra?: Record<string, unknown>
+    /** Give the seeded view a data source, arming the canvas hooks that are
+     *  inert without one. Absent by default. */
+    dataSourceId?: string
+    /** Lineage totals per URN for `/nodes/degree`. Every URN the canvas asks
+     *  about is answered, and one not listed has none ({ in: 0, out: 0 }, and
+     *  no roll-up cell when asked); one listed without the roll-up flags has
+     *  none of those either, as the server says when asked; one listed as
+     *  'fail' is never answered (its count failed). Absent by default: the
+     *  provider then cannot count degrees at all. */
+    nodeDegrees?: Record<string, NodeDegree | 'fail'>
+    /** Answer `/nodes/ancestor-chains` from the estate's containment. Off by
+     *  default: the provider then cannot walk containment. */
+    ancestorChains?: boolean
+    /** Parents whose children page never answers, so opening one leaves a
+     *  child load in flight for as long as the test runs. */
+    holdChildren?: readonly string[]
+    /** Roll-up cells for `/edges/aggregated`: each request is answered with
+     *  those from one of its sources to one of its targets, as the server
+     *  does — to any target when it names none, from any source when it
+     *  names none. `aggregatedExtra.aggregatedEdges` overrides them. */
+    aggregatedCells?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
+    /** The view's entityScope. Curated by default; 'all' opens the view to
+     *  its whole data source. */
+    entityScope?: 'all' | 'curated'
+    /** Flows `getEdges` answers with, by source or target, as TRANSFORMS
+     *  edges with id `f:<source>><target>`. Absent: it answers none. */
+    flows?: ReadonlyArray<{ sourceUrn: string; targetUrn: string }>
+    /** A test's own turn on the stub provider: wrap a read to fail it, or
+     *  hold it. */
+    wrapProvider?: (provider: GraphDataProvider) => GraphDataProvider
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -497,7 +661,7 @@ export async function renderCanvasWithTrace(
     if (key.startsWith('nx:trace-history:')) localStorage.removeItem(key)
   }
   releaseFetch?.()
-  releaseFetch = stubFetch(estate)
+  releaseFetch = stubFetch(estate, opts.entityScope)
   usePreferencesStore.setState({ canvasDensity: 'spacious' } as never)
   // AUTHORING MUST BE LIVE for a test of the trace's write gates to mean
   // anything: with no draft open (or edit mode off) every connect/edit path
@@ -516,7 +680,7 @@ export async function renderCanvasWithTrace(
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
-  seedView(estate)
+  seedView(estate, opts.entityTypes, opts.dataSourceId, opts.entityScope)
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []
@@ -552,19 +716,24 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0, getNodes: 0 }
+  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null>, aggregatedSources: [] as string[][], aggregatedTargets: [] as string[][], chains: [] as string[][] }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  // A Router, because the header's BranchSwitcher keeps the active branch in the
+  // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
+  // and every canvas test dies before it can look at the canvas.
   render(
-    <QueryClientProvider client={queryClient}>
-      <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace),
-        isLoading: false, error: null, scopeKind: 'ready',
-        workspaceId: 'harness-ws', dataSourceId: null,
-        providerReady: true, providerVersion: 1,
-      } as never}>
-        <ContextViewCanvas />
-      </ProviderOverride>
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <ProviderOverride value={{
+          provider: (opts.wrapProvider ?? (p => p))(stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra, opts.nodeDegrees, opts.ancestorChains, opts.holdChildren, opts.aggregatedCells, opts.flows)),
+          isLoading: false, error: null, scopeKind: 'ready',
+          workspaceId: 'harness-ws', dataSourceId: null,
+          providerReady: true, providerVersion: 1,
+        } as never}>
+          <ContextViewCanvas />
+        </ProviderOverride>
+      </QueryClientProvider>
+    </MemoryRouter>,
   )
 
   // REAL TIME, for the surfaces that animate. `settle` drains microtasks and
@@ -628,6 +797,20 @@ export async function renderCanvasWithTrace(
       await settle()
       assertQuiet('the trace')
     },
+    async startTraceMany(urns: readonly string[]) {
+      act(() => {
+        urns.forEach((urn, i) => useCanvasStore.getState().selectNode(urn, i > 0))
+      })
+      await settle()
+      const button = await screen.findByRole('button', { name: new RegExp(`^trace ${urns.length} entities$`, 'i') })
+      writes.count = 0
+      await act(async () => { fireEvent.click(button) })
+      await waitFor(() => {
+        if (!isTracing()) throw new Error('the canvas did not enter trace mode')
+      }, { timeout: 4000 })
+      await settle()
+      assertQuiet('the combined trace')
+    },
     async resolveTrace() {
       releaseTrace()
       await settle()
@@ -666,7 +849,7 @@ export async function renderCanvasWithTrace(
     },
     async typeChildSearch(query: string) {
       // The column's own input, driven the way a reader drives it — no prop
-      // capture, no mock: this is the exact path to `onSearchChildren`.
+      // capture, no mock: this is the exact path into the search session.
       //
       // ENTER IS LOAD-BEARING. SearchBoxItem holds the text in local state
       // and only calls its `onChange` on Enter or blur, so a change event by
@@ -706,10 +889,10 @@ export async function renderCanvasWithTrace(
     connectPickerOpen: () =>
       [...document.querySelectorAll('h3')].some(h => h.textContent?.trim() === 'Connect'),
     missingConnections: () => {
-      // The chip reads "<n> connections outside this view" (curated) or
-      // "… not on canvas" (open). Absent entirely when the count is 0.
+      // The chip reads "<n> flows outside this view". Absent entirely when
+      // the count is 0.
       const label = [...document.querySelectorAll<HTMLElement>('span')]
-        .find(el => /^connections (outside this view|not on canvas)$/.test(el.textContent?.trim() ?? ''))
+        .find(el => el.textContent?.trim() === 'flows outside this view')
       const count = label?.previousElementSibling?.textContent?.trim()
       if (count === undefined) return null
       return Number(count.replace(/,/g, ''))
@@ -717,10 +900,11 @@ export async function renderCanvasWithTrace(
     async layerContextMenu() {
       // Right-click EMPTY layer space — the column's scroll area, which is
       // what carries `onLayerContextMenu` (cards handle their own).
-      // The FIRST scroller belongs to a chrome panel that marks itself
-      // interactive, and the handler deliberately bails for those; the layer
-      // columns' own scrollers are the ones that carry the menu.
-      const area = [...document.querySelectorAll<HTMLElement>('.custom-scrollbar')]
+      // Scoped to a column: the app styles several scrollers with
+      // `custom-scrollbar` — chrome panels (which mark themselves
+      // interactive, and the handler deliberately bails for those) and the
+      // canvas's own horizontal scroller, which carries no menu at all.
+      const area = [...document.querySelectorAll<HTMLElement>('[data-layer-id] .custom-scrollbar')]
         .find(el => !el.closest('[data-canvas-interactive]'))
       if (!area) throw new Error('no layer scroll area')
       await act(async () => { fireEvent.contextMenu(area) })
@@ -754,7 +938,11 @@ export async function renderCanvasWithTrace(
       const rows = [...(panel?.querySelectorAll<HTMLElement>('[data-history-resume]') ?? [])]
       const row = rows.find(r => r.textContent?.includes(label))
       if (!row) throw new Error(`no trace history entry for ${label}`)
-      const share = row.parentElement?.querySelector<HTMLButtonElement>('[data-history-share]')
+      // Not `row.parentElement`: each control in the row is wrapped by its own
+      // HoverTip anchor, so the two buttons are cousins rather than siblings.
+      // The row itself is marked, and that is what they share.
+      const share = row.closest('[data-history-row]')
+        ?.querySelector<HTMLButtonElement>('[data-history-share]')
       if (!share) throw new Error(`no share action on the ${label} entry`)
       clipboard.text = ''
       await act(async () => { fireEvent.click(share) })
@@ -830,6 +1018,10 @@ export async function renderCanvasWithTrace(
       await settle()
     },
     providerCalls: () => providerCalls.traceClosure,
+    aggregatedGranularities: () => [...providerCalls.aggregated],
+    aggregatedSources: () => providerCalls.aggregatedSources.map(urns => [...urns]),
+    aggregatedTargets: () => providerCalls.aggregatedTargets.map(urns => [...urns]),
+    chainRequests: () => providerCalls.chains.map(urns => [...urns]),
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
       await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })

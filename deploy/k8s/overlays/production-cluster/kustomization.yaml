@@ -25,9 +25,20 @@ resources:
 
 patches:
   # The 3-shard cluster replaces the single-node StatefulSet + Service.
+  # One delete per patch: kustomize (v5.4-5.6) panics on a file holding
+  # several `$patch: delete` documents.
   - path: patches/remove-single-falkordb.yaml
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: falkordb
+        namespace: synodic
   # FALKORDB_MODE=cluster + seed nodes for the topology-aware client.
   - path: patches/cluster-config.yaml
+  # Aggregation's slot budget re-derived for THREAD_COUNT 6 (base is 8).
+  - path: patches/worker-slots.yaml
   # DR: one backup pod per shard, snapshotting the shard's REPLICA.
   - path: patches/dr-backup-cluster.yaml
 

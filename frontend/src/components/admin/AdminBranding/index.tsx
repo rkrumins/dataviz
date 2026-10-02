@@ -9,12 +9,12 @@
  * concurrency: the saved ``version`` is echoed back; a 409 surfaces a
  * "someone else changed this" prompt rather than silently overwriting.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
     Palette, Type, ImageIcon, Scale, Loader2, Check, Upload, Trash2,
-    RotateCcw, AlertCircle, Info, Sparkles,
+    RotateCcw, RefreshCw, AlertCircle, AlertTriangle, Info, Sparkles, GitMerge,
 } from 'lucide-react'
 
 /** Built-in brand marks the admin can apply in one click. Paths resolve to
@@ -40,11 +40,14 @@ const BUILTIN_MARKS = [
 ] as const
 import {
     fetchAdminBranding, updateBranding, uploadBrandingImage, resetBranding,
-    type Branding, type BrandingPatch,
+    BrandingConflictError, type Branding, type BrandingPatch,
 } from '@/services/brandingService'
 import { useBrandingStore } from '@/store/branding'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { cn } from '@/lib/utils'
+import { MOTION } from '@/lib/motion'
+import { formatUtc, timeAgo } from '@/lib/timeAgo'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 const BRANDING_QUERY_KEY = ['admin', 'branding'] as const
@@ -76,87 +79,167 @@ function formFrom(b: Branding): FormState {
     }
 }
 
+const FIELD_LABELS: Record<keyof FormState, string> = {
+    appName: 'Application name',
+    shortName: 'Short name',
+    description: 'Description',
+    loginTagline: 'Sign-in tagline',
+    logoUrl: 'Logo URL',
+    faviconUrl: 'Favicon URL',
+    accentColor: 'Accent colour',
+    copyrightText: 'Copyright',
+    supportEmail: 'Support email',
+}
+const FIELDS = Object.keys(FIELD_LABELS) as (keyof FormState)[]
+
+/** The fields of ``form`` that differ from the snapshot ``from``. */
+function editsFrom(form: FormState, from: Branding): Partial<FormState> {
+    const seed = formFrom(from)
+    const edits: Partial<FormState> = {}
+    for (const k of FIELDS) if (form[k] !== seed[k]) edits[k] = form[k]
+    return edits
+}
+
 export function AdminBranding() {
     const setBranding = useBrandingStore((s) => s.setBranding)
+    const queryClient = useQueryClient()
+    const { notify } = useAppNotifications()
 
-    const { data, isLoading, error, refetch } = useQuery({
+    const { data, error, refetch, isFetching } = useQuery({
         queryKey: BRANDING_QUERY_KEY,
         queryFn: fetchAdminBranding,
         staleTime: 0,
     })
 
+    // The server snapshot the edits on screen started from: the version a
+    // save is bound to, the resolved logo/favicon (may be data URIs from an
+    // upload), and what Discard returns to. Kept apart from ``data`` so a
+    // background refetch can't swap it out from under a half-typed form.
+    const [base, setBase] = useState<Branding | null>(null)
     const [form, setForm] = useState<FormState | null>(null)
-    const [version, setVersion] = useState(0)
-    // The resolved logo/favicon as the server sees them (may be data URIs
-    // from an upload) — used by the preview and the "remove" affordance.
-    const [resolvedLogo, setResolvedLogo] = useState('')
-    const [resolvedFavicon, setResolvedFavicon] = useState('')
     const [saving, setSaving] = useState(false)
     const [saved, setSaved] = useState(false)
-    const [saveError, setSaveError] = useState<string | null>(null)
-    const [conflict, setConflict] = useState(false)
+    // The newer snapshot a stale write ran into — drives the conflict panel.
+    // ``unapplied`` names the image action that write was, so it isn't
+    // dropped in silence: nothing is typed for Keep to carry over.
+    const [conflict, setConflict] = useState<{ latest: Branding; unapplied?: string } | null>(null)
     const [showReset, setShowReset] = useState(false)
     const [resetting, setResetting] = useState(false)
 
-    // Sync local form when the query resolves (or after a refetch).
-    useEffect(() => {
-        if (data) {
-            setForm(formFrom(data))
-            setVersion(data.version)
-            setResolvedLogo(data.logoUrl)
-            setResolvedFavicon(data.faviconUrl)
-        }
-    }, [data])
-
-    const dirty = useMemo(
-        () => !!data && !!form
-            && JSON.stringify(form) !== JSON.stringify(formFrom(data)),
-        [form, data],
+    const edits = useMemo(
+        () => (form && base ? editsFrom(form, base) : {}),
+        [form, base],
     )
+    const editCount = Object.keys(edits).length
+    const dirty = editCount > 0
+
+    // Adopt a server snapshot: the first load, or a newer version while the
+    // form is clean. Refetches fire on mount, on reconnect and on the app's
+    // blanket invalidations (permissionPoller, fetchWithTimeout); a dirty
+    // form is never overwritten by one — it gets the notice below instead.
+    if (data && (!base || (!dirty && !conflict && data.version > base.version))) {
+        setBase(data)
+        setForm(formFrom(data))
+    }
+    const changedElsewhere = !!data && !!base && dirty && !conflict
+        && data.version > base.version
 
     function update<K extends keyof FormState>(key: K, value: FormState[K]) {
         setForm((f) => (f ? { ...f, [key]: value } : f))
         setSaved(false)
     }
 
-    /** Apply a server response everywhere: local form, version, store. */
-    function absorb(next: Branding) {
-        setForm(formFrom(next))
-        setVersion(next.version)
-        setResolvedLogo(next.logoUrl)
-        setResolvedFavicon(next.faviconUrl)
+    /** Measure edits from ``next`` from now on. The unsaved edits made
+     *  since ``since`` are carried across, minus ``except``. */
+    function rebase(next: Branding, since?: Branding, except: (keyof FormState)[] = []) {
+        setBase(next)
+        setForm((f) => {
+            const carried = f && since ? editsFrom(f, since) : {}
+            for (const k of except) delete carried[k]
+            return { ...formFrom(next), ...carried }
+        })
+    }
+
+    /** Apply a server response everywhere: snapshot, form, query cache and
+     *  the live brand store. The cache matters too — a refetch or remount
+     *  must not resurrect the pre-save values. */
+    function absorb(next: Branding, since?: Branding, except?: (keyof FormState)[]) {
+        rebase(next, since, except)
+        queryClient.setQueryData(BRANDING_QUERY_KEY, next)
         setBranding(next)   // live-update the whole app
     }
 
+    /** A stale ``expectedVersion``: load what the other save wrote and put
+     *  the choice in front of the user. Their edits stay in the form. */
+    async function openConflict(unapplied?: string) {
+        try {
+            const latest = await queryClient.fetchQuery({
+                queryKey: BRANDING_QUERY_KEY,
+                queryFn: fetchAdminBranding,
+                staleTime: 0,
+            })
+            setConflict({ latest, unapplied })
+        } catch (e) {
+            notify('error', `Someone else changed the branding, and the latest version couldn't be loaded. ${errMsg(e)}`)
+        }
+    }
+
     async function handleSave() {
-        if (!form) return
+        if (!base) return
         setSaving(true)
-        setSaveError(null)
-        setConflict(false)
-        const patch: BrandingPatch = { ...form, expectedVersion: version }
+        // Only what changed: untouched fields keep following the APP_BRAND_*
+        // env defaults instead of being pinned to today's values.
+        const patch: BrandingPatch = { ...edits, expectedVersion: base.version }
         try {
             absorb(await updateBranding(patch))
             setSaved(true)
+            notify('success', 'Branding saved — the new name and logo are live everywhere.')
         } catch (e) {
-            const msg = errMsg(e)
-            if (/version mismatch|conflict/i.test(msg)) {
-                setConflict(true)
+            // A 409 is not a failure to report and forget: it is a standing
+            // instruction ("someone else changed this — keep yours or theirs?"),
+            // and it stays on the page until the user acts on it.
+            if (e instanceof BrandingConflictError) {
+                await openConflict()
             } else {
-                setSaveError(msg)
+                notify('error', errMsg(e) || 'Could not save the branding changes.')
             }
         } finally {
             setSaving(false)
         }
     }
 
+    /** Keep my changes: re-apply the user's edits over the latest version,
+     *  so the next Save is bound to it. Save stays armed. */
+    function keepMine() {
+        if (!conflict || !base) return
+        rebase(conflict.latest, base)
+        setConflict(null)
+    }
+
+    /** Discard mine: load the latest version as-is. */
+    function discardMine() {
+        if (!conflict) return
+        absorb(conflict.latest)
+        setConflict(null)
+    }
+
+    // Image actions persist on their own. They carry the typed-but-unsaved
+    // text edits over the response (minus the field the action itself
+    // replaces) and route a stale version to the conflict panel.
     async function handleUpload(kind: 'logo' | 'favicon', file: File) {
+        if (!base) return
         setSaving(true)
-        setSaveError(null)
         try {
-            absorb(await uploadBrandingImage(kind, file))
+            absorb(
+                await uploadBrandingImage(kind, file),
+                base, [kind === 'logo' ? 'logoUrl' : 'faviconUrl'],
+            )
             setSaved(true)
+            notify('success', kind === 'logo'
+                ? 'New logo uploaded — it is live everywhere now.'
+                : 'New favicon uploaded — it is live in the browser tab now.')
         } catch (e) {
-            setSaveError(errMsg(e))
+            notify('error', errMsg(e) || `Could not upload the new ${kind}.`)
         } finally {
             setSaving(false)
         }
@@ -165,13 +248,18 @@ export function AdminBranding() {
     /** Reset every field back to the deployment (env) defaults. */
     async function handleReset() {
         setResetting(true)
-        setSaveError(null)
         try {
             absorb(await resetBranding())
-            setShowReset(false)
+            notify('success', 'Branding reset — every override is gone and the deployment defaults are back.')
         } catch (e) {
-            setSaveError(errMsg(e))
+            notify('error', errMsg(e) || 'Could not reset branding. Nothing was changed.')
         } finally {
+            // Closed either way. The confirmation asked its question and got an
+            // answer; a dialog left standing over a failure is both an invitation
+            // to click the same button again and — before this page spoke through
+            // the notification stack — the thing that hid the failure completely,
+            // because the modal sits on top of the page it was reported on.
+            setShowReset(false)
             setResetting(false)
         }
     }
@@ -180,19 +268,24 @@ export function AdminBranding() {
      *  asset paths and clears any uploaded image data so the paths win
      *  (uploads otherwise take precedence). Persists immediately, like upload. */
     async function applyBuiltInMark(mark: (typeof BUILTIN_MARKS)[number]) {
+        if (!base) return
         setSaving(true)
-        setSaveError(null)
         try {
             absorb(await updateBranding({
                 logoUrl: mark.logoUrl,
                 faviconUrl: mark.faviconUrl,
                 logoData: '', logoMime: '',
                 faviconData: '', faviconMime: '',
-                expectedVersion: version,
-            }))
+                expectedVersion: base.version,
+            }), base, ['logoUrl', 'faviconUrl'])
             setSaved(true)
+            notify('success', `“${mark.name}” applied as the logo and favicon.`)
         } catch (e) {
-            setSaveError(errMsg(e))
+            if (e instanceof BrandingConflictError) {
+                await openConflict(`“${mark.name}” wasn't applied. Apply it again on the latest version.`)
+            } else {
+                notify('error', errMsg(e) || `Could not apply “${mark.name}”.`)
+            }
         } finally {
             setSaving(false)
         }
@@ -200,21 +293,59 @@ export function AdminBranding() {
 
     /** Clear an uploaded image so the URL field / default mark takes over. */
     async function handleClearImage(kind: 'logo' | 'favicon') {
+        if (!base) return
         setSaving(true)
-        setSaveError(null)
         const patch: BrandingPatch = kind === 'logo'
-            ? { logoData: '', logoMime: '', expectedVersion: version }
-            : { faviconData: '', faviconMime: '', expectedVersion: version }
+            ? { logoData: '', logoMime: '', expectedVersion: base.version }
+            : { faviconData: '', faviconMime: '', expectedVersion: base.version }
         try {
-            absorb(await updateBranding(patch))
+            absorb(await updateBranding(patch), base)
+            setSaved(true)
+            notify('success', kind === 'logo'
+                ? 'Uploaded logo removed — the URL field, or the default mark, takes over.'
+                : 'Uploaded favicon removed — the URL field, or the default mark, takes over.')
         } catch (e) {
-            setSaveError(errMsg(e))
+            if (e instanceof BrandingConflictError) {
+                await openConflict(`The uploaded ${kind} wasn't removed. Remove it again on the latest version.`)
+            } else {
+                notify('error', errMsg(e) || `Could not remove the uploaded ${kind}.`)
+            }
         } finally {
             setSaving(false)
         }
     }
 
-    if (isLoading || !form) {
+    // Before the skeleton guard: a failed first load leaves ``form`` null
+    // forever, so checked after it this state could never render.
+    if (error && !form) {
+        return (
+            <div className="max-w-2xl mx-auto p-8">
+                <div
+                    role="alert"
+                    className="flex items-start gap-3 rounded-2xl border border-accent-warning/20 bg-accent-warning/10 px-5 py-4"
+                >
+                    <AlertCircle className="w-5 h-5 shrink-0 mt-0.5 text-accent-warning" />
+                    <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-accent-warning">
+                            Couldn't load branding settings.
+                        </p>
+                        <p className="mt-1 text-xs text-ink-secondary break-words">{errMsg(error)}</p>
+                        <button
+                            type="button"
+                            onClick={() => void refetch()}
+                            disabled={isFetching}
+                            className="mt-3 inline-flex items-center gap-2 rounded-lg border border-glass-border bg-canvas-elevated px-3.5 py-2 text-sm font-medium text-ink transition-colors hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+                        >
+                            {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                            Try again
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )
+    }
+
+    if (!form || !base) {
         return (
             <div className="max-w-2xl mx-auto p-8 space-y-6">
                 <div className="space-y-2">
@@ -231,17 +362,8 @@ export function AdminBranding() {
         )
     }
 
-    if (error) {
-        return (
-            <div className="max-w-2xl mx-auto p-8">
-                <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-accent-warning/10 border border-accent-warning/20 text-accent-warning">
-                    <AlertCircle className="w-5 h-5 shrink-0" />
-                    <span className="text-sm">Couldn't load branding settings. {errMsg(error)}</span>
-                </div>
-            </div>
-        )
-    }
-
+    const resolvedLogo = base.logoUrl
+    const resolvedFavicon = base.faviconUrl
     const hasUploadedLogo = resolvedLogo.startsWith('data:')
     const hasUploadedFavicon = resolvedFavicon.startsWith('data:')
     const previewLogo = hasUploadedLogo ? resolvedLogo : form.logoUrl
@@ -287,7 +409,7 @@ export function AdminBranding() {
                         />
                         <Field
                             label="Description"
-                            help="A one-line tagline describing what the product does. Used in metadata."
+                            help="A one-line summary of what the product does. Shown under the name on the sign-in screen and set as the page's meta description."
                             value={form.description}
                             onChange={(v) => update('description', v)}
                             placeholder="Interactive Data Lineage Visualization"
@@ -408,7 +530,7 @@ export function AdminBranding() {
                         />
                         <Field
                             label="Support email"
-                            help="Where users are pointed for help. Leave blank to hide."
+                            help="Shown as “Contact support” in the in-app Help panel. Leave blank to hide it."
                             value={form.supportEmail}
                             onChange={(v) => update('supportEmail', v)}
                             placeholder="support@example.com"
@@ -416,25 +538,54 @@ export function AdminBranding() {
                         />
                     </Section>
 
-                    {/* Conflict / error banners */}
-                    {conflict && (
-                        <Banner tone="warning">
-                            Someone else updated branding while you were editing. {' '}
-                            <button
-                                onClick={() => { setConflict(false); void refetch() }}
-                                className="underline font-medium hover:opacity-80"
+                    {/* The one thing that stays on the page: a 409 is not a report of
+                        something that happened, it is state that is still true while
+                        you read it, and it carries the next step. Failures go to the
+                        notification stack — including the reset's, which used to be
+                        rendered here, underneath the modal that caused it. */}
+                    <AnimatePresence initial={false}>
+                        {conflict ? (
+                            <ConflictPanel
+                                key="branding-conflict"
+                                latest={conflict.latest}
+                                unapplied={conflict.unapplied}
+                                base={base}
+                                form={form}
+                                onKeep={keepMine}
+                                onDiscard={discardMine}
+                            />
+                        ) : changedElsewhere && data ? (
+                            <motion.div
+                                key="branding-changed-elsewhere"
+                                role="status"
+                                initial={{ opacity: 0, y: MOTION.cardY }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: MOTION.cardY }}
+                                transition={MOTION.cardEntry}
+                                className="flex items-start gap-3 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-3"
                             >
-                                Reload the latest
-                            </button>{' '}and re-apply your changes.
-                        </Banner>
-                    )}
-                    {saveError && <Banner tone="error">{saveError}</Banner>}
+                                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-500" />
+                                <p className="flex-1 text-[13px] leading-snug text-ink-secondary">
+                                    Someone else saved branding (version {data.version}) while you
+                                    were editing. Nothing you typed was touched; saving will ask
+                                    which changes to keep.
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={() => setConflict({ latest: data })}
+                                    className="shrink-0 rounded-lg px-2.5 py-1 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-300"
+                                >
+                                    Review
+                                </button>
+                            </motion.div>
+                        ) : null}
+                    </AnimatePresence>
 
                     {/* Action bar */}
-                    <div className="flex items-center gap-3 sticky bottom-4 bg-canvas-elevated/80 backdrop-blur border border-glass-border rounded-2xl px-4 py-3 shadow-lg">
+                    <div className="flex items-center gap-3 sticky bottom-4 bg-canvas-elevated border border-glass-border rounded-2xl px-4 py-3 shadow-lg">
                         <button
                             onClick={handleSave}
-                            disabled={!dirty || saving}
+                            disabled={!dirty || saving || !!conflict}
                             className={cn(
                                 'inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors',
                                 'bg-indigo-500 text-white hover:bg-indigo-600 shadow-sm shadow-indigo-500/30',
@@ -446,9 +597,9 @@ export function AdminBranding() {
                                 : null}
                             {saving ? 'Saving…' : saved && !dirty ? 'Saved' : 'Save changes'}
                         </button>
-                        {dirty && data && (
+                        {dirty && (
                             <button
-                                onClick={() => setForm(formFrom(data))}
+                                onClick={() => setForm(formFrom(base))}
                                 disabled={saving}
                                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
                             >
@@ -456,9 +607,34 @@ export function AdminBranding() {
                             </button>
                         )}
                         <div className="ml-auto flex items-center gap-3">
-                            <span className="text-[11px] text-ink-muted hidden sm:inline">
-                                Empty fields fall back to deployment defaults.
-                            </span>
+                            {/* One status slot: the unsaved count while editing, the
+                                defaults hint otherwise — the bar never outgrows its row. */}
+                            <AnimatePresence mode="wait" initial={false}>
+                                {dirty ? (
+                                    <motion.span
+                                        key="unsaved-count"
+                                        initial={{ opacity: 0, scale: 0.9 }}
+                                        animate={{ opacity: 1, scale: 1 }}
+                                        exit={{ opacity: 0, scale: 0.9 }}
+                                        transition={MOTION.fadeIn}
+                                        className="hidden sm:inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-indigo-500/25 bg-indigo-500/10 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-300"
+                                    >
+                                        <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
+                                        {editCount} unsaved {editCount === 1 ? 'change' : 'changes'}
+                                    </motion.span>
+                                ) : (
+                                    <motion.span
+                                        key="defaults-hint"
+                                        initial={{ opacity: 0 }}
+                                        animate={{ opacity: 1 }}
+                                        exit={{ opacity: 0 }}
+                                        transition={MOTION.fadeIn}
+                                        className="text-[11px] text-ink-muted hidden sm:inline"
+                                    >
+                                        Empty fields fall back to deployment defaults.
+                                    </motion.span>
+                                )}
+                            </AnimatePresence>
                             <button
                                 onClick={() => setShowReset(true)}
                                 disabled={saving || resetting}
@@ -479,6 +655,7 @@ export function AdminBranding() {
                         accent={form.accentColor}
                         name={form.appName}
                         shortName={form.shortName}
+                        description={form.description}
                         tagline={form.loginTagline}
                         copyright={form.copyrightText}
                         logo={previewLogo}
@@ -697,11 +874,12 @@ function ImageField({
 }
 
 function Preview({
-    accent, name, shortName, tagline, copyright, logo,
+    accent, name, shortName, description, tagline, copyright, logo,
 }: {
     accent: string
     name: string
     shortName: string
+    description: string
     tagline: string
     copyright: string
     logo: string
@@ -750,6 +928,9 @@ function Preview({
                 <div className="text-base font-bold text-ink truncate" style={{ color: accent }}>
                     {name || 'Your brand'}
                 </div>
+                {description && (
+                    <div className="text-[10px] text-ink-muted mt-0.5 line-clamp-2">{description}</div>
+                )}
                 <div className="text-[11px] text-ink-secondary mt-1">{tagline || 'Sign in to continue'}</div>
                 <div className="mt-4 space-y-2">
                     <div className="h-7 rounded-lg bg-black/5 dark:bg-white/5" />
@@ -766,16 +947,140 @@ function Preview({
     )
 }
 
-function Banner({ tone, children }: { tone: 'warning' | 'error'; children: React.ReactNode }) {
+/** Shows a field value in the conflict comparison. Blank means the field
+ *  falls back to the deployment default, so it says so. */
+function ConflictValue({ field, value }: { field: keyof FormState; value: string }) {
+    if (!value) return <span className="italic text-ink-muted">Deployment default</span>
     return (
-        <div className={cn(
-            'flex items-start gap-3 px-4 py-3 rounded-xl border text-sm',
-            tone === 'warning'
-                ? 'bg-amber-500/10 border-amber-500/20 text-amber-700 dark:text-amber-300'
-                : 'bg-accent-warning/10 border-accent-warning/20 text-accent-warning',
-        )}>
-            <AlertCircle className="w-4.5 h-4.5 shrink-0 mt-0.5" />
-            <div>{children}</div>
-        </div>
+        <span className="flex min-w-0 items-center gap-1.5" title={value}>
+            {field === 'accentColor' && (
+                <span
+                    className="h-3 w-3 shrink-0 rounded-full border border-black/10 dark:border-white/15"
+                    style={{ background: value }}
+                />
+            )}
+            <span className={cn('truncate', field === 'accentColor' && 'font-mono')}>{value}</span>
+        </span>
+    )
+}
+
+/**
+ * The 409, as a decision rather than an error. Says who won the race and
+ * when, lists the fields BOTH sides changed with their value and ours side
+ * by side, and offers the two ways forward. The user's edits stay in the
+ * form underneath the whole time. When the stale write was an image action
+ * on a clean form there is nothing to keep, so it says what didn't happen
+ * and offers the one way forward.
+ */
+function ConflictPanel({
+    latest, unapplied, base, form, onKeep, onDiscard,
+}: {
+    latest: Branding
+    unapplied?: string
+    base: Branding
+    form: FormState
+    onKeep: () => void
+    onDiscard: () => void
+}) {
+    const before = formFrom(base)
+    const theirs = formFrom(latest)
+    const mine = FIELDS.some((k) => form[k] !== before[k])
+    const overlaps = FIELDS.filter((k) =>
+        theirs[k] !== before[k] && form[k] !== before[k] && form[k] !== theirs[k])
+    const when = timeAgo(latest.updatedAt)
+
+    return (
+        <motion.div
+            role="alert"
+            aria-labelledby="branding-conflict-title"
+            initial={{ opacity: 0, y: MOTION.cardY, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: MOTION.cardY, scale: 0.98 }}
+            transition={MOTION.cardEntry}
+            className="overflow-hidden rounded-2xl border border-amber-500/30 bg-canvas-elevated shadow-lg shadow-amber-500/5"
+        >
+            <div className="h-1 bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500" />
+            <div className="p-5">
+                <div className="flex items-start gap-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/10">
+                        <GitMerge className="h-4.5 w-4.5 text-amber-500" />
+                    </div>
+                    <div className="min-w-0">
+                        <h3 id="branding-conflict-title" className="text-sm font-bold text-ink">
+                            Branding changed while you were editing
+                        </h3>
+                        <p className="mt-0.5 text-xs text-ink-muted">
+                            Version {latest.version} was saved elsewhere
+                            {when && <> <span title={formatUtc(latest.updatedAt)}>{when}</span></>}.
+                            {mine && ' Nothing you typed has been lost.'}
+                        </p>
+                    </div>
+                </div>
+
+                {unapplied && (
+                    <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-glass-border bg-black/[0.03] px-3 py-2.5 text-xs text-ink-secondary dark:bg-white/[0.04]">
+                        <ImageIcon className="mt-px h-3.5 w-3.5 shrink-0 text-amber-500" />
+                        <span>{unapplied}</span>
+                    </div>
+                )}
+
+                {overlaps.length > 0 ? (
+                    <div className="mt-4 overflow-hidden rounded-xl border border-glass-border">
+                        <div className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)_minmax(0,1fr)] gap-3 bg-black/[0.03] px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-ink-muted dark:bg-white/[0.04]">
+                            <span>Both changed</span>
+                            <span>Theirs</span>
+                            <span>Yours</span>
+                        </div>
+                        {overlaps.map((k) => (
+                            <div
+                                key={k}
+                                className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)_minmax(0,1fr)] items-center gap-3 border-t border-glass-border px-3 py-2 text-xs"
+                            >
+                                <span className="truncate font-medium text-ink-secondary">{FIELD_LABELS[k]}</span>
+                                <span className="text-ink-secondary"><ConflictValue field={k} value={theirs[k]} /></span>
+                                <span className="font-medium text-ink"><ConflictValue field={k} value={form[k]} /></span>
+                            </div>
+                        ))}
+                    </div>
+                ) : mine ? (
+                    <p className="mt-3 text-xs text-ink-secondary">
+                        Their changes don't touch the fields you edited, so keeping yours
+                        keeps both.
+                    </p>
+                ) : null}
+
+                {mine ? (
+                    <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+                        <span className="mr-auto text-[11px] text-ink-muted">
+                            Keeping yours puts them on top of version {latest.version}; then Save.
+                        </span>
+                        <button
+                            type="button"
+                            onClick={onDiscard}
+                            className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium text-ink-secondary transition-colors hover:bg-black/5 hover:text-ink dark:hover:bg-white/5"
+                        >
+                            <RotateCcw className="h-4 w-4" /> Discard mine
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onKeep}
+                            className="inline-flex items-center gap-2 rounded-xl bg-indigo-500 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-indigo-500/30 transition-colors hover:bg-indigo-600"
+                        >
+                            <GitMerge className="h-4 w-4" /> Keep my changes
+                        </button>
+                    </div>
+                ) : (
+                    <div className="mt-4 flex justify-end">
+                        <button
+                            type="button"
+                            onClick={onDiscard}
+                            className="inline-flex items-center gap-2 rounded-xl bg-indigo-500 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-indigo-500/30 transition-colors hover:bg-indigo-600"
+                        >
+                            <RefreshCw className="h-4 w-4" /> Load version {latest.version}
+                        </button>
+                    </div>
+                )}
+            </div>
+        </motion.div>
     )
 }

@@ -15,7 +15,7 @@
  * - Collapse/expand per node
  */
 
-import { useState, useCallback, useMemo } from 'react'
+import { useContext, useState, useCallback, useEffect, useMemo, useRef, type RefObject } from 'react'
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import {
@@ -29,17 +29,83 @@ import {
     FolderOpen,
     Layers,
     FolderPlus,
+    FolderInput,
+    ArrowRightLeft,
+    Ungroup,
     Box,
     Eraser,
     Loader2,
     X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry } from '@/types/schema'
+import { PlacedTag } from '@/components/ui/PlacedTag'
+import { PlacementPathsContext } from './placementPathsContext'
+import { groupSubtreeIds, listGroups } from '@/components/canvas/context-view/layerMutations'
+import type {
+    ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry,
+    LayerNodeSortMode, LayerNodeSortAlgo,
+} from '@/types/schema'
+import { LayerSortMenu } from '@/components/canvas/context-view/LayerSortMenu'
+
+
+/** Rows a column draws before it offers to show more. The rail is a 300px
+ *  authoring aid, not the canvas — a long column is scrolled past, not read. */
+const RAIL_PAGE = 50
+
+/** An anchored column's unloaded remainder. `remaining` is `null` when the
+ *  server has more but its size isn't known — said as "more", never as zero.
+ *  `failed`: the last page request failed; the row offers a retry. */
+export interface AnchorMore {
+    anchorUrn: string
+    remaining: number | null
+    failed: boolean
+}
+
+/**
+ * Fetch more when the row DWELLS in view (300ms), once per `latchKey` — which
+ * the caller ties to what the column holds and shows, so it re-fires only after
+ * something landed. Off while `enabled` is false (in flight, failed, nothing
+ * left). The observer is rooted in the rail's own scroller. Same guards that
+ * ended the historical load-more pump (see LoadMoreItem).
+ */
+function useAutoMore(
+    ref: RefObject<HTMLElement | null>,
+    latchKey: string,
+    enabled: boolean,
+    fire: () => void,
+) {
+    const firedRef = useRef<string | null>(null)
+    const fireRef = useRef(fire)
+    useEffect(() => { fireRef.current = fire }, [fire])
+    useEffect(() => {
+        if (!enabled) return
+        const el = ref.current
+        if (!el || typeof IntersectionObserver === 'undefined') return
+        let dwell: ReturnType<typeof setTimeout> | null = null
+        const io = new IntersectionObserver(([entry]) => {
+            if (!entry?.isIntersecting) {
+                if (dwell !== null) { clearTimeout(dwell); dwell = null }
+                return
+            }
+            if (firedRef.current === latchKey) return
+            dwell = setTimeout(() => {
+                dwell = null
+                firedRef.current = latchKey
+                fireRef.current()
+            }, 300)
+        }, { root: el.closest('.overflow-y-auto'), rootMargin: '120px' })
+        io.observe(el)
+        return () => {
+            io.disconnect()
+            if (dwell !== null) clearTimeout(dwell)
+        }
+    }, [ref, latchKey, enabled])
+}
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useEntityTypes } from '@/store/schema'
 import {
     fallbackNameFromUrn,
+    WIZARD_CHILDREN_PAGE_SIZE,
     type WizardEntityIndex,
 } from '@/components/views/ViewWizard/useWizardEntityIndex'
 
@@ -61,12 +127,38 @@ export interface DropPayload {
  *  rendering needs. */
 type LayerEntityRef = Pick<EntityAssignmentConfig, 'entityId' | 'logicalNodeId'>
 
+/** One root of a column, as the canvas will render it. Ordered by the Studio
+ *  with the canvas's own comparators — the rail must not re-sort. */
+export interface LayerRootRow {
+    id: string
+    urn: string
+    name: string
+    typeId: string
+    childCount: number
+    /** Placed by the layer's `entityTypes` rule, so it holds no assignment. */
+    rulePlaced: boolean
+}
+
 interface LayerHierarchyPanelProps {
     layers: ViewLayerConfig[]
     /** Canonical urn-keyed assignment map (formData.assignments) — source of truth
      *  for per-layer/per-node entity lists and count badges; layer.entityAssignments
      *  is deprecated and no longer written. */
     assignments: Record<string, LayerAssignmentEntry>
+    /** layerId -> the column's roots, already ordered. Includes rule-placed rows
+     *  (which hold no assignment entry), so the rail is honest about what the
+     *  canvas will render — see ViewWizard/effectivePlacement.ts. */
+    rootsByLayer?: Map<string, LayerRootRow[]>
+    /** View-wide default sort, for the per-column menu's "View default" item. */
+    defaultNodeSortMode?: LayerNodeSortAlgo
+    onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
+    onApplySortToView?: (mode: LayerNodeSortAlgo) => void
+    onResetCustomOrder?: (layerId: string) => void
+    /** Drop one root before/after another inside the same column. */
+    onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
+    /** layerId -> an anchored column's unloaded remainder, mirroring the canvas. */
+    anchorMoreByLayer?: Map<string, AnchorMore>
+    onLoadMoreAnchor?: (anchorUrn: string) => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     /** Resolves assigned-entity identity + children. The wizard has no canvas
@@ -116,35 +208,48 @@ function InlineInput({
     placeholder = 'Group name…',
     onConfirm,
     onCancel,
+    takenIn,
 }: {
     defaultValue?: string
     placeholder?: string
     onConfirm: (value: string) => void
     onCancel: () => void
+    /** Where a name is already used beside this group ("Apps", "Critical") — refused, said while typing. */
+    takenIn?: (value: string) => string | null
 }) {
     const [value, setValue] = useState(defaultValue)
+    const clash = value.trim() ? takenIn?.(value.trim()) ?? null : null
 
     return (
-        <input
-            autoFocus
-            value={value}
-            placeholder={placeholder}
-            onChange={e => setValue(e.target.value)}
-            onKeyDown={e => {
-                if (e.key === 'Enter' && value.trim()) onConfirm(value.trim())
-                if (e.key === 'Escape') onCancel()
-                e.stopPropagation()
-            }}
-            onBlur={() => {
-                if (value.trim()) onConfirm(value.trim())
-                else onCancel()
-            }}
-            className={cn(
-                'flex-1 min-w-0 bg-transparent border-b border-blue-400 outline-none',
-                'text-sm text-slate-800 dark:text-white placeholder:text-slate-400',
-                'py-0.5'
+        <span className="flex-1 min-w-0 flex flex-col">
+            <input
+                autoFocus
+                value={value}
+                placeholder={placeholder}
+                aria-invalid={!!clash || undefined}
+                onChange={e => setValue(e.target.value)}
+                onKeyDown={e => {
+                    if (e.key === 'Enter' && value.trim() && !clash) onConfirm(value.trim())
+                    if (e.key === 'Escape') onCancel()
+                    e.stopPropagation()
+                }}
+                onBlur={() => {
+                    if (value.trim() && !clash) onConfirm(value.trim())
+                    else onCancel()
+                }}
+                className={cn(
+                    'flex-1 min-w-0 bg-transparent border-b outline-none',
+                    clash ? 'border-red-400' : 'border-blue-400',
+                    'text-sm text-slate-800 dark:text-white placeholder:text-slate-400',
+                    'py-0.5'
+                )}
+            />
+            {clash && (
+                <span role="alert" className="text-[11px] text-red-500 mt-0.5">
+                    There's already a group called “{value.trim()}” in {clash}.
+                </span>
             )}
-        />
+        </span>
     )
 }
 
@@ -156,6 +261,8 @@ function AssignedEntityItem({
     entityIndex,
     onUnassign,
     inherited = false,
+    rulePlaced = false,
+    onReorder,
 }: {
     entityId: string
     depth: number
@@ -165,13 +272,27 @@ function AssignedEntityItem({
      *  it is read-only here (no unassign, no drag: moving it would violate the
      *  containment rule the Studio already enforces). */
     inherited?: boolean
+    /** Placed by this layer's `entityTypes` rule, not by an assignment entry.
+     *  There is no entry to remove, so no unassign — but it stays DRAGGABLE:
+     *  dropping it on another layer writes the explicit override. */
+    rulePlaced?: boolean
+    /** Present on column roots: dropping another root on this row's top/bottom
+     *  third reorders instead of re-assigning. Absent on inherited children,
+     *  which have no independent position. */
+    onReorder?: (draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
 }) {
+    // Which third of the row the pointer is over: the outer thirds reorder, the
+    // middle falls through to the LAYER's drop handler (move to this column).
+    const [band, setBand] = useState<'before' | 'after' | null>(null)
+    /** The row's own header, so drop bands measure it and not its whole subtree. */
+    const rowRef = useRef<HTMLDivElement | null>(null)
     const [isExpanded, setIsExpanded] = useState(false)
 
     // Identity + children come from the entity browser's data (via the wizard
     // entity index) — NOT the canvas store, which is empty inside the wizard
     // and used to make every assigned row render as a raw URN fragment.
     const identity = entityIndex.resolve(entityId)
+    const dataPath = useContext(PlacementPathsContext).get(entityId)
     const isNodeLoading = entityIndex.isLoading(entityId)
     const childrenIds = entityIndex.childrenOf(entityId)
 
@@ -215,9 +336,57 @@ function AssignedEntityItem({
     })()
     const color = visual?.color ?? '#94a3b8'
 
+    const handleDragOver = (e: React.DragEvent) => {
+        if (!onReorder || !e.dataTransfer.types.includes('application/x-entity-assignment')) return
+        // Measure the HEADER ROW, not the wrapper: the wrapper also contains the
+        // expanded children, so on a root with 20 of them its top third reached
+        // most of the way down the subtree and a drop over the 3rd child
+        // reordered against the parent.
+        const rect = (rowRef.current ?? e.currentTarget).getBoundingClientRect()
+        const y = e.clientY - rect.top
+        const next = y < rect.height * 0.3 ? 'before' : y > rect.height * 0.7 ? 'after' : null
+        setBand(next)
+        if (next) {
+            e.preventDefault()
+            e.stopPropagation()
+            e.dataTransfer.dropEffect = 'move'
+        }
+    }
+
+    const handleDrop = (e: React.DragEvent) => {
+        const position = band
+        setBand(null)
+        if (!onReorder || !position) return   // middle third — let the layer take it
+        const payload = parseTransfer(e)
+        const draggedUrn = payload?.entityId ?? payload?.entityIds?.[0]
+        if (!draggedUrn) return
+        e.preventDefault()
+        e.stopPropagation()
+        if (draggedUrn !== entityId) onReorder(draggedUrn, entityId, position)
+    }
+
     return (
-        <div>
+        <div
+            onDragOver={handleDragOver}
+            onDragLeave={() => setBand(null)}
+            onDrop={handleDrop}
+            className="relative"
+        >
+            {band && (
+                <div
+                    aria-hidden
+                    className={cn(
+                        // pointer-events-none is not decoration: this sits ON the
+                        // drop target's top/bottom edge, exactly where the cursor
+                        // is when the band is showing, and must not take the
+                        // dragover out from under it.
+                        'absolute inset-x-1 h-0.5 rounded-full bg-blue-500 z-10 pointer-events-none',
+                        band === 'before' ? 'top-0' : 'bottom-0',
+                    )}
+                />
+            )}
             <div
+                ref={rowRef}
                 draggable={!inherited}
                 onDragStart={!inherited ? handleDragStart : undefined}
                 className={cn(
@@ -257,7 +426,8 @@ function AssignedEntityItem({
                 >
                     {icon}
                 </div>
-                <div className="flex-1 min-w-0 flex items-center gap-1">
+                <div className="flex-1 min-w-0 flex flex-col">
+                <div className="min-w-0 flex items-center gap-1">
                     {isResolving ? (
                         <span className="h-2.5 w-24 rounded bg-slate-200 dark:bg-slate-700 animate-pulse" />
                     ) : (
@@ -279,8 +449,34 @@ function AssignedEntityItem({
                         </span>
                     )}
                 </div>
+                {/* Where it sits in the DATA — the same "Placed · Part of …" the canvas shows. An
+                    explicitly assigned entity that has a parent is a view placement; the data keeps
+                    it inside that parent. */}
+                {!inherited && dataPath && dataPath.length > 0 && (
+                    <span
+                        className="mt-0.5 flex items-center gap-1 min-w-0"
+                        title={`Placed here for this view only — the data source is unchanged. In the data, ${name} is part of ${dataPath.map(a => a.displayName).join(' › ')}.`}
+                    >
+                        <PlacedTag />
+                        <span className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                            Part of {(dataPath.length > 3
+                                ? [dataPath[0].displayName, '…', ...dataPath.slice(-2).map(a => a.displayName)]
+                                : dataPath.map(a => a.displayName)).join(' › ')}
+                        </span>
+                    </span>
+                )}
+                </div>
+                {rulePlaced && (
+                    <span
+                        data-testid="rail-rule-placed-marker"
+                        className="text-[9px] px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 shrink-0"
+                        title={`Placed automatically because this layer covers the ${type} type. Drag it to another layer to override.`}
+                    >
+                        by type
+                    </span>
+                )}
                 {/* Unassign — only the explicit placement can be removed. */}
-                {!inherited && (
+                {!inherited && !rulePlaced && (
                     <button
                         onClick={(e) => {
                             e.stopPropagation()
@@ -353,6 +549,15 @@ function LogicalNodeItem({
     const [isRenaming, setIsRenaming] = useState(false)
     const [showAddChild, setShowAddChild] = useState(false)
     const [isDragOver, setIsDragOver] = useState(false)
+    // The same group actions the canvas offers (one set of operations — see useLogicalNodes).
+    const [groupMode, setGroupMode] = useState<null | 'move' | 'contents' | 'confirmDelete'>(null)
+    // Why the last group action on this row was refused (a same-named group already sits there).
+    const [refusal, setRefusal] = useState<string | null>(null)
+    const refuse = (clash: string | null) => setRefusal(clash
+        ? `There's already a group called “${clash}” there — rename one of them first.` : null)
+    const layerGroups = [{ id: layerId, logicalNodes: logicalNodes.nodesForLayer(layerId) }] as unknown as ViewLayerConfig[]
+    const ownSubtree = new Set(groupSubtreeIds(layerGroups, layerId, node.id))
+    const moveTargets = listGroups(layerGroups, layerId).filter(g => !ownSubtree.has(g.id))
 
     const isActive = activeTarget?.layerId === layerId && activeTarget?.nodeId === node.id
     const isCollapsed = node.collapsed ?? false
@@ -362,7 +567,7 @@ function LogicalNodeItem({
     const hasChildren = !!(node.children && node.children.length > 0) || assignedCount > 0
 
     // Build the display label for this node's path
-    const pathLabel = `${layerName} → ${logicalNodes.nodePathLabel(layerId, node.id)}`
+    const pathLabel = `${layerName} › ${logicalNodes.nodePathLabel(layerId, node.id)}`
 
     // ── Drop zone handlers ────────────────────────────────────────────────────
 
@@ -440,6 +645,11 @@ function LogicalNodeItem({
                 {isRenaming ? (
                     <InlineInput
                         defaultValue={node.name}
+                        takenIn={name => {
+                            const parent = logicalNodes.parentOf(layerId, node.id)
+                            return logicalNodes.nameTaken(layerId, name, parent, node.id)
+                                ? (parent ? logicalNodes.nodePathLabel(layerId, parent) : layerName) : null
+                        }}
                         onConfirm={name => {
                             logicalNodes.renameNode(layerId, node.id, name)
                             setIsRenaming(false)
@@ -492,14 +702,97 @@ function LogicalNodeItem({
                         <Pencil className="w-3 h-3" />
                     </button>
                     <button
-                        onClick={e => { e.stopPropagation(); logicalNodes.deleteNode(layerId, node.id) }}
+                        onClick={e => { e.stopPropagation(); setGroupMode('move') }}
+                        className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
+                        title={`Move group ${node.name} into another group or layer`}
+                        aria-label={`Move group ${node.name}`}
+                    >
+                        <FolderInput className="w-3 h-3" />
+                    </button>
+                    <button
+                        onClick={e => { e.stopPropagation(); setGroupMode('contents') }}
+                        className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
+                        title={`Move everything in ${node.name} into another group`}
+                        aria-label={`Move the contents of ${node.name}`}
+                    >
+                        <ArrowRightLeft className="w-3 h-3" />
+                    </button>
+                    <button
+                        onClick={e => { e.stopPropagation(); refuse(logicalNodes.ungroupNode(layerId, node.id)) }}
+                        className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
+                        title={`Ungroup ${node.name} — its contents move up a level`}
+                        aria-label={`Ungroup ${node.name}`}
+                    >
+                        <Ungroup className="w-3 h-3" />
+                    </button>
+                    <button
+                        onClick={e => { e.stopPropagation(); setGroupMode('confirmDelete') }}
                         className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500"
-                        title="Delete group"
+                        title={`Delete group ${node.name}`}
+                        aria-label={`Delete group ${node.name}`}
                     >
                         <Trash2 className="w-3 h-3" />
                     </button>
                 </div>
             </motion.div>
+
+            {refusal && (
+                <div style={{ paddingLeft: `${(depth + 1) * 16 + 8}px` }} className="px-2 py-1" role="alert">
+                    <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 bg-red-50 dark:bg-red-900/20 text-xs text-red-600 dark:text-red-400">
+                        <span className="flex-1">{refusal}</span>
+                        <button onClick={e => { e.stopPropagation(); setRefusal(null) }}
+                            className="px-1.5 rounded-md hover:bg-red-500/10" aria-label="Dismiss">OK</button>
+                    </div>
+                </div>
+            )}
+
+            {/* Move group / move contents / delete — inline, as on the canvas */}
+            {groupMode && (
+                <div style={{ paddingLeft: `${(depth + 1) * 16 + 8}px` }} className="px-2 py-1" onClick={e => e.stopPropagation()}>
+                    {groupMode === 'confirmDelete' ? (
+                        <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 bg-red-50 dark:bg-red-900/20 text-xs text-slate-600 dark:text-slate-300">
+                            <span className="flex-1">Delete “{node.name}”? Its entities stay in this layer, ungrouped.</span>
+                            <button onClick={() => { logicalNodes.deleteNode(layerId, node.id); setGroupMode(null) }}
+                                className="px-2 py-0.5 rounded-md bg-red-500/15 text-red-600 dark:text-red-400 font-semibold hover:bg-red-500/25">Delete</button>
+                            <button onClick={() => setGroupMode(null)}
+                                className="px-2 py-0.5 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700">Keep</button>
+                        </div>
+                    ) : (
+                        <select
+                            autoFocus
+                            defaultValue=""
+                            aria-label={groupMode === 'move' ? `Move group ${node.name} into` : `Move everything in ${node.name} into`}
+                            onBlur={() => setGroupMode(null)}
+                            onKeyDown={e => { if (e.key === 'Escape') setGroupMode(null) }}
+                            onChange={e => {
+                                const v = e.target.value
+                                if (groupMode === 'move' && v) {
+                                    const [toLayerId, parent] = JSON.parse(v) as [string, string | null]
+                                    refuse(logicalNodes.moveNodeToLayer(layerId, node.id, toLayerId, parent ?? undefined))
+                                } else if (v) refuse(logicalNodes.moveContents(layerId, node.id, v))
+                                setGroupMode(null)
+                            }}
+                            className="w-full px-2 py-1 rounded-lg text-xs bg-white dark:bg-slate-800 border border-violet-300 dark:border-violet-500/50 text-slate-700 dark:text-slate-200 outline-none"
+                        >
+                            <option value="" disabled>{groupMode === 'move' ? `Move “${node.name}” into…` : `Move everything in “${node.name}” into…`}</option>
+                            {groupMode === 'move' ? (
+                                <>
+                                    <optgroup label={`In ${layerName}`}>
+                                        <option value={JSON.stringify([layerId, null])}>Top level of {layerName}</option>
+                                        {moveTargets.map(g => <option key={g.id} value={JSON.stringify([layerId, g.id])}>{g.path}</option>)}
+                                    </optgroup>
+                                    {logicalNodes.layerChoices().filter(l => l.layerId !== layerId).map(l => (
+                                        <optgroup key={l.layerId} label={`To ${l.layerName}`}>
+                                            <option value={JSON.stringify([l.layerId, null])}>Top level of {l.layerName}</option>
+                                            {l.groups.map(g => <option key={g.id} value={JSON.stringify([l.layerId, g.id])}>{l.layerName} › {g.path}</option>)}
+                                        </optgroup>
+                                    ))}
+                                </>
+                            ) : moveTargets.map(g => <option key={g.id} value={g.id}>{g.path}</option>)}
+                        </select>
+                    )}
+                </div>
+            )}
 
             {/* Add child inline input */}
             <AnimatePresence>
@@ -515,6 +808,7 @@ function LogicalNodeItem({
                             <Folder className="w-4 h-4 text-blue-400 shrink-0" />
                             <InlineInput
                                 placeholder="Sub-group name…"
+                                takenIn={name => logicalNodes.nameTaken(layerId, name, node.id) ? logicalNodes.nodePathLabel(layerId, node.id) : null}
                                 onConfirm={name => {
                                     logicalNodes.addNode(layerId, name, node.id)
                                     setShowAddChild(false)
@@ -583,6 +877,16 @@ interface LayerRowProps {
     /** 0-based position — surfaces the 1–9 quick-assign shortcut. */
     layerIndex: number
     assignments: Record<string, LayerAssignmentEntry>
+    /** This column's roots, already ordered by the Studio. */
+    rows?: LayerRootRow[]
+    defaultNodeSortMode?: LayerNodeSortAlgo
+    onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
+    onApplySortToView?: (mode: LayerNodeSortAlgo) => void
+    onResetCustomOrder?: (layerId: string) => void
+    onReorderRoot?: (layerId: string, draggedUrn: string, targetUrn: string, position: 'before' | 'after') => void
+    /** This column's unloaded remainder, when it is anchored. */
+    anchorMore?: AnchorMore
+    onLoadMoreAnchor?: (anchorUrn: string) => void
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     entityIndex: WizardEntityIndex
@@ -598,6 +902,14 @@ function LayerRow({
     layer,
     layerIndex,
     assignments,
+    rows,
+    defaultNodeSortMode,
+    onSetLayerSortMode,
+    onApplySortToView,
+    onResetCustomOrder,
+    onReorderRoot,
+    anchorMore,
+    onLoadMoreAnchor,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -626,8 +938,66 @@ function LayerRow({
             .map(([urn, entry]) => ({ entityId: urn, logicalNodeId: entry.logicalNodeId })),
         [assignments, layer.id]
     )
-    const unassignedEntities = layerEntityAssignments.filter(a => !a.logicalNodeId).map(a => a.entityId)
+    // The column's roots in canvas order. Members of a logical group are drawn
+    // inside that group instead, so they never appear in this list.
+    const groupedIds = useMemo(
+        () => new Set(layerEntityAssignments.filter(a => a.logicalNodeId).map(a => a.entityId)),
+        [layerEntityAssignments],
+    )
+    const rootRows = useMemo(() => {
+        if (rows) return rows.filter(r => !groupedIds.has(r.urn))
+        // No ordered rows supplied — fall back to the canonical assignments, as
+        // this panel always did. Identity is resolved per row anyway, so the
+        // blank fields here are never rendered.
+        return layerEntityAssignments
+            .filter(a => !a.logicalNodeId)
+            .map<LayerRootRow>(a => ({
+                id: a.entityId, urn: a.entityId, name: '', typeId: '', childCount: 0, rulePlaced: false,
+            }))
+    }, [rows, groupedIds, layerEntityAssignments])
+    // "Clear all" only ever removes explicit placements — a rule-placed row has
+    // no entry to clear.
+    // The rail is ONE scroller wrapping a Reorder.Group of layers, so a column
+    // cannot own a virtualized viewport without breaking layer drag-reorder.
+    // Render a window instead: a column that holds 50,000 scanned roots draws
+    // RAIL_PAGE of them and says how many are left. Bounded either way.
+    const [visibleCount, setVisibleCount] = useState(RAIL_PAGE)
     const totalAssigned = layerEntityAssignments.length
+    const shownRows = useMemo(() => rootRows.slice(0, visibleCount), [rootRows, visibleCount])
+    const heldButHidden = rootRows.length - shownRows.length
+    // What the column has yet to show: rows it holds but has not drawn, plus
+    // rows the server still has. Both read as "more" to the user. The server's
+    // share is `null` when it has more but the count isn't known — said as
+    // "more", never as zero.
+    const serverRemaining = anchorMore ? anchorMore.remaining : 0
+    const remaining = serverRemaining === null ? null : heldButHidden + serverRemaining
+    const moreFailed = heldButHidden === 0 && (anchorMore?.failed ?? false)
+    const hasMore = heldButHidden > 0 || (!!anchorMore && !anchorMore.failed)
+    const anchorLoading = !!anchorMore && entityIndex.isLoading(anchorMore.anchorUrn)
+    // How many the next click actually produces: revealing rows we hold is a
+    // RAIL_PAGE, fetching the anchor's next page is a WIZARD_CHILDREN_PAGE_SIZE
+    // (the wizard index's page — not the canvas's).
+    // Naming the wrong one would promise 50 and deliver 100.
+    const nextChunk = heldButHidden > 0
+        ? Math.min(heldButHidden, RAIL_PAGE)
+        : Math.min(serverRemaining ?? WIZARD_CHILDREN_PAGE_SIZE, WIZARD_CHILDREN_PAGE_SIZE)
+    const totalShown = rootRows.length + (serverRemaining ?? 0)
+    const totalLabel = serverRemaining === null
+        ? `${totalShown.toLocaleString()}+`
+        : totalShown.toLocaleString()
+    const showMore = useCallback(() => {
+        if (heldButHidden > 0) setVisibleCount(v => v + RAIL_PAGE)
+        else if (anchorMore) onLoadMoreAnchor?.(anchorMore.anchorUrn)
+    }, [heldButHidden, anchorMore, onLoadMoreAnchor])
+    // Scroll-driven: the row fetches once per growth of what the column holds
+    // or shows, never while its page is in flight or failed.
+    const moreRowRef = useRef<HTMLButtonElement>(null)
+    useAutoMore(moreRowRef, `${rootRows.length}:${visibleCount}`, hasMore && !anchorLoading, showMore)
+    const sortMode: LayerNodeSortMode = layer.nodeSortMode ?? defaultNodeSortMode ?? 'alpha-asc'
+    const hasCustomOrder = useMemo(
+        () => Object.values(assignments).some(e => e.layerId === layer.id && e.orderKey),
+        [assignments, layer.id],
+    )
     const color = layer.color || '#3b82f6'
 
     // ── Layer-level drop zone (layer root, no node) ───────────────────────────
@@ -745,8 +1115,33 @@ function LayerRow({
                     )}
 
                     {/* Assignment count */}
-                    {totalAssigned > 0 && !isDragOver && (
-                        <span className="text-xs text-slate-400 shrink-0">{totalAssigned}</span>
+                    {totalShown > 0 && !isDragOver && (
+                        <span
+                            data-testid={`layer-count-${layer.id}`}
+                            className="text-xs text-slate-400 shrink-0"
+                        >{totalLabel}</span>
+                    )}
+
+                    {/* Column sort — the canvas's own menu, writing the same
+                        fields, so the order chosen here is the order it renders. */}
+                    {onSetLayerSortMode && (
+                        <span onClick={e => e.stopPropagation()} className="shrink-0">
+                            <LayerSortMenu
+                                layerName={layer.name}
+                                layerColor={color}
+                                mode={sortMode}
+                                isOverride={layer.nodeSortMode !== undefined}
+                                viewDefault={defaultNodeSortMode ?? 'alpha-asc'}
+                                canPersist
+                                onSelectMode={mode => onSetLayerSortMode(layer.id, mode)}
+                                onApplyToView={() => onApplySortToView?.(
+                                    sortMode === 'custom' ? 'alpha-asc' : sortMode,
+                                )}
+                                onResetCustomOrder={hasCustomOrder && onResetCustomOrder
+                                    ? () => onResetCustomOrder(layer.id)
+                                    : undefined}
+                            />
+                        </span>
                     )}
 
                     {/* Layer actions */}
@@ -875,35 +1270,81 @@ function LayerRow({
                                     />
                                 ))}
 
-                                {/* Entities placed directly in the layer */}
-                                {unassignedEntities.length > 0 && (
-                                    <div className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1">
-                                        {/* The bulk escape hatch lives HERE, next to the things it
-                                            removes — not as a hover-only icon on the layer row, which
-                                            is where nobody found it. */}
+                                {/* The column's roots, in the order the canvas draws
+                                    them. Drag a row onto another row's top or bottom
+                                    edge to rearrange; the middle drops into the layer.
+                                    Also drawn with NO rows when the first page failed:
+                                    the Retry lives here, and a blank column would look
+                                    finished. */}
+                                {(rootRows.length > 0 || moreFailed) && (
+                                    <div
+                                        data-testid={`layer-rows-${layer.id}`}
+                                        className="mt-2 space-y-0.5 border-t border-slate-100 dark:border-slate-800 pt-1"
+                                    >
                                         <div className="flex items-center gap-1.5 px-3 py-1">
                                             <Layers className="w-3 h-3 text-slate-400 shrink-0" />
                                             <span className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase truncate">
-                                                Layer Entities ({unassignedEntities.length})
+                                                In this column ({totalLabel})
                                             </span>
                                             <span className="flex-1" />
-                                            <button
-                                                onClick={e => { e.stopPropagation(); setConfirmClear(true) }}
-                                                title={`Remove all ${totalAssigned} placements from ${layer.name} — undoable`}
-                                                className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
-                                            >
-                                                Clear all
-                                            </button>
+                                            {totalAssigned > 0 && (
+                                                <button
+                                                    onClick={e => { e.stopPropagation(); setConfirmClear(true) }}
+                                                    title={`Remove all ${totalAssigned} placements from ${layer.name} — undoable`}
+                                                    className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 transition-colors"
+                                                >
+                                                    Clear all
+                                                </button>
+                                            )}
                                         </div>
-                                        {unassignedEntities.map(entityId => (
+                                        {shownRows.map(row => (
                                             <AssignedEntityItem
-                                                key={entityId}
-                                                entityId={entityId}
+                                                key={row.urn}
+                                                entityId={row.urn}
                                                 depth={0}
                                                 entityIndex={entityIndex}
                                                 onUnassign={onUnassign}
+                                                rulePlaced={row.rulePlaced}
+                                                onReorder={onReorderRoot
+                                                    ? (dragged, target, position) =>
+                                                        onReorderRoot(layer.id, dragged, target, position)
+                                                    : undefined}
                                             />
                                         ))}
+                                        {/* ONE affordance for both kinds of "more":
+                                            reveal what this column already holds,
+                                            and once it is all on screen, fetch the
+                                            anchor's next page. An anchored column
+                                            draws no anchor row, so this is also the
+                                            only place its paging can live. */}
+                                        {(hasMore || moreFailed) && (
+                                            <button
+                                                ref={moreRowRef}
+                                                onClick={e => {
+                                                    e.stopPropagation()
+                                                    if (!anchorLoading) showMore()
+                                                }}
+                                                disabled={anchorLoading}
+                                                className="w-full text-left px-3 py-1.5 rounded-lg text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors disabled:cursor-wait disabled:opacity-70"
+                                            >
+                                                {anchorLoading ? 'Loading…'
+                                                    : moreFailed ? (
+                                                        <>
+                                                            Couldn't load the next {WIZARD_CHILDREN_PAGE_SIZE}
+                                                            <span className="ml-1 text-slate-400 font-normal">· Retry</span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            Show {nextChunk} more
+                                                            {remaining !== null && (
+                                                                <span className="ml-1 text-slate-400 font-normal tabular-nums">
+                                                                    ({remaining.toLocaleString()} left)
+                                                                </span>
+                                                            )}
+                                                        </>
+                                                    )}
+                                            </button>
+                                        )}
                                     </div>
                                 )}
 
@@ -920,6 +1361,7 @@ function LayerRow({
                                                 <Folder className="w-4 h-4 text-blue-400 shrink-0" />
                                                 <InlineInput
                                                     placeholder="Group name…"
+                                                    takenIn={name => logicalNodes.nameTaken(layer.id, name, null) ? layer.name : null}
                                                     onConfirm={name => {
                                                         logicalNodes.addNode(layer.id, name)
                                                         setShowAddRoot(false)
@@ -956,6 +1398,14 @@ function LayerRow({
 export function LayerHierarchyPanel({
     layers,
     assignments,
+    rootsByLayer,
+    defaultNodeSortMode,
+    onSetLayerSortMode,
+    onApplySortToView,
+    onResetCustomOrder,
+    onReorderRoot,
+    anchorMoreByLayer,
+    onLoadMoreAnchor,
     activeTarget,
     logicalNodes,
     entityIndex,
@@ -976,6 +1426,7 @@ export function LayerHierarchyPanel({
 
     return (
         <div
+            data-testid="layer-hierarchy-panel"
             className={cn(
                 'relative flex flex-col h-full rounded-2xl overflow-hidden',
                 'bg-white/60 dark:bg-slate-900/60 backdrop-blur-xl',
@@ -1052,6 +1503,14 @@ export function LayerHierarchyPanel({
                                 layer={layer}
                                 layerIndex={i}
                                 assignments={assignments}
+                                rows={rootsByLayer?.get(layer.id)}
+                                defaultNodeSortMode={defaultNodeSortMode}
+                                onSetLayerSortMode={onSetLayerSortMode}
+                                onApplySortToView={onApplySortToView}
+                                onResetCustomOrder={onResetCustomOrder}
+                                onReorderRoot={onReorderRoot}
+                                anchorMore={anchorMoreByLayer?.get(layer.id)}
+                                onLoadMoreAnchor={onLoadMoreAnchor}
                                 activeTarget={activeTarget}
                                 logicalNodes={logicalNodes}
                                 entityIndex={entityIndex}

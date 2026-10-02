@@ -20,6 +20,9 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BackchannelHostsPanel } from '../BackchannelHostsPanel'
+import {
+    NotificationStack, useNotificationStore,
+} from '@/components/ui/notifications'
 import { ssoAdminService } from '@/services/ssoAdminService'
 
 vi.mock('@/services/ssoAdminService', () => ({
@@ -41,8 +44,16 @@ const ENTRY = {
     note: 'primary', createdAt: '2026-08-24T00:00:00Z', createdBy: 'ada',
 }
 
+/** Changing where this deployment may send requests is an act, not a
+ *  state — it reports through the app's one notification stack. The
+ *  banner underneath keeps only what is still true while it is read: a
+ *  list that could not be loaded. */
+const raised = () => useNotificationStore.getState().notifications
+const panel = () => render(<><BackchannelHostsPanel /><NotificationStack /></>)
+
 beforeEach(() => {
     vi.clearAllMocks()
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     svc.listBackchannelHosts.mockResolvedValue([])
     svc.addBackchannelHost.mockResolvedValue(ENTRY)
     svc.deleteBackchannelHost.mockResolvedValue(undefined)
@@ -51,7 +62,7 @@ beforeEach(() => {
 describe('reading the list', () => {
     it('shows the port, because an entry is a service not a machine', async () => {
         svc.listBackchannelHosts.mockResolvedValue([ENTRY])
-        render(<BackchannelHostsPanel />)
+        panel()
         expect(
             await screen.findByText('sso-gateway.corp.internal:443'),
         ).toBeInTheDocument()
@@ -59,20 +70,20 @@ describe('reading the list', () => {
 
     it('names who allowed it', async () => {
         svc.listBackchannelHosts.mockResolvedValue([ENTRY])
-        render(<BackchannelHostsPanel />)
+        panel()
         expect(await screen.findByText(/added by ada/)).toBeInTheDocument()
     })
 
     it('says an empty list means gateways cannot be reached', async () => {
         // "Nothing listed" alone reads as "nothing to do here".
-        render(<BackchannelHostsPanel />)
+        panel()
         expect(
             await screen.findByText(/cannot reach anything internal/i),
         ).toBeInTheDocument()
     })
 
     it('states the floor no entry can lower', async () => {
-        render(<BackchannelHostsPanel />)
+        panel()
         expect(
             await screen.findByText(/cloud metadata addresses are\s+refused/i),
         ).toBeInTheDocument()
@@ -81,7 +92,7 @@ describe('reading the list', () => {
 
 describe('changing the list', () => {
     it('allows a host and reloads', async () => {
-        render(<BackchannelHostsPanel />)
+        panel()
         await screen.findByText(/nothing listed/i)
 
         await userEvent.type(
@@ -96,17 +107,55 @@ describe('changing the list', () => {
             })
         })
         expect(svc.listBackchannelHosts).toHaveBeenCalledTimes(2)
+        // A re-rendered list is not a confirmation that an egress rule
+        // was written.
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].type).toBe('success')
+        expect(raised()[0].message)
+            .toBe('gw.corp.internal:443 is allowed — sign-in can call it now.')
+    })
+
+    it('says what a withdrawal took away', async () => {
+        svc.listBackchannelHosts.mockResolvedValue([ENTRY])
+        panel()
+        await screen.findByText('sso-gateway.corp.internal:443')
+
+        await userEvent.click(
+            screen.getByRole('button', { name: /remove sso-gateway/i }),
+        )
+
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].message).toBe(
+            'sso-gateway.corp.internal:443 is withdrawn — sign-in can no '
+            + 'longer call it.',
+        )
+    })
+
+    it('names the host when a withdrawal is refused with no message', async () => {
+        svc.listBackchannelHosts.mockResolvedValue([ENTRY])
+        svc.deleteBackchannelHost.mockRejectedValueOnce(new Error(''))
+        panel()
+        await screen.findByText('sso-gateway.corp.internal:443')
+
+        await userEvent.click(
+            screen.getByRole('button', { name: /remove sso-gateway/i }),
+        )
+
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].type).toBe('error')
+        expect(raised()[0].message)
+            .toBe('Could not withdraw sso-gateway.corp.internal:443.')
     })
 
     it('will not submit an empty host', async () => {
-        render(<BackchannelHostsPanel />)
+        panel()
         await screen.findByText(/nothing listed/i)
         expect(screen.getByRole('button', { name: /allow/i })).toBeDisabled()
     })
 
     it('withdraws an entry in one click', async () => {
         svc.listBackchannelHosts.mockResolvedValue([ENTRY])
-        render(<BackchannelHostsPanel />)
+        panel()
         await screen.findByText('sso-gateway.corp.internal:443')
 
         await userEvent.click(
@@ -121,7 +170,7 @@ describe('changing the list', () => {
         svc.addBackchannelHost.mockRejectedValue(
             new Error("'*.corp' is not a plain hostname."),
         )
-        render(<BackchannelHostsPanel />)
+        panel()
         await screen.findByText(/nothing listed/i)
 
         await userEvent.type(screen.getByLabelText('Gateway host'), '*.corp')
@@ -138,7 +187,7 @@ describe('when the caller lacks the permission', () => {
         // An empty list here would say "nothing is allowed", which is
         // the opposite of what a 403 means.
         svc.listBackchannelHosts.mockRejectedValue(new Error('Forbidden'))
-        render(<BackchannelHostsPanel />)
+        panel()
         expect(
             await screen.findByText(/don.t have permission/i),
         ).toBeInTheDocument()
@@ -147,7 +196,7 @@ describe('when the caller lacks the permission', () => {
 
     it('says the permission is separate from platform administration', async () => {
         svc.listBackchannelHosts.mockRejectedValue(new Error('403 Forbidden'))
-        render(<BackchannelHostsPanel />)
+        panel()
         expect(
             await screen.findByText(/granted separately/i),
         ).toBeInTheDocument()
@@ -155,7 +204,7 @@ describe('when the caller lacks the permission', () => {
 
     it('does not offer an Allow button it cannot use', async () => {
         svc.listBackchannelHosts.mockRejectedValue(new Error('Forbidden'))
-        render(<BackchannelHostsPanel />)
+        panel()
         await screen.findByText(/don.t have permission/i)
         expect(
             screen.queryByRole('button', { name: /allow/i }),
@@ -164,7 +213,7 @@ describe('when the caller lacks the permission', () => {
 
     it('still reports a real failure as an error', async () => {
         svc.listBackchannelHosts.mockRejectedValue(new Error('Network down'))
-        render(<BackchannelHostsPanel />)
+        panel()
         expect(await screen.findByText(/network down/i)).toBeInTheDocument()
     })
 })

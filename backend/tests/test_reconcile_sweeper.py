@@ -122,6 +122,53 @@ def _versioned(monkeypatch):
     return versioned
 
 
+@pytest.fixture(autouse=True)
+def _projector_health(monkeypatch):
+    """Stub the projection-watermark read, for the same reason as above.
+
+    It goes to the ``graphver`` store through its own engine, and a cold
+    failure DEFERS the whole sweep — deliberately, since the one answer that
+    must never be invented is "the fleet's projectors are fine". Without this
+    stub every test here would be asserting against a sweep that never ran (or,
+    worse, against whatever a developer's live dev database happened to say).
+
+    Returns a mutable ``{data_source_id: ProjectorHealth}`` a test can populate
+    to wedge a source's projection.
+    """
+    health: dict = {}
+
+    async def _fake_health(**_kw):
+        return dict(health)
+
+    monkeypatch.setattr(
+        "backend.app.services.versioned_sources.projector_health",
+        _fake_health,
+    )
+    return health
+
+
+def _health(*, behind=0, last_error=None, pinned=True, head=100, status="idle"):
+    """One ``ProjectorHealth`` row, expressed as "N commits behind".
+
+    ``status`` defaults to ``idle``, which is what a wedged projector actually
+    looks like: nothing running, watermark stuck. ``projecting``/``rebuilding``
+    mean a pass IS closing the gap and are deliberately not wedges — pass one
+    explicitly to test that.
+    """
+    from backend.app.services.versioned_sources import ProjectorHealth
+
+    return ProjectorHealth(
+        data_source_id="ds_1",
+        graph_id="g_1",
+        projected_commit_seq=head - behind,
+        main_head_commit_seq=head,
+        last_error=last_error,
+        falkor_graph_pinned=pinned,
+        status=status,
+        checked_at="2026-08-30T12:00:00+00:00",
+    )
+
+
 class _FakeJob:
     id = "agg_fake"
 
@@ -795,8 +842,12 @@ async def test_action_cap_bounds_one_sweep(session_factory):
 
 @pytest.mark.asyncio
 async def test_first_builds_are_capped_separately(session_factory):
-    """A fresh install with many unbuilt sources drains one per sweep rather
-    than queueing every full build at once."""
+    """A fresh install with many unbuilt sources drains a BOUNDED number per
+    sweep rather than queueing every full build at once.
+
+    The bound is occupancy, not a fixed rate: nothing is in flight here, so
+    the sweep fills up to the target and stops — five sources do not become
+    five concurrent full-cube rebuilds."""
     for i in range(5):
         await _seed(
             session_factory, ds_id=f"ds_{i}",
@@ -807,8 +858,13 @@ async def test_first_builds_are_capped_separately(session_factory):
     svc = _FakeService()
     result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
 
+    from backend.app.services.aggregation.reconcile_sweeper import (
+        _FIRST_BUILD_TARGET_IN_FLIGHT,
+    )
+
     assert result.findings == 5
-    assert len(svc.triggers) == 1
+    assert len(svc.triggers) == _FIRST_BUILD_TARGET_IN_FLIGHT
+    assert len(svc.triggers) < 5, "never the whole backlog at once"
 
 
 @pytest.mark.asyncio
@@ -1641,3 +1697,529 @@ async def test_a_sub_300s_override_not_yet_elapsed_stays_quiet(session_factory):
         session_factory, lambda: _FakeService(),
     ).sweep()
     assert result.scanned == 0
+
+
+# ── A versioned source whose projector is NOT keeping up ────────────────
+# ``platform_mastered`` asserts "the projector owns this source's rollups and
+# is maintaining them". For fourteen hours that assertion was false and nothing
+# checked it: a wedged projection left reads falling back to the version log,
+# which holds no rollups, while the sweep kept stamping ``managed``.
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_projection_is_not_waved_through_as_managed(
+    session_factory, _versioned, _projector_health,
+):
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=5)
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    state = await _state(session_factory)
+    assert state.drift_state == "projectionStalled", (
+        "a source whose rolled-up connections are missing from the product "
+        "still reads as 'managed' — someone else owns this and is doing fine"
+    )
+    assert result.by_skip.get("projection_stalled") == 1
+    assert result.by_skip.get("platform_mastered") is None
+    # Report-only, unchanged: recovery is a deliberate operator action on the
+    # projector. An automatic retry against a deterministically-failing verify
+    # is what burned CPU for fourteen hours without recovering anything.
+    assert result.actions == 0
+    assert svc.signals == [] and svc.triggers == []
+
+
+@pytest.mark.asyncio
+async def test_a_stale_projector_error_alone_is_not_a_wedge(
+    session_factory, _versioned, _projector_health,
+):
+    """The watermark has caught up and the error is left over from an earlier
+    pass. It was counted as a wedge, and that was a permanent false alarm: ten
+    pinned graphs on the dev fleet sat at their head carrying errors six weeks
+    to two and a half months old, because ``last_error`` is only ever rewritten
+    by the NEXT pass and nothing publishes to those graphs any more. A failed
+    verify holds the watermark BACK on purpose, so a projector that is really
+    failing to publish is caught by ``behind`` instead."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(
+        behind=0, last_error="verify mismatch at seq 902",
+    )
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+
+    assert (await _state(session_factory)).drift_state == "managed"
+
+
+@pytest.mark.asyncio
+async def test_a_projection_pass_in_flight_is_not_a_wedge(
+    session_factory, _versioned, _projector_health,
+):
+    """The watermark trails the head for the length of every ordinary pass.
+    Stamping ``projectionStalled`` there fires the red badge, the stat tile and
+    the "Needs attention" workspace dot on normal operation, and prescribes an
+    action ("go look at version control") that is wrong."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=400, status="projecting")
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert (await _state(session_factory)).drift_state == "managed"
+    assert result.by_skip.get("projection_stalled") is None
+    assert result.by_skip.get("platform_mastered") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_current_projector_still_reads_managed(
+    session_factory, _versioned, _projector_health,
+):
+    """The guard's justification holds while the projector keeps up. A verdict
+    that is always red is a verdict nobody reads."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=0)
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert (await _state(session_factory)).drift_state == "managed"
+    assert result.by_skip.get("platform_mastered") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_projection_does_not_adopt_its_baseline(
+    session_factory, _versioned, _projector_health,
+):
+    """The baseline is only moved when we believe the numbers. While the
+    projection is behind, the stats scan is measuring whichever backend
+    happened to answer, and freezing a wedged reading as "the new normal" is
+    how the fault gets forgotten. Contrast the ``managed`` sibling above,
+    which DOES adopt."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 900, "AGGREGATED": 500},
+        raw_fingerprint="fp_last_known_good",
+    )
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=3)
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+
+    state = await _state(session_factory)
+    assert state.raw_fingerprint == "fp_last_known_good"
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_source_stays_due_on_the_next_tick(
+    session_factory, _versioned, _projector_health,
+):
+    """A red condition that means lineage is missing RIGHT NOW must be
+    re-looked-at every tick — both so it is noticed within a minute instead of
+    an hour, and so it CLEARS within a minute of the projector catching up. The
+    fairness clock still advances, so it rotates rather than camping in the
+    oldest-first window."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=5)
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+    stamped = (await _state(session_factory)).last_reconcile_checked_at
+    assert stamped is not None, "the fairness clock must still advance"
+
+    # The projector catches up; the very next sweep must clear the state.
+    _projector_health["ds_1"] = _health(behind=0)
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert result.scanned == 1, (
+        "a stalled source fell out of the scan window, so its recovery would "
+        "not be noticed until the next full check interval"
+    )
+    assert (await _state(session_factory)).drift_state == "managed"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_projector_health_lookup_defers_the_whole_sweep(
+    session_factory, _versioned, monkeypatch,
+):
+    """The one answer that must never be invented is "the fleet's projectors
+    are fine" — assuming exactly that is what let a wedged projection read as
+    ``managed``. So the sweep defers, and stamps no verdict on the way out."""
+    from backend.app.services.versioned_sources import (
+        ProjectorHealthUnavailable,
+    )
+
+    async def _unavailable(**_kw):
+        raise ProjectorHealthUnavailable("graphver unreachable")
+
+    monkeypatch.setattr(
+        "backend.app.services.versioned_sources.projector_health",
+        _unavailable,
+    )
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result is None
+    assert svc.signals == [] and svc.triggers == []
+    state = await _state(session_factory)
+    assert state.drift_state is None
+    assert state.last_reconcile_checked_at is None
+
+    async with session_factory() as s:
+        run = (await s.execute(select(ReconcileRunORM))).scalars().one()
+    assert json.loads(run.detail)["bySkip"] == {
+        "projector_health_unavailable": 1,
+    }
+
+
+# ── a first build refused by trigger()'s hold gate is a skip, not an error ─
+
+
+@pytest.mark.asyncio
+async def test_a_first_build_held_by_trigger_is_counted_as_a_skip(session_factory):
+    """``trigger()`` refuses automation sources under a hold with
+    ``HeldError``. The sweeper is its only live caller for first builds and
+    must land that in the skip tally — an operator asked for it — never in
+    ``errors``, which reads as "dispatch is broken"."""
+    from backend.app.services.aggregation.holds import HeldError, Hold
+
+    await _seed(
+        session_factory,
+        agg_status="none", expected_edges=0, raw_fingerprint=None,
+        edge_counts={"FLOWS_TO": 200}, job_rows=(),
+        last_aggregated_ago_secs=None,
+    )
+
+    class _HeldSvc(_FakeService):
+        async def trigger(self, ds_id, request, trigger_source, session):
+            raise HeldError(Hold("provider", "stopped", scope_id="prov_1"))
+
+    svc = _HeldSvc()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_reason == {"never_aggregated": 1}
+    assert result.errors == 0
+    assert result.actions == 0
+    assert result.skipped == 1
+    assert result.by_skip == {"provider_held": 1}
+    assert svc.signals == []
+
+
+# ── Provider / fleet holds ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_provider_hold_is_honoured_by_the_sweep_and_named_in_the_tally(
+    session_factory,
+):
+    """One ``automation_holds`` row for the provider holds every source
+    under it — the sweep still evaluates and records the finding (a hold is
+    never a guard), dispatches nothing, and says WHICH control is holding
+    the source: ``provider_held``, not ``paused``, so an operator is not
+    sent to a source-level Resume that cannot release it."""
+    from backend.app.services.aggregation.models import AutomationHoldORM
+
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    async with session_factory() as s:
+        s.add(AutomationHoldORM(
+            scope="provider", scope_id="prov_1",
+            stopped_at="2026-09-01T00:00:00+00:00",
+        ))
+        await s.commit()
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("provider_held") == 1
+    assert svc.signals == [] and svc.triggers == []
+    state = await _state(session_factory)
+    assert state.last_finding_reason == "overlay_missing"
+
+
+@pytest.mark.asyncio
+async def test_a_fleet_hold_outranks_a_source_pause_in_what_is_reported(
+    session_factory,
+):
+    from backend.app.services.aggregation.models import AutomationHoldORM
+
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    async with session_factory() as s:
+        state = await s.get(AggregationDataSourceStateORM, "ds_1")
+        state.paused_until = "2999-01-01T00:00:00+00:00"
+        s.add(AutomationHoldORM(
+            scope="fleet", scope_id="", paused_until="2999-01-01T00:00:00+00:00",
+        ))
+        await s.commit()
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("fleet_held") == 1
+    assert "paused" not in result.by_skip
+    assert svc.signals == []
+
+
+@pytest.mark.asyncio
+async def test_a_hold_on_another_provider_does_not_touch_this_source(
+    session_factory,
+):
+    from backend.app.services.aggregation.models import AutomationHoldORM
+
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    async with session_factory() as s:
+        s.add(AutomationHoldORM(scope="provider", scope_id="prov_other", stopped_at="x"))
+        await s.commit()
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert "provider_held" not in result.by_skip
+    assert len(svc.signals) == 1, "an unheld source is still dispatched"
+
+
+# ── ③ Act off is a fleet-wide stop for the sweep too ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_act_off_holds_the_sweep_fleet_wide(session_factory, monkeypatch):
+    """"Automatically rebuild a source when drift is detected" off used to
+    leave this loop — the main automatic rebuild engine — running. Now every
+    finding is still recorded, nothing is acted on, and the tally names the
+    fleet-wide stop."""
+    from backend.app.services.aggregation import service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("fleet_held") == 1
+    assert svc.signals == [] and svc.triggers == []
+    state = await _state(session_factory)
+    assert state.last_finding_reason == "overlay_missing"
+
+
+@pytest.mark.asyncio
+async def test_act_off_holds_first_builds_too(session_factory, monkeypatch):
+    from backend.app.services.aggregation import service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    await _seed(
+        session_factory,
+        agg_status="none", expected_edges=0, raw_fingerprint=None,
+        edge_counts={"FLOWS_TO": 200}, job_rows=(),
+        last_aggregated_ago_secs=None,
+    )
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("fleet_held") == 1
+    assert svc.triggers == [] and svc.signals == []
+
+
+# ── The scan window belongs to the sources that are due ─────────────────
+#
+# The SQL cutoff used to be clamped to a 300s floor while _is_due tested the
+# resolved per-source interval (3600s by default). Every source checked
+# between those two numbers matched the query, took a slot in the LIMIT, was
+# dropped by _is_due without its fairness clock moving, and took the same
+# slot again on the next tick. At steady state that is ~92% of the fleet, so
+# past ~218 sources the window held nothing the pass could act on — and a
+# source made due by the counts tripwire, whose last_reconcile_checked_at is
+# by definition RECENT, sorted to the tail and was the row the LIMIT cut.
+
+
+async def _set_interval(factory, ds_id, secs):
+    async with factory() as s:
+        state = await s.get(AggregationDataSourceStateORM, ds_id)
+        state.reconcile_check_interval_secs = secs
+        await s.commit()
+
+
+async def _quiet(factory, ds_id):
+    """Steady state for a source nothing has happened to: the probe has read
+    its counts and the sweep has already seen that digest. Without this the
+    tripwire's own NULL-digest fallback holds the source open, which is a
+    different (and correct) reason to be due."""
+    await _set_digests(factory, ds_id, stats_digest="same", seen_digest="same")
+
+
+@pytest.mark.asyncio
+async def test_a_source_inside_its_interval_is_not_even_read(session_factory):
+    """The bug, at its smallest. 600s is past the old 300s clamp and far
+    inside the 3600s interval the verdict is actually taken against."""
+    for i in range(3):
+        await _seed(session_factory, ds_id=f"ds_{i}", checked_at=_ago(seconds=600))
+        await _quiet(session_factory, f"ds_{i}")
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        assert await sweeper._candidates(s, None, 3600) == []
+
+
+@pytest.mark.asyncio
+async def test_the_window_is_not_spent_on_rows_the_pass_would_discard(
+    session_factory, monkeypatch,
+):
+    """The consequence at fleet scale, with the cap shrunk so three sources
+    stand in for three hundred. The tripwire source was checked seconds ago,
+    so oldest-checked-first puts it LAST; it has to be in the window anyway,
+    because the promise on that path is sub-minute detection."""
+    from backend.app.services.aggregation import reconcile_sweeper as rs
+
+    monkeypatch.setattr(rs, "_SCAN_CAP", 2)
+    for i in range(4):
+        await _seed(session_factory, ds_id=f"quiet_{i}", checked_at=_ago(seconds=600))
+        await _quiet(session_factory, f"quiet_{i}")
+    await _seed(session_factory, ds_id="moved", checked_at=_ago(seconds=5))
+    await _set_digests(
+        session_factory, "moved", stats_digest="new", seen_digest="old",
+    )
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["moved"]
+
+
+@pytest.mark.asyncio
+async def test_a_tripwire_row_outranks_an_older_but_merely_stale_one(
+    session_factory, monkeypatch,
+):
+    """Both are due; only one has fresh evidence. With the window full, the
+    order decides which gets looked at this tick and which waits."""
+    from backend.app.services.aggregation import reconcile_sweeper as rs
+
+    monkeypatch.setattr(rs, "_SCAN_CAP", 1)
+    await _seed(session_factory, ds_id="ancient", checked_at=_ago(seconds=90_000))
+    await _quiet(session_factory, "ancient")
+    await _seed(session_factory, ds_id="moved", checked_at=_ago(seconds=5))
+    await _set_digests(
+        session_factory, "moved", stats_digest="new", seen_digest="old",
+    )
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["moved"]
+
+
+@pytest.mark.asyncio
+async def test_each_source_is_due_on_its_own_cadence(session_factory):
+    """A per-source override is now a SQL predicate rather than a clamp, so a
+    fast source is read on its own schedule and a slow neighbour is not read
+    at all. Under the clamp the fast source's override widened the cutoff for
+    the whole fleet, and — being the most recently checked — sorted last and
+    was the row the LIMIT truncated, so its own override never took effect."""
+    await _seed(session_factory, ds_id="fast", checked_at=_ago(seconds=120))
+    await _set_interval(session_factory, "fast", 60)
+    await _quiet(session_factory, "fast")
+    await _seed(session_factory, ds_id="slow", checked_at=_ago(seconds=120))
+    await _quiet(session_factory, "slow")
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert [c.data_source_id for c in candidates] == ["fast"]
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_source_cannot_narrow_the_fleets_window(session_factory):
+    """``probe_scheduler._fastest_override`` filters disabled sources out of
+    its fleet-wide MIN for this reason. There is no fleet-wide number here any
+    more, so the property holds by construction — which is what this pins."""
+    await _seed(session_factory, ds_id="stopped", checked_at=_ago(seconds=120),
+                reconcile_enabled=False)
+    await _set_interval(session_factory, "stopped", 30)
+    await _quiet(session_factory, "stopped")
+    await _seed(session_factory, ds_id="quiet", checked_at=_ago(seconds=120))
+    await _quiet(session_factory, "quiet")
+
+    sweeper = ReconciliationSweeper(session_factory, lambda: _FakeService())
+    async with session_factory() as s:
+        candidates = await sweeper._candidates(s, None, 3600)
+
+    assert "quiet" not in [c.data_source_id for c in candidates]
+
+
+@pytest.mark.asyncio
+async def test_the_run_row_says_how_many_rows_the_window_cost(session_factory):
+    """``scanned=5`` while 195 rows were read and thrown away was invisible.
+    The two now track each other, and the gap is on the run row when it does
+    not."""
+    await _seed(session_factory, ds_id="due", checked_at=_ago(seconds=7200))
+    await _quiet(session_factory, "due")
+    await _seed(session_factory, ds_id="inside", checked_at=_ago(seconds=600))
+    await _quiet(session_factory, "inside")
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert result.rows_read == 1 == result.scanned
+    assert json.loads(result.detail_json())["rowsRead"] == 1
+
+
+
+# ── first builds: occupancy, not a fixed rate ───────────────────────────
+#
+# _FIRST_BUILD_CAP = 1 was two problems, not one. Too slow going in: 300
+# never-aggregated sources take ~5h just to be QUEUED at one per tick. And
+# too fast coming out — it is an admission RATE with no feedback from drain,
+# and the only re-queue guard is per source, so queued-but-unstarted first
+# builds accumulate whenever the fleet drains slower than one per tick. The
+# head of that queue reaches AGGREGATION_PENDING_TIMEOUT_SECS and is failed
+# as NEVER_DISPATCHED — "the dispatch message was likely lost", which is not
+# what happened — and three of those suspend the source.
+
+
+def test_a_fleet_that_is_not_draining_admits_nothing():
+    from backend.app.services.aggregation.reconcile_sweeper import (
+        _FIRST_BUILD_TARGET_IN_FLIGHT, _first_build_cap,
+    )
+
+    assert _first_build_cap(_FIRST_BUILD_TARGET_IN_FLIGHT, 10) == 0
+    assert _first_build_cap(_FIRST_BUILD_TARGET_IN_FLIGHT + 5, 10) == 0
+    # …and it recovers on its own as they drain, with no operator action.
+    assert _first_build_cap(0, 10) == _FIRST_BUILD_TARGET_IN_FLIGHT
+
+
+def test_first_builds_never_take_more_than_half_the_action_budget():
+    """They draw from the SAME allowance as drift rebuilds, which are the
+    freshness the fleet is judged on. (It is also why a cap above
+    max_actions was always silently ineffective.)"""
+    from backend.app.services.aggregation.reconcile_sweeper import _first_build_cap
+
+    assert _first_build_cap(0, 2) <= 1
+    assert _first_build_cap(0, 100) <= _first_build_cap(0, 100)
+    for budget in (1, 2, 4, 10):
+        assert _first_build_cap(0, budget) <= max(1, budget // 2)
+
+
+def test_the_cap_is_read_from_what_the_sweep_already_loaded():
+    """A job queued or running, for a source that has never completed one.
+    Both facts are on the context rows already; a new query per sweep to
+    police the cold start would be its own cost."""
+    import inspect
+
+    from backend.app.services.aggregation import reconcile_sweeper as rs
+
+    src = inspect.getsource(rs.ReconciliationSweeper._phase_a)
+    assert 'row.get("job_in_flight") and not row.get("has_completed_job")' in src
+    assert "first_build_cap = _first_build_cap(first_builds_in_flight, max_actions)" in src
+    assert "if first_builds >= first_build_cap:" in src

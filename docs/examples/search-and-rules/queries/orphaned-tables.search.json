@@ -1,0 +1,12 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      { "kind": "entityType", "op": "in", "values": ["dataset"] },
+      { "kind": "isOrphan", "edgeClass": "lineage" }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": { "results": "hits", "pageSize": 500, "sort": "displayName", "sortDir": "asc" }
+}

@@ -12,7 +12,7 @@
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { useCanvasTraceWalk } from '../useCanvasTraceWalk'
+import { useCanvasTraceWalk, MAX_TRACE_SEEDS } from '../useCanvasTraceWalk'
 import { recordEvent } from '@/services/telemetryService'
 import { useCanvasStore } from '@/store/canvas'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
@@ -289,5 +289,98 @@ describe('useCanvasTraceWalk', () => {
 
     act(() => result.current.start('F'))
     await waitFor(() => expect(recordEvent).toHaveBeenCalledTimes(2))
+  })
+})
+
+/**
+ * A COMBINED trace: a multi-selection traced as one. Each seed is its own
+ * walk and the picture is their union — which is re-derived only when a walk
+ * actually moves, never merely because the canvas re-rendered.
+ */
+describe('useCanvasTraceWalk — several seeds', () => {
+  const gEstate = () => closureResult({
+    focus: f('G'),
+    nodes: [gn('G', 'dataset'), gn('colG')],
+    edges: [hop('G', 'colG', 'eg')],
+    downstreamUrns: new Set(['colG']),
+  })
+
+  it('walks every seed and hands back ONE model: their union', async () => {
+    const { provider } = providerByUrn({ F: estate, G: gEstate })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(['F', 'G']))
+    expect(result.current.tracedUrns).toEqual(['F', 'G'])
+    expect(result.current.tracedUrn).toBe('F')
+
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'G', 'PLAT', 'T1', 'colA', 'colG'])
+    expect(result.current.walkEntry?.model.upstreamUrns).toEqual(new Set(['colA']))
+    expect(result.current.walkEntry?.model.downstreamUrns).toEqual(new Set(['colG']))
+    expect(storeNodeIds()).toEqual(['F', 'PLAT'])
+  })
+
+  it('a re-render with nothing new keeps the union — and the progress — by identity', async () => {
+    const { provider } = providerByUrn({ F: estate, G: gEstate })
+    const { result, rerender } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(['F', 'G']))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+
+    const first = result.current
+    rerender()
+    rerender()
+    expect(result.current.walkEntry).toBe(first.walkEntry)
+    expect(result.current.progress).toBe(first.progress)
+    expect(result.current).toBe(first)
+  })
+
+  it('removeSeed narrows the trace without a single new request', async () => {
+    const { provider, traceClosure } = providerByUrn({ F: estate, G: gEstate })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(['F', 'G']))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    await waitFor(() => expect(recordEvent).toHaveBeenCalledTimes(1))
+    const calls = traceClosure.mock.calls.length
+
+    act(() => result.current.removeSeed('G'))
+    expect(result.current.tracedUrns).toEqual(['F'])
+    expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['F', 'PLAT', 'T1', 'colA'])
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    expect(traceClosure).toHaveBeenCalledTimes(calls)
+    // Narrowing is not asking again.
+    expect(recordEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('removing the primary promotes the next seed; removing the last leaves the trace', async () => {
+    const { provider } = providerByUrn({ F: estate, G: gEstate })
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(['F', 'G']))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+
+    act(() => result.current.removeSeed('F'))
+    expect(result.current.tracedUrn).toBe('G')
+    expect(modelNodeUrns(result.current.walkEntry?.model)).toEqual(['G', 'colG'])
+
+    act(() => result.current.removeSeed('nobody'))      // not a seed: nothing moves
+    expect(result.current.tracedUrns).toEqual(['G'])
+
+    act(() => result.current.removeSeed('G'))
+    expect(result.current.isTracing).toBe(false)
+    expect(result.current.tracedUrn).toBeNull()
+    expect(result.current.walkEntry).toBeNull()
+    expect(storeNodeIds()).toEqual(['F', 'PLAT'])
+  })
+
+  it(`traces the first ${MAX_TRACE_SEEDS} of a larger selection and never walks the rest`, async () => {
+    const traceClosure = vi.fn(async (req: Record<string, unknown>) =>
+      closureResult({ focus: f(req.urn as string), nodes: [gn(req.urn as string, 'dataset')] }))
+    const provider = { scopeKey: 'ws1', traceClosure } as unknown as GraphDataProvider
+    const selection = Array.from({ length: MAX_TRACE_SEEDS + 5 }, (_, i) => `s${i}`)
+    const { result } = renderHook(() => useCanvasTraceWalk(provider))
+    act(() => result.current.start(selection))
+
+    expect(result.current.tracedUrns).toEqual(selection.slice(0, MAX_TRACE_SEEDS))
+    await waitFor(() => expect(result.current.progress?.phase).toBe('done'))
+    const walked = new Set(traceClosure.mock.calls.map(([req]) => req.urn))
+    expect(walked).toEqual(new Set(selection.slice(0, MAX_TRACE_SEEDS)))
   })
 })

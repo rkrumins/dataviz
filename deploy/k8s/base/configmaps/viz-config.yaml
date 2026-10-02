@@ -15,12 +15,23 @@ data:
   # build would wedge the event loop and freeze every request). Explicit here
   # so the topology never depends on a code default flipping.
   GRAPHVER_PROJECTION_INPROCESS: "0"
+  # Import and export jobs are only queued here: the versioning-worker
+  # Deployment claims them from the jobs table and runs them, so a large
+  # import or export never shares a web pod's CPU and memory with requests.
+  GRAPHVER_TRANSFER_INPROCESS: "0"
   # R-C3: keep the isolated GRAPH_READ pool modest so the per-pod Postgres
   # ceiling (~85 conns/process × GUNICORN_WORKERS × replicas) stays bounded.
   # A single Postgres max_connections cannot cover an HPA'd fleet — front it
   # with PgBouncer (transaction pooling) for real scale.
+  # These two are also what the graph admission gate sizes itself from
+  # (providers/manager.py::_graph_inflight_limits): pool+overflow is the
+  # ceiling on concurrent graph reads per worker, and a source's guaranteed
+  # share is 1/8th of it. 8+8 → at most 12 in flight, 2 reserved per source.
   DB_GRAPH_READ_POOL_SIZE: "8"
-  DB_GRAPH_READ_MAX_OVERFLOW: "8"
+  # POOL_MAX_OVERFLOW, not MAX_OVERFLOW: the name this ConfigMap carried
+  # until now was never read, so the overflow silently stayed at the code
+  # default of 10 and the pool was 18, not the 16 intended here.
+  DB_GRAPH_READ_POOL_MAX_OVERFLOW: "8"
   # The grid every analytics window ends on. The warmer itself is
   # controlplane-only, but this tier reads the same variable to decide which
   # epoch it is asking for, so it MUST match controlplane-config's value —

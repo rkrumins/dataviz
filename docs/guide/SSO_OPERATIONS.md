@@ -144,12 +144,13 @@ For a gateway connection's browser exchange, the rehearsal verdict states
 which reply shape arrived (a signed token or bare JSON) and what judged it —
 the quickest way to see which rating a deployment's gateway earns.
 
-The verdict also says when the claims carried **no authentication time**. A
-sign-in can only get that far on a connection whose *Require an
-authentication time* toggle is off, and the line spells out the cost: the
+The verdict also says when the claims carried **no authentication time**.
+Such a sign-in is not refused; the line spells out what it means: the
 re-certification ceiling (24 hours by default, `SSO_SESSION_MAX_AGE_HOURS`)
 then measures from each sign-in instead of from the moment the person
-actually authenticated at the IdP.
+actually authenticated at the IdP. The same happens when the time is too old
+to use — a gateway reporting the portal's original login — and the login
+event records it as `auth_time_anchored: true`.
 
 ---
 
@@ -163,7 +164,7 @@ change them.
 | Switch | On | Off |
 |---|---|---|
 | **Single sign-on** | Connections appear on the sign-in page | No company buttons at all. Nothing is deleted; turning it back on restores every connection as it was. People already signed in through a connection stay signed in until their sessions expire — the confirm offers to sign them out now, with the count, and the same action stands alone on the page once the switch is off |
-| **Passwords** | Email and password still work | SSO is the only way in. Refused if it would lock out an admin who has no SSO identity |
+| **Passwords** | Email and password still work | SSO is the only way in — see *Enforcing single sign-on* below. Refused if it would lock out an admin who has no SSO identity and is not a system account |
 | **Create accounts automatically** | An account appears the first time somebody signs in through a connection | They must already exist here. An unknown person is turned away with `jit_disabled` |
 | **Ask for an email first** | One field, routed to the connection owning that domain | A button per connection |
 
@@ -176,6 +177,43 @@ flip both in one save or one at a time. Should a deployment reach that state
 anyway (a seeded database, a direct edit), the posture sentence at the top of
 the page turns red and says nobody can sign in; existing sessions keep working
 until they expire, so there is a window to put one back.
+
+### Enforcing single sign-on
+
+Turning **Passwords** off makes SSO the only way in. Three things make that
+safe to actually do:
+
+1. **The lockout guard.** The switch is refused while any active admin has
+   neither a linked SSO identity nor the system-account mark — the 409 lists
+   who. Fix it by having each listed admin sign in once through a connection
+   (linking their identity), or by marking the operational account as a
+   **system account** in Admin → Users.
+
+2. **The system account (break-glass).** A system account is out of scope for
+   enforcement: it keeps password sign-in even while passwords are off, and
+   forced sign-outs skip it. The sign-in page hides the password form under
+   enforcement, so the system account signs in at `/login?password=1` — the
+   page does not advertise that address, and revealing the form grants
+   nothing, because the server refuses every account that is not marked (an
+   unknown email gets the identical refusal). A fresh deployment's seeded
+   administrator is marked automatically; existing deployments mark theirs in
+   Admin → Users. Reserve the mark for operational accounts — it is the door
+   that survives an IdP outage.
+
+3. **Requiring everyone to sign in again.** Flipping the switch changes what
+   the *next* sign-in must be; the sessions already out there stay valid under
+   the old policy until they expire — up to a day. The confirm offers to end
+   them in the same breath, with the counts, and the same act stands alone on
+   the page as **Require everyone to sign in again** for the admin who reaches
+   for it later. It ends every session, password and SSO alike, except system
+   accounts — including your own, unless your account is one; you are walked
+   to the sign-in page and come back in through a connection like everyone
+   else.
+
+Password **sign-up** is refused under enforcement too, invited or not — an
+account created with a password it can never use is a dead end discovered at
+first sign-in. Invites are redeemed by signing in through a connection
+instead.
 
 ### Create accounts automatically
 
@@ -229,9 +267,93 @@ connection in the editor's **Identity** section.
 
 The person is shown a short reference like `a1b2c3d4` and nothing else — telling
 them the real reason would describe your configuration to anyone who can reach
-the sign-in page. Ask them for it, then **Admin → SSO → Diagnostics** and search.
+the sign-in page. Ask them for it, then **Admin → SSO → Diagnostics → Given a
+reference?** — **Look up** opens the Activity tab with it searched.
 
-Each row explains its code in place. The full vocabulary:
+**Activity** is the full log: every sign-in, failure, session ending, sign-out,
+identity link and SSO configuration change, one row per event with the person,
+the connection, the outcome, the reason and the error behind it, the reference,
+and the network address and browser as columns. Filter by outcome (each chip
+shows its count), by connection, by window, and search by person, email,
+reference or address; click a person or a connection in the table to narrow to
+them, and open a row for the whole record. Every filter runs on the server, so
+pages are full and "Load more" continues where the last page ended.
+
+Nobody has quoted anything yet? **Sign-in problems**, at the top of
+Diagnostics, lists everyone who failed to sign in over the last day, week or month —
+one row per person, the people **still failing** first. Filter by reason, by
+connection, or find a person by name, email or id. Open a row for:
+
+- **The account.** Whether it has a password at all, the connections it can sign
+  in through, and when it last signed in successfully. Someone who has signed
+  in since their failures shows **Signed in**, and needs nothing.
+- **Why, in words.** Each reason code, how often, and what to do.
+- **Where each attempt came from.** Network address, browser, time, the
+  reference, and the underlying error — an upstream status, an exception
+  message — kept beside the code.
+- **Why their session ended before it**, when it did (below).
+- **Failures just before, from the same browser**, that happened before anyone
+  could be named — a connection that could not reach its gateway, no corporate
+  session on the request. Same address and browser is strong evidence, not
+  proof: an office can share an address.
+
+The list is built on the server from at most the 5,000 most recent records in
+the window; it says so when there were more. Finding a person reads that
+person's records directly, however many others there are.
+
+### Password failures for accounts that sign in with SSO
+
+A password attempt now records which refusal it was. The person still sees
+"Invalid email or password" whichever it is.
+
+| Code | What happened | What to do |
+|---|---|---|
+| `no_local_password` | The account has no password — it signs in only through single sign-on | They used the password form, usually because their SSO sign-in failed first: look at the failure just before it. **Ask for an email first**, or switching passwords off, stops the form being offered |
+| `invalid_credentials` | Wrong password for an account that has one | Nothing, unless it repeats |
+| `user_not_found` | No account uses that address | Nothing, unless it repeats |
+| `account_inactive` | The account is pending or suspended | Approve or reinstate it under Admin → Users |
+| `throttled` | Too many failures for that address in a short time | It clears by itself; a burst across many addresses is a password spray |
+| `local_login_disabled` | Passwords are switched off | Expected — point them at their SSO button |
+
+Rows written before this change say `invalid_credentials` for all of the first
+four.
+
+### Why a session ended
+
+Shown beside a person's failures, because a session that stopped renewing is
+usually why they were signing in at all.
+
+| Code | Meaning |
+|---|---|
+| `reauth_ceiling`, `idle`, `absolute` | An SSO session reached the daily re-authentication limit, its idle limit, or its maximum age — they are sent back through their provider |
+| `session_idle`, `session_expired` | The same limits, for a password session |
+| `reuse_detected` | A renewal token was used twice, so the session was ended. Once is two tabs racing; repeatedly for one person, suspect a copied cookie |
+| `sessions_revoked` | All their sessions were ended at once — "sign out everywhere", or an access change |
+| `user_inactive` | The account stopped being active while signed in |
+| `no_record`, `family_revoked` | The server had no record of the session, or it had already ended |
+
+### Ending sessions
+
+| To end | Do this | What happens |
+|---|---|---|
+| One person's sessions, keeping the account | Admin → Users → **End sessions** on their row | Every browser they are signed in on is refused at its next request; they can sign straight back in |
+| One person, for good | **Suspend** | As above, and they cannot sign back in until reactivated |
+| What one identity minted | Unlink the identity (theirs, or an admin's unlink) | Only the sessions that identity started end; their others carry on |
+| What one connection minted | The connection's **End sessions** | Every session that connection started ends. Disabling a connection alone stops new sign-ins but ends nothing |
+| Everyone | Settings → **Sign everyone out now** | Every session except the system accounts' |
+
+Signing out, a password change or reset, a suspension and a role change take
+effect on the next request, on every route. Sessions also end on their own at
+the limits set in the deployment: `SSO_SESSION_MAX_AGE_HOURS` (default 24, the
+daily re-authentication), `SESSION_IDLE_MAX_HOURS` (12) and
+`SESSION_ABSOLUTE_MAX_HOURS` (168). The server refuses to start with an SSO
+limit no longer than one access token (`JWT_EXPIRY_MINUTES`), and — in
+production — with an absolute limit longer than the refresh-token lifetime
+(`JWT_REFRESH_EXPIRY_DAYS`), which could never fire.
+
+### Codes
+
+Each row explains its code in place. The full vocabulary for linking:
 
 | Code | What happened | What to do |
 |---|---|---|
@@ -264,11 +386,11 @@ specifics (which URL, which path, which status).
 |---|---|---|
 | `backchannel_no_session` | The request arrived without your portal's session cookie (or header) | Usually correct — they are not signed in to the portal. If they say they are, the cookie is not reaching us: check its domain and `SameSite` |
 | `backchannel_idp_rejected:401` / `:403` | Your gateway said the session is not valid | Also usually correct. It is what makes signing out of the portal sign them out here |
-| `backchannel_unavailable` | We could not get an answer. The audit summary says which way: `idp_blocked:…` means we refused to make the call — almost always the host allowlist (Settings → *Internal gateways SSO may call*; check the host **and the port**); `idp_unreachable:…` means it did not answer in time; `idp_status:5xx` means it answered with an error | Allowlist problems are yours; outages and 5xx are theirs — quote them the summary. Existing sessions ride out a short outage; see below |
+| `backchannel_unavailable` | We could not get an answer. The audit summary says which way: `idp_blocked:…` means we refused to make the call — almost always the host allowlist (Settings → *Internal gateways SSO may call*; check the host **and the port**); `idp_unreachable:…` means it did not answer in time; `idp_status:5xx` means it answered with an error | Allowlist problems are yours; outages and 5xx are theirs — quote them the summary. An `idp_unreachable` whose summary mentions *certificate verify failed* means this deployment does not trust the gateway's TLS: mount your corporate CA bundle (`SSO_OUTBOUND_TLS_CA_CERTS`) rather than switching verification off. Existing sessions ride out a short outage; see below |
 | `backchannel_token_absent` | Their reply did not contain a token where we were told to look | The path in the connection's settings does not match what they actually send. Rehearse and read the reply |
 | `backchannel_claims_absent` | Same, for the user details | Same fix |
 | `backchannel_claims_unmappable` | The details arrived, but the claim mapping could not produce an identity from them | Open the connection's **Claim mapping**, load the last assertion, and see which required field (subject, email) has no source |
-| `backchannel_auth_time_absent` | Their reply carried no authentication time | Ask them to include one. Turning the requirement off is possible and quietly disables the daily re-authentication ceiling for everyone on that connection |
+| `backchannel_auth_time_absent` | Only on failures recorded before this was retired: their reply carried no authentication time | Nothing — such sign-ins now succeed, with the daily re-authentication ceiling measured from each sign-in. Asking them to include the time makes it measure from their own sign-in |
 | `backchannel_jwt_invalid` | Their reply carried a signed token we could not accept — undecodable, wrong signature, unknown key, or an issuer/audience that fails the pins | Compare the connection's JWKS URL and pins against what their team publishes; the audit summary names the exact refusal |
 | `backchannel_jwt_expired` | The signed token in their reply had already expired | Clock skew or a cached answer on their side |
 | `backchannel_replayed` | A browser-delivered sign-in token was presented twice | Once is a harmless double submit; a pattern is replayed captured tokens — treat as an incident |
@@ -287,7 +409,35 @@ keep working for the connection's grace period (15 minutes unless the
 connection sets otherwise), measured from the last time the gateway actually
 answered rather than the last time we tried. A brief outage is invisible. A
 long one ends sessions rather than extending them indefinitely, which is
-deliberate: an outage should spend that allowance down, not renew it.
+deliberate: an outage should spend that allowance down, not renew it. A
+re-check that has not answered within 10 seconds counts as the gateway being
+down for that renewal.
+
+**Set the grace to at least twice the access-token lifetime.** The gateway is
+asked once per renewal, and a renewal comes round once per access-token
+lifetime (`JWT_EXPIRY_MINUTES`). A grace shorter than two of those can end
+sessions at the first renewal that finds the gateway down, and against the
+Helm chart's 60-minute tokens the default 15 minutes always does. *Outage
+grace (seconds)* is on the connection's settings.
+
+**Two settings that pass a rehearsal and fail at the first renewal.** A
+rehearsal proves the sign-in; neither of these touches it:
+
+* **A sign-in trigger connection whose *Cookie name* is the portal's own
+  host-only cookie.** The renewal re-check reads that cookie off requests to
+  *this* application, and a cookie scoped to the SSO host
+  (`sso.corp.example`) never arrives here. Every renewal then reads as
+  "signed out upstream": people are signed in again silently every token
+  lifetime, and their other sessions end. Name a cookie set on a domain both
+  hosts share, or turn off *Re-check with the provider on every session
+  renewal*.
+* **A handle-only connection that presents the handle as a cookie with no
+  name.** With *Present the ambient token* on cookie and neither a *Cookie
+  name* nor *Send it under a different cookie name* filled in, the gateway
+  receives a cookie with no name. Name it, or present the token as a header.
+
+**Tabs left open across an upgrade** keep running the page they loaded until
+they are reloaded, including its sign-in and renewal code.
 
 ---
 
@@ -437,4 +587,6 @@ should usually be zero.
 **Rehearse after changes.** The rehearsal from setup is available on every
 connection's card at any time, not just during setup. It writes nothing and
 creates no session, so there is no reason not to use it after editing a
-connection.
+connection. Its verdict also tells the avatar story — whether the mapped
+picture would arrive (type and size), or which rule refused it and, when the
+host is the problem, which host to add to the avatar image hosts list.

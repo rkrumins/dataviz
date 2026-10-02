@@ -231,3 +231,28 @@ async def test_suspend_revokes_every_existing_session(
     assert res.status_code == 200, res.text
 
     assert await get_revocation_service().is_revoked(sid)
+
+
+async def test_an_admin_can_end_one_persons_sessions(
+    test_client: AsyncClient, db_session: AsyncSession, real_claims,
+):
+    """Without suspending them: the account is untouched, every session
+    it holds ends, and the next renewal is refused."""
+    user_id = await _seed(db_session, "lost-laptop@example.com")
+    access = await _login(test_client, "lost-laptop@example.com")
+    sid = decode_token(access)["sid"]
+
+    res = await test_client.post(f"/api/v1/admin/users/{user_id}/sessions/revoke")
+    assert res.status_code == 200, res.text
+
+    assert await get_revocation_service().is_revoked(sid)
+    user = await user_repo.get_user_by_id(db_session, user_id)
+    assert user.status == "active"
+    assert user.sessions_valid_from is not None
+
+
+async def test_ending_your_own_sessions_goes_through_sign_out_everywhere(
+    test_client: AsyncClient,
+):
+    res = await test_client.post("/api/v1/admin/users/usr_test000000/sessions/revoke")
+    assert res.status_code == 409

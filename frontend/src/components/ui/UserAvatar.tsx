@@ -6,8 +6,11 @@
  * the picked illustration over initials. The fallback renders as the
  * base layer with the image absolutely positioned on top, so a slow
  * load shows initials rather than a blank circle, and a 404 simply
- * never covers them. Misses are remembered per page load, so a member
- * list does not re-404 every avatar-less row on every mount.
+ * never covers them. Misses are remembered (with a short TTL), so a
+ * member list does not re-404 every avatar-less row on every mount —
+ * and a failure is pinned to the exact src that failed, so the
+ * post-sign-in cache bump retries in place instead of waiting for a
+ * hard refresh.
  *
  * The wrapper owns only the circle; size and text scale come from
  * ``className`` (e.g. ``w-8 h-8 text-xs``), which is what lets the
@@ -49,9 +52,10 @@ export function UserAvatar({
     fallback?: React.ReactNode
     alt?: string
 }) {
-    const [broken, setBroken] = useState(false)
-    const showImage = Boolean(userId)
-        && !broken
+    const [failedSrc, setFailedSrc] = useState<string | null>(null)
+    const src = userId ? avatarImageSrc(userId) : null
+    const showImage = Boolean(src)
+        && failedSrc !== src
         && avatarImageState(userId as string) !== 'none'
 
     const art = avatarId
@@ -107,13 +111,13 @@ export function UserAvatar({
                 access summary. */}
             {showImage && (
                 <img
-                    src={avatarImageSrc(userId as string)}
+                    src={src as string}
                     alt={alt ?? ''}
                     className="absolute inset-0 h-full w-full object-cover"
                     onLoad={() => rememberAvatarImage(userId as string, 'ok')}
                     onError={() => {
                         rememberAvatarImage(userId as string, 'none')
-                        setBroken(true)
+                        setFailedSrc(src)
                     }}
                 />
             )}

@@ -22,7 +22,7 @@ import {
 import { DeletedDataSources } from '@/components/admin/workspace/DeletedDataSources'
 import { aggregationService } from '@/services/aggregationService'
 import { DEFAULT_TIMEOUT_SECS } from '@/components/admin/shared/AggregationOverridesForm'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission, usePermissionClaims } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { accessRequestsService } from '@/services/accessRequestsService'
@@ -48,7 +48,7 @@ import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 export function WorkspaceDetailPage() {
     const { wsId } = useParams<{ wsId: string }>()
     const navigate = useNavigate()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // ── Data fetching via custom hook ──────────────────────
     const {
@@ -195,14 +195,37 @@ export function WorkspaceDetailPage() {
     // ── Handlers ───────────────────────────────────────────
     const handleSaveHeader = async () => {
         if (!wsId || !editName.trim()) return
-        await workspaceService.update(wsId, { name: editName, description: editDesc || undefined })
+        const name = editName.trim()
+        const renamed = name !== workspace?.name
+        try {
+            await workspaceService.update(wsId, { name: editName, description: editDesc || undefined })
+        } catch (err) {
+            // Leave the header in edit mode with what they typed — closing it here
+            // would swallow the edit as well as the failure.
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not save the changes to “${workspace?.name ?? 'this workspace'}”.`)
+            return
+        }
         setEditingHeader(false)
+        notify('success', renamed
+            ? `Workspace renamed to “${name}”.`
+            : `Description updated for “${name}”.`)
         reload()
     }
 
     const handleSetPrimary = async (dsId: string) => {
         if (!wsId) return
-        await workspaceService.setPrimaryDataSource(wsId, dsId)
+        const label = workspace?.dataSources.find(ds => ds.id === dsId)?.label || 'That data source'
+        try {
+            await workspaceService.setPrimaryDataSource(wsId, dsId)
+            notify('success', `“${label}” is now the primary data source for this workspace.`)
+        } catch (err) {
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not make “${label}” the primary data source.`)
+        }
+        // Either way — the Primary badge on the grid has to end up matching the server.
         reload()
     }
 
@@ -225,27 +248,48 @@ export function WorkspaceDetailPage() {
         const nameChanged = pending.dedicatedGraphName !== original.dedicatedGraphName
         const identityChanged = pending.identityProperty !== original.identityProperty
         const namePropChanged = pending.nameProperty !== original.nameProperty
-        if (modeChanged) {
-            await workspaceService.setProjectionMode(wsId, dsId, pending.projectionMode)
+        if (!modeChanged && !nameChanged && !identityChanged && !namePropChanged) return
+        const label = workspace?.dataSources.find(ds => ds.id === dsId)?.label || 'this data source'
+        try {
+            if (modeChanged) {
+                await workspaceService.setProjectionMode(wsId, dsId, pending.projectionMode)
+            }
+            if (nameChanged || identityChanged || namePropChanged) {
+                await workspaceService.updateDataSource(wsId, dsId, {
+                    ...(nameChanged ? { dedicatedGraphName: pending.dedicatedGraphName || undefined } : {}),
+                    // Empty string clears the override server-side, so the source
+                    // inherits from its provider / workspace / the platform again.
+                    ...(identityChanged ? { identityProperty: pending.identityProperty } : {}),
+                    ...(namePropChanged ? { nameProperty: pending.nameProperty } : {}),
+                })
+            }
+            notify('success', `Aggregation settings saved for “${label}”.`)
+        } catch (err) {
+            // Two writes, not one: the mode can land and the rest fail. Reload either
+            // way so the panel resyncs to whatever actually made it to the server.
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not save the aggregation settings for “${label}”.`)
         }
-        if (nameChanged || identityChanged || namePropChanged) {
-            await workspaceService.updateDataSource(wsId, dsId, {
-                ...(nameChanged ? { dedicatedGraphName: pending.dedicatedGraphName || undefined } : {}),
-                // Empty string clears the override server-side, so the source
-                // inherits from its provider / workspace / the platform again.
-                ...(identityChanged ? { identityProperty: pending.identityProperty } : {}),
-                ...(namePropChanged ? { nameProperty: pending.nameProperty } : {}),
-            })
-        }
-        if (modeChanged || nameChanged || identityChanged || namePropChanged) {
-            showToast('success', 'Aggregation settings saved')
-            reload()
-        }
+        reload()
     }
 
     const handleEditDsSave = async (label: string, ontologyId: string | undefined) => {
         if (!wsId || !selectedDs) return
-        await workspaceService.updateDataSource(wsId, selectedDs.id, { label, ontologyId })
+        const renamed = label !== (selectedDs.label ?? '')
+        try {
+            await workspaceService.updateDataSource(wsId, selectedDs.id, { label, ontologyId })
+        } catch (err) {
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not save the changes to “${selectedDs.label || 'this data source'}”.`)
+            // Rethrown so the panel keeps its edit form — and the typed label — open.
+            // Same contract as handlePurge below.
+            throw err
+        }
+        notify('success', renamed
+            ? `Data source renamed to “${label}”.`
+            : `Ontology saved for “${label}”.`)
         reload()
     }
 
@@ -259,7 +303,7 @@ export function WorkspaceDetailPage() {
             // hand-rolled raw-fetch path coerced the structured
             // ``detail`` object into ``"[object Object]"`` via
             // ``new Error(object)`` and the user saw that in their
-            // toast.
+            // notification.
             await aggregationService.triggerAggregation(ds.id, {
                 projectionMode: ds.projectionMode || 'in_source',
                 batchSize: 1000,
@@ -270,11 +314,11 @@ export function WorkspaceDetailPage() {
                 // falls back to the 15-minute stall window — so it is sent.
                 timeoutSecs: DEFAULT_TIMEOUT_SECS,
             }, 'manual')
-            showToast('success', `Aggregation triggered for "${ds.label || 'data source'}"`)
+            notify('success', `Aggregation triggered for "${ds.label || 'data source'}"`)
             reload()
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'Failed to trigger aggregation'
-            showToast('error', msg)
+            notify('error', msg)
         }
     }
 
@@ -284,14 +328,14 @@ export function WorkspaceDetailPage() {
     // _AggMeta.stampVersion to 2), fixing self-nesting hierarchies that read
     // degenerate on legacy generations. Per-source failures (e.g. 409 when a
     // job is already running, or a gate rejection) are tolerated and summarised
-    // — one toast, one reload — rather than aborting the whole sweep.
+    // — one notification, one reload — rather than aborting the whole sweep.
     const handleReaggregateAll = async () => {
         if (!wsId) return
         const targets = (workspace?.dataSources ?? []).filter(
             ds => ds.isActive !== false && ds.ontologyId,
         )
         if (targets.length === 0) {
-            showToast('info', 'No aggregatable data sources (each needs an assigned ontology).')
+            notify('info', 'No aggregatable data sources (each needs an assigned ontology).')
             return
         }
         const results = await Promise.allSettled(
@@ -305,7 +349,7 @@ export function WorkspaceDetailPage() {
         )
         const triggered = results.filter(r => r.status === 'fulfilled').length
         const skipped = results.length - triggered
-        showToast(
+        notify(
             skipped ? 'warning' : 'success',
             `Rebuild triggered for ${triggered}/${targets.length} data source(s)`
             + (skipped ? ` — ${skipped} skipped (already running or gated)` : ''),
@@ -316,10 +360,10 @@ export function WorkspaceDetailPage() {
     const handlePurge = async (ds: DataSourceResponse) => {
         try {
             const result = await aggregationService.purgeAggregation(ds.id)
-            showToast('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
+            notify('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
             reload()
         } catch (err: any) {
-            showToast('error', err?.message ?? 'Purge failed')
+            notify('error', err?.message ?? 'Purge failed')
             throw err
         }
     }
@@ -676,7 +720,7 @@ export function WorkspaceDetailPage() {
             />
 
             {/* One dialog, two registers. Removing is disruptive but REVERSIBLE, so it shows the
-                full blast radius and then asks for nothing but a click — and the toast carries an
+                full blast radius and then asks for nothing but a click — and the notification carries an
                 Undo. Deleting permanently is not reversible, so it keeps the type-to-confirm and
                 the copy stops hedging. Friction proportional to consequence. */}
             <DangerConfirmDialog
@@ -748,13 +792,13 @@ function AccessRevokedPanel({
     wsId: string
     onNavigateHome: () => void
 }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const [secondsLeft, setSecondsLeft] = useState(REDIRECT_AFTER_SECONDS)
     const [requested, setRequested] = useState(false)
     const [submitting, setSubmitting] = useState(false)
     // Pause the countdown if the user is interacting (clicked the
     // request button). Cancelled redirects let the user read the
-    // confirmation toast without being yanked away mid-action.
+    // confirmation notification without being yanked away mid-action.
     const [paused, setPaused] = useState(false)
 
     useEffect(() => {
@@ -778,9 +822,9 @@ function AccessRevokedPanel({
                 justification: 'Requesting access again after losing membership.',
             })
             setRequested(true)
-            showToast('success', 'Access request sent to the workspace admin.')
+            notify('success', 'Access request sent to the workspace admin.')
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Failed to send request')
+            notify('error', err instanceof Error ? err.message : 'Failed to send request')
             setPaused(false)
         } finally {
             setSubmitting(false)

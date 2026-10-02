@@ -10,13 +10,16 @@
  * silence is the absence of any reading at all.
  */
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Check, EyeOff, Radio } from 'lucide-react'
+import { AlertTriangle, Check, CheckCheck, EyeOff, Radio } from 'lucide-react'
 import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { exact } from '@/lib/formatMetric'
 import { profilingService } from '@/services/profilingService'
-import { PROFILING_KEY, useProfilingFindings } from '@/hooks/useProfiling'
+import {
+    PROFILING_KEY, useAcknowledgeFindings, useProfilingFindings,
+} from '@/hooks/useProfiling'
+import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import type { Finding } from '@/types/profiling'
 import { formatInstant, metricNoun, significanceMeta } from './shared'
@@ -148,6 +151,8 @@ export function FindingsBand({ dataSourceId }: { dataSourceId?: string | null })
      * only place that was missing.
      */
     const [showAll, setShowAll] = useState(false)
+    const [confirming, setConfirming] = useState(false)
+    const acknowledgeMany = useAcknowledgeFindings()
     const { data, isLoading } = useProfilingFindings(
         { id: dataSourceId ?? undefined, openOnly: !showAll, limit: 50 },
         { enabled: canRead },
@@ -181,6 +186,14 @@ export function FindingsBand({ dataSourceId }: { dataSourceId?: string | null })
     }
 
     const invalidate = () => queryClient.invalidateQueries({ queryKey: [PROFILING_KEY, 'findings'] })
+
+    // The params the read used, so the response seeds THIS key rather than a
+    // neighbouring one.
+    const clearAll = () => acknowledgeMany.mutate({
+        dataSourceId: dataSourceId ?? null,
+        openOnly: !showAll,
+        limit: 50,
+    }, { onSettled: () => setConfirming(false) })
     const tone = showAll
         ? 'border-glass-border bg-canvas-elevated'
         : 'border-amber-500/30 bg-amber-500/[0.05]'
@@ -201,6 +214,28 @@ export function FindingsBand({ dataSourceId }: { dataSourceId?: string | null })
                             ? 'One finding needs a look'
                             : `${findings.length} findings need a look`}
                 </h3>
+                <div className="flex flex-wrap items-center gap-2">
+                {/* Only where there is something to clear, and only on the
+                    Open tab — on "All" it would be ambiguous which of the
+                    rows on screen it meant. */}
+                {!showAll && openCount > 0 && (
+                    <button
+                        type="button"
+                        disabled={acknowledgeMany.isPending}
+                        onClick={() => (
+                            dataSourceId ? clearAll() : setConfirming(true)
+                        )}
+                        className={cn(
+                            'rounded-lg border border-glass-border px-2.5 py-1',
+                            'text-[11px] font-semibold text-ink-secondary transition-colors',
+                            acknowledgeMany.isPending
+                                ? 'opacity-60'
+                                : 'hover:bg-canvas-sunken hover:text-ink',
+                        )}
+                    >
+                        {acknowledgeMany.isPending ? 'Marking…' : 'Mark all seen'}
+                    </button>
+                )}
                 <div className="flex items-center gap-1 rounded-xl bg-canvas p-0.5 border border-glass-border">
                     {[
                         { key: false, label: openCount ? `Open ${openCount}` : 'Open' },
@@ -223,7 +258,35 @@ export function FindingsBand({ dataSourceId }: { dataSourceId?: string | null })
                         </button>
                     ))}
                 </div>
+                </div>
             </header>
+
+            {/* Unscoped, this clears the band for every source the caller can
+                see — and acknowledging is what makes a finding purgeable,
+                since retention only ever deletes acknowledged rows. Both
+                facts are non-obvious and neither is easy to undo, so the
+                fleet-wide press asks first. The per-source one in the drawer
+                does not: its blast radius is on screen.
+
+                The count comes from openCount, not findings.length: the band
+                fetches 50 and clears ALL of them, so the number in the
+                sentence has to be the real one. */}
+            <ConfirmDialog
+                open={confirming}
+                title={`Mark ${openCount} finding${openCount === 1 ? '' : 's'} seen?`}
+                message={
+                    'This clears them for everyone who can see these sources, '
+                    + 'and lets retention delete them on its normal schedule. '
+                    + 'Findings that say a source stopped reporting do not '
+                    + 'start it reporting again.'
+                }
+                confirmLabel="Mark all seen"
+                confirmColor="bg-indigo-500 hover:bg-indigo-600 shadow-md"
+                confirmIcon={CheckCheck}
+                loading={acknowledgeMany.isPending}
+                onConfirm={clearAll}
+                onCancel={() => setConfirming(false)}
+            />
             {findings.length ? (
                 <ul>
                     {findings.map((f) => (

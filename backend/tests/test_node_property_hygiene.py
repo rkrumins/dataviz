@@ -26,6 +26,7 @@ def _apply_node_set(item: dict) -> dict:
               "propertiesRaw", "searchableText"):
         props[k] = item[k]
     props.update(item["nativeProps"])                             # n += item.nativeProps
+    props["gvHash"] = 1234567890                                  # n.gvHash = item.gvHash
     props.pop("properties", None)                                 # REMOVE n.properties
     return props
 
@@ -47,6 +48,7 @@ def test_projected_node_reads_back_clean_properties():
     assert node.properties == {"owner": "team-finance", "rows": 42}  # ONLY the real user props
     assert "searchableText" not in node.properties                # the doubled-name leak — gone
     assert "entityId" not in node.properties                      # the raw-urn leak — gone
+    assert "gvHash" not in node.properties                        # the projector's fingerprint — not user data
 
 
 def test_reserved_set_covers_every_denormalised_write_field():
@@ -75,6 +77,21 @@ def test_sanitize_strips_reserved_keys_mirrored_into_properties():
     assert out["properties"] == {"owner": "fin", "rows": 42}          # reserved keys gone
     assert out["childCount"] == 7 and out["displayName"] == "X"       # top-level fields intact
     assert not (set(out["properties"]) & _RESERVED_NODE_KEYS)         # nothing left for the projector to drop
+
+
+def test_projector_fingerprint_never_reads_back_as_a_user_property():
+    """The projector SETs `n.gvHash` (an int64 content fingerprint) on every node. Read back as a
+    user property it reached the browser, which cannot represent it, and the canvas then saved the
+    ROUNDED copy into the payload — where `n += nativeProps` overwrote the real fingerprint."""
+    stored = {"urn": "urn:li:dataset:x", "displayName": "X", "gvHash": -3746471915534727923,
+              "owner": "fin"}
+    node = _node_from_props(stored)
+    assert node.properties == {"owner": "fin"}
+
+
+def test_sanitize_strips_a_round_tripped_fingerprint():
+    payload = {"urn": "urn:li:dataset:x", "properties": {"owner": "fin", "gvHash": -3746471915534728000}}
+    assert _sanitize_node_properties(payload)["properties"] == {"owner": "fin"}
 
 
 def test_sanitize_is_identity_for_clean_payloads():

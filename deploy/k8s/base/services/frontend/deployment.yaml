@@ -46,6 +46,16 @@ spec:
           ports:
             - containerPort: 80
               name: http
+          env:
+            # Origins the SPA's Content-Security-Policy lets the page fetch
+            # beyond its own — space-separated https:// origins, e.g.
+            # "https://sso.corp.example" for an Enterprise Gateway whose
+            # sign-in trigger or translate call runs in the browser. Empty =
+            # connect-src 'self' only. An invalid value stops nginx starting
+            # rather than serving a weakened policy. Set it per environment
+            # with an overlay patch on this Deployment.
+            - name: CSP_CONNECT_SRC
+              value: ""
           resources:
             requests:
               cpu: 50m

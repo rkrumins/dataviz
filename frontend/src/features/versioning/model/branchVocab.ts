@@ -71,6 +71,15 @@ export function ownerName(owner?: string | null, userNames?: Record<string, stri
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1)
 }
 
+/**
+ * Who a history row names. Platform writes — a bootstrap import, a write-through with no user —
+ * carry no actor or the literal `"system"`; those read as "system", never as an unresolved
+ * "Unknown" person.
+ */
+export function actorName(actor?: string | null, userNames?: Record<string, string>): string {
+  return actor && actor !== 'system' ? ownerName(actor, userNames) : 'system'
+}
+
 /** Two-letter initials for an avatar chip — same source precedence as {@link ownerName}. */
 export function ownerInitials(owner?: string | null, userNames?: Record<string, string>): string {
   if (!owner) return '?'

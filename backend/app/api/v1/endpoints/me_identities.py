@@ -27,6 +27,7 @@ from backend.app.db.repositories.user_identity_repo import (
     IdentityNotFound,
     LastAuthenticatorError,
 )
+from backend.app.services.revocation_service import revoke_provider_sessions
 from backend.auth_service.core.password import is_password_set
 from backend.auth_service.interface import User
 
@@ -134,6 +135,14 @@ async def unlink_identity(
     # lock held by a different provider stays.
     await user_repo.clear_idp_managed_snapshot(
         session, current.id, provider_id=identity.provider_id,
+    )
+    # A session minted through this identity outlives the link unless it
+    # is ended here: nothing on the renewal path re-checks that the link
+    # still exists. Only what this provider minted ends — the person's
+    # other sessions re-mint their access token at the next renewal.
+    await revoke_provider_sessions(
+        identity.provider_id, user_id=current.id, session=session,
+        reason="identity_unlinked",
     )
     await user_repo.create_outbox_event(
         session, event_type="user.identity.unlinked",

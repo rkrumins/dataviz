@@ -194,6 +194,22 @@ async def test_timeout_before_response_started_emits_504():
     assert "timed out" in body_text.lower()
 
 
+async def test_a_timeout_before_the_response_names_its_path_in_the_log(caplog):
+    """The most common 504 on view open left no line on the server at all,
+    so nothing said which request the tier had cut short."""
+    path = "/api/v1/ws/graph/edges/between"
+    mw = _TimeoutMiddleware(_slow_before_start_app(delay=2.0))
+    with caplog.at_level("WARNING", logger="backend.app.main"):
+        await mw(_http_scope(path), _Receiver(), _Sink())
+
+    lines = [
+        r.getMessage() for r in caplog.records
+        if r.levelname == "WARNING" and "timed out before a response" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    assert "GET" in lines[0] and path in lines[0]
+
+
 async def test_timeout_after_response_started_emits_closing_chunk():
     """T-2 (stream-corruption case): the bug we are actually fixing.
 
@@ -304,6 +320,33 @@ async def test_sse_path_bypasses_timeout():
     assert sink.terminal_chunks == 1
 
 
+async def test_streamed_export_bypasses_timeout():
+    """A streamed export, or a stored export's download, runs as long as the file takes: a
+    deadline would cut it short, and the clean closing chunk would make the truncated file look
+    complete."""
+
+    async def slow_download(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await asyncio.sleep(0.5)  # > 0.2s default timeout
+        await send({"type": "http.response.body", "body": b"rows\n", "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    mw = _TimeoutMiddleware(slow_download)
+    sink = _Sink()
+    await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/exports/stream"), _Receiver(), sink)
+    assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    await mw(_http_scope("/api/v1/ws_1/graph/export/stream"), _Receiver(), sink := _Sink())
+    assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1/download"), _Receiver(), sink := _Sink())
+    assert sink.total_body == b"rows\n" and sink.terminal_chunks == 1
+
+    # Only those routes: the export job's status is an ordinary request.
+    assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/stream/extra")
+    assert not mw._is_sse_path("/api/v1/ws_1/versioning/graphs/g_1/exports/job_1")
+
+
 async def test_non_http_scope_passes_through():
     """Lifespan / websocket / etc must not be touched by the HTTP-only
     timeout — call the inner app directly."""
@@ -351,3 +394,77 @@ async def test_no_orphan_tasks_after_timeout():
     after = {t for t in asyncio.all_tasks() if not t.done()}
     leaked = after - baseline - {asyncio.current_task()}
     assert not leaked, f"Orphan tasks after timeout: {[t.get_name() for t in leaked]}"
+
+
+# ── Tier resolution for workspace-scoped routes ──────────────────────
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        # The canvas's hydration and browse reads, mounted under the
+        # workspace segment the tier table collapses away.
+        ("/api/v1/ws-1/graph/edges/aggregated", "aggregation"),
+        ("/api/v1/ws-1/graph/edges/between", "aggregation"),
+        ("/api/v1/ws-1/graph/nodes/urn:a:b/children-with-edges", "graph"),
+        ("/api/v1/ws-1/graph/nodes/urn:a:b/children", "graph"),
+        ("/api/v1/ws-1/graph/nodes/query", "graph"),
+        ("/api/v1/ws-1/graph/nodes/top-level", "graph"),
+        ("/api/v1/ws-1/graph/trace/v2", "trace"),
+        ("/api/v2/ws-1/graph/trace/closure", "trace"),
+        ("/api/v1/ws-1/versioning/branches", "versioning"),
+        # Not workspace-scoped: the literal prefixes and the default tier.
+        ("/api/v1/graph/nodes/query", "graph"),
+        ("/api/v1/health/deps", "health"),
+        ("/api/v1/views/", "default"),
+        ("/api/v1/admin/aggregation-workers", "default"),
+    ],
+)
+def test_workspace_scoped_graph_routes_get_their_tier(monkeypatch, path, expected):
+    """Every graph route the canvas hits is mounted as
+    ``/api/v1/{ws_id}/graph/...``; the tier table lists the prefixes without
+    the workspace segment. This pins the collapse: an edge scan budgeted at
+    80s on the provider must land in the 90s aggregation tier, not the 30s
+    default, or the middleware's 504 fires before the provider's own
+    structured timeout (and its stale-snapshot fallback) can."""
+    tiers = {
+        "health": "5", "aggregation": "90", "trace": "120",
+        "graph": "120", "versioning": "120", "default": "30",
+    }
+    monkeypatch.setenv("HTTP_TIMEOUT_HEALTH_SECS", tiers["health"])
+    monkeypatch.setenv("HTTP_TIMEOUT_AGGREGATION_SECS", tiers["aggregation"])
+    monkeypatch.setenv("HTTP_TIMEOUT_TRACE_SECS", tiers["trace"])
+    monkeypatch.setenv("HTTP_TIMEOUT_GRAPH_SECS", tiers["graph"])
+    monkeypatch.setenv("HTTP_TIMEOUT_VERSIONING_SECS", tiers["versioning"])
+    monkeypatch.setenv("HTTP_TIMEOUT_DEFAULT_SECS", tiers["default"])
+    mw = _TimeoutMiddleware(_instant_app())
+
+    assert mw._resolve_timeout(path) == float(tiers[expected])
+
+
+def test_every_provider_budget_sits_under_its_http_tier(monkeypatch):
+    """The provider's per-query deadlines must fire BEFORE the HTTP tier
+    around them: the provider's timeout is structured (504 PROVIDER_TIMEOUT,
+    last-known-good fallback), the middleware's is not (the handler is
+    cancelled, nothing is served). A default that crosses its tier is the
+    bug the "504 upstream" reports were made of."""
+    from backend.app.config import resilience as r
+
+    for name in (
+        "HTTP_TIMEOUT_HEALTH_SECS", "HTTP_TIMEOUT_AGGREGATION_SECS",
+        "HTTP_TIMEOUT_TRACE_SECS", "HTTP_TIMEOUT_GRAPH_SECS",
+        "HTTP_TIMEOUT_VERSIONING_SECS", "HTTP_TIMEOUT_DEFAULT_SECS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    mw = _TimeoutMiddleware(_instant_app())
+    aggregation = mw._resolve_timeout("/api/v1/ws/graph/edges/aggregated")
+    between = mw._resolve_timeout("/api/v1/ws/graph/edges/between")
+    graph = mw._resolve_timeout("/api/v1/ws/graph/nodes/query")
+
+    assert r.FALKORDB_AGGREGATED_READ_TIMEOUT_SECS < aggregation
+    assert r.FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS < between
+    assert r.FALKORDB_NODES_QUERY_TIMEOUT_SECS < graph
+    assert r.FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS < graph
+    # children-with-edges runs the children page and then its edges, each
+    # on the children budget.
+    assert 2 * r.FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS < graph

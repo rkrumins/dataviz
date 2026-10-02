@@ -1,0 +1,17 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      { "kind": "entityType", "op": "in", "values": ["dataset"] },
+      { "kind": "property", "key": "owner", "op": "isEmpty" }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": {
+    "results": "both",
+    "pageSize": 200,
+    "includeAncestorPath": true,
+    "aggregations": [{ "by": "parent", "maxBuckets": 50, "sampleHitsPerBucket": 3 }]
+  }
+}

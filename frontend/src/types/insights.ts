@@ -52,6 +52,12 @@ export interface AssetDetailSummary {
     name: string
     nodeCount: number | null
     edgeCount: number | null
+    /** Registered attribute names on this graph. `null` means NOT MEASURED —
+     *  the store would not answer, the provider is not FalkorDB, or the row
+     *  predates collection. Never render it as 0: a graph with no properties
+     *  and a graph we could not read are opposite situations, and this
+     *  figure exists to warn about the second kind. */
+    propertyKeyCount?: number | null
     updatedAt: string | null
 }
 
@@ -65,6 +71,8 @@ export interface AssetStatsPayload {
     edgeCount: number
     entityTypeCounts: Record<string, number>
     edgeTypeCounts: Record<string, number>
+    /** See AssetDetailSummary.propertyKeyCount — null is "not measured". */
+    propertyKeyCount?: number | null
 }
 
 /** Historical entity counts.

@@ -122,7 +122,7 @@ Per-pod `maxmemory 90gb` on 128 GB machines gives ~28% headroom per shard. Not e
 
 | Instance | Tier | Storage | HA | Replicas |
 | :--- | :--- | :--- | :--- | :--- |
-| `synodic-graphver` | `db-perf-optimized-N-64` (64 vCPU / 512 GB) + data cache | 4 TB SSD | Regional (sync standby) | 1 in-region read replica (wired to the app `READONLY` pool), 1 cross-region DR replica |
+| `synodic-graphver` | `db-perf-optimized-N-64` (64 vCPU / 512 GB) + data cache | 4 TB SSD | Regional (sync standby) | 1 in-region read replica (not used by the app today — the `READONLY` pool connects to the primary), 1 cross-region DR replica |
 | `synodic-mgmt` | `db-perf-optimized-N-8` (8 vCPU / 64 GB) | 256 GB SSD | Regional | 1 cross-region DR replica |
 
 > **Decision.** Split `graphver` onto its own instance from day one at this scale. The store was designed decoupled — set `GRAPHVER_DB_URL` and everything else follows (`versioning/config.py:graphver_db_url()`; no cross-schema FKs exist). This isolates the 750M-row append-only workload (vacuum, WAL volume, reseed scans) from interactive management queries, and lets the two instances be sized, tuned, and failed over independently.
@@ -298,7 +298,6 @@ Sizing rationale: `maxmemory 90gb` ≈ 70% of the 128 GB node — the remainder 
 | Setting | Value | Why |
 | :--- | :--- | :--- |
 | `CACHE_REDIS_URL` | dedicated cache Redis (§5) | The provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and logs loudly |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | `true` (default — do not disable) | Constant-memory, crash-resumable aggregation instead of full-graph in-memory pair accumulation |
 | `AGGREGATION_MAX_PAIRS_PER_PAGE` | `200000` (default) | Bounds high-fan-in hub pages |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS` | set per provider ≈ shard `maxmemory` × 0.8 | Turns on cold-graph eviction so residency tracks the working set, not the full 250M corpus |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | `8` (default; raise with worker CPU) | Keeps hundreds of graphs' projections caught up |
@@ -327,8 +326,8 @@ Per [architecture-when-scaling.md](./architecture-when-scaling.md) these are **n
 
 | Instance | Serves | Spec | Policy |
 | :--- | :--- | :--- | :--- |
-| `synodic-redis-cache` | `CACHE_REDIS_URL`, `REDIS_CACHE_URL` | Memorystore 10 GB, Standard (HA) | `allkeys-lru`, persistence off |
-| `synodic-redis-coord` | `REDIS_COORDINATION_URL` (aggregation streams, locks, rate limits) | Memorystore 5 GB, Standard (HA) | `noeviction`, AOF/persistence on |
+| `synodic-redis-cache` | `REDIS_CACHE_*`, legacy `CACHE_REDIS_URL` | Memorystore 10 GB, Standard (HA) | `allkeys-lru`, persistence off |
+| `synodic-redis-coord` | `REDIS_STREAMS_*`, legacy `REDIS_URL` (aggregation streams, locks, rate limits) | Memorystore 5 GB, Standard (HA) | `noeviction`, AOF/persistence on |
 
 ---
 
@@ -419,7 +418,6 @@ Phased, each gate verifiable before the next:
 | `FALKORDB_CLUSTER_NODES` | same | three shard-0 pod DNS names |
 | `FALKORDB_TLS_*` | same | per security posture |
 | `CACHE_REDIS_URL` | same | `synodic-redis-cache` |
-| `REDIS_CACHE_URL` / `REDIS_COORDINATION_URL` | per architecture-when-scaling.md | cache / coord instances |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | workers | `true` (default) |
+| `REDIS_CACHE_*` / `REDIS_STREAMS_*` (`_HOST`, `_PORT`, `_DB`, `_PASSWORD`, `_TLS_*`, `_MAX_CONNECTIONS`) | same | cache / coord instances |
 | `AGGREGATION_MAX_PAIRS_PER_PAGE` | workers | 200000 (default) |
 | `IMPORT_COMMIT_WINDOW` | import worker | 50000 (default) |

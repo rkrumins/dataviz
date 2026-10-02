@@ -39,7 +39,7 @@ import {
 } from '@/services/accessRequestsService'
 import { AccessSummary } from '@/components/access/AccessSummary'
 import { AccountShell } from '@/components/account/AccountShell'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
@@ -52,7 +52,7 @@ export function MyAccessPage() {
     const [loading, setLoading] = useState(true)
     const [refreshing, setRefreshing] = useState(false)
     const [error, setError] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const load = async (silent = false) => {
         if (!silent) setLoading(true)
@@ -77,7 +77,7 @@ export function MyAccessPage() {
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Failed to load access'
             setError(message)
-            if (silent) showToast('error', message)
+            if (silent) notify('error', message)
         } finally {
             setLoading(false)
             setRefreshing(false)

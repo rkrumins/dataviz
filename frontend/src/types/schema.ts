@@ -328,6 +328,21 @@ export interface ViewLayerConfig {
   logicalNodes?: LogicalNodeConfig[];
   showUnassigned?: boolean; // Whether to show unmapped physical entities
 
+  /**
+   * The entity this column IS, rather than one it merely contains.
+   *
+   * A column per Domain used to spend its first row on the Domain itself, with
+   * the entities you actually came to see one expand deeper — the name said
+   * twice and a level wasted. With an anchor, the column header is the entity
+   * and its CHILDREN are the rows. They resolve through containment at read
+   * time exactly as before, so the column keeps reflecting what the source adds,
+   * renames or removes.
+   *
+   * Purely a rendering promotion: the anchor still carries its own assignment,
+   * so a client that doesn't know this field renders the column the old way.
+   */
+  anchorUrn?: string;
+
   // Advanced assignment rules (overrides entityTypes)
   rules?: LayerAssignmentRuleConfig[];
 
@@ -450,6 +465,9 @@ export interface DisplayRuleConfig {
   enabled: boolean;
   /** ISO timestamp — set at creation, used for stable list ordering. */
   createdAt: string;
+  /** Set by the server's library on a stored rule a rule may not be (one a
+   *  bundle import or version restore stored as given): why. Never saved. */
+  invalid?: string;
 }
 
 export interface LogicalNodeConfig {

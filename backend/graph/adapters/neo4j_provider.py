@@ -699,22 +699,27 @@ class Neo4jProvider(GraphDataProvider):
         params["limit"] = limit
 
         include_child_count = query.include_child_count
+        # A TOTAL order (name, then id) before SKIP: a page is the same slice in
+        # every query, so paging a type by position neither skips nor repeats.
+        order = f"ORDER BY n.`{name_field}`, n.{ip}"
 
         if include_child_count:
             containment = list(self._get_containment_edge_types())
             if containment:
                 containment_rel = "|".join(f"`{_sanitize_label(t)}`" for t in containment)
+                # Counted with a list comprehension, not OPTIONAL MATCH + count():
+                # the aggregation reorders the page's rows, and a caller trimming
+                # a page (get_nodes_page probes one row past it) drops the wrong one.
                 cypher = (
                     f"MATCH (n) {where} "
-                    f"WITH n SKIP $skip LIMIT $limit "
-                    f"OPTIONAL MATCH (n)-[:{containment_rel}]->(child) "
-                    f"RETURN n, count(child) as childCount"
+                    f"WITH n {order} SKIP $skip LIMIT $limit "
+                    f"RETURN n, size([(n)-[:{containment_rel}]->(child) | child]) as childCount"
                 )
             else:
                 # No containment types — childCount is always 0
-                cypher = f"MATCH (n) {where} WITH n SKIP $skip LIMIT $limit RETURN n, 0 as childCount"
+                cypher = f"MATCH (n) {where} WITH n {order} SKIP $skip LIMIT $limit RETURN n, 0 as childCount"
         else:
-            cypher = f"MATCH (n) {where} RETURN n SKIP $skip LIMIT $limit"
+            cypher = f"MATCH (n) {where} RETURN n {order} SKIP $skip LIMIT $limit"
 
         try:
             rows = await self._run_read(cypher, params)
@@ -1846,7 +1851,9 @@ class Neo4jProvider(GraphDataProvider):
         self._stats_cache.set(result)
         return result
 
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None,
+    ) -> GraphSchemaStats:
         name_field = self._mapping.display_name_field
         tags_field = self._mapping.tags_field
 
