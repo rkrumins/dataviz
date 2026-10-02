@@ -12,15 +12,6 @@ from __future__ import annotations
 
 from typing import Iterable, List, NamedTuple, Optional, Tuple
 
-# Platform built-in labels every graph gets indexed regardless of ontology.
-DEFAULT_INDEX_LABELS: List[str] = [
-    "domain",
-    "dataPlatform",
-    "container",
-    "dataset",
-    "schemaField",
-]
-
 # `level` indexed for trace queries that filter by hierarchy level
 # (Cypher: WHERE n.level = $level).
 # `layerAssignment` indexed for the by-layer listing (Cypher:
@@ -33,17 +24,13 @@ INDEXED_NODE_PROPS: List[str] = ["urn", "displayName", "qualifiedName", "level",
 
 def indexed_labels(entity_type_ids: Optional[Iterable[str]] = None) -> List[str]:
     """The exact, deduplicated, order-preserving label list ``ensure_indices``
-    indexes: platform defaults first, then the ontology's declared entity
-    type ids (their DECLARED spelling — a case-drifted physical label is by
-    construction not in this list, so queries against it label-scan)."""
-    extra = list(entity_type_ids) if entity_type_ids else []
-    seen: set[str] = set()
-    labels: List[str] = []
-    for lbl in DEFAULT_INDEX_LABELS + extra:
-        if lbl not in seen:
-            seen.add(lbl)
-            labels.append(lbl)
-    return labels
+    indexes: the ontology's declared entity type ids and nothing else (their
+    DECLARED spelling — a case-drifted physical label is by construction not in
+    this list, so queries against it label-scan). A label this product invents
+    in a graph stays in its catalogue for the graph's life — that is how
+    domain…schemaField came to sit at ids 0-4 of every graph (see
+    graph_generation)."""
+    return list(dict.fromkeys(entity_type_ids or []))
 
 
 # ── Edge indexes on :AGGREGATED ──────────────────────────────────────────

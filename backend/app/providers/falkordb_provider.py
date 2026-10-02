@@ -45,7 +45,7 @@ from ..models.graph import (
     EntityTypeSummary, EdgeTypeSummary, TagSummary,
     OntologyMetadata, EdgeTypeMetadata, EntityTypeHierarchy,
     AggregatedEdgeResult, AggregatedEdgeInfo,
-    ChildrenWithEdgesResult, TopLevelNodesResult,
+    ChildrenWithEdgesResult, TopLevelNodesResult, NodePage,
     TraceResult, TraceFocus,
 )
 # The closure-walk models are not carried by the app-level re-export above.
@@ -2234,6 +2234,7 @@ class FalkorDBProvider(GraphDataProvider):
         # purge) — see ``graph_generation`` and ``_refresh_if_graph_rebuilt``.
         from .graph_generation import GraphRebuildWatch
         self._rebuild_watch = GraphRebuildWatch()
+        self._id_tables_checked_at = float("-inf")  # see _id_tables_drifted
         # Connect-time index/projection reconcile. A READ-ONLY caller must
         # turn this off: the reconcile issues CREATE INDEX, which is a WRITE,
         # and a write to a graph key that does not exist CREATES it (this
@@ -4499,13 +4500,81 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:                               # noqa: BLE001 — never decides alone
             return False
 
+    def _forget_graph_state(self) -> None:
+        """Forget everything learned from a graph since dropped and written again (or
+        retyped / re-parented): the handles' id tables (falkordb-py would decode every
+        node with the old names), the graph-derived memos, and — in the background — the
+        shared urn→label / ancestor caches. Called on a moved generation, a drifted
+        catalogue, or a read that decoded rows without their anchor label."""
+        for handle in (getattr(self, "_graph", None), getattr(self, "_proj_graph", None)):
+            schema = getattr(handle, "schema", None)
+            if schema is not None:
+                schema.clear()
+        self._agg_meta_cached = None
+        self._regime_probe_cached = None
+        self._property_names_cache = None
+        self._casing_maps_cache = None
+        self._property_key_count_cache = None
+        self._save_indices_ensured = False
+        # The shared content caches keyed by what moved: urn → label (a stale label
+        # anchors a lookup on the OLD label and finds nothing — the node reads as
+        # missing) and ancestor chains (a moved container). Shared across processes;
+        # deleting twice is harmless. In the BACKGROUND, not before the user's query,
+        # and with UNLINK: a DEL of a multi-million-field hash blocks Redis for everyone.
+        # The label warmup's cooldown is reset so the cache refills now, not in 15 min.
+        self._label_warmup_until = 0.0
+        if self._redis is not None:
+            task = asyncio.get_running_loop().create_task(self._drop_structural_caches())
+            _LABEL_WARMUP_TASKS.add(task)
+            task.add_done_callback(_LABEL_WARMUP_TASKS.discard)
+        logger.info("graph %s changed elsewhere (dropped, reloaded, retyped or "
+                    "re-parented) — cleared this provider's id tables, graph memos "
+                    "and content caches", self._graph_name)
+
+    async def _id_tables_drifted(self) -> bool:
+        """True when the handle's id tables are no longer a prefix of its graph's
+        catalogue on the server. A catalogue only grows while its graph lives, so a
+        table that is not a prefix of it was loaded from a graph since dropped and
+        written again. The same three procedures falkordb-py loads its tables with,
+        READ-ONLY (a missing key raises, it is never created), outside _guarded_timed
+        (no slot, no recursion), at most once per CATALOGUE_CHECK_INTERVAL_S and within
+        READ_TIMEOUT_S. Unanswerable → False."""
+        from .graph_generation import CATALOGUE_CHECK_INTERVAL_S, READ_TIMEOUT_S
+
+        now = time.monotonic()
+        if now - getattr(self, "_id_tables_checked_at", float("-inf")) < CATALOGUE_CHECK_INTERVAL_S:
+            return False
+        self._id_tables_checked_at = now
+        graph = getattr(self, "_graph", None)
+        schema = getattr(graph, "schema", None)
+
+        async def _probe() -> bool:
+            for attr, proc in (("labels", "db.labels"), ("properties", "db.propertyKeys"),
+                               ("relationships", "db.relationshipTypes")):
+                cached = getattr(schema, attr, None)
+                if not isinstance(cached, list) or not cached:
+                    continue                            # nothing decoded yet (or a test double)
+                res = await graph.ro_query(f"CALL {proc}()")
+                server = [r[0].decode("utf-8") if isinstance(r[0], (bytes, bytearray)) else str(r[0])
+                          for r in (res.result_set or []) if r]
+                if server[:len(cached)] != cached:
+                    return True
+            return False
+
+        try:
+            return await asyncio.wait_for(_probe(), timeout=READ_TIMEOUT_S)
+        except Exception:                               # noqa: BLE001 — no verdict, no change
+            return False
+
     async def _refresh_if_graph_rebuilt(self) -> None:
         """Forget everything this provider learned from a graph that has since been
         dropped and written again, or retyped / re-parented by a publish: the handles' id tables (falkordb-py would otherwise
         decode every node with the old names — Domain as "Schema Field") and the
         graph-derived memos (rollup meta, regime, property names, casing maps, the
         ensured-indexes latch — the drop took the indexes). At most one Redis read per
-        interval; never raises."""
+        interval; never raises. Also when the graph's catalogue on the server no longer
+        starts with the handle's id tables — a drop nobody bumped for (see
+        _id_tables_drifted)."""
         try:
             names = {self._graph_name}
             try:
@@ -4516,35 +4585,51 @@ class FalkorDBProvider(GraphDataProvider):
             for name in names:
                 if name and await self._rebuild_watch.rebuilt(name):
                     rebuilt = True
-            if not rebuilt:
+            if not rebuilt and not await self._id_tables_drifted():
                 return
-            for handle in (getattr(self, "_graph", None), getattr(self, "_proj_graph", None)):
-                schema = getattr(handle, "schema", None)
-                if schema is not None:
-                    schema.clear()
-            self._agg_meta_cached = None
-            self._regime_probe_cached = None
-            self._property_names_cache = None
-            self._casing_maps_cache = None
-            self._property_key_count_cache = None
-            self._save_indices_ensured = False
-            # The shared content caches keyed by what moved: urn → label (a stale label
-            # anchors a lookup on the OLD label and finds nothing — the node reads as
-            # missing) and ancestor chains (a moved container). Shared across processes;
-            # deleting twice is harmless. In the BACKGROUND, not before the user's query,
-            # and with UNLINK: a DEL of a multi-million-field hash blocks Redis for everyone.
-            # The label warmup's cooldown is reset so the cache refills now, not in 15 min.
-            self._label_warmup_until = 0.0
-            if self._redis is not None:
-                task = asyncio.get_running_loop().create_task(self._drop_structural_caches())
-                _LABEL_WARMUP_TASKS.add(task)
-                task.add_done_callback(_LABEL_WARMUP_TASKS.discard)
-            logger.info("graph %s changed structurally elsewhere (dropped, retyped or "
-                        "re-parented) — cleared this provider's id tables, graph memos "
-                        "and content caches", self._graph_name)
+            self._forget_graph_state()
         except Exception:                               # noqa: BLE001 — never fails a query
             logger.debug("rebuild check skipped for %s", getattr(self, "_graph_name", "?"),
                          exc_info=True)
+
+    @staticmethod
+    def _decoded_without(rows, labels) -> bool:
+        """A label-anchored MATCH (n:X) guarantees X is among n's labels. A row decoded
+        carrying NONE of the anchor labels was decoded through id tables loaded from a
+        graph since dropped and written again (graph_generation). A multi-label node
+        cannot trip this — it always carries the label it matched on."""
+        wanted = set(labels)
+        for row in rows or []:
+            cell = row[0] if isinstance(row, (list, tuple)) and row else row
+            got = getattr(cell, "labels", None)
+            if got is not None and not wanted.intersection(got):
+                return True
+        return False
+
+    async def _read_decoded_fresh(self, read, stale):
+        """Run ``read``; when ``stale(result)`` says rows came back decoded without their
+        anchor label, forget this graph's id tables and memos and run it once more — the
+        re-read reloads the tables from the server. Still stale means the graph is being
+        rewritten under the read: ProviderLoading (503 + Retry-After, never cached, not a
+        breaker failure). The check is against the UNION of a read's anchors, so a stale
+        table that maps one anchor label onto another passes; _id_tables_drifted catches
+        that within its interval."""
+        result = await read()
+        if not stale(result):
+            return result
+        logger.warning("graph %s: a label-anchored read decoded rows without their label — "
+                       "this process held the id tables of a graph since dropped and "
+                       "rewritten; forgetting them and reading once more", self._graph_name)
+        self._forget_graph_state()
+        result = await read()
+        if stale(result):
+            from backend.common.adapters import ProviderLoading
+            raise ProviderLoading(
+                provider_name=self._graph_name,
+                reason="the graph's catalogue changed during the read; it is being reloaded",
+                retry_after_seconds=1,
+            )
+        return result
 
     async def _guarded_timed(
         self,
@@ -5186,8 +5271,9 @@ class FalkorDBProvider(GraphDataProvider):
         it regardless, for a caller that has reason to believe the graph was
         rebuilt underneath the marker.
 
-        When *entity_type_ids* is provided (e.g. from the resolved ontology),
-        those labels are indexed in addition to the hardcoded defaults.
+        Only *entity_type_ids* (the resolved ontology's types, or the labels a
+        save is about to write) get label indexes; there are no platform
+        defaults (see ``index_policy.indexed_labels``).
 
         The label/property policy lives in ``index_policy`` — shared with the
         alignment-analysis endpoint so its performance predictions can never
@@ -6269,9 +6355,13 @@ class FalkorDBProvider(GraphDataProvider):
                     return []
 
             buckets = await self._label_buckets(query.urns)
-            rows_per_bucket = await asyncio.gather(*[
-                _fetch_bucket(lbl, b) for lbl, b in buckets
-            ])
+            # A labelled bucket's rows must decode with that label (_read_decoded_fresh);
+            # the '' residue is unanchored and not checked.
+            rows_per_bucket = await self._read_decoded_fresh(
+                lambda: asyncio.gather(*[_fetch_bucket(lbl, b) for lbl, b in buckets]),
+                lambda per: any(lbl and self._decoded_without(rows, [lbl])
+                                for (lbl, _), rows in zip(buckets, per)),
+            )
             merged: List[GraphNode] = []
             for rows in rows_per_bucket:
                 for row in rows:
@@ -6356,15 +6446,22 @@ class FalkorDBProvider(GraphDataProvider):
 
             cypher = " ".join(clauses)
 
-        try:
-            result = await self._ro_query(
-                cypher, params=params, timeout=self._NODES_QUERY_TIMEOUT, op="nodes.query",
-            )
-        except Exception as e:
-            if await self._is_verified_missing_graph(e):
-                return []  # never-created / empty key = legitimately no data
-            logger.warning(f"get_nodes query failed: {e}")
-            raise  # connection refused / transient = surface it (breaker -> 503)
+        async def _read():
+            try:
+                return await self._ro_query(
+                    cypher, params=params, timeout=self._NODES_QUERY_TIMEOUT, op="nodes.query",
+                )
+            except Exception as e:
+                if await self._is_verified_missing_graph(e):
+                    return None
+                logger.warning(f"get_nodes query failed: {e}")
+                raise  # connection refused / transient = surface it (breaker -> 503)
+
+        anchors = [_sanitize_label(t) for t in types] if use_label_union else []
+        result = await self._read_decoded_fresh(
+            _read, lambda r: bool(anchors) and self._decoded_without(getattr(r, "result_set", None), anchors))
+        if result is None:
+            return []  # never-created / empty key = legitimately no data
 
         nodes = []
         for row in (result.result_set or []):
@@ -6392,6 +6489,48 @@ class FalkorDBProvider(GraphDataProvider):
                 if len(nodes) >= limit:
                     break
         return nodes
+
+    async def get_nodes_page(self, query: NodeQuery) -> NodePage:
+        """The interface's page and, on a FIRST page of entity types, how many
+        nodes the whole query matches: a layer column's total. Best-effort and
+        display-only, like the top-level count: None when it misses its short
+        budget. Later pages carry none (the client keeps the first page's); a
+        first page that holds everything is its own count."""
+        page = await super().get_nodes_page(query)
+        if query.offset or not query.entity_types or query.urns:
+            return page
+        if not page.has_more:
+            page.total_count = len(page.nodes)
+            return page
+        from ..config.resilience import FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS as ct
+
+        # get_nodes' label-union read without SKIP/LIMIT: the same aliased labels
+        # (case-sensitive MATCH) and the same WHERE (tag, search). Keep in step.
+        params: Dict[str, Any] = {}
+        conditions = []
+        if query.tags:
+            params["tagVal"] = json.dumps(query.tags[0])
+            conditions.append("(n.tags IS NOT NULL AND n.tags CONTAINS $tagVal)")
+        if query.search_query:
+            params["search"] = query.search_query.lower()
+            conditions.append("(toLower(toString(n.displayName)) CONTAINS $search OR toLower(toString(n.urn)) CONTAINS $search)")
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        types = self._alias_entity_types([str(t) for t in query.entity_types])
+        inner = " UNION ".join(f"MATCH (n:{_sanitize_label(t)}){where} RETURN n" for t in types)
+        try:
+            res = await self._ro_query(
+                f"CALL {{ {inner} }} RETURN count(n) as total",
+                params=params, timeout=ct, op="nodes.count",
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"get_nodes_page count query degraded: exceeded {ct:.0f}s budget "
+                f"(graph={self._graph_name}); returning totalCount=null"
+            )
+            return page
+        first = res.result_set[0] if res and res.result_set else [0]
+        page.total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
+        return page
 
     def _match_property_filters(self, node: GraphNode, filters: List[PropertyFilter]) -> bool:
         for f in filters:
@@ -7350,21 +7489,28 @@ class FalkorDBProvider(GraphDataProvider):
 
         # One row past the page, so "more" is a fact (see get_children_with_edges).
         params["limit"] = int(limit) + 1
-        try:
-            page_result = await self._ro_query(page_cypher, params=params, timeout=t, op="toplevel.page")
-        except asyncio.TimeoutError as e:
-            # Same type (GraphCache stale-fallback and the 503 handler match
-            # on it) but with a non-empty str() so the surfaced reason names
-            # the budget that actually fired instead of a blank string.
-            raise asyncio.TimeoutError(
-                f"top-level page query exceeded {t:.0f}s provider budget "
-                f"(graph={self._graph_name})"
-            ) from e
-        except Exception as e:
-            if not await self._is_verified_missing_graph(e):
-                logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
-                raise  # connection refused / transient = surface it (breaker -> 503)
-            page_result = None  # never-created / empty key = legitimately no data
+
+        async def _read_page():
+            try:
+                return await self._ro_query(page_cypher, params=params, timeout=t, op="toplevel.page")
+            except asyncio.TimeoutError as e:
+                # Same type (GraphCache stale-fallback and the 503 handler match
+                # on it) but with a non-empty str() so the surfaced reason names
+                # the budget that actually fired instead of a blank string.
+                raise asyncio.TimeoutError(
+                    f"top-level page query exceeded {t:.0f}s provider budget "
+                    f"(graph={self._graph_name})"
+                ) from e
+            except Exception as e:
+                if not await self._is_verified_missing_graph(e):
+                    logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
+                    raise  # connection refused / transient = surface it (breaker -> 503)
+                return None  # never-created / empty key = legitimately no data
+
+        page_result = await self._read_decoded_fresh(
+            _read_page,
+            lambda r: use_label_union and self._decoded_without(getattr(r, "result_set", None), safe_types),
+        )
 
         nodes: List[GraphNode] = []
         root_type_count = 0
@@ -9160,7 +9306,8 @@ class FalkorDBProvider(GraphDataProvider):
         from the old graph shape for up to the 7-day content-cache TTL.
 
         Best-effort and never-raising: a no-op if no cache Redis is
-        configured; any failure is logged and swallowed.
+        configured; any failure is logged and swallowed. Also bumps the
+        graph's generation so every process drops its id tables.
         """
         try:
             await self._ensure_connected()
@@ -9178,6 +9325,11 @@ class FalkorDBProvider(GraphDataProvider):
             logger.warning(f"clear_content_caches failed: {e}")
         finally:
             self._agg_meta_cached = None
+        # A confirmed out-of-band change may have dropped and rewritten the graph: a new
+        # id catalogue under the same name. Every process's handles must forget the old
+        # one, not only this provider's (graph_generation). Never raises.
+        from .graph_generation import bump_graph_generation
+        await bump_graph_generation(self._graph_name, reason="source changed")
 
     async def count_aggregated_edges(self) -> int:
         """Cheap COUNT for purge progress reporting. Returns the current
