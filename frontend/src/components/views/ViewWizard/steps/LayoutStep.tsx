@@ -23,6 +23,7 @@ import type { WizardFormData } from '../ViewWizard'
 import type { ViewLayerConfig } from '@/types/schema'
 import { listTemplates as fetchBackendTemplates } from '@/services/contextModelService'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
+import { caseFold } from '@/features/ontology/lib/caseFold'
 import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { blankQuickStartTemplates } from '../blankTemplates'
@@ -273,6 +274,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
         relationshipTypes: dsRelationshipTypes,
         rootEntityTypes: dsRootEntityTypes,
         containmentEdgeTypes: dsContainmentEdgeTypes,
+        isLoading: dsSchemaLoading,
     } = useDataSourceSchema(dataSourceId)
     const storeEntityTypes = useSchemaEntityTypes()
     const schemaEntityTypes = blank ? storeEntityTypes : dsEntityTypes
@@ -396,12 +398,19 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     // assignments (keyed to the OLD layer ids) would otherwise dangle. Never
     // copies assignments a template might carry; only layer STRUCTURE is copied.
     const handleApplyGalleryTemplate = useCallback((template: GalleryTemplate) => {
+        // Template types are suggestions written for SOME ontology: keep only the ones
+        // this data source's ontology declares, in its own spelling. A layer left with
+        // none keeps its name and colour and is filled by assignment, like the local
+        // fallbacks.
+        const declared = new Map(schemaEntityTypes.map(et => [caseFold(et.id), et.id]))
         const layers: ViewLayerConfig[] = template.layers.map((l, i) => ({
             ...l,
             name: l.name,
             description: l.description ?? '',
             color: l.color ?? LAYER_COLORS[i % LAYER_COLORS.length],
-            entityTypes: [...(l.entityTypes ?? [])],
+            entityTypes: [...new Set((l.entityTypes ?? [])
+                .map(t => declared.get(caseFold(t)))
+                .filter((t): t is string => !!t))],
             id: l.id ?? generateId(),
             order: i,
         }))
@@ -412,7 +421,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             entityScope: template.entityScope,
         })
         setGalleryOpen(false)
-    }, [updateFormData])
+    }, [updateFormData, schemaEntityTypes])
     // ────────────────────────────────────────────────────────────────────────
 
     const handleSelectLayoutType = useCallback((type: 'graph' | 'hierarchy' | 'reference') => {
@@ -605,7 +614,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                                 <TemplateGallery
                                     templates={galleryTemplates}
                                     activeId={formData.layoutTemplateId}
-                                    loading={!blank && templatesLoading}
+                                    loading={!blank && (templatesLoading || dsSchemaLoading)}
                                     onApply={handleApplyGalleryTemplate}
                                 />
                             </motion.div>
