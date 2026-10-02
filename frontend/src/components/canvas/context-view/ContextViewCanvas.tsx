@@ -63,6 +63,7 @@ import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartner
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import { lookupRetryDelayMs } from '@/config/polling'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
+import { feedRemainder } from './feedRemainder'
 import {
   childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
   openedViewMessage, openingViewMessage,
@@ -3474,18 +3475,29 @@ export function ContextViewCanvas({
     }
     return out
   }, [typeFeeds, sortedLayers])
+  // Loaded entities per type, folded as the feeds are matched: what a type's
+  // server total has already delivered, wherever its rows are drawn.
+  const loadedByType = useMemo(() => {
+    const out = new Map<string, number>()
+    for (const n of nodes) {
+      const t = String(n.data?.type ?? '').toLowerCase()
+      if (t) out.set(t, (out.get(t) ?? 0) + 1)
+    }
+    return out
+  }, [nodes])
   const feedMoreByLayer = useMemo(() => {
-    const out = new Map<string, { loading: boolean; failed: boolean }>()
+    const out = new Map<string, { loading: boolean; failed: boolean; remaining: number | null }>()
     for (const [layerId, types] of feedTypesByLayer) {
       const keys = types.filter(t => typeFeeds[t]?.hasMore).map(t => `TYPE:${t}`)
       if (keys.length === 0) continue
       out.set(layerId, {
         loading: keys.some(k => loadingNodes.has(k)),
         failed: keys.some(k => failedNodes.has(k)),
+        remaining: feedRemainder(types, typeFeeds, loadedByType),
       })
     }
     return out
-  }, [feedTypesByLayer, typeFeeds, loadingNodes, failedNodes])
+  }, [feedTypesByLayer, typeFeeds, loadingNodes, failedNodes, loadedByType])
   const onFeedMore = useCallback((layerId: string) => {
     if (traceWriteLocked()) return
     const types = feedTypesByLayer.get(layerId)
@@ -3997,10 +4009,10 @@ export function ContextViewCanvas({
   // never name which one. That message moved to `announceChildLoad`, at the
   // two call sites where the container is known.
   //
-  // 'roots' AND 'children' — the entities load spans BOTH phases, and only the
-  // transition out of the pair is behind `setGraph`. An open-scope view loads
-  // by type: roots first, then 'children' for the remaining visible types
-  // (useGraphHydration), and the nodes are committed after that second fetch.
+  // 'roots' AND 'children' — the entities load can span both phases, and only the
+  // transition out of the pair is behind `setGraph`. The hierarchy/graph load runs
+  // roots first, then 'children' (useGraphHydration), and commits its nodes after
+  // the second fetch.
   // Gating on 'roots' alone put the falling edge at the roots→children hop —
   // before the write, on a store that hydration had just emptied — so every
   // such view was announced as "· 0 items".

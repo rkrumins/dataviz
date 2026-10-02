@@ -117,13 +117,16 @@ export interface ChildPageState {
 /**
  * Where one feed of entities-by-type stands: the entity types it queries, where
  * its next page starts and whether there is one — as the server said (see
- * ChildPageState). An open Context View keeps one feed per visible type; the
+ * ChildPageState). An open Context View keeps one feed per type its layers claim; the
  * Hierarchy and Graph views keep a roots feed and an orphans feed.
  */
 export interface TypeFeedState {
   entityTypes: string[]
   offset: number
   hasMore: boolean
+  /** How many entities the feed's types hold, as the server counted them with
+   *  its first page. null/absent = it did not say. */
+  total?: number | null
 }
 
 interface CanvasState {

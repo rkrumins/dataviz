@@ -1,17 +1,15 @@
 /**
  * "Opened “Customer 360” · 1,204 items" must count the entities that arrived.
  *
- * An OPEN-scope view (no assignments — the default) hydrates BY TYPE, and that
- * load spans two phases: 'roots' fetches the root types, then 'children'
- * fetches the remaining visible types, and only after that second fetch are
- * the nodes committed with `setGraph`. Hydration had already emptied the store
- * on line one of the attempt, so a success message fired at the roots→children
- * hop counted an empty store and announced "· 0 items" — immediately followed
- * by "Connections · 3,918", which contradicted it.
+ * An OPEN-scope view (no assignments — the default) hydrates BY TYPE — one
+ * fetch per type its layers claim — and commits the nodes with `setGraph` only
+ * after those fetches. Hydration had already emptied the store on line one of
+ * the attempt, so a success message that fired before the write counted an
+ * empty store and announced "· 0 items" — immediately followed by
+ * "Connections · 3,918", which contradicted it.
  *
- * The canvas therefore holds the notification across BOTH phases; the falling
- * edge is the move to 'edges', which is behind the store write on the curated
- * path too. Pinned here against the real hook, the real notification store and
+ * The canvas therefore holds the notification until the falling edge, the
+ * move to 'edges', which is behind the store write on the curated path too. Pinned here against the real hook, the real notification store and
  * the real `useLoadingNotification` — the wiring itself is pinned in
  * `loadMessages.test.ts` (the canvas cannot be mounted in jsdom).
  */
@@ -51,11 +49,16 @@ vi.mock('@/hooks/useViewSchema', () => ({
   useViewSchemaIsReady: () => true,
 }))
 vi.mock('@/store/schema', () => ({
-  // No assignments ⇒ entityScope 'all' ⇒ the type-based branch, where
-  // `remainingTypes` is non-empty and the 'children' phase is rendered.
+  // No assignments ⇒ entityScope 'all'; the layers claim both types, so both
+  // are fed.
   useActiveView: () => ({
     id: 'v1',
-    layout: { type: 'reference', referenceLayout: { layers: [] } },
+    layout: {
+      type: 'reference',
+      referenceLayout: {
+        layers: [{ id: 'L1', entityTypes: ['database'] }, { id: 'L2', entityTypes: ['table'] }],
+      },
+    },
     content: { visibleEntityTypes: ['database', 'table'] },
   }),
   isContainmentEdgeType: () => false,
@@ -92,9 +95,9 @@ describe('the message that announces an opened view', () => {
     useNotificationStore.getState().clearHistory()
     useCanvasStore.getState().setGraph([], [])
     // Both fetches take a MACROTASK, as a real one does. Resolving inside the
-    // microtask queue lets React coalesce roots→children→edges into a single
-    // render, and a harness that never renders the 'children' phase can never
-    // see the bug it was written for.
+    // microtask queue lets React coalesce roots→edges into a single render, and
+    // a harness that never renders the loading phase can never see the bug it
+    // was written for.
     mockProvider.getNodes.mockImplementation(async ({ entityTypes }) => {
       await new Promise(r => setTimeout(r, 5))
       return entityTypes?.[0] === 'database'
@@ -110,8 +113,8 @@ describe('the message that announces an opened view', () => {
       expect(useNotificationStore.getState().history.map(h => h.message))
         .toContain('Opened “Customer 360” · 5 items'),
     )
-    // The load really did run through the second, non-root type — otherwise
-    // this test would pass on the very sequence it exists to catch.
+    // The load really did fetch the second claimed type, the non-root one —
+    // otherwise this test would not count everything the load brought back.
     expect(mockProvider.getNodes).toHaveBeenCalledWith(
       expect.objectContaining({ entityTypes: ['table'] }),
     )

@@ -495,6 +495,10 @@ export interface NodePage {
     nodes: GraphNode[]
     hasMore: boolean
     nextOffset: number
+    /** How many rows the whole query matches: sent with a FIRST page, best-effort.
+     *  null/absent = unknown (a later page, a draft with changes, an older server,
+     *  a count over its time budget). */
+    totalCount?: number | null
 }
 
 export interface EdgeQuery {
