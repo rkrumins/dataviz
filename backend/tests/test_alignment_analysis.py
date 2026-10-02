@@ -2,9 +2,9 @@
 Alignment & Query Performance report, assembled purely from cached data.
 
 Seeds a data source whose cached profile drifts from its assigned ontology
-(declared ``Pipeline`` vs physical ``pipeline`` — NOT ``dataset``, which is a
-platform default index label) plus an unmapped ``custom_thing``, and asserts
-the derived findings, index coverage, grade, and degrade paths.
+(declared ``Pipeline`` vs physical ``pipeline``) plus an unmapped
+``custom_thing``, and asserts the derived findings, index coverage, grade, and
+degrade paths.
 """
 import json
 
@@ -80,11 +80,11 @@ async def test_alignment_analysis_drifted_raw_source(test_client: AsyncClient, d
     # evidence is UNKNOWN rather than healthy.
     assert agg["projectorCurrent"] is None
 
-    # Index coverage: declared spellings (+ platform defaults) are indexed;
+    # Index coverage: declared spellings are indexed;
     # the drifted and unmapped physical labels are not.
     cov = body["indexCoverage"]
     assert "Pipeline" in cov["indexedLabels"]
-    assert "dataset" in cov["indexedLabels"]  # platform default
+    assert "dataset" not in cov["indexedLabels"]  # no platform defaults: the ontology alone decides
     assert "urn" in cov["indexedProps"]
     by_label = {e["label"]: e for e in cov["unindexedPhysical"]}
     assert by_label["pipeline"] == {

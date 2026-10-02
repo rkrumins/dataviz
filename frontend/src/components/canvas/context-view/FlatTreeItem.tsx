@@ -9,6 +9,7 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
 import type { ViewLayerConfig } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
+import { useViewEntityType } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
@@ -214,7 +215,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const stagedRowClass = directDeco
     ? FLAT_ROW_STYLE[`${directDeco.state}-${directDeco.status}`]
     : (hasDescendantChange ? 'border-l-[3px] border-l-amber-400/50' : '')
-  const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
+  const entityType = useViewEntityType(node.typeId)
   const visual = entityType?.visual
   const nodeColor = visual?.color ?? layer.color
   // Logical nodes use a folder/group icon instead of entity type icon

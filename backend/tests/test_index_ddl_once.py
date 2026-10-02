@@ -1,7 +1,7 @@
 """THE INDEX DDL IS A ONE-OFF, NOT A PER-RUN TAX.
 
-`ensure_indices` creates `(5 + N_ontology_types) × 5` node indices plus six
-`:AGGREGATED` edge indices. For a twenty-type ontology that is 131 statements,
+`ensure_indices` creates `N_ontology_types × 5` node indices plus six
+`:AGGREGATED` edge indices. For a twenty-type ontology that is 106 statements,
 issued serially on the WRITE path. It ran unconditionally on every aggregation
 job, every skip, every ontology-cache miss and every provider connect — and
 before the write lease is taken and before the admission controller is
@@ -19,9 +19,9 @@ overrides the marker for a caller that knows the graph was rebuilt.
 And the other direction — the storm that DOES happen, because the marker is
 written only on a clean sweep. When the NODE refuses (`-NOREPLICAS` from
 `min-replicas-to-write`, `-LOADING`, a socket that is not there), every one of
-the 131 statements fails, no marker is written, and the next ontology-cache
+the 106 statements fails, no marker is written, and the next ontology-cache
 miss runs the whole set again. On the interactive read path
-(`context_engine._resolve_ontology`) that is 131 doomed round trips per
+(`context_engine._resolve_ontology`) that is 106 doomed round trips per
 reader, for as long as the condition lasts — an hour-long node restart, say.
 So a refusal that is about the node stops the set at the first statement and
 silences it for everyone for a short while.
@@ -91,6 +91,29 @@ def _expected_count(types):
 
 
 TYPES = ["table", "column", "report"]
+
+
+def test_index_labels_come_from_the_ontology_only():
+    """No platform defaults. A label this product plants in a graph stays in its
+    catalogue for the graph's life — that is how domain…schemaField sat at ids 0-4
+    of every graph, and what a stale id table decoded other types as."""
+    assert indexed_labels(None) == []
+    assert indexed_labels(["Layer", "Object", "Layer"]) == ["Layer", "Object"]
+
+
+def test_no_ontology_types_create_no_label_indexes():
+    p = _provider()
+    _run(p.ensure_indices())
+    assert not any(c.startswith("CREATE INDEX FOR (n:") for c in p.issued)
+    assert p.issued == list(_AGGREGATED_EDGE_INDEXES)
+
+
+def test_an_ontology_gets_indexes_for_its_own_labels_and_nothing_else():
+    p = _provider()
+    _run(p.ensure_indices(["Layer"]))
+    assert any("(n:Layer)" in c for c in p.issued)
+    for planted in ("domain", "dataPlatform", "container", "dataset", "schemaField"):
+        assert not any(planted in c for c in p.issued), planted
 
 
 def test_the_set_is_applied_once_and_then_never_again():

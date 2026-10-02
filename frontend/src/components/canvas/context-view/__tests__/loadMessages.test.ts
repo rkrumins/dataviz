@@ -217,10 +217,10 @@ describe('the canvas raises them from the sites that know the subject', () => {
   })
 
   it('counts the entities load across BOTH of its phases', () => {
-    // An open-scope view loads by type: 'roots', then 'children' for the
-    // remaining visible types, and only THEN are the nodes committed. Gating
-    // on 'roots' alone put the falling edge before that write, so the success
-    // message read an empty store and said "· 0 items".
+    // The hierarchy/graph load runs 'roots' first, then 'children', and only
+    // THEN are the nodes committed. Gating on 'roots' alone put the falling
+    // edge before that write, so the success message read an empty store and
+    // said "· 0 items".
     // (Behaviour: useGraphHydration.openedCount.test.tsx.)
     const at = canvas.indexOf("'ctx-hydrating-entities'")
     expect(canvas.slice(at, canvas.indexOf('  )', at)))

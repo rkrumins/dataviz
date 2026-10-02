@@ -305,6 +305,55 @@ describe('ViewWizard — submit (edit path)', () => {
   })
 })
 
+describe('ViewWizard — no hardcoded root types in the saved config', () => {
+  // Root types come from the data source's ontology at runtime. Older saves
+  // stamped a hardcoded ['domain'] into content.rootEntityTypes (baseConfig
+  // still carries it, as a stored view would).
+  it('drops a stale rootEntityTypes on an edit save, still sending the visible types', async () => {
+    renderWizard(makeView(baseConfig({
+      layers: [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }],
+      assignments: {},
+    })))
+
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewMock).toHaveBeenCalledTimes(1))
+    const content = updateViewMock.mock.calls[0][1].config.content
+    expect(content).not.toHaveProperty('rootEntityTypes')
+    expect(content.visibleEntityTypes).toEqual(['domain', 'dataset'])
+  })
+
+  it('writes no rootEntityTypes when creating a view', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={vi.fn()}
+            onComplete={vi.fn()}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    await waitFor(() => expect(createViewMock).toHaveBeenCalledTimes(1))
+    expect(createViewMock.mock.calls[0][0].config.content).not.toHaveProperty('rootEntityTypes')
+  })
+})
+
 describe('ViewWizard — submit (create path) retry', () => {
   it('a retry after updateViewLayout fails re-drives ONLY the layout write, never createView again', async () => {
     createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))

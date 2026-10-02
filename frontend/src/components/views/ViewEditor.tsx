@@ -71,7 +71,6 @@ export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {
         visibleRelationshipTypes: schema?.relationshipTypes.map((r) => r.id) ?? [],
         defaultDepth: 5,
         maxDepth: 10,
-        rootEntityTypes: ['domain'],
       },
       layout: {
         type: 'graph',

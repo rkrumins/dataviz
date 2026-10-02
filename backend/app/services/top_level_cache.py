@@ -4,7 +4,7 @@ For data sources at/above ``resilience.STATS_POLL_LARGE_THRESHOLD`` nodes,
 the live top-level/orphan query is too expensive to run per-request. The
 insights counts lane (the collector) materializes a JSON payload —
 displayName-sorted nodes, a fingerprint of the graph counts, and a digest
-of the ontology's containment/root types — into
+of the ontology's containment/root types and assigned entity types — into
 ``DataSourceStatsORM.top_level_nodes``. The ``/top-level`` endpoint serves
 pages out of that payload via :func:`try_serve_top_level` instead of
 querying the provider directly.
@@ -69,21 +69,42 @@ def _kill_switch_enabled() -> bool:
     )
 
 
-def containment_digest(containment_types: Iterable[str], root_types: Iterable[str]) -> str:
+def containment_digest(
+    containment_types: Iterable[str], root_types: Iterable[str],
+    entity_types: Iterable[str] = (),
+) -> str:
     """Digest of the ontology shape that the materialized payload depends on.
 
     Order-insensitive and dedup'd — only the *set* of containment/root
     types matters, so a re-resolve that returns the same types in a
     different order does not spuriously invalidate the cache.
+
+    ``entity_types`` is the assigned ontology's vocabulary
+    (:func:`assigned_entity_types`): the payload is a label union over it, so
+    a reassigned ontology must not keep serving the old one's nodes — and the
+    new input retires, once, every payload built before it was part of the
+    digest.
     """
     canonical = json.dumps(
         {
             "containment": sorted(set(containment_types or [])),
             "rootTypes": sorted(set(root_types or [])),
+            "entityTypes": sorted(set(entity_types or [])),
         },
         sort_keys=True,
     )
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+
+
+def assigned_entity_types(resolved) -> List[str]:
+    """The entity types the data source's ASSIGNED ontology declares — not the
+    introspected ones, which come and go with an introspection that can time
+    out on exactly the large graphs this payload serves."""
+    sources = getattr(resolved, "resolution_sources", None) or {}
+    return [
+        k for k in (getattr(resolved, "entity_type_definitions", None) or {})
+        if sources.get(k) == "assigned"
+    ]
 
 
 def build_top_level_payload(result: TopLevelNodesResult, *, stats: dict, digest: str) -> str:
@@ -247,6 +268,7 @@ async def try_serve_top_level(
     digest = containment_digest(
         getattr(resolved, "containment_edge_types", None) or [],
         getattr(resolved, "root_entity_types", None) or [],
+        assigned_entity_types(resolved),
     )
     if digest != payload.get("digest"):
         await enqueue_stats_job_safe_ex(ds_id, ws_id)

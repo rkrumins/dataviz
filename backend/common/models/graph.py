@@ -462,6 +462,11 @@ class NodePage(BaseModel):
     nodes: List[GraphNode]
     has_more: bool = Field(alias="hasMore")
     next_offset: int = Field(alias="nextOffset")
+    # How many rows the whole query matches, counted with a FIRST page only and
+    # best-effort (a display total). None = unknown: a later page (the client
+    # keeps the first page's), a provider that can't count cheaply, a draft with
+    # changes, or a count over its time budget.
+    total_count: Optional[int] = Field(None, alias="totalCount")
 
     class Config:
         populate_by_name = True

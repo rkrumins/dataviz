@@ -52,7 +52,7 @@ import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
 import type { AggregatedEdgeInfo, TraceV2Result } from '@/providers/GraphDataProvider'
-import { useGraphHydration } from '@/hooks/useGraphHydration'
+import { layerClaimedTypes, useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
@@ -63,6 +63,7 @@ import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartner
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import { lookupRetryDelayMs } from '@/config/polling'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
+import { feedRemainder } from './feedRemainder'
 import {
   childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
   openedViewMessage, openingViewMessage,
@@ -3447,8 +3448,8 @@ export function ContextViewCanvas({
   }, [loadMoreRoots, traceWriteLocked])
 
   // ── Open-scope type feeds, per column ─────────────────────────────
-  // A column pages the feeds of the types it holds by rule; the column that
-  // takes unassigned entities pages every feed no layer claims. Matched
+  // A column pages the feeds of the types it holds by rule; a feed no layer
+  // claims any more (left behind by an edited rule) pages nowhere. Matched
   // case-insensitively: a rule and a feed can spell a type differently
   // (observed vs declared), and a missed match is a column that silently
   // never loads more.
@@ -3458,34 +3459,39 @@ export function ContextViewCanvas({
     const feedTypes = Object.keys(typeFeeds)
     if (feedTypes.length === 0) return out
     const byFold = new Map(feedTypes.map(t => [t.toLowerCase(), t]))
-    const claimed = new Set<string>()
     for (const layer of sortedLayers) {
-      const types = (layer.entityTypes ?? [])
+      const types = [...new Set(layerClaimedTypes(layer)
         .map(t => byFold.get(String(t).toLowerCase()))
-        .filter((t): t is string => !!t)
-      if (types.length === 0) continue
-      out.set(layer.id, types)
-      types.forEach(t => claimed.add(t))
-    }
-    const fallback = sortedLayers.find(l => l.showUnassigned === true)
-    if (fallback) {
-      const rest = feedTypes.filter(t => !claimed.has(t))
-      if (rest.length > 0) out.set(fallback.id, [...(out.get(fallback.id) ?? []), ...rest])
+        .filter((t): t is string => !!t))]
+      if (types.length > 0) out.set(layer.id, types)
     }
     return out
   }, [typeFeeds, sortedLayers])
+  // Loaded entities per type, folded as the feeds are matched: what a type's
+  // server total has already delivered, wherever its rows are drawn.
+  const loadedByType = useMemo(() => {
+    const out = new Map<string, number>()
+    for (const n of nodes) {
+      const t = String(n.data?.type ?? '').toLowerCase()
+      if (t) out.set(t, (out.get(t) ?? 0) + 1)
+    }
+    return out
+  }, [nodes])
   const feedMoreByLayer = useMemo(() => {
-    const out = new Map<string, { loading: boolean; failed: boolean }>()
+    const out = new Map<string, { loading: boolean; failed: boolean; remaining: number | null; types: string[] }>()
     for (const [layerId, types] of feedTypesByLayer) {
-      const keys = types.filter(t => typeFeeds[t]?.hasMore).map(t => `TYPE:${t}`)
-      if (keys.length === 0) continue
+      const open = types.filter(t => typeFeeds[t]?.hasMore)
+      if (open.length === 0) continue
+      const keys = open.map(t => `TYPE:${t}`)
       out.set(layerId, {
         loading: keys.some(k => loadingNodes.has(k)),
         failed: keys.some(k => failedNodes.has(k)),
+        remaining: feedRemainder(types, typeFeeds, loadedByType),
+        types: open,
       })
     }
     return out
-  }, [feedTypesByLayer, typeFeeds, loadingNodes, failedNodes])
+  }, [feedTypesByLayer, typeFeeds, loadingNodes, failedNodes, loadedByType])
   const onFeedMore = useCallback((layerId: string) => {
     if (traceWriteLocked()) return
     const types = feedTypesByLayer.get(layerId)
@@ -3997,10 +4003,10 @@ export function ContextViewCanvas({
   // never name which one. That message moved to `announceChildLoad`, at the
   // two call sites where the container is known.
   //
-  // 'roots' AND 'children' — the entities load spans BOTH phases, and only the
-  // transition out of the pair is behind `setGraph`. An open-scope view loads
-  // by type: roots first, then 'children' for the remaining visible types
-  // (useGraphHydration), and the nodes are committed after that second fetch.
+  // 'roots' AND 'children' — the entities load can span both phases, and only the
+  // transition out of the pair is behind `setGraph`. The hierarchy/graph load runs
+  // roots first, then 'children' (useGraphHydration), and commits its nodes after
+  // the second fetch.
   // Gating on 'roots' alone put the falling edge at the roots→children hop —
   // before the write, on a store that hydration had just emptied — so every
   // such view was announced as "· 0 items".

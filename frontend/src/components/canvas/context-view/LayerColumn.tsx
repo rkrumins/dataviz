@@ -17,6 +17,7 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
+import { useViewEntityTypes } from '@/hooks/useViewSchema'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
@@ -109,8 +110,10 @@ interface LayerColumnProps {
   failedNodes?: Set<string>
   /** Open scope: this column's type feeds still have more (present only then).
    *  Drawn as a column-level row that auto-loads while the column GROWS and
-   *  offers a click when a page lands elsewhere — never an unattended drain. */
-  feedMore?: { loading: boolean; failed: boolean }
+   *  offers a click when a page lands elsewhere — never an unattended drain.
+   *  `remaining`: what those feeds' types still hold on the server (null/absent:
+   *  a feed has no total). */
+  feedMore?: { loading: boolean; failed: boolean; remaining?: number | null; types?: string[] }
   onFeedMore?: (layerId: string) => void
   /** Parents the server says have no further pages, with the childCount that
    *  was said against: no load-more row while the parent still has that count,
@@ -853,12 +856,41 @@ export const LayerColumn = React.memo(function LayerColumn({
     selectedNodeId, selectedNodeIds,
   ])
 
-  // Count total including nested
-  const totalCount = useMemo(() => {
-    const count = (n: HierarchyNode): number =>
-      1 + n.children.reduce((acc, c) => acc + count(c), 0)
-    return nodes.reduce((acc, n) => acc + count(n), 0)
-  }, [nodes])
+  const viewEntityTypes = useViewEntityTypes()
+  // Header totals, 'Layer + known children'. `loadedCount` is the entities
+  // loaded into this column, nested included; group wrappers are not entities.
+  // `layerTotal` adds what the column knows is still unloaded: each row's
+  // childCount less its loaded children (wherever drawn; none once the server
+  // said no more pages), the anchor's remainder, and the type feeds' remainder.
+  // A row whose every containable type (per the view's ontology) this column
+  // feeds with a known total adds no remainder of its own: the feeds already
+  // count those children. childCount is not split by type, so a row that can
+  // also hold an unfed type keeps its remainder rather than lose those children.
+  const { loadedCount, layerTotal } = useMemo(() => {
+    const fed = new Set(feedMore?.remaining != null ? (feedMore.types ?? []).map(t => t.toLowerCase()) : [])
+    const coveredByFeed = new Set(fed.size === 0 ? [] : viewEntityTypes
+      .filter(et => {
+        const canContain = et.hierarchy?.canContain ?? []
+        return canContain.length > 0 && canContain.every(t => fed.has(t.toLowerCase()))
+      })
+      .map(et => et.id.toLowerCase()))
+    let loadedCount = 0
+    let unloaded = (anchorMore?.remaining ?? 0) + (feedMore?.remaining ?? 0)
+    const stack = [...nodes]
+    while (stack.length > 0) {
+      const n = stack.pop()!
+      for (const c of n.children) stack.push(c)
+      if (n.isLogical) continue
+      loadedCount++
+      const childCount = (n.data.childCount as number) || (n.data._collapsedChildCount as number) || 0
+      if (childCount === 0 || exhaustedParents?.get(n.id) === childCount) continue
+      if (coveredByFeed.has(String(n.typeId).toLowerCase())) continue
+      unloaded += Math.max(0, childCount - Math.max(n.children.length, loadedChildren?.get(n.id)?.length ?? 0))
+    }
+    return { loadedCount, layerTotal: loadedCount + unloaded }
+  }, [nodes, anchorMore, feedMore, exhaustedParents, loadedChildren, viewEntityTypes])
+  const totalIsFloor = !!feedMore && feedMore.remaining == null  // a feed with more has no server total
+  const totalLabel = `${layerTotal.toLocaleString()}${totalIsFloor ? '+' : ''}`
 
   // TRACE HEADER: what this lane contributes to the LINEAGE — participants,
   // not rows. Each root carries the view model's own count of the
@@ -1307,10 +1339,11 @@ export const LayerColumn = React.memo(function LayerColumn({
   // Auxiliary rows — search boxes, skeletons, load-more, failed
   // placeholders — are UI, not entities: counting them pushed the header
   // past the loaded total ("402 / 400"). Entity rows are a strict subset
-  // of loaded entities, so X ≤ Y holds by construction.
+  // of loaded entities, so X ≤ Y holds by construction. Group wrappers are not
+  // entities either.
   const visibleCount = useMemo(
     () => flatTree.reduce((acc, it) =>
-      acc + (it.isSkeleton || it.isSearchBox || it.isFailed || it.isLoadMore || it.isSearchHit ? 0 : 1), 0),
+      acc + (it.isSkeleton || it.isSearchBox || it.isFailed || it.isLoadMore || it.isSearchHit || it.node.isLogical ? 0 : 1), 0),
     [flatTree],
   )
 
@@ -1907,7 +1940,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   ? onLineageLabel
                   : sortIsOverride ? `Sorted: ${SORT_MODE_LABELS[sortMode]}` : undefined}
               >
-                {isTracing ? onLineageCount : totalCount}
+                {isTracing ? onLineageCount : `${compactCount.format(layerTotal)}${totalIsFloor ? '+' : ''}`}
                 {/* Sort-override indicator survives collapse, so a curated
                     arrangement doesn't silently vanish from view. */}
                 {sortIsOverride && (
@@ -2009,7 +2042,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] border border-white/[0.08]"
                     title={isTracing
                       ? onLineageLabel
-                      : `${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${totalCount.toLocaleString()} loaded in this layer (collapsed children included — expand rows to reveal them)`}
+                      : `${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${loadedCount.toLocaleString()} loaded · ${totalLabel} in this layer (with the children the server reports for loaded rows${totalIsFloor ? '; some types have no count yet' : ''})`}
                   >
                     {isTracing ? (
                       <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
@@ -2018,10 +2051,10 @@ export const LayerColumn = React.memo(function LayerColumn({
                     ) : (
                       <>
                         <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
-                          {visibleCount}
+                          {loadedCount.toLocaleString()}
                         </span>
                         <span className="text-[9px] text-ink-muted/60">/</span>
-                        <span className="text-[10px] text-ink-muted/60">{totalCount}</span>
+                        <span className="text-[10px] text-ink-muted/60">{totalLabel}</span>
                       </>
                     )}
                   </div>
@@ -2090,14 +2123,15 @@ export const LayerColumn = React.memo(function LayerColumn({
                   </button>
                 )}
                 {/* Delete — hover-revealed trash → inline check/✗ confirm (the check's tooltip warns
-                    when the layer has entities: they fall back to the default layer on removal). */}
+                    when the layer has entities: hand-placed ones fall back to the default layer,
+                    rule-placed ones become unassigned unless another layer claims their type). */}
                 {onDeleteLayer && (
                   confirmingDelete ? (
                     <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                       <button
                         onClick={(e) => { e.stopPropagation(); onDeleteLayer(layer.id); setConfirmingDelete(false) }}
-                        title={totalCount > 0
-                          ? `Delete — ${totalCount} ${totalCount === 1 ? 'entity' : 'entities'} will move to the default layer`
+                        title={loadedCount > 0
+                          ? `Delete — ${loadedCount} ${loadedCount === 1 ? 'entity' : 'entities'} here: hand-placed ones move to the default layer; ones placed by this layer's type rules become unassigned unless another layer claims their type`
                           : 'Delete layer'}
                         className="p-1.5 rounded-lg bg-rose-500/15 text-rose-500 hover:bg-rose-500/25 transition-all"
                       >
