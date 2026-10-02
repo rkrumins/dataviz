@@ -3448,8 +3448,8 @@ export function ContextViewCanvas({
   }, [loadMoreRoots, traceWriteLocked])
 
   // ── Open-scope type feeds, per column ─────────────────────────────
-  // A column pages the feeds of the types it holds by rule; the column that
-  // takes unassigned entities pages every feed no layer claims. Matched
+  // A column pages the feeds of the types it holds by rule; a feed no layer
+  // claims any more (left behind by an edited rule) pages nowhere. Matched
   // case-insensitively: a rule and a feed can spell a type differently
   // (observed vs declared), and a missed match is a column that silently
   // never loads more.
@@ -3459,19 +3459,11 @@ export function ContextViewCanvas({
     const feedTypes = Object.keys(typeFeeds)
     if (feedTypes.length === 0) return out
     const byFold = new Map(feedTypes.map(t => [t.toLowerCase(), t]))
-    const claimed = new Set<string>()
     for (const layer of sortedLayers) {
       const types = (layer.entityTypes ?? [])
         .map(t => byFold.get(String(t).toLowerCase()))
         .filter((t): t is string => !!t)
-      if (types.length === 0) continue
-      out.set(layer.id, types)
-      types.forEach(t => claimed.add(t))
-    }
-    const fallback = sortedLayers.find(l => l.showUnassigned === true)
-    if (fallback) {
-      const rest = feedTypes.filter(t => !claimed.has(t))
-      if (rest.length > 0) out.set(fallback.id, [...(out.get(fallback.id) ?? []), ...rest])
+      if (types.length > 0) out.set(layer.id, types)
     }
     return out
   }, [typeFeeds, sortedLayers])
@@ -3486,14 +3478,16 @@ export function ContextViewCanvas({
     return out
   }, [nodes])
   const feedMoreByLayer = useMemo(() => {
-    const out = new Map<string, { loading: boolean; failed: boolean; remaining: number | null }>()
+    const out = new Map<string, { loading: boolean; failed: boolean; remaining: number | null; types: string[] }>()
     for (const [layerId, types] of feedTypesByLayer) {
-      const keys = types.filter(t => typeFeeds[t]?.hasMore).map(t => `TYPE:${t}`)
-      if (keys.length === 0) continue
+      const open = types.filter(t => typeFeeds[t]?.hasMore)
+      if (open.length === 0) continue
+      const keys = open.map(t => `TYPE:${t}`)
       out.set(layerId, {
         loading: keys.some(k => loadingNodes.has(k)),
         failed: keys.some(k => failedNodes.has(k)),
         remaining: feedRemainder(types, typeFeeds, loadedByType),
+        types: open,
       })
     }
     return out

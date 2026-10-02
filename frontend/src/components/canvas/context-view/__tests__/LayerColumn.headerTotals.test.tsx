@@ -10,7 +10,10 @@
  *    (wherever they are drawn; none once the server said there are no more
  *    pages), the anchor's remainder and the type feeds' remainder;
  *  - a feed with more and no server total makes the total a floor ('+');
- *  - the folded spine shows the total; the delete warning counts what moves.
+ *  - a row whose type can contain a fed type adds no remainder of its own (the
+ *    feed's total already counts those children);
+ *  - the folded spine shows the total; the delete warning says what happens to
+ *    the loaded entities.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -126,6 +129,18 @@ describe('LayerColumn — header totals', () => {
         expect(pill().getAttribute('title')).not.toContain('≈')
     })
 
+    it("does not count twice the children a fed type's total already holds", () => {
+        // 'domain' rows can contain 'domain': the feed's remainder counts the
+        // unloaded nested domains, so the row's own childCount adds nothing.
+        const schema = { entityTypes: [{ id: 'domain', hierarchy: { canContain: ['domain'] } }] } as never
+        renderColumn({
+            schema,
+            nodes: bigRoot(),
+            feedMore: { loading: false, failed: false, remaining: 4999, types: ['domain'] },
+        })
+        expect(pill().getAttribute('title')).toContain('1 loaded · 5,000 in this layer')
+    })
+
     it('counts no group wrapper as an entity', () => {
         renderColumn({
             nodes: [
@@ -137,10 +152,12 @@ describe('LayerColumn — header totals', () => {
         expect(pill().getAttribute('title')).toMatch(/^3 entities in the tree · 3 loaded · 3 in this layer/)
     })
 
-    it('warns that the loaded entities move to the default layer on delete', () => {
+    it('warns on delete what happens to the loaded entities', () => {
         renderColumn({ nodes: bigRoot(), onDeleteLayer: vi.fn() })
         fireEvent.click(screen.getByTitle('Delete Domains'))
-        expect(screen.getByTitle('Delete — 1 entity will move to the default layer')).toBeInTheDocument()
+        expect(screen.getByTitle(
+            "Delete — 1 entity here: hand-placed ones move to the default layer; ones placed by this layer's type rules leave the view unless another layer claims their type",
+        )).toBeInTheDocument()
     })
 
     it('shows the total on the folded spine', () => {

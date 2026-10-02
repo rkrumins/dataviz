@@ -20,9 +20,12 @@ This page covers how to:
 
 Each **column** is one layer, and each column lists its entities as an
 expandable tree. A column header shows the layer's name, its colour, and a small
-count in the form **visible / loaded** — how many rows are currently in the tree
-versus how many entities are loaded in that layer overall (collapsed children
-included). Columns handle very long lists smoothly, rendering only what's on
+count in the form **loaded / total** — how many entities are loaded into that
+layer (collapsed children included) versus how many it holds: the loaded ones,
+plus the children the server reports for loaded rows and what the server still
+counts for the layer's entity types. A trailing **+** means some types have no
+count yet, so the total is a minimum. Hover the count for how many rows are in
+the tree right now. Columns handle very long lists smoothly, rendering only what's on
 screen as you scroll, so a layer with thousands of entities stays responsive.
 
 ## The Layer Strip: your "you-are-here" navigator

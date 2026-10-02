@@ -681,8 +681,8 @@ class AggregationWorker:
                 # Ensure per-label URN indexes for the ontology's entity
                 # types BEFORE the scan/flush so every MATCH/MERGE on
                 # (label {urn}) is an index seek. Driven by the frozen
-                # level-map keys (ontology entity types) — schema-agnostic,
-                # not the provider's hardcoded defaults. Best-effort.
+                # level-map keys (ontology entity types) — schema-agnostic;
+                # the provider has no default labels of its own. Best-effort.
                 if entity_type_levels and hasattr(provider, "ensure_indices"):
                     try:
                         await provider.ensure_indices(list(entity_type_levels.keys()))

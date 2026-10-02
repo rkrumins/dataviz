@@ -569,6 +569,8 @@ async def update_data_source(
     # or workspace default underneath, CLEARING this source's override is a real
     # change, and setting it to the value it already inherited is not one.
     old_identity = await load_node_identity(session, old_ds)
+    # Read before the write: the update below changes ``old_ds`` in place.
+    old_ontology_id = old_ds.ontology_id
 
     # Evict old cache entry if provider/graph config changed
     if req.projection_mode is not None or req.dedicated_graph_name is not None:
@@ -611,9 +613,12 @@ async def update_data_source(
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
         await bump_ontology_generation(workspace_id, ds_id)
         # Cached hierarchy reads were answered under the old ontology / name
-        # mapping (entity types, display names) — drop them. Never raises.
-        from backend.app.services.graph_cache import invalidate_hierarchy_reads
-        await invalidate_hierarchy_reads(workspace_id, ds_id)
+        # mapping (entity types, display names) — drop them. Only when one of
+        # them really moved: the edit form re-sends the current ontologyId with
+        # a rename. Never raises.
+        if ds.ontology_id != old_ontology_id or mapping_changed:
+            from backend.app.services.graph_cache import invalidate_hierarchy_reads
+            await invalidate_hierarchy_reads(workspace_id, ds_id)
 
     # A mapping change makes the materialized AGGREGATED edges stale, and the
     # stamp's NULL-only fill means a re-run is required to rewrite them.

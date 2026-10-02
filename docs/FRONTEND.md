@@ -603,7 +603,7 @@ Beyond the key hooks listed in Section 6, the codebase includes:
 | `useWorkspaces` | Load & manage workspace list with auto-selection |
 | `useDataSourceSchema` | Load ontology for active data source |
 | `useGraphSchema` | Low-level graph API schema introspection |
-| `useGraphHydration` | Converts backend GraphNode/GraphEdge to canvas types. Tracks hydration phases: idle, roots, edges, children, complete. Provides `toCanvasNode()`, `toCanvasEdge()`, `computeViewScopedRoots()` |
+| `useGraphHydration` | Converts backend GraphNode/GraphEdge to canvas types. Tracks hydration phases: idle, roots, edges, children, complete. Provides `toCanvasNode()`, `toCanvasEdge()`, `claimedFeedTypes()`, `feedAfter()` |
 | `useExternalDegrees` | Fetches total lineage degree (in/out) per URN via `POST /{ws_id}/graph/nodes/degree`; powers the Context View's "lineage outside this view" chip by comparing external totals against internally loaded degree |
 | `useLogicalNodes` | Manage layer-to-node mappings (CRUD) |
 | `useLayerAssignment` | Handle entity-to-layer assignment logic |

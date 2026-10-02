@@ -17,6 +17,10 @@ integration/test_nodes_type_paging_live.py.
 """
 import asyncio
 
+import pytest
+from redis.exceptions import ResponseError
+
+from backend.common.adapters import ProviderBusy
 from backend.common.models.graph import NodeQuery
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 
@@ -159,8 +163,13 @@ def test_a_page_that_holds_everything_is_its_own_count():
     assert (len(page.nodes), page.has_more, page.total_count) == (3, False, 3)
 
 
-def test_a_count_over_its_budget_leaves_the_total_unknown():
-    p = _counting_provider(count_error=asyncio.TimeoutError())
+@pytest.mark.parametrize("error", [
+    asyncio.TimeoutError(),
+    ResponseError("Query timed out"),   # the store's own budget, the usual way it ends
+    ProviderBusy(provider_name="g", reason="busy", retry_after_seconds=1),
+])
+def test_a_count_over_its_budget_leaves_the_total_unknown(error):
+    p = _counting_provider(count_error=error)
     page = _run(p.get_nodes_page(NodeQuery(entityTypes=["domain"], limit=2)))
     assert len(page.nodes) == 2 and page.has_more
     assert page.total_count is None

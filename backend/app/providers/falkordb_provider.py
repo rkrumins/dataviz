@@ -6494,7 +6494,7 @@ class FalkorDBProvider(GraphDataProvider):
         """The interface's page and, on a FIRST page of entity types, how many
         nodes the whole query matches: a layer column's total. Best-effort and
         display-only, like the top-level count: None when it misses its short
-        budget. Later pages carry none (the client keeps the first page's); a
+        budget or the store refuses it. Later pages carry none (the client keeps the first page's); a
         first page that holds everything is its own count."""
         page = await super().get_nodes_page(query)
         if query.offset or not query.entity_types or query.urns:
@@ -6522,9 +6522,12 @@ class FalkorDBProvider(GraphDataProvider):
                 f"CALL {{ {inner} }} RETURN count(n) as total",
                 params=params, timeout=ct, op="nodes.count",
             )
-        except asyncio.TimeoutError:
+        except Exception as exc:  # noqa: BLE001 — display-only; the page already succeeded
+            # Not only the client's TimeoutError: the store's own "Query timed out"
+            # reply, a shed (ProviderBusy) or a memory refusal must not fail a page
+            # that was read fine.
             logger.warning(
-                f"get_nodes_page count query degraded: exceeded {ct:.0f}s budget "
+                f"get_nodes_page count query degraded ({type(exc).__name__}: {exc}) "
                 f"(graph={self._graph_name}); returning totalCount=null"
             )
             return page

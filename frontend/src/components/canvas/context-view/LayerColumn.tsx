@@ -112,7 +112,7 @@ interface LayerColumnProps {
    *  offers a click when a page lands elsewhere — never an unattended drain.
    *  `remaining`: what those feeds' types still hold on the server (null/absent:
    *  a feed has no total). */
-  feedMore?: { loading: boolean; failed: boolean; remaining?: number | null }
+  feedMore?: { loading: boolean; failed: boolean; remaining?: number | null; types?: string[] }
   onFeedMore?: (layerId: string) => void
   /** Parents the server says have no further pages, with the childCount that
    *  was said against: no load-more row while the parent still has that count,
@@ -860,7 +860,14 @@ export const LayerColumn = React.memo(function LayerColumn({
   // `layerTotal` adds what the column knows is still unloaded: each row's
   // childCount less its loaded children (wherever drawn; none once the server
   // said no more pages), the anchor's remainder, and the type feeds' remainder.
+  // A row whose type can contain a type this column feeds with a known total
+  // adds no remainder of its own: the feed's already counts those children
+  // (childCount is not split by type), so it would be counted twice.
   const { loadedCount, layerTotal } = useMemo(() => {
+    const fed = new Set(feedMore?.remaining != null ? (feedMore.types ?? []).map(t => t.toLowerCase()) : [])
+    const coveredByFeed = new Set(fed.size === 0 ? [] : (schema?.entityTypes ?? [])
+      .filter(et => (et.hierarchy?.canContain ?? []).some(t => fed.has(t.toLowerCase())))
+      .map(et => et.id.toLowerCase()))
     let loadedCount = 0
     let unloaded = (anchorMore?.remaining ?? 0) + (feedMore?.remaining ?? 0)
     const stack = [...nodes]
@@ -871,10 +878,11 @@ export const LayerColumn = React.memo(function LayerColumn({
       loadedCount++
       const childCount = (n.data.childCount as number) || (n.data._collapsedChildCount as number) || 0
       if (childCount === 0 || exhaustedParents?.get(n.id) === childCount) continue
+      if (coveredByFeed.has(String(n.typeId).toLowerCase())) continue
       unloaded += Math.max(0, childCount - Math.max(n.children.length, loadedChildren?.get(n.id)?.length ?? 0))
     }
     return { loadedCount, layerTotal: loadedCount + unloaded }
-  }, [nodes, anchorMore, feedMore, exhaustedParents, loadedChildren])
+  }, [nodes, anchorMore, feedMore, exhaustedParents, loadedChildren, schema])
   const totalIsFloor = !!feedMore && feedMore.remaining == null  // a feed with more has no server total
   const totalLabel = `${layerTotal.toLocaleString()}${totalIsFloor ? '+' : ''}`
 
@@ -2109,14 +2117,15 @@ export const LayerColumn = React.memo(function LayerColumn({
                   </button>
                 )}
                 {/* Delete — hover-revealed trash → inline check/✗ confirm (the check's tooltip warns
-                    when the layer has entities: they fall back to the default layer on removal). */}
+                    when the layer has entities: hand-placed ones fall back to the default layer,
+                    rule-placed ones leave the view unless another layer claims their type). */}
                 {onDeleteLayer && (
                   confirmingDelete ? (
                     <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                       <button
                         onClick={(e) => { e.stopPropagation(); onDeleteLayer(layer.id); setConfirmingDelete(false) }}
                         title={loadedCount > 0
-                          ? `Delete — ${loadedCount} ${loadedCount === 1 ? 'entity' : 'entities'} will move to the default layer`
+                          ? `Delete — ${loadedCount} ${loadedCount === 1 ? 'entity' : 'entities'} here: hand-placed ones move to the default layer; ones placed by this layer's type rules leave the view unless another layer claims their type`
                           : 'Delete layer'}
                         className="p-1.5 rounded-lg bg-rose-500/15 text-rose-500 hover:bg-rose-500/25 transition-all"
                       >

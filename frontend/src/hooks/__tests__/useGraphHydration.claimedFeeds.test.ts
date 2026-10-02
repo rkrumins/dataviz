@@ -11,8 +11,8 @@
  *    layer claims and a `showUnassigned` layer add nothing;
  *  - an open view feeds exactly those types and loads its placements by URN; with
  *    none claimed it loads by placement alone;
- *  - a rule edit that claims a new type loads it without a reload, and a curated
- *    view, which never feeds by type, does not re-hydrate on one;
+ *  - a rule edit that claims a new type pages it in place, a dropped claim loads
+ *    nothing, and a curated view, which never feeds by type, does not re-hydrate;
  *  - an open draft fetches the roots its branch created.
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
@@ -124,6 +124,12 @@ describe('claimedFeedTypes', () => {
     )).toEqual(['domain'])
   })
 
+  it('counts a type a layer rule claims', () => {
+    expect(claimedFeedTypes(
+      [layer('L1', [], { rules: [{ id: 'r1', entityTypes: ['Dataset'], priority: 0 }] })], ontology('domain', 'dataset'),
+    )).toEqual(['dataset'])
+  })
+
   it('names a type two layers claim once', () => {
     expect(claimedFeedTypes(
       [layer('L1', ['domain']), layer('L2', ['DOMAIN', 'dataset'])], ontology('domain', 'dataset'),
@@ -184,6 +190,20 @@ describe('useGraphHydration — an open view loads Rules + assignments', () => {
     await waitFor(() => expect(hydrating.result.current.hydrationStatus).toBe('ready'))
     expect(useCanvasStore.getState().nodes.map(n => n.id)).toEqual(
       expect.arrayContaining(['urn:domain:1', 'urn:dataset:1']))
+  })
+
+  it('loads nothing and does not re-hydrate when a claim is dropped', async () => {
+    view.layers = [layer('L1', ['domain']), layer('L2', ['dataset'])]
+    const hydrating = await hydrate()
+    const pages = mockProvider.getNodesPage.mock.calls.length
+    const between = mockProvider.getEdgesBetween.mock.calls.length
+
+    act(() => { view.layers = [layer('L1', ['domain'])] })
+    hydrating.rerender()
+    await act(async () => { await new Promise(r => setTimeout(r, 50)) })
+    expect(mockProvider.getNodesPage).toHaveBeenCalledTimes(pages)
+    expect(mockProvider.getEdgesBetween).toHaveBeenCalledTimes(between)
+    expect(hydrating.result.current.hydrationStatus).toBe('ready')
   })
 
   it('does not re-hydrate a curated view when a layer’s types change', async () => {

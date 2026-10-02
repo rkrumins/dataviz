@@ -173,7 +173,8 @@ async def test_ontology_reassignment_invalidates_cached_hierarchy_reads(
 ):
     """Cached top-level / children / node reads were answered under the old
     ontology (its entity types, its name mapping) — a reassignment drops them.
-    A label-only edit changes nothing they depend on and keeps them."""
+    A rename changes nothing they depend on and keeps them, also when the edit
+    form re-sends the ontology the source already has."""
     calls: list = []
 
     async def _record(ws_id, ds_id):
@@ -205,6 +206,13 @@ async def test_ontology_reassignment_invalidates_cached_hierarchy_reads(
     r = await test_client.put(
         f"/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}",
         json={"ontologyId": ont.json()["id"]},
+    )
+    assert r.status_code == 200
+    assert calls == [(ws_id, ds_id)]
+
+    r = await test_client.put(
+        f"/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}",
+        json={"label": "renamed again", "ontologyId": ont.json()["id"]},
     )
     assert r.status_code == 200
     assert calls == [(ws_id, ds_id)]
