@@ -24,6 +24,7 @@ import {
 } from '@/components/canvas/search/session/ViewSearchSessionContext'
 import { installJsdomLayout } from '@/test/canvasHarness'
 import { stubSession } from '@/test/stubSearchSession'
+import { useSchemaStore } from '@/store/schema'
 import type { ViewLayerConfig } from '@/types/schema'
 
 import { LayerColumn } from '../LayerColumn'
@@ -77,8 +78,16 @@ const pill = () => screen.getByTitle(/in this layer/)
 /** One collapsed container whose server-reported children are all unloaded. */
 const bigRoot = () => [node('root', { childCount: 5000 })]
 
+/** The ontology the column reads (the global store, outside a view context). */
+const viewOntology = (entityTypes: unknown[]) =>
+    useSchemaStore.setState({ schema: { ...(useSchemaStore.getState().schema ?? {}), entityTypes } } as never)
+
+const initialSchema = useSchemaStore.getState().schema
 beforeEach(() => { installJsdomLayout() })
-afterEach(() => { vi.restoreAllMocks() })
+afterEach(() => {
+    vi.restoreAllMocks()
+    useSchemaStore.setState({ schema: initialSchema } as never)
+})
 
 
 describe('LayerColumn — header totals', () => {
@@ -130,15 +139,24 @@ describe('LayerColumn — header totals', () => {
     })
 
     it("does not count twice the children a fed type's total already holds", () => {
-        // 'domain' rows can contain 'domain': the feed's remainder counts the
+        // 'domain' rows can contain only 'domain': the feed's remainder counts the
         // unloaded nested domains, so the row's own childCount adds nothing.
-        const schema = { entityTypes: [{ id: 'domain', hierarchy: { canContain: ['domain'] } }] } as never
+        viewOntology([{ id: 'domain', hierarchy: { canContain: ['domain'] } }])
         renderColumn({
-            schema,
             nodes: bigRoot(),
             feedMore: { loading: false, failed: false, remaining: 4999, types: ['domain'] },
         })
         expect(pill().getAttribute('title')).toContain('1 loaded · 5,000 in this layer')
+    })
+
+    it('keeps the remainder of a row that can also hold a type the column does not feed', () => {
+        // Its 5,000 children may be systems, which no feed counts: keep them.
+        viewOntology([{ id: 'domain', hierarchy: { canContain: ['domain', 'system'] } }])
+        renderColumn({
+            nodes: bigRoot(),
+            feedMore: { loading: false, failed: false, remaining: 10, types: ['domain'] },
+        })
+        expect(pill().getAttribute('title')).toContain('1 loaded · 5,011 in this layer')
     })
 
     it('counts no group wrapper as an entity', () => {
@@ -156,7 +174,7 @@ describe('LayerColumn — header totals', () => {
         renderColumn({ nodes: bigRoot(), onDeleteLayer: vi.fn() })
         fireEvent.click(screen.getByTitle('Delete Domains'))
         expect(screen.getByTitle(
-            "Delete — 1 entity here: hand-placed ones move to the default layer; ones placed by this layer's type rules leave the view unless another layer claims their type",
+            "Delete — 1 entity here: hand-placed ones move to the default layer; ones placed by this layer's type rules become unassigned unless another layer claims their type",
         )).toBeInTheDocument()
     })
 

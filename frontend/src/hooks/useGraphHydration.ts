@@ -384,19 +384,24 @@ export function closedScopeLoadUrns(
     return [...new Set([...assignedUrns, ...delta])]
 }
 
+/** The types ONE layer claims by rule, as written: `layer.entityTypes` and its
+ *  rules' `entityTypes`. Shared with the canvas's per-column paging so what a
+ *  view loads and what a column pages can never disagree. */
+export function layerClaimedTypes(layer: ViewLayerConfig): string[] {
+    return [...(layer.entityTypes ?? []), ...(layer.rules ?? []).flatMap(r => r.entityTypes ?? [])]
+}
+
 /**
  * The entity types an OPEN reference view loads by type (Rules + assignments):
- * every type a layer claims by rule (`layer.entityTypes`, or a layer rule's
- * `entityTypes`), in the spelling the view's ontology declares (matched case-insensitively; the provider widens a
+ * every type a layer claims by rule (layerClaimedTypes), in the spelling the
+ * view's ontology declares (matched case-insensitively; the provider widens a
  * declared type to the graph's observed spellings). A type the ontology does not
  * declare is never loaded, nor is a type no layer claims. Empty means the view
  * loads by its placements alone.
  */
 export function claimedFeedTypes(layers: ViewLayerConfig[], schemaEntityTypes: EntityTypeDefinition[]): string[] {
     const declared = new Map(schemaEntityTypes.map(et => [caseFold(et.id), et.id]))
-    return [...new Set(layers
-        .flatMap(l => [...(l.entityTypes ?? []), ...(l.rules ?? []).flatMap(r => r.entityTypes ?? [])])
-        .flatMap(t => declared.get(caseFold(String(t))) ?? []))]
+    return [...new Set(layers.flatMap(layerClaimedTypes).flatMap(t => declared.get(caseFold(String(t))) ?? []))]
 }
 
 // ─── The Hook ───────────────────────────────────────────────────────────────
@@ -557,6 +562,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
         if (initializedKeyRef.current === initKey) return
         initializedKeyRef.current = initKey
+        // Not ready until this run settles: a 'ready' left from the run before must
+        // not let the claimed-feed effect seed feeds this run is about to write.
+        readyKeyRef.current = null
 
         // A genuinely NEW view (new initKey) resets the retry budget.
         const isFreshView = lastInitKeyRef.current !== initKey
@@ -891,6 +899,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // — a Published view with no assignments still must not lie
                         // "empty" when the provider is down.)
                         if (batchErrors.length > 0) throw totalFailure()
+                        // Empty claimed types are still fed (and exhausted): the
+                        // claimed-feed effect must find them answered.
+                        useCanvasStore.getState().seedPositions({}, Object.fromEntries(typeFeedSeeds))
                         markReady()   // empty view — terminal, not a stall
                         return
                     }
@@ -1401,6 +1412,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // rows are all held already would otherwise look like a click
                     // that did nothing. Bounded, as a feed can be long.
                     let readAt = feed.offset
+                    let total = feed.total
                     for (let walk = 0; walk < FEED_WALK_MAX_PAGES; walk++) {
                         const result = await provider.getNodesPage({
                             entityTypes: feed.entityTypes,
@@ -1458,7 +1470,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // ONE store update: nodes, edges and the feed's position —
                         // unless another instance of this hook moved the feed on
                         // meanwhile: then the rows land and its position stands.
-                        const next = feedAfter(feed.entityTypes, result, readAt, feed.total)
+                        const next = feedAfter(feed.entityTypes, result, readAt, total)
+                        total = next.total
                         const store = useCanvasStore.getState()
                         if ((store.typeFeeds[feedKey]?.offset ?? readAt) !== readAt) {
                             store.addGraph(fresh.map(n => toCanvasNode(n)), edges.map(e => toCanvasEdge(e)))
@@ -1478,9 +1491,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         }))
     }, [provider, containmentEdgeTypes, lineageEdgeTypes, schemaEntityTypes])
 
-    // A type a rule edit claims on a loaded open view gets a feed of its own and
-    // its first page through loadMoreFeeds — the column's own paging — rather
-    // than a re-run of the whole view. Only the hydrating instance does this.
+    // A type a rule edit claims on a loaded open view gets a feed of its own, at
+    // its start: the column's feed row then pages it in through the column's own
+    // instance (its loading / Retry state, its queue) rather than a re-run of the
+    // whole view. Only the hydrating instance seeds.
     useEffect(() => {
         if (!enableHydration || hydrationStatus !== 'ready' || !claimedTypesKey) return
         if (readyKeyRef.current !== `${providerVersion}:${activeView?.id ?? 'default'}:reference`) return
@@ -1489,8 +1503,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         if (unfed.length === 0) return
         useCanvasStore.getState().seedPositions({}, Object.fromEntries(
             unfed.map(t => [t, { entityTypes: [t], offset: 0, hasMore: true }])))
-        void loadMoreFeeds(unfed)
-    }, [enableHydration, hydrationStatus, claimedTypesKey, loadMoreFeeds, providerVersion, activeView?.id])
+    }, [enableHydration, hydrationStatus, claimedTypesKey, providerVersion, activeView?.id])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 

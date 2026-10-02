@@ -11,8 +11,9 @@
  *    layer claims and a `showUnassigned` layer add nothing;
  *  - an open view feeds exactly those types and loads its placements by URN; with
  *    none claimed it loads by placement alone;
- *  - a rule edit that claims a new type pages it in place, a dropped claim loads
- *    nothing, and a curated view, which never feeds by type, does not re-hydrate;
+ *  - a rule edit that claims a new type gives it a feed the column pages, a
+ *    dropped claim loads nothing, and a curated view, which never feeds by type,
+ *    does not re-hydrate;
  *  - an open draft fetches the roots its branch created.
  */
 import { renderHook, waitFor, act } from '@testing-library/react'
@@ -179,17 +180,33 @@ describe('useGraphHydration — an open view loads Rules + assignments', () => {
     expect(mockProvider.getNodesPage).not.toHaveBeenCalled()
   })
 
-  it('loads a type a rule edit claims, without a reload', async () => {
+  it('gives a type a rule edit claims a feed at its start, without a reload', async () => {
     view.layers = [layer('L1', ['domain'])]
     const hydrating = await hydrate()
     expect(fedTypes()).toEqual([['domain']])
 
     act(() => { view.layers = [layer('L1', ['domain', 'dataset'])] })
     hydrating.rerender()
-    await waitFor(() => expect(fedTypes()).toContainEqual(['dataset']))
-    await waitFor(() => expect(hydrating.result.current.hydrationStatus).toBe('ready'))
+    // Seeded, not fetched: the column's feed row pages it through its own instance.
+    await waitFor(() => expect(useCanvasStore.getState().typeFeeds.dataset)
+      .toEqual({ entityTypes: ['dataset'], offset: 0, hasMore: true }))
+    expect(fedTypes()).toEqual([['domain']])
+    expect(hydrating.result.current.hydrationStatus).toBe('ready')
+
+    // The column's "load more", standing in for its feed row.
+    await act(async () => { await hydrating.result.current.loadMoreFeeds(['dataset']) })
+    expect(fedTypes()).toEqual([['domain'], ['dataset']])
     expect(useCanvasStore.getState().nodes.map(n => n.id)).toEqual(
       expect.arrayContaining(['urn:domain:1', 'urn:dataset:1']))
+  })
+
+  it('answers an empty claimed type on first load, so nothing seeds it again', async () => {
+    mockProvider.getNodesPage.mockResolvedValueOnce({ nodes: [], hasMore: false, nextOffset: 0 } as never)
+    view.layers = [layer('L1', ['domain'])]
+    await hydrate()
+    await act(async () => { await new Promise(r => setTimeout(r, 20)) })
+    expect(useCanvasStore.getState().typeFeeds.domain).toMatchObject({ hasMore: false })
+    expect(fedTypes()).toEqual([['domain']])
   })
 
   it('loads nothing and does not re-hydrate when a claim is dropped', async () => {

@@ -399,18 +399,18 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     // copies assignments a template might carry; only layer STRUCTURE is copied.
     const handleApplyGalleryTemplate = useCallback((template: GalleryTemplate) => {
         // Template types are suggestions written for SOME ontology: keep only the ones
-        // this data source's ontology declares, once each, in the template's spelling
-        // (rule matching is case-sensitive against the graph's labels — see autoLayers.ts).
-        // A layer left with none keeps its name and colour and is filled by assignment,
-        // like the local fallbacks.
-        const declared = new Set(schemaEntityTypes.map(et => caseFold(et.id)))
+        // this data source's ontology declares, in its own spelling. A layer left with
+        // none keeps its name and colour and is filled by assignment, like the local
+        // fallbacks.
+        const declared = new Map(schemaEntityTypes.map(et => [caseFold(et.id), et.id]))
         const layers: ViewLayerConfig[] = template.layers.map((l, i) => ({
             ...l,
             name: l.name,
             description: l.description ?? '',
             color: l.color ?? LAYER_COLORS[i % LAYER_COLORS.length],
-            entityTypes: (l.entityTypes ?? []).filter((t, j, all) =>
-                declared.has(caseFold(t)) && all.findIndex(u => caseFold(u) === caseFold(t)) === j),
+            entityTypes: [...new Set((l.entityTypes ?? [])
+                .map(t => declared.get(caseFold(t)))
+                .filter((t): t is string => !!t))],
             id: l.id ?? generateId(),
             order: i,
         }))

@@ -123,9 +123,9 @@ describe('LayoutStep — template application', () => {
 
     const call = updateFormData.mock.calls[0][0]
     // A layer whose types the ontology lacks survives, empty; a declared type
-    // stays, once, in the template's spelling (rule matching is case-sensitive).
+    // takes the ontology's spelling, once.
     expect(call.layers.map((l: { name: string }) => l.name)).toEqual(['Domain', 'Data Product'])
-    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([[], ['dataset']])
+    expect(call.layers.map((l: { entityTypes: string[] }) => l.entityTypes)).toEqual([[], ['Dataset']])
   })
 
   it('waits for the ontology before a template can be applied', async () => {

@@ -52,7 +52,7 @@ import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
 import type { AggregatedEdgeInfo, TraceV2Result } from '@/providers/GraphDataProvider'
-import { useGraphHydration } from '@/hooks/useGraphHydration'
+import { layerClaimedTypes, useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
@@ -3460,9 +3460,9 @@ export function ContextViewCanvas({
     if (feedTypes.length === 0) return out
     const byFold = new Map(feedTypes.map(t => [t.toLowerCase(), t]))
     for (const layer of sortedLayers) {
-      const types = (layer.entityTypes ?? [])
+      const types = [...new Set(layerClaimedTypes(layer)
         .map(t => byFold.get(String(t).toLowerCase()))
-        .filter((t): t is string => !!t)
+        .filter((t): t is string => !!t))]
       if (types.length > 0) out.set(layer.id, types)
     }
     return out
