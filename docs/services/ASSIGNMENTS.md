@@ -203,12 +203,11 @@ replace, advanced-search view scope, the search Layer filter and layer aggregati
 - An ancestor the canvas has not loaded passes down only a hand placement (from its URN chain).
 - Placement still covers the loaded/rendered set; exact per-layer membership and totals come with
   server-side membership (next phase).
-- The browser reads numbers as doubles. An integer property above 2^53 that a double cannot hold
-  exactly loses digits there, and a whole-number float of 1e15 or more reads as an integer, so a text
-  rule (`equals`, `startsWith`, `contains`) on such a property can place differently on the canvas
-  than on the server. Likewise a stored integer rule value of 2^53 or more reaches the canvas as text,
-  where the server compares it as a number or finds the rule inert; the dry run's `inertRules` lists
-  those. Sending such values as strings comes with server-side membership.
+- The browser cannot tell a whole-number float from an integer: a float property of 1e15 or more
+  (the server reads `1e+15`) reads as its digits there, so a text rule (`equals`, `startsWith`,
+  `contains`) on it can place differently on the canvas than on the server. Integers past 2^53
+  arrive exactly, as their digits, so a rule value past the 64-bit integers compares as text on the
+  canvas, where the server finds the rule inert; the dry run's `inertRules` lists those.
 
 ## Limitations
 

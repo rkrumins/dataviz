@@ -39,9 +39,9 @@ would change and why, before anyone sees it.
   `BELONGS_TO` children can be placed differently there than on the server.
 - Export, scoped replace, the search Layer filter, open-view type feeds and column totals keep
   today's rules until server-side membership (the next phase).
-- The browser reads numbers as doubles, so a text rule on an integer property above 2^53 (or a
-  whole-number float of 1e15 or more) can place an entity differently on the canvas than on the
-  server.
+- The browser cannot tell a whole-number float from an integer, so a text rule on a float property
+  of 1e15 or more, or a rule value past the 64-bit integers, can place an entity differently on the
+  canvas than on the server.
 
 ---
 
