@@ -471,7 +471,8 @@ function AssignedEntityItem({
                 {!inherited && dataPath && dataPath.length > 0 && (
                     <span
                         className="mt-0.5 flex items-center gap-1 min-w-0"
-                        title={`Placed here for this view only — the data source is unchanged. In the data, ${name} is part of ${dataPath.map(a => a.displayName).join(' › ')}.`}
+                        // A stamp lives on the entity, not only in this view.
+                        title={`${placedBy === 'stamp' ? "Placed here by the entity's own layer setting." : 'Placed here for this view only — the data source is unchanged.'} In the data, ${name} is part of ${dataPath.map(a => a.displayName).join(' › ')}.`}
                     >
                         <PlacedTag />
                         <span className="text-[10px] text-slate-500 dark:text-slate-400 truncate">

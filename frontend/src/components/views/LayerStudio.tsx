@@ -86,6 +86,7 @@ import {
 import { rootComparators, effectiveSortMode } from '@/hooks/lib/rootSort'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { ViewLayerConfig, LayerNodeSortMode, LayerNodeSortAlgo, ViewContentConfig } from '@/types/schema'
+import type { AncestorRef } from '@/types/search'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
@@ -1620,8 +1621,8 @@ export function LayerStudio({
     /**
      * Contract only: the loaded children whose own entry, stamp or rule puts them
      * in another layer than their parent's. The canvas draws such a child in that
-     * layer, so the rail lists it there and not under its parent. Places what the
-     * rail has loaded below the column roots, nothing more.
+     * layer, so the rail lists it there and not under its parent, with its path in
+     * the data. Places what the rail has loaded below the column roots, nothing more.
      */
     const splitChildren = useMemo(() => {
         if (!placementSpec) return null
@@ -1656,12 +1657,16 @@ export function LayerStudio({
 
         const urns = new Set<string>()
         const rows: { layerId: string; urn: string; placedBy?: PlacedBy }[] = []
+        const paths = new Map<string, AncestorRef[]>()
         const walked = new Set<string>()
-        const walk = (urn: string) => {
+        // `above`: the urn's ancestors, root first — undefined while unknown.
+        const walk = (urn: string, above: AncestorRef[] | undefined) => {
             if (walked.has(urn)) return
             walked.add(urn)
             const parent = placed.get(urn)!
             const parentLayerId = isMember(parent) ? parent.layerId : null
+            const identity = entityIndex.resolve(urn)
+            const here = above && [...above, { urn, displayName: identity?.name ?? urn, entityType: identity?.type ?? 'unknown' }]
             for (const child of entityIndex.childrenOf(urn)) {
                 const result = placed.get(child)!
                 // Only its own entry, stamp or rule takes a child out; an
@@ -1671,16 +1676,23 @@ export function LayerStudio({
                     // An entry is listed as a row already.
                     if (result.source !== 'explicit') {
                         rows.push({ layerId: result.layerId!, urn: child, placedBy: placedByOf(placementSpec, result) })
+                        if (here) paths.set(child, here)
                     }
                 }
-                walk(child)
+                walk(child, here)
             }
         }
+        const topLevel = new Set(scannedTopLevel.map(e => e.urn))
         roots.forEach(urn => {
-            if (isMember(placed.get(urn)!)) walk(urn)
+            if (isMember(placed.get(urn)!)) walk(urn, topLevel.has(urn) ? [] : placementPaths.get(urn)?.slice())
         })
-        return { urns, rows }
-    }, [placementSpec, scannedTopLevel, snapshot, entityIndex])
+        return { urns, rows, paths }
+    }, [placementSpec, scannedTopLevel, snapshot, entityIndex, placementPaths])
+    // An entry's path comes from its lookup; a split-out row's from the walk.
+    const railPaths = useMemo(
+        () => splitChildren?.paths.size ? new Map([...placementPaths, ...splitChildren.paths]) : placementPaths,
+        [placementPaths, splitChildren],
+    )
 
 
     /**
@@ -2025,7 +2037,7 @@ export function LayerStudio({
                     }}
                 >
                     {/* Left: Layer hierarchy */}
-<PlacementPathsContext.Provider value={placementPaths}>
+<PlacementPathsContext.Provider value={railPaths}>
                                         <LayerHierarchyPanel
                         layers={layers}
                         assignments={assignments}

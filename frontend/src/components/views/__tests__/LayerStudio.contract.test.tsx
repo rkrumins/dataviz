@@ -244,6 +244,10 @@ describe('LayerStudio — contract rail, loaded children', () => {
     expect(railRows()).toEqual({ left: [['Warehouse', true]], right: [['Orders', true]] })
     expect(railPlacedBy()).toMatchObject({ Orders: 'type' })
     expect(left().queryByText('Orders')).not.toBeInTheDocument()
+    // With its path in the data, as the canvas tags it.
+    expect(within(screen.getByTestId('layer-rows-right'))
+      .getByTitle('Placed here for this view only — the data source is unchanged. In the data, Orders is part of Warehouse.'))
+      .toHaveTextContent('Part of Warehouse')
     // Nor counted as a child that inherits Left.
     fireEvent.click(left().getByRole('button', { name: 'Collapse Warehouse' }))
     expect(left().queryByTitle(/children inherit this layer/)).not.toBeInTheDocument()
