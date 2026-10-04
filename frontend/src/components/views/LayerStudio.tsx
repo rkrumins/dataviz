@@ -60,7 +60,7 @@ import {
     type RootTypeCandidate,
     type TopLevelEntity,
 } from '../views/ViewWizard/autoLayers'
-import { buildWizardPlacement, resolveWizardEntityScope } from '../views/ViewWizard/effectivePlacement'
+import { buildWizardPlacement, resolveWizardEntityScope, type PlaceableEntity } from '../views/ViewWizard/effectivePlacement'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 import { LAYER_COLORS } from '../views/ViewWizard/steps/LayoutStep'
 import { useLogicalNodes } from '@/hooks/useLogicalNodes'
@@ -83,6 +83,7 @@ import type { ViewLayerConfig, LayerNodeSortMode, LayerNodeSortAlgo, ViewContent
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
+import { useFeature } from '@/store/features'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
 import { PlacementPathsContext } from './placementPathsContext'
@@ -944,6 +945,7 @@ export function LayerStudio({
 }: LayerStudioProps) {
     const storeParentMap = useReferenceModelStore(s => s.parentMap)
     const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
+    const placementContractOn = useFeature('placementContractEnabled')
 
     // Build containment parent map from canvas edges (ground truth).
     // The referenceModelStore.parentMap may be empty in the wizard context
@@ -982,8 +984,9 @@ export function LayerStudio({
     // its in-session suggestions still render as assigned.
     const layerAssignmentMap = useMemo(() => {
         const map = new Map<string, string>() // entityId -> layerId
-        // Start with store assignments (lowest priority)
-        storeEffectiveAssignments.forEach((a, entityId) => {
+        // Start with store assignments (lowest priority). Not under the contract:
+        // nothing computes them then, and a stale result may be another view's.
+        if (!placementContractOn) storeEffectiveAssignments.forEach((a, entityId) => {
             map.set(entityId, a.layerId)
         })
         // Legacy per-layer entityAssignments (e.g. Auto-Organize suggestions)
@@ -997,7 +1000,7 @@ export function LayerStudio({
             map.set(urn, entry.layerId)
         })
         return map
-    }, [storeEffectiveAssignments, formData.layers, formData.assignments])
+    }, [storeEffectiveAssignments, formData.layers, formData.assignments, placementContractOn])
 
     /** Build reverse child map from parentMap */
     const childMap = useMemo(() => {
@@ -1602,7 +1605,7 @@ export function LayerStudio({
      * express a single arrangement and did not match the column it previews.
      */
     const rootsByLayer = useMemo(() => {
-        const place = buildWizardPlacement(layers, assignments, effectiveScope)
+        const place = buildWizardPlacement(layers, assignments, effectiveScope, placementContractOn)
         const byLayer = new Map<string, LayerRootRow[]>()
         const seen = new Set<string>()
 
@@ -1624,12 +1627,16 @@ export function LayerStudio({
         // group, not as a column root).
         for (const [urn, entry] of Object.entries(assignments)) {
             if (!entry?.layerId || entry.logicalNodeId) continue
+            // The contract skips a stale entry (its layer is gone); a rule or the
+            // entity's stamp may still place it below.
+            if (placementContractOn && !layers.some(l => l.id === entry.layerId)) continue
             add(entry.layerId, urn, false)
         }
-        // Then whatever the type rules place.
+        // Then whatever the type rules place (and, under the contract, stamps).
+        // Snapshot facts exist only under the contract; the legacy resolver ignores them.
         for (const entity of scannedTopLevel) {
-            const { layerId, source } = place(entity)
-            if (layerId && source === 'rule') add(layerId, entity.urn, true)
+            const { layerId, source } = place({ ...entity, facts: snapshot?.directory.get(entity.urn)?.facts })
+            if (layerId && (source === 'rule' || source === 'stamped')) add(layerId, entity.urn, true)
         }
 
         // An ANCHORED column is that entity, so its rows are the entity's
@@ -1667,7 +1674,7 @@ export function LayerStudio({
             rows.sort(cmps[mode] ?? cmps['alpha-asc'])
         })
         return byLayer
-    }, [layers, assignments, defaultNodeSortMode, scannedTopLevel, entityIndex, effectiveScope])
+    }, [layers, assignments, defaultNodeSortMode, scannedTopLevel, entityIndex, effectiveScope, placementContractOn, snapshot])
 
     /** What each column actually holds — derived from the very rows the rail
      *  lists, so an ANCHORED column reports its children rather than the single
@@ -1680,10 +1687,11 @@ export function LayerStudio({
 
     /** The draft's CURRENT placement for an entity — what the Auto-layer sheet
      *  consults before calling anything stranded. */
-    const placeCurrent = useMemo(
-        () => buildWizardPlacement(layers, assignments, effectiveScope),
-        [layers, assignments, effectiveScope],
-    )
+    const placeCurrent = useMemo(() => {
+        const place = buildWizardPlacement(layers, assignments, effectiveScope, placementContractOn)
+        // The sheet's rows carry no facts; under the contract the snapshot has them.
+        return (entity: PlaceableEntity) => place({ ...entity, facts: snapshot?.directory.get(entity.urn)?.facts })
+    }, [layers, assignments, effectiveScope, placementContractOn, snapshot])
 
     /** Mirrors the canvas: how much of each anchored column is still unloaded.
      *  The SERVER's hasMore decides whether more exists; the looked-up count only

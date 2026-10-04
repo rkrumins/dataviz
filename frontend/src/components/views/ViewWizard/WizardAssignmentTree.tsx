@@ -43,6 +43,16 @@ import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
 import { useEntityBrowser } from '@/hooks/useEntityBrowser'
 import { useLoadingNotification } from '@/components/ui/notifications'
+import { useFeature } from '@/store/features'
+import {
+    compilePlacementSpec,
+    factsFromGraphNode,
+    isMember,
+    parentContextOf,
+    place,
+    type ParentContext,
+    type PlacementFacts,
+} from '@/lib/placement/placement'
 
 
 // ============================================
@@ -76,6 +86,8 @@ export interface BrowserSnapshotEntry {
     name: string
     type: string
     childCount: number
+    /** Its placement facts — published only with placementContractEnabled on. */
+    facts?: PlacementFacts
 }
 
 /** Live snapshot of everything the entity browser has loaded. Published via
@@ -436,6 +448,7 @@ export function WizardAssignmentTree({
     })
     useLoadingNotification('wizard-entities', browser.isLoading, 'Loading entities')
     useLoadingNotification('wizard-schema', isSchemaLoading, 'Loading schema')
+    const placementContractOn = useFeature('placementContractEnabled')
 
     // Load top-level entities from API when schema is ready.
     useEffect(() => {
@@ -461,6 +474,7 @@ export function WizardAssignmentTree({
                 name: entry.node.displayName,
                 type: entry.node.entityType,
                 childCount: entry.totalChildren,
+                ...(placementContractOn ? { facts: factsFromGraphNode(entry.node) } : {}),
             })
         })
         onBrowserSnapshot({
@@ -477,6 +491,7 @@ export function WizardAssignmentTree({
         browser.topLevelTotalCount,
         browser.topLevelHasMore,
         loadAllTopLevel,
+        placementContractOn,
     ])
 
     // Store hooks (assignment-related — read-only; the tree never writes to the
@@ -527,6 +542,16 @@ export function WizardAssignmentTree({
         [layers, assignments, entityScope],
     )
 
+    // One Placement Contract (placementContractEnabled): the draft compiled once.
+    // The tree places each node from its own facts and its parent's context, the
+    // coverage meter each root the same way — no backend answer, no legacy rules.
+    const placementSpec = useMemo(
+        () => placementContractOn
+            ? compilePlacementSpec({ layout: { referenceLayout: { layers, assignments: assignments ?? {} } }, content: { entityScope } })
+            : null,
+        [placementContractOn, layers, assignments, entityScope],
+    )
+
     const entityTree = useMemo<EntityTreeNode[]>(() => {
         if (browser.topLevelIds.length === 0) return []
 
@@ -540,7 +565,8 @@ export function WizardAssignmentTree({
             urn: string,
             depth: number,
             parentId?: string,
-            parentEffectiveLayerId?: string
+            parentEffectiveLayerId?: string,
+            parentContext?: ParentContext | null
         ): EntityTreeNode | null => {
             // Prevent duplicates: each URN renders exactly once
             if (visited.has(urn)) return null
@@ -555,26 +581,39 @@ export function WizardAssignmentTree({
                 return null
             }
 
-            // Determine effective assignment (Top-Down)
-            const effectiveAssignment = effectiveAssignments.get(urn)
-            let effectiveLayerId = effectiveAssignment?.layerId ?? manualAssignmentMap.get(urn)
-            let isInherited = effectiveAssignment?.isInherited ?? false
-            if (!effectiveLayerId && parentEffectiveLayerId) {
-                effectiveLayerId = parentEffectiveLayerId
-                isInherited = true
-            }
-
-            // Nothing placed it explicitly or by inheritance — so ask the layers'
-            // own type rules, exactly as the canvas will. A layer declaring this
-            // entity's type places it with NO assignment entry to read, and
-            // without this the wizard would call it unassigned while the canvas
-            // rendered it in a column.
+            let effectiveLayerId: string | undefined
+            let isInherited = false
             let isRulePlaced = false
-            if (!effectiveLayerId) {
-                const ruled = placeByRule({ urn, type: node.entityType })
-                if (ruled.source === 'rule' && ruled.layerId) {
-                    effectiveLayerId = ruled.layerId
-                    isRulePlaced = true
+            let childContext: ParentContext | null = null
+            if (placementSpec) {
+                // Contract: a hand placement cascades, an own rule or stamp beats
+                // a rule-placed parent. A stamp has no entry to remove either.
+                const placed = place(placementSpec, urn, factsFromGraphNode(node), parentContext ? [parentContext] : [])
+                effectiveLayerId = isMember(placed) ? placed.layerId! : undefined
+                isInherited = placed.source === 'inherited'
+                isRulePlaced = placed.source === 'rule' || placed.source === 'stamped'
+                childContext = parentContextOf(urn, placed)
+            } else {
+                // Determine effective assignment (Top-Down)
+                const effectiveAssignment = effectiveAssignments.get(urn)
+                effectiveLayerId = effectiveAssignment?.layerId ?? manualAssignmentMap.get(urn)
+                isInherited = effectiveAssignment?.isInherited ?? false
+                if (!effectiveLayerId && parentEffectiveLayerId) {
+                    effectiveLayerId = parentEffectiveLayerId
+                    isInherited = true
+                }
+
+                // Nothing placed it explicitly or by inheritance — so ask the layers'
+                // own type rules, exactly as the canvas will. A layer declaring this
+                // entity's type places it with NO assignment entry to read, and
+                // without this the wizard would call it unassigned while the canvas
+                // rendered it in a column.
+                if (!effectiveLayerId) {
+                    const ruled = placeByRule({ urn, type: node.entityType })
+                    if (ruled.source === 'rule' && ruled.layerId) {
+                        effectiveLayerId = ruled.layerId
+                        isRulePlaced = true
+                    }
                 }
             }
 
@@ -585,7 +624,7 @@ export function WizardAssignmentTree({
             // Recurse into loaded children only (lazy — children are loaded on expand)
             const children = entry.loaded
                 ? entry.childIds
-                    .map(id => buildNode(id, depth + 1, urn, effectiveLayerId))
+                    .map(id => buildNode(id, depth + 1, urn, effectiveLayerId, childContext))
                     .filter((n): n is EntityTreeNode => n !== null)
                     .sort((a, b) => a.name.localeCompare(b.name))
                 : []
@@ -618,7 +657,7 @@ export function WizardAssignmentTree({
             .map(urn => buildNode(urn, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
-    }, [browser.nodes, browser.topLevelIds, visibleRootIds, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap, hideAssigned, placeByRule])
+    }, [browser.nodes, browser.topLevelIds, visibleRootIds, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap, hideAssigned, placeByRule, placementSpec])
 
     // Build child allocation map: for each entity with children, which layers are descendants assigned to?
     const childAllocationMap = useMemo(() => {
@@ -780,6 +819,40 @@ export function WizardAssignmentTree({
     // parent, so it can only be placed EXPLICITLY (children inherit). Y comes
     // from the server's total, so it doesn't lie while pages are still loading.
     const coverage = useMemo(() => {
+        if (placementSpec) {
+            // Contract: each root placed exactly as the tree places it. A root has
+            // no parent, so its entry, its stamp or a rule places it; a stale
+            // entry places nothing and falls through to the other two.
+            const perLayer = new Map<string, number>()
+            const bump = (layerId: string) => perLayer.set(layerId, (perLayer.get(layerId) ?? 0) + 1)
+            let totalPlacements = 0
+            placementSpec.explicit.forEach(({ layerId }) => {
+                if (!placementSpec.layerIds.has(layerId)) return
+                bump(layerId)
+                totalPlacements++
+            })
+            let assignedRoots = 0
+            for (const urn of visibleRootIds) {
+                const entry = browser.nodes.get(urn)
+                const placed = place(placementSpec, urn, entry ? factsFromGraphNode(entry.node) : null, [])
+                if (!isMember(placed)) continue
+                assignedRoots++
+                if (placed.source === 'explicit') continue   // counted with the entries
+                bump(placed.layerId!)
+                totalPlacements++
+            }
+            const loadedRoots = visibleRootIds.length
+            const totalRoots = Math.max(browser.topLevelTotalCount, loadedRoots)
+            return {
+                assignedRoots,
+                loadedRoots,
+                totalRoots,
+                partial: loadedRoots < totalRoots,
+                perLayer,
+                totalPlacements,
+                pct: totalRoots > 0 ? Math.round((assignedRoots / totalRoots) * 100) : 0,
+            }
+        }
         const explicit = assignments ?? {}
         const perLayer = new Map<string, number>()
         Object.values(explicit).forEach(a => {
@@ -810,7 +883,7 @@ export function WizardAssignmentTree({
             totalPlacements: Object.keys(explicit).length + ruleRoots,
             pct: totalRoots > 0 ? Math.round((assignedRoots / totalRoots) * 100) : 0,
         }
-    }, [assignments, visibleRootIds, browser.topLevelTotalCount, browser.nodes, placeByRule])
+    }, [assignments, visibleRootIds, browser.topLevelTotalCount, browser.nodes, placeByRule, placementSpec])
 
     // Handlers
     // CRITICAL: expandNode() ONLY loads direct children of the clicked node.
