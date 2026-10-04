@@ -426,6 +426,55 @@ python -m backend.scripts.export_view_library_schema --check  # exit 1 if it is 
 
 ---
 
+## View placement
+
+### `placement_dry_run.py` — What the placement contract would change
+
+Run this before you turn on **One placement rule for every view surface**
+(`placementContractEnabled`, Admin → Features → Experimental). For every live
+view with layers, it reports which entities would move to another layer and why.
+It is read-only. It does not read the flag, and the only file it writes is the
+optional `--json` report.
+
+```bash
+python -m backend.scripts.placement_dry_run                      # every live view with layers
+python -m backend.scripts.placement_dry_run --view view_abc      # one view (repeatable)
+python -m backend.scripts.placement_dry_run --workspace ws_abc   # the views of one workspace
+python -m backend.scripts.placement_dry_run --json /tmp/placement-dry-run.json
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--view` | every view | Only this view id. Repeat it for more views |
+| `--workspace` | every workspace | Only the views of this workspace |
+| `--json` | — | Also write the full report to this file |
+
+**What the counts compare.** For each view, the script reads one sample of
+entities: the view's explicit entries, a page of each entity type a layer or
+rule claims, a page of each rule tag, and the ancestors of all of these. It
+places that sample twice, over the same nodes and containment edges. The first
+pass is the server's placement today (`AssignmentEngine`, given the request the
+canvas sends). The second pass is the placement contract. Each change is counted
+by transition, such as `inherited->rule` (a typed child now leaves its rule-placed
+parent's column), `rule->none` (rule criteria now combine with AND, or the glob
+is now anchored), `none->rule` (types match in any case, and property rules now
+work) or `explicit->rule +stale` (the entry names a layer that no longer exists).
+The report also lists inert rules, stale explicit entries, and `rejected` views,
+whose config the server refuses today. Counts are for the sample, not exact. A
+view whose sample hit a page limit is marked `capped`.
+
+**What canvas-only means.** Today the canvas also places some entities itself,
+and it reads parts of the config differently from the server: a type claimed by
+two layers, authored rule priorities, empty rules, URN patterns, property rules
+and `showUnassigned` layers. Turning the flag on changes what the canvas shows
+for these views, even when the server-side counts are zero. The `canvasOnly` list
+names the constructs each view uses.
+
+For the full rollout and rollback steps, see the runbook in
+[`docs/services/ASSIGNMENTS.md`](../../docs/services/ASSIGNMENTS.md).
+
+---
+
 ## Typical Workflows
 
 ### First-time setup with Docker

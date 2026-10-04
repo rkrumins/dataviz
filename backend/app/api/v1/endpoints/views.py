@@ -679,6 +679,16 @@ async def create_view(
     # wizard hides the rest. Enforced here too, because a hidden button is not a rule.
     await ensure_view_mode_allowed(req.view_type, session)
 
+    # A new layer rule that can never match is refused while the placement
+    # contract is on (no-op when off). Checked here too: the wizard seeds its
+    # rules through create, then re-sends them unchanged through PUT /layout.
+    try:
+        await view_repo.check_layer_rules(
+            session, view_repo._base_reference_layout(req.config or {}), {},
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
     digest = await _compute_ontology_digest(
         session, req.workspace_id, req.data_source_id,
     )
@@ -808,6 +818,15 @@ async def update_view(
     # the admin is told — would be false the moment they renamed one.
     if req.view_type is not None and req.view_type != existing.view_type:
         await ensure_view_mode_allowed(req.view_type, session)
+
+    if req.config is not None:
+        try:
+            await view_repo.check_layer_rules(
+                session, view_repo._base_reference_layout(req.config),
+                view_repo._base_reference_layout(existing.config),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     digest = await _compute_ontology_digest(
         session, existing.workspace_id, existing.data_source_id,
