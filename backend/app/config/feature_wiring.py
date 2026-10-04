@@ -588,8 +588,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "POST /graph/assignments/compute — places with the shared placement contract",
             "View-scoped import — a new top-level entity is pinned to a layer only where the "
             "contract would place it elsewhere",
-            "POST /views, PUT /views/{id} and PUT /views/{id}/layout — a new or changed layer "
-            "rule that can never match is refused",
+            "POST /views and PUT /views/{id}/layout — a new or changed layer rule that can "
+            "never match is refused",
         ),
         ui_surfaces=(
             "Context View columns, trace overlay lanes and search-hit layer badges",

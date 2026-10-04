@@ -456,8 +456,9 @@ places that sample twice, over the same nodes and containment edges. The first
 pass is the server's placement today (`AssignmentEngine`, given the request the
 canvas sends). The second pass is the placement contract. Each change is counted
 by transition, such as `inherited->rule` (a typed child now leaves its rule-placed
-parent's column), `rule->none` (rule criteria now combine with AND, or the glob
-is now anchored), `none->rule` (types match in any case, and property rules now
+parent's column), `rule->none` (rule criteria now combine with AND, or the URN
+glob is now case-sensitive and treats regex characters other than `*` and `?`
+literally), `none->rule` (types match in any case, and property rules now
 work) or `explicit->rule +stale` (the entry names a layer that no longer exists).
 The report also lists inert rules, stale explicit entries, and `rejected` views,
 whose config the server refuses today. Counts are for the sample, not exact. A

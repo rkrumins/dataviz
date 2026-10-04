@@ -138,8 +138,8 @@ reload (tier 3 above) rather than snapping back to a type-rule layer.
 
 Everything above describes placement with the flag **off**, which is the default. With the admin
 flag `placementContractEnabled` on (Admin → Features → Experimental → *One placement rule for every
-view surface*), every surface answers "which layer of this view is this entity in, and why" with
-one contract instead of its own rules: the server compute, view-scoped import and the layer-rule
+view surface*), these surfaces answer "which layer of this view is this entity in, and why" with
+one contract instead of their own rules: the server compute, view-scoped import and the layer-rule
 save check (`backend/app/services/view_placement.py`), and the canvas columns, trace lanes, search
 badges, wizard preview and assignment tree, Layer Studio, Build Mode and rail create
 (`frontend/src/lib/placement/`). The two are twins held together by one shared corpus
@@ -150,7 +150,7 @@ badges, wizard preview and assignment tree, Layer Studio, Build Mode and rail cr
 
 1. The entity's own explicit entry (a stale entry naming a deleted layer is skipped, flagged `staleExplicit`).
 2. Inherited from a parent placed **by hand** (an explicit entry, or a draft-created entity's stamp in a curated view), unless that parent's entry sets `inheritsChildren: false`.
-3. *(Curated views stop here.)*
+3. *(Curated views stop here, except an entity created in this draft: its own valid `layerAssignment` stamp places it (source `stamped`) and passes to its children like a hand placement.)*
 4. Stamped: the entity's own `layerAssignment` (legacy, open views only).
 5. The entity's **own rule**.
 6. Inherited from a parent placed by a stamp or a rule, unless that rule sets `inheritsFromParent: false`.
@@ -163,7 +163,9 @@ and `conditions` (the shared operator table in `backend/common/search_semantics`
 rules use). When several rules match, the higher `priority` wins (missing = 0; a layer's
 `entityTypes` act as priority-0 rules after its authored rules); ties go to the **first** layer by
 order. A rule that can never match (no criteria, `contains ''`, an unknown operator) matches nothing,
-and saving a new or changed one is refused with a 422 that names the layer, the rule and why.
+and saving a new or changed one through `POST /views` or `PUT /views/{id}/layout` is refused with a
+422 that names the layer, the rule and why. (`PUT /views/{id}` is not checked: the wizard sends back
+the layout it read there, and its layer edits go through `PUT /layout`.)
 
 **Split by type.** A child whose own type a layer claims is shown in that layer even when its
 parent sits in another one. Like a hand placement, it carries the violet *Placed* tag with its path
@@ -172,7 +174,8 @@ placements still carry their subtree with them.
 
 **Outside the contract in this phase** (unchanged, pinned by their tests): export and scoped
 replace, advanced-search view scope, the search Layer filter and layer aggregation,
-`get_nodes_by_layer`, open-view type feeds and column totals.
+`get_nodes_by_layer`, open-view type feeds and column totals, the anchored-column check
+(`anchorIssueByLayer`) and the drag conflict warnings, which look only at explicit entries.
 
 ### Turning it on (runbook)
 
@@ -183,8 +186,9 @@ replace, advanced-search view scope, the search Layer filter and layer aggregati
    `staleExplicit`, `rejected` and `canvasOnly` constructs.
 3. Review the transitions (`<old source>-><new source>`, plus ` +stale`): `inherited->rule` means a
    typed child now leaves its parent's column; `rule->rule` first-layer-wins, priority or AND;
-   `rule->none` AND or the anchored glob; `none->rule` case-insensitive types or property rules now
-   working; `*->* +stale` an entry naming a deleted layer. `canvasOnly` flags (`duplicate-types`,
+   `rule->none` AND, or the URN glob now being case-sensitive with only `*` and `?` special;
+   `none->rule` case-insensitive types or property rules now working; `*->* +stale` an entry
+   naming a deleted layer. `canvasOnly` flags (`duplicate-types`,
    `authored-rules`, `empty-rule`, `glob-pattern`, `property-rule`, `fallback-layer`) change the
    canvas even when the server counts do not. Fix stale entries, priorities and inert rules first.
 4. Enable the flag. Servers pick it up within 30 s, open tabs within about a minute or on focus.
@@ -199,6 +203,12 @@ replace, advanced-search view scope, the search Layer filter and layer aggregati
 - An ancestor the canvas has not loaded passes down only a hand placement (from its URN chain).
 - Placement still covers the loaded/rendered set; exact per-layer membership and totals come with
   server-side membership (next phase).
+- The browser reads numbers as doubles. An integer property above 2^53 that a double cannot hold
+  exactly loses digits there, and a whole-number float of 1e15 or more reads as an integer, so a text
+  rule (`equals`, `startsWith`, `contains`) on such a property can place differently on the canvas
+  than on the server. Likewise a stored integer rule value of 2^53 or more reaches the canvas as text,
+  where the server compares it as a number or finds the rule inert; the dry run's `inertRules` lists
+  those. Sending such values as strings comes with server-side membership.
 
 ## Limitations
 

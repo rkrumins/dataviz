@@ -17,9 +17,9 @@ limitations** — a changelog that only lists good news is not worth reading.
 of a view an entity is in used to be decided separately by the server compute, the canvas, the
 wizard, Layer Studio, the trace overlay, search badges, Build Mode and import, and they disagreed:
 entities jumped columns when the server answer arrived, the wizard preview contradicted the canvas,
-and property and condition rules placed nothing. With the flag on, every one of those surfaces uses
-one contract — a Python reference and a TypeScript twin proven equal by a shared corpus of 140+ cases
-in required CI. Rules are the AND of their criteria and finally work for tags, URN globs,
+and property and condition rules placed nothing. With the flag on, all of those surfaces use one
+contract — a Python reference and a TypeScript twin held equal by a shared corpus of 140+ cases in
+required CI. Rules are the AND of their criteria and finally work for tags, URN globs,
 `propertyMatch` and conditions; the first layer wins a tie; types match whatever their case; a child
 whose own type a layer claims is shown in that layer with the *Placed* path tag, while hand
 placements still carry their subtree. Saving a new or changed rule that can never match is refused
@@ -39,6 +39,9 @@ would change and why, before anyone sees it.
   `BELONGS_TO` children can be placed differently there than on the server.
 - Export, scoped replace, the search Layer filter, open-view type feeds and column totals keep
   today's rules until server-side membership (the next phase).
+- The browser reads numbers as doubles, so a text rule on an integer property above 2^53 (or a
+  whole-number float of 1e15 or more) can place an entity differently on the canvas than on the
+  server.
 
 ---
 
