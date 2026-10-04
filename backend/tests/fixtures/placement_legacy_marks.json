@@ -9,6 +9,13 @@
     "why": "Rejected: the request the canvas builds fails validation today (a condition with no field), so the server places nothing; the contract reads the stored config.",
     "legacy": "rejected"
   },
+  "blank-display-name-is-absent": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "n2": null,
+      "n3": null
+    }
+  },
   "blank-list-entries-are-dropped": {
     "why": "Decision 3: a rule is the AND of its criteria; the server matched a rule when any one criterion matched.",
     "legacy": {
@@ -95,6 +102,10 @@
         "source": "rule"
       }
     }
+  },
+  "empty-list-or-object-operator-means-equals": {
+    "why": "Rejected: the request the canvas builds fails validation today (an operator that is a list or an object), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
   },
   "empty-or-non-string-layer-id-is-absent-not-stale": {
     "why": "Rejected: the request the canvas builds fails validation today (an entry whose layerId is null or a number), so the server places nothing; the contract reads the stored config.",
