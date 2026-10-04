@@ -1,0 +1,1035 @@
+{
+  "cases": [
+    {
+      "name": "property-equals-is-case-insensitive-whole-value",
+      "summary": "MATCH evaluate eq (string): equals compares the whole folded text, so case is ignored but a longer value does not match.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "owner", "operator": "equals", "value": "Finance" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "properties": { "owner": "finance" } },
+        { "urn": "y", "properties": { "owner": "Finance Ops" } },
+        { "urn": "z", "properties": { "owner": "FINANCE" } }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "y": { "source": "none" },
+        "z": { "layerId": "a", "source": "rule", "ruleId": "r" }
+      }
+    },
+    {
+      "name": "property-equals-number-reads-numeric-text",
+      "summary": "MATCH evaluate eq (number): a numeric value reads stored text by _stored_number (strtoll spelling: leading space and sign allowed, leading zeros, '15.0' is 15); trailing space, words and booleans never match.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "rows", "operator": "equals", "value": 15 }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "n1", "properties": { "rows": "15" } },
+        { "urn": "n2", "properties": { "rows": "015" } },
+        { "urn": "n3", "properties": { "rows": "fifteen" } },
+        { "urn": "n4", "properties": { "rows": 15 } },
+        { "urn": "n5", "properties": { "rows": "15.0" } },
+        { "urn": "n6", "properties": { "rows": "15 " } },
+        { "urn": "n7", "properties": { "rows": " +15" } },
+        { "urn": "n8", "properties": { "rows": true } }
+      ],
+      "expect": {
+        "n1": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "n2": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "n3": { "source": "none" },
+        "n4": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "n5": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "n6": { "source": "none" },
+        "n7": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "n8": { "source": "none" }
+      }
+    },
+    {
+      "name": "property-equals-decimal-value",
+      "summary": "MATCH evaluate eq (number): stored decimal text is digits / 10^scale ('12.50' is 12.5); a comma or an exponent is not a number.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "score", "operator": "equals", "value": 12.5 }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "s1", "properties": { "score": "12.5" } },
+        { "urn": "s2", "properties": { "score": "12.50" } },
+        { "urn": "s3", "properties": { "score": 12.5 } },
+        { "urn": "s4", "properties": { "score": "12,5" } },
+        { "urn": "s5", "properties": { "score": "1.25e1" } }
+      ],
+      "expect": {
+        "s1": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "s2": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "s3": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "s4": { "source": "none" },
+        "s5": { "source": "none" }
+      }
+    },
+    {
+      "name": "property-equals-text-keeps-text",
+      "summary": "resolve_comparison auto type: a text value compares as text under equals, so a stored number reads as its digits and '015' is not '15'.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "rows", "operator": "equals", "value": "15" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "t1", "properties": { "rows": 15 } },
+        { "urn": "t2", "properties": { "rows": "015" } },
+        { "urn": "t3", "properties": { "rows": "15" } },
+        { "urn": "t4", "properties": { "rows": " 15" } }
+      ],
+      "expect": {
+        "t1": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "t2": { "source": "none" },
+        "t3": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "t4": { "source": "none" }
+      }
+    },
+    {
+      "name": "property-equals-boolean",
+      "summary": "MATCH evaluate eq (boolean): a boolean value reads stored booleans and the text true/false in any case (no trimming); numbers and other words never match.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "pii", "operator": "equals", "value": true }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "b1", "properties": { "pii": true } },
+        { "urn": "b2", "properties": { "pii": "TRUE" } },
+        { "urn": "b3", "properties": { "pii": "yes" } },
+        { "urn": "b4", "properties": { "pii": 1 } },
+        { "urn": "b5", "properties": { "pii": false } },
+        { "urn": "b6", "properties": { "pii": " true" } }
+      ],
+      "expect": {
+        "b1": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "b2": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "b3": { "source": "none" },
+        "b4": { "source": "none" },
+        "b5": { "source": "none" },
+        "b6": { "source": "none" }
+      }
+    },
+    {
+      "name": "property-equals-boolean-text-value",
+      "summary": "resolve_comparison auto type: the text 'true' compares as text, so a stored boolean reads 'true' and matches while 'true ' does not.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "pii", "operator": "equals", "value": "true" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "c1", "properties": { "pii": true } },
+        { "urn": "c2", "properties": { "pii": "True" } },
+        { "urn": "c3", "properties": { "pii": "true " } }
+      ],
+      "expect": {
+        "c1": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "c2": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "c3": { "source": "none" }
+      }
+    },
+    {
+      "name": "property-field-fallbacks",
+      "summary": "MATCH VALUE: properties[field] when present, else name->displayName, type->entityType, urn->urn; a bag value wins over the fallback.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "ra",
+                    "priority": 1,
+                    "conditions": [{ "field": "name", "operator": "contains", "value": "sales" }]
+                  }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "rb",
+                    "priority": 1,
+                    "propertyMatch": { "field": "type", "operator": "equals", "value": "DATASET" }
+                  }
+                ]
+              },
+              {
+                "id": "c",
+                "name": "C",
+                "order": 2,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "rc",
+                    "priority": 1,
+                    "propertyMatch": { "field": "urn", "operator": "startsWith", "value": "urn:q:" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "n1", "entityType": "table", "displayName": "Sales Orders" },
+        { "urn": "n2", "entityType": "table", "displayName": "Sales", "properties": { "name": "Other" } },
+        { "urn": "n3", "entityType": "dataset", "displayName": "Orders" },
+        { "urn": "urn:q:1", "entityType": "table", "displayName": "Q" },
+        { "urn": "n5", "entityType": "table", "displayName": "Orders", "properties": { "type": "Dataset" } },
+        { "urn": "n6", "entityType": "table", "displayName": "Orders", "properties": { "urn": "urn:q:9" } }
+      ],
+      "expect": {
+        "n1": { "layerId": "a", "source": "rule", "ruleId": "ra" },
+        "n2": { "source": "none" },
+        "n3": { "layerId": "b", "source": "rule", "ruleId": "rb" },
+        "urn:q:1": { "layerId": "c", "source": "rule", "ruleId": "rc" },
+        "n5": { "layerId": "b", "source": "rule", "ruleId": "rb" },
+        "n6": { "layerId": "c", "source": "rule", "ruleId": "rc" }
+      }
+    },
+    {
+      "name": "null-property-is-missing-and-uses-the-field-fallback",
+      "summary": "MATCH VALUE: a null property is missing, so name falls back to displayName; a field with no fallback stays missing and fails exists.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "ra",
+                    "priority": 1,
+                    "propertyMatch": { "field": "name", "operator": "equals", "value": "Orders" }
+                  }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "rb", "priority": 1, "propertyMatch": { "field": "owner", "operator": "exists" } }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "displayName": "Orders", "properties": { "name": null } },
+        { "urn": "y", "displayName": "Orders", "properties": { "name": "Other" } },
+        { "urn": "z", "displayName": "Orders", "properties": {} },
+        { "urn": "w", "displayName": "X", "properties": { "owner": null } },
+        { "urn": "v", "displayName": "X", "properties": { "owner": "" } }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "ra" },
+        "y": { "source": "none" },
+        "z": { "layerId": "a", "source": "rule", "ruleId": "ra" },
+        "w": { "source": "none" },
+        "v": { "layerId": "b", "source": "rule", "ruleId": "rb" }
+      }
+    },
+    {
+      "name": "property-not-equals-leaves-out-missing",
+      "summary": "MATCH evaluate neq: a missing or null value is false (include_missing false); otherwise it is not-eq, so a list matches only when no element equals, an empty list included.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "owner", "operator": "notEquals", "value": "x" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "m", "properties": {} },
+        { "urn": "d", "properties": { "owner": "y" } },
+        { "urn": "e", "properties": { "owner": "X" } },
+        { "urn": "n", "properties": { "owner": null } },
+        { "urn": "l1", "properties": { "owner": ["x", "y"] } },
+        { "urn": "l2", "properties": { "owner": ["y", "z"] } },
+        { "urn": "l3", "properties": { "owner": [] } }
+      ],
+      "expect": {
+        "m": { "source": "none" },
+        "d": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "e": { "source": "none" },
+        "n": { "source": "none" },
+        "l1": { "source": "none" },
+        "l2": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "l3": { "layerId": "a", "source": "rule", "ruleId": "r" }
+      }
+    },
+    {
+      "name": "property-exists-means-set",
+      "summary": "MATCH evaluate isSet: exists is stored != null, so '', false, 0 and [] are set while null and missing are not.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "r", "priority": 5, "propertyMatch": { "field": "tier", "operator": "exists" } }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "s", "properties": { "tier": "" } },
+        { "urn": "n", "properties": { "tier": null } },
+        { "urn": "m", "properties": {} },
+        { "urn": "f", "properties": { "tier": false } },
+        { "urn": "l", "properties": { "tier": [] } },
+        { "urn": "z", "properties": { "tier": 0 } }
+      ],
+      "expect": {
+        "s": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "n": { "source": "none" },
+        "m": { "source": "none" },
+        "f": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "l": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "z": { "layerId": "a", "source": "rule", "ruleId": "r" }
+      }
+    },
+    {
+      "name": "property-list-matches-any-element",
+      "summary": "MATCH evaluate: a stored list matches when any element does; numbers read as text, a nested list has no text and never matches.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "owners", "operator": "equals", "value": "finance" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "properties": { "owners": ["ops", "Finance"] } },
+        { "urn": "y", "properties": { "owners": [] } },
+        { "urn": "z", "properties": { "owners": ["ops", ["finance"]] } },
+        { "urn": "w", "properties": { "owners": [15, "FINANCE"] } }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "y": { "source": "none" },
+        "z": { "source": "none" },
+        "w": { "layerId": "a", "source": "rule", "ruleId": "r" }
+      }
+    },
+    {
+      "name": "conditions-starts-and-ends-with",
+      "summary": "MATCH: every condition must hold; startsWith and endsWith compare folded text.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "conditions": [
+                      { "field": "dept", "operator": "startsWith", "value": "fin" },
+                      { "field": "dept", "operator": "endsWith", "value": "CE" }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "f", "properties": { "dept": "finance" } },
+        { "urn": "g", "properties": { "dept": "final" } },
+        { "urn": "h", "properties": { "dept": "FINANCE" } },
+        { "urn": "i", "properties": { "dept": "refinance" } }
+      ],
+      "expect": {
+        "f": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "g": { "source": "none" },
+        "h": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "i": { "source": "none" }
+      }
+    },
+    {
+      "name": "text-operators-read-numbers-and-booleans-as-text",
+      "summary": "MATCH evaluate (string): contains/startsWith read a stored float as '%.15g' text, an integer as its digits and a boolean as true/false.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r1",
+                    "priority": 5,
+                    "propertyMatch": { "field": "code", "operator": "contains", "value": ".5" }
+                  }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r2",
+                    "priority": 5,
+                    "propertyMatch": { "field": "flag", "operator": "startsWith", "value": "TR" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "k1", "properties": { "code": 1.5 } },
+        { "urn": "k2", "properties": { "code": 15 } },
+        { "urn": "k3", "properties": { "code": "2.50" } },
+        { "urn": "k4", "properties": { "code": 0.5 } },
+        { "urn": "f1", "properties": { "flag": true } },
+        { "urn": "f2", "properties": { "flag": "False" } }
+      ],
+      "expect": {
+        "k1": { "layerId": "a", "source": "rule", "ruleId": "r1" },
+        "k2": { "source": "none" },
+        "k3": { "layerId": "a", "source": "rule", "ruleId": "r1" },
+        "k4": { "layerId": "a", "source": "rule", "ruleId": "r1" },
+        "f1": { "layerId": "b", "source": "rule", "ruleId": "r2" },
+        "f2": { "source": "none" }
+      }
+    },
+    {
+      "name": "property-values-fold-case-per-character",
+      "summary": "fold_case: the value '\u0130STANBUL' folds to 'istanbul' (\u0130 to i), so it matches istanbul in any case but not the dotless \u0131.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "city", "operator": "equals", "value": "\u0130STANBUL" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "c1", "properties": { "city": "istanbul" } },
+        { "urn": "c2", "properties": { "city": "ISTANBUL" } },
+        { "urn": "c3", "properties": { "city": "\u0131stanbul" } },
+        { "urn": "c4", "properties": { "city": "\u0130stanbul" } }
+      ],
+      "expect": {
+        "c1": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "c2": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "c3": { "source": "none" },
+        "c4": { "layerId": "a", "source": "rule", "ruleId": "r" }
+      }
+    },
+    {
+      "name": "every-criterion-must-hold",
+      "summary": "Decision 3 / MATCH: types, tags, glob, conditions and propertyMatch are ANDed; failing any one of them fails the rule.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "tags": ["pii"],
+                    "urnPattern": "urn:*",
+                    "conditions": [{ "field": "owner", "operator": "equals", "value": "finance" }],
+                    "propertyMatch": { "field": "tier", "operator": "equals", "value": "gold" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        {
+          "urn": "urn:x",
+          "entityType": "dataset",
+          "tags": ["pii"],
+          "properties": { "owner": "Finance", "tier": "gold" }
+        },
+        {
+          "urn": "urn:y",
+          "entityType": "dataset",
+          "tags": ["pii"],
+          "properties": { "owner": "finance", "tier": "silver" }
+        },
+        {
+          "urn": "urn:z",
+          "entityType": "table",
+          "tags": ["pii"],
+          "properties": { "owner": "finance", "tier": "gold" }
+        },
+        { "urn": "urn:w", "entityType": "dataset", "properties": { "owner": "finance", "tier": "gold" } },
+        {
+          "urn": "v",
+          "entityType": "dataset",
+          "tags": ["pii"],
+          "properties": { "owner": "finance", "tier": "gold" }
+        }
+      ],
+      "expect": {
+        "urn:x": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "urn:y": { "source": "none" },
+        "urn:z": { "source": "none" },
+        "urn:w": { "source": "none" },
+        "v": { "source": "none" }
+      }
+    },
+    {
+      "name": "uncomparable-value-makes-the-rule-inert",
+      "summary": "CRITERIA inert: a SemanticsError from resolve_comparison (contains/endsWith '', equals null or a missing value, a two-element list) makes the whole rule inert, so its type criterion claims nothing either.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r1",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "propertyMatch": { "field": "owner", "operator": "contains", "value": "" }
+                  },
+                  {
+                    "id": "r2",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "propertyMatch": { "field": "owner", "operator": "equals", "value": null }
+                  },
+                  {
+                    "id": "r3",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "conditions": [{ "field": "owner", "operator": "equals", "value": ["a", "b"] }]
+                  },
+                  {
+                    "id": "r4",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "conditions": [{ "field": "owner", "operator": "endsWith", "value": "" }]
+                  },
+                  {
+                    "id": "r5",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "propertyMatch": { "field": "owner", "operator": "equals" }
+                  }
+                ]
+              },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset", "properties": { "owner": "finance" } },
+        { "urn": "y", "entityType": "dataset", "properties": {} },
+        { "urn": "z", "entityType": "dataset", "properties": { "owner": "a" } }
+      ],
+      "expect": {
+        "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" },
+        "y": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" },
+        "z": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" }
+      }
+    },
+    {
+      "name": "unknown-operator-makes-the-rule-inert",
+      "summary": "CRITERIA inert: only the six rule operator names are known; 'matches', search operators such as 'gt' and 'eq', and a differently cased 'Equals' make the whole rule inert.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r1",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "propertyMatch": { "field": "owner", "operator": "matches", "value": "fin" }
+                  },
+                  {
+                    "id": "r2",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "conditions": [{ "field": "owner", "operator": "gt", "value": "a" }]
+                  },
+                  {
+                    "id": "r3",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "conditions": [{ "field": "owner", "operator": "eq", "value": "finance" }]
+                  },
+                  {
+                    "id": "r4",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "conditions": [{ "field": "owner", "operator": "Equals", "value": "finance" }]
+                  }
+                ]
+              },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset", "properties": { "owner": "finance" } }],
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" } }
+    },
+    {
+      "name": "blank-condition-field-counts-as-absent",
+      "summary": "CRITERIA conds: a blank, non-string or missing field makes that condition absent (not the rule inert); a rule left with no criteria is inert.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r1",
+                    "priority": 5,
+                    "entityTypes": ["dataset"],
+                    "conditions": [{ "field": "", "operator": "equals", "value": "x" }]
+                  },
+                  {
+                    "id": "r2",
+                    "priority": 5,
+                    "propertyMatch": { "field": "", "operator": "equals", "value": "x" }
+                  }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r3",
+                    "priority": 5,
+                    "tags": ["pii"],
+                    "propertyMatch": { "field": 7, "operator": "equals", "value": "x" }
+                  },
+                  { "id": "r4", "priority": 5, "conditions": [{ "operator": "equals", "value": "x" }] }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset" },
+        { "urn": "y", "entityType": "folder" },
+        { "urn": "z", "entityType": "folder", "tags": ["pii"] }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "r1" },
+        "y": { "source": "none" },
+        "z": { "layerId": "b", "source": "rule", "ruleId": "r3" }
+      }
+    },
+    {
+      "name": "missing-operator-means-equals",
+      "summary": "CRITERIA op = map[operator or 'equals']: a missing, null or '' operator is equals.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "r1", "priority": 5, "propertyMatch": { "field": "owner", "value": "finance" } }]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r2",
+                    "priority": 5,
+                    "conditions": [{ "field": "dept", "operator": null, "value": "ops" }]
+                  }
+                ]
+              },
+              {
+                "id": "c",
+                "name": "C",
+                "order": 2,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r3",
+                    "priority": 5,
+                    "conditions": [{ "field": "team", "operator": "", "value": "core" }]
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "properties": { "owner": "Finance" } },
+        { "urn": "y", "properties": { "dept": "OPS" } },
+        { "urn": "z", "properties": { "team": "Core" } },
+        { "urn": "w", "properties": { "owner": "fin" } }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "r1" },
+        "y": { "layerId": "b", "source": "rule", "ruleId": "r2" },
+        "z": { "layerId": "c", "source": "rule", "ruleId": "r3" },
+        "w": { "source": "none" }
+      }
+    },
+    {
+      "name": "equals-empty-text-is-a-valid-value",
+      "summary": "resolve_comparison: only the text operators refuse ''; equals '' is a valid comparison that matches a stored ''.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "owner", "operator": "equals", "value": "" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "e1", "properties": { "owner": "" } },
+        { "urn": "e2", "properties": { "owner": "x" } },
+        { "urn": "e3", "properties": {} }
+      ],
+      "expect": {
+        "e1": { "layerId": "a", "source": "rule", "ruleId": "r" },
+        "e2": { "source": "none" },
+        "e3": { "source": "none" }
+      }
+    },
+    {
+      "name": "one-element-list-value-is-a-single-value",
+      "summary": "resolve_comparison: a one-element list value is that single value.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r",
+                    "priority": 5,
+                    "propertyMatch": { "field": "owner", "operator": "equals", "value": ["Finance"] }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "properties": { "owner": "finance" } }, { "urn": "y", "properties": { "owner": "ops" } }],
+      "expect": { "x": { "layerId": "a", "source": "rule", "ruleId": "r" }, "y": { "source": "none" } }
+    },
+    {
+      "name": "property-field-names-are-exact",
+      "summary": "MATCH VALUE: property keys are exact (Owner is not owner), and only name, type and urn have fallbacks (displayName does not).",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "ra",
+                    "priority": 5,
+                    "propertyMatch": { "field": "Owner", "operator": "equals", "value": "x" }
+                  }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "rb",
+                    "priority": 5,
+                    "propertyMatch": { "field": "displayName", "operator": "equals", "value": "Sales" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "o1", "displayName": "O1", "properties": { "owner": "x" } },
+        { "urn": "o2", "displayName": "O2", "properties": { "Owner": "x" } },
+        { "urn": "d1", "displayName": "Sales", "properties": {} },
+        { "urn": "d2", "displayName": "Other", "properties": { "displayName": "Sales" } }
+      ],
+      "expect": {
+        "o1": { "source": "none" },
+        "o2": { "layerId": "a", "source": "rule", "ruleId": "ra" },
+        "d1": { "source": "none" },
+        "d2": { "layerId": "b", "source": "rule", "ruleId": "rb" }
+      }
+    }
+  ]
+}

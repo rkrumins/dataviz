@@ -1,0 +1,264 @@
+{
+  "cases": [
+    {
+      "name": "stamp-beats-rule-in-open-scope",
+      "summary": "PLACE tier 5 before tier 6: in open scope a node's own stamp beats its type rule.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset", "layerAssignment": "b" }],
+      "expect": { "x": { "layerId": "b", "source": "stamped" } }
+    },
+    {
+      "name": "stamp-must-be-an-exact-layer-id",
+      "summary": "PLACE s: a stamp counts only when it equals a layer id exactly; an unknown id, a layer name, a differently cased id and '' fall through to the rule.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] },
+              { "id": "b", "name": "Gold", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset", "layerAssignment": "gone" },
+        { "urn": "y", "entityType": "dataset", "layerAssignment": "Gold" },
+        { "urn": "z", "entityType": "dataset", "layerAssignment": "" },
+        { "urn": "w", "entityType": "dataset", "layerAssignment": "B" }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "z": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "w": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" }
+      }
+    },
+    {
+      "name": "stamp-falls-back-to-the-property-bag",
+      "summary": "FACTS stamp: the top-level layerAssignment if a non-empty string, else properties.layerAssignment if a non-empty string; a stale top-level value hides the bag.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset", "properties": { "layerAssignment": "b" } },
+        {
+          "urn": "y",
+          "entityType": "dataset",
+          "layerAssignment": "gone",
+          "properties": { "layerAssignment": "b" }
+        },
+        {
+          "urn": "z",
+          "entityType": "dataset",
+          "layerAssignment": "",
+          "properties": { "layerAssignment": "b" }
+        },
+        { "urn": "v", "entityType": "dataset", "properties": { "layerAssignment": 5 } }
+      ],
+      "expect": {
+        "x": { "layerId": "b", "source": "stamped" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "z": { "layerId": "b", "source": "stamped" },
+        "v": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" }
+      }
+    },
+    {
+      "name": "stamp-ignored-in-curated-scope",
+      "summary": "PLACE tier 4: curated scope stops before the stamp tier for nodes not created in this draft.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "y": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "layerAssignment": "b" }, { "urn": "y" }],
+      "expect": { "x": { "source": "none" }, "y": { "layerId": "a", "source": "explicit" } }
+    },
+    {
+      "name": "curated-created-in-branch-stamp-cascades-by-hand",
+      "summary": "PLACE tier 4 (user override): in curated scope a node created in this draft is placed by a valid stamp (top-level or bag) and cascades it to descendants as a HAND placement; others stop at none, and an entry still wins.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "y": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "x", "layerAssignment": "b" },
+        { "urn": "z", "layerAssignment": "gone" },
+        { "urn": "w", "layerAssignment": "b" },
+        { "urn": "p", "layerAssignment": "b" },
+        { "urn": "c" },
+        { "urn": "g" },
+        { "urn": "y", "layerAssignment": "b" },
+        { "urn": "q", "properties": { "layerAssignment": "b" } }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "c", "target": "g", "edgeType": "CONTAINS" }
+      ],
+      "context": { "createdInBranch": ["x", "z", "p", "y", "q"] },
+      "expect": {
+        "x": { "layerId": "b", "source": "stamped" },
+        "z": { "source": "none" },
+        "w": { "source": "none" },
+        "p": { "layerId": "b", "source": "stamped" },
+        "c": { "layerId": "b", "source": "inherited", "inheritedFrom": "p" },
+        "g": { "layerId": "b", "source": "inherited", "inheritedFrom": "c" },
+        "y": { "layerId": "a", "source": "explicit" },
+        "q": { "layerId": "b", "source": "stamped" }
+      }
+    },
+    {
+      "name": "curated-hand-parent-beats-created-in-branch-stamp",
+      "summary": "PLACE tier 2 before tier 4: a created-in-draft node under a hand-placed parent inherits instead of using its own stamp.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p" }, { "urn": "c", "layerAssignment": "b" }],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "context": { "createdInBranch": ["c"] },
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" }
+      }
+    },
+    {
+      "name": "curated-stale-entry-falls-through-to-created-in-branch-stamp",
+      "summary": "PLACE stale + tier 4: a stale entry on a created-in-draft node falls through to its stamp (staleExplicit set), which still cascades by hand.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "s": { "layerId": "gone", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "s", "layerAssignment": "b" }, { "urn": "t" }],
+      "edges": [{ "source": "s", "target": "t", "edgeType": "CONTAINS" }],
+      "context": { "createdInBranch": ["s"] },
+      "expect": {
+        "s": { "layerId": "b", "source": "stamped", "staleExplicit": true },
+        "t": { "layerId": "b", "source": "inherited", "inheritedFrom": "s" }
+      }
+    },
+    {
+      "name": "created-in-branch-is-ignored-in-open-scope",
+      "summary": "PLACE tier 5: in open scope createdInBranch changes nothing; the stamp cascades only softly, so a child's own rule wins.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["table"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "folder", "layerAssignment": "b" },
+        { "urn": "c", "entityType": "table" },
+        { "urn": "d", "entityType": "folder" }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "d", "edgeType": "CONTAINS" }
+      ],
+      "context": { "createdInBranch": ["p"] },
+      "expect": {
+        "p": { "layerId": "b", "source": "stamped" },
+        "c": { "layerId": "a", "source": "rule", "ruleId": "_type_a_table" },
+        "d": { "layerId": "b", "source": "inherited", "inheritedFrom": "p" }
+      }
+    },
+    {
+      "name": "explicit-beats-stamp",
+      "summary": "PLACE tier 1 before tier 5: an explicit entry beats the node's own stamp.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "x": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "layerAssignment": "b" }],
+      "expect": { "x": { "layerId": "a", "source": "explicit" } }
+    },
+    {
+      "name": "stale-explicit-falls-through-to-stamp",
+      "summary": "PLACE stale: a stale entry falls through to the stamp tier and the result carries staleExplicit.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "x": { "layerId": "gone", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset", "layerAssignment": "b" }],
+      "expect": { "x": { "layerId": "b", "source": "stamped", "staleExplicit": true } }
+    }
+  ]
+}
