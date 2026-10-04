@@ -1623,14 +1623,16 @@ export function LayerStudio({
      * in another layer than their parent's. The canvas draws such a child in that
      * layer, so the rail lists it there and not under its parent, with its path in
      * the data. Places what the rail has loaded below the column roots, nothing more.
+     * `layerOf` is each placed node's layer: the rail nests a child, or promotes an
+     * anchor's child, only in that layer, as the canvas does.
      */
     const splitChildren = useMemo(() => {
         if (!placementSpec) return null
         const factsOf = (urn: string): PlacementFacts | null => {
-            const facts = snapshot?.directory.get(urn)?.facts
+            const facts = snapshot?.directory.get(urn)?.facts ?? entityIndex.factsOf?.(urn)
             if (facts) return facts
-            // A child only the rail loaded has no facts, just its type — as
-            // buildWizardPlacement assumes for a row without them.
+            // Known by its identity alone: just its type — as buildWizardPlacement
+            // assumes for a row without facts.
             const identity = entityIndex.resolve(urn)
             return identity ? { urn, entityType: identity.type, tags: [], properties: {} } : null
         }
@@ -1655,7 +1657,6 @@ export function LayerStudio({
         roots.forEach(collect)
         const placed = placeAll(placementSpec, parentsOf.keys(), factsOf, urn => parentsOf.get(urn)!)
 
-        const urns = new Set<string>()
         const rows: { layerId: string; urn: string; placedBy?: PlacedBy }[] = []
         const paths = new Map<string, AncestorRef[]>()
         const walked = new Set<string>()
@@ -1672,7 +1673,6 @@ export function LayerStudio({
                 // Only its own entry, stamp or rule takes a child out; an
                 // inherited one stays under the parent it inherits from.
                 if (isMember(result) && result.source !== 'inherited' && result.layerId !== parentLayerId) {
-                    urns.add(child)
                     // An entry is listed as a row already.
                     if (result.source !== 'explicit') {
                         rows.push({ layerId: result.layerId!, urn: child, placedBy: placedByOf(placementSpec, result) })
@@ -1686,7 +1686,9 @@ export function LayerStudio({
         roots.forEach(urn => {
             if (isMember(placed.get(urn)!)) walk(urn, topLevel.has(urn) ? [] : placementPaths.get(urn)?.slice())
         })
-        return { urns, rows, paths }
+        // The layer the canvas draws each in — a fallback too, as it is drawn there.
+        const layerOf = new Map([...placed].map(([urn, result]) => [urn, result.layerId]))
+        return { rows, paths, layerOf }
     }, [placementSpec, scannedTopLevel, snapshot, entityIndex, placementPaths])
     // An entry's path comes from its lookup; a split-out row's from the walk.
     const railPaths = useMemo(
@@ -1755,7 +1757,11 @@ export function LayerStudio({
             // placed here (an unrelated root dragged in) is still a root of this
             // layer on the canvas and has to stay listed here too.
             const others = (byLayer.get(layer.id) ?? []).filter(r => r.urn !== layer.anchorUrn)
-            byLayer.set(layer.id, [...others, ...children.map(childUrn => {
+            // Under the contract, only the children it places in this layer — the
+            // canvas promotes no other, and one placed elsewhere is listed there.
+            const layerOf = splitChildren?.layerOf
+            const promoted = layerOf ? children.filter(c => !layerOf.has(c) || layerOf.get(c) === layer.id) : children
+            byLayer.set(layer.id, [...others, ...promoted.map(childUrn => {
                 const identity = entityIndex.resolve(childUrn)
                 return {
                     id: childUrn,
@@ -2042,7 +2048,7 @@ export function LayerStudio({
                         layers={layers}
                         assignments={assignments}
                         rootsByLayer={rootsByLayer}
-                        splitChildren={splitChildren?.urns}
+                        contractLayerOf={splitChildren?.layerOf}
                         defaultNodeSortMode={defaultNodeSortMode}
                         onSetLayerSortMode={handleSetLayerSortMode}
                         onApplySortToView={handleApplySortToView}

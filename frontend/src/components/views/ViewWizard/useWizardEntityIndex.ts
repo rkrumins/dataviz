@@ -24,6 +24,7 @@
 import { createContext, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { mapWithConcurrency } from '@/lib/concurrency'
+import { factsFromGraphNode, type PlacementFacts } from '@/lib/placement/placement'
 import type { LayerAssignmentEntry } from '@/types/schema'
 import type { BrowserSnapshot } from './WizardAssignmentTree'
 
@@ -46,6 +47,8 @@ interface ProviderScope {
     waiting: Set<string>
     attempts: Map<string, number>
     timers: Set<ReturnType<typeof setTimeout>>
+    /** Placement facts of each child a page brought in. */
+    facts: Map<string, PlacementFacts>
 }
 
 export interface WizardEntityIndex {
@@ -61,6 +64,9 @@ export interface WizardEntityIndex {
     /** What the server said about `urn`'s children: `hasMore` is undefined until
      *  a page has landed; `failed` is true when the last page request failed. */
     childPageState: (urn: string) => { hasMore: boolean | undefined; failed: boolean }
+    /** Placement facts of a child a page brought in (tags, properties, stamp),
+     *  so the contract's rail places it as the canvas does, not by type alone. */
+    factsOf?: (urn: string) => PlacementFacts | undefined
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -108,16 +114,17 @@ export function useWizardEntityIndex(opts: {
     const loadingRef = useRef<Set<string>>(new Set())
     const inFlightRef = useRef<Set<string>>(new Set())
     /** State that belongs to ONE provider (workspace/data-source scope): each
-     *  container's paging, and failed lookups waiting out a backoff. Reset
-     *  lazily on first use under a new provider — never during render — so a
-     *  switch can't show the previous scope's paging, and its timers stop. */
+     *  container's paging, its children's facts, and failed lookups waiting out
+     *  a backoff. Reset lazily on first use under a new provider — never during
+     *  render — so a switch can't show the previous scope's paging, and its
+     *  timers stop. */
     const scopeRef = useRef<ProviderScope | null>(null)
     const scoped = useCallback((): ProviderScope => {
         const current = scopeRef.current
         if (current && current.provider === provider) return current
         current?.timers.forEach(clearTimeout)
         const fresh: ProviderScope = {
-            provider, paging: new Map(), waiting: new Set(), attempts: new Map(), timers: new Set(),
+            provider, paging: new Map(), waiting: new Set(), attempts: new Map(), timers: new Set(), facts: new Map(),
         }
         scopeRef.current = fresh
         return fresh
@@ -232,6 +239,10 @@ export function useWizardEntityIndex(opts: {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tick])
 
+    const factsOf = useCallback((urn: string): PlacementFacts | undefined => scoped().facts.get(urn),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [tick, scoped])
+
     /**
      * One page of `urn`'s children, appended to whatever is cached, read at
      * `offset` — where the server said the next page starts — so repeated calls
@@ -242,7 +253,7 @@ export function useWizardEntityIndex(opts: {
         if (loadingRef.current.has(urn)) return
         loadingRef.current.add(urn)
         setTick(t => t + 1)
-        const paging = scoped().paging
+        const { paging, facts } = scoped()
         const prev = paging.get(urn)
         try {
             const result = await provider.getChildrenWithEdges(urn, {
@@ -268,6 +279,7 @@ export function useWizardEntityIndex(opts: {
             // Children arrive with full identity — seed the cache so their rows
             // render names without another round-trip.
             for (const child of result.children) {
+                facts.set(child.urn, factsFromGraphNode(child))
                 if (!resolvedRef.current.get(child.urn) && !snapshotRef.current?.directory.has(child.urn)) {
                     resolvedRef.current.set(child.urn, {
                         name: child.displayName,
@@ -316,6 +328,6 @@ export function useWizardEntityIndex(opts: {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tick, scoped])
 
-    return useMemo(() => ({ resolve, childrenOf, loadChildren, loadMoreChildren, isLoading, childPageState }),
-        [resolve, childrenOf, loadChildren, loadMoreChildren, isLoading, childPageState])
+    return useMemo(() => ({ resolve, childrenOf, loadChildren, loadMoreChildren, isLoading, childPageState, factsOf }),
+        [resolve, childrenOf, loadChildren, loadMoreChildren, isLoading, childPageState, factsOf])
 }

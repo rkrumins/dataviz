@@ -2,8 +2,9 @@
  * LayerStudio with placementContractEnabled on: the rail lists what the One
  * Placement Contract places as roots (stale entries skipped, stamped and
  * tag/property rule roots included) and the loaded children it places apart
- * from their parent, the conflict map ignores the store's backend answer, and
- * Auto-layer asks the contract what is already placed.
+ * from their parent (nested, or promoted by an anchor, only in their own layer),
+ * the conflict map ignores the store's backend answer, and Auto-layer asks the
+ * contract what is already placed.
  * Flag-off behaviour is pinned by the other LayerStudio tests, unedited.
  */
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
@@ -253,6 +254,22 @@ describe('LayerStudio — contract rail, loaded children', () => {
     expect(left().queryByTitle(/children inherit this layer/)).not.toBeInTheDocument()
   })
 
+  it('does not draw a child its parent passes nothing to, nor count it', async () => {
+    // Warehouse's entry does not cascade and Orders has no rule: the contract places it nowhere.
+    render(<LayerStudio formData={makeFormData({
+      entityScope: 'all',
+      layers: [layer('left', 'Left', 0)],
+      assignments: { 'urn:p': { layerId: 'left', inheritsChildren: false } },
+    })} updateFormData={vi.fn()} />)
+    fireEvent.click(left().getByRole('button', { name: 'Expand Warehouse' }))
+    fireEvent.click(left().getByRole('button', { name: 'Collapse Warehouse' }))
+
+    // Counted until its page is in, then not.
+    await waitFor(() => expect(left().queryByTitle(/children inherit this layer/)).not.toBeInTheDocument())
+    fireEvent.click(left().getByRole('button', { name: 'Expand Warehouse' }))
+    expect(left().queryByText('Orders')).not.toBeInTheDocument()
+  })
+
   it('nests the child under its parent with the flag off (control)', async () => {
     setContract(false)
     render(<LayerStudio formData={formData} updateFormData={vi.fn()} />)
@@ -260,6 +277,82 @@ describe('LayerStudio — contract rail, loaded children', () => {
 
     await waitFor(() => expect(left().getByText('Orders')).toBeInTheDocument())
     expect(screen.queryByTestId('layer-rows-right')).not.toBeInTheDocument()
+  })
+})
+
+describe('LayerStudio — contract rail, a child only the rail loaded', () => {
+  // Warehouse (container) holds Orders (dataset), which only the rail's own page
+  // brings in: its tags and stamp come from that page, not the browser.
+  const formData = makeFormData({
+    entityScope: 'all',
+    layers: [
+      layer('left', 'Left', 0, { entityTypes: ['container'] }),
+      layer('gold', 'Gold', 1, { rules: [{ id: 'r', priority: 0, tags: ['gold'] }] }),
+      layer('right', 'Right', 2),
+    ],
+  })
+  const orders = (extra: Partial<FakeNode>) => getChildrenWithEdges.mockResolvedValue({
+    children: [{ urn: 'urn:k', entityType: 'dataset', displayName: 'Orders', properties: {}, ...extra }],
+    containmentEdges: [], lineageEdges: [],
+  })
+
+  beforeEach(() => {
+    rail.real = true
+    browse([node({ urn: 'urn:p', entityType: 'container', displayName: 'Warehouse' }, ['urn:k'])], ['urn:p'])
+  })
+
+  const expandWarehouse = () =>
+    fireEvent.click(within(screen.getByTestId('layer-rows-left')).getByRole('button', { name: 'Expand Warehouse' }))
+
+  it('lists it where its tags place it', async () => {
+    orders({ tags: ['gold'] })
+    render(<LayerStudio formData={formData} updateFormData={vi.fn()} />)
+    expandWarehouse()
+
+    await waitFor(() => expect(screen.getByTestId('layer-rows-gold')).toHaveTextContent('Orders'))
+    expect(railRows()).toEqual({ left: [['Warehouse', true]], gold: [['Orders', true]] })
+    expect(railPlacedBy()).toMatchObject({ Orders: 'rule' })
+  })
+
+  it('lists it where its own stamp places it', async () => {
+    orders({ layerAssignment: 'right' })
+    render(<LayerStudio formData={formData} updateFormData={vi.fn()} />)
+    expandWarehouse()
+
+    await waitFor(() => expect(screen.getByTestId('layer-rows-right')).toHaveTextContent('Orders'))
+    expect(railRows()).toEqual({ left: [['Warehouse', true]], right: [['Orders', true]] })
+    expect(railPlacedBy()).toMatchObject({ Orders: 'stamp' })
+  })
+})
+
+describe('LayerStudio — contract rail, an anchored column', () => {
+  // Left is Warehouse, whose entry passes nothing down: Staging is Left's by type,
+  // Orders is Right's.
+  beforeEach(() => {
+    rail.real = true
+    browse([node({ urn: 'urn:p', entityType: 'container', displayName: 'Warehouse' }, ['urn:k', 'urn:s'])], ['urn:p'])
+    getChildrenWithEdges.mockResolvedValue({
+      children: [
+        { urn: 'urn:k', entityType: 'dataset', displayName: 'Orders', properties: {} },
+        { urn: 'urn:s', entityType: 'schema', displayName: 'Staging', properties: {} },
+      ],
+      containmentEdges: [], lineageEdges: [],
+    })
+  })
+
+  it('promotes only the children placed in its layer', async () => {
+    render(<LayerStudio formData={makeFormData({
+      entityScope: 'all',
+      layers: [
+        layer('left', 'Left', 0, { anchorUrn: 'urn:p', entityTypes: ['schema'] }),
+        layer('right', 'Right', 1, { entityTypes: ['dataset'] }),
+      ],
+      assignments: { 'urn:p': { layerId: 'left', inheritsChildren: false } },
+    })} updateFormData={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('layer-rows-left')).toHaveTextContent('Staging'))
+    expect(railRows()).toEqual({ left: [['Staging', false]], right: [['Orders', true]] })
+    expect(screen.getAllByText('Orders')).toHaveLength(1)
   })
 })
 
@@ -278,10 +371,13 @@ describe('LayerStudio — contract rail, a child under two parents', () => {
     })
   })
 
-  const expandBoth = async (alphaLayer: string, betaLayer: string) => {
-    fireEvent.click(within(screen.getByTestId(`layer-rows-${alphaLayer}`)).getByRole('button', { name: 'Expand Alpha' }))
-    fireEvent.click(within(screen.getByTestId(`layer-rows-${betaLayer}`)).getByRole('button', { name: 'Expand Beta' }))
-    await waitFor(() => expect(screen.getAllByText('Shared')).toHaveLength(2))
+  const rows = (layerId: string) => within(screen.getByTestId(`layer-rows-${layerId}`))
+  /** Expand both parents and wait for Shared to land in `sharedIn` — only there. */
+  const expandBoth = async (alphaLayer: string, betaLayer: string, sharedIn: string) => {
+    fireEvent.click(rows(alphaLayer).getByRole('button', { name: 'Expand Alpha' }))
+    fireEvent.click(rows(betaLayer).getByRole('button', { name: 'Expand Beta' }))
+    await waitFor(() => expect(rows(sharedIn).getByText('Shared')).toBeInTheDocument())
+    expect(screen.getAllByText('Shared')).toHaveLength(1)
   }
 
   it('does not list a child that only inherits as a root of either column', async () => {
@@ -290,7 +386,8 @@ describe('LayerStudio — contract rail, a child under two parents', () => {
       layers: [layer('left', 'Left', 0), layer('right', 'Right', 1)],
       assignments: { 'urn:a': { layerId: 'left', inheritsChildren: true }, 'urn:b': { layerId: 'right', inheritsChildren: true } },
     })} updateFormData={vi.fn()} />)
-    await expandBoth('left', 'right')
+    // Two hand parents: the smaller URN wins, so under Alpha only.
+    await expandBoth('left', 'right', 'left')
 
     expect(railRows()).toEqual({ left: [['Alpha', false]], right: [['Beta', false]] })
     expect(screen.queryByTestId('rail-rule-placed-marker')).not.toBeInTheDocument()
@@ -306,9 +403,12 @@ describe('LayerStudio — contract rail, a child under two parents', () => {
       ],
       assignments: { 'urn:b': { layerId: 'middle', inheritsChildren: true } },
     })} updateFormData={vi.fn()} />)
-    await expandBoth('left', 'middle')
+    // Under Beta, whose Middle it inherits — not under Alpha too.
+    await expandBoth('left', 'middle', 'middle')
 
     expect(railRows()).toEqual({ left: [['Alpha', true]], middle: [['Beta', false]] })
+    fireEvent.click(rows('left').getByRole('button', { name: 'Collapse Alpha' }))
+    expect(rows('left').queryByTitle(/children inherit this layer/)).not.toBeInTheDocument()
   })
 })
 

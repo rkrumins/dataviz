@@ -153,9 +153,9 @@ interface LayerHierarchyPanelProps {
      *  (which hold no assignment entry), so the rail is honest about what the
      *  canvas will render — see ViewWizard/effectivePlacement.ts. */
     rootsByLayer?: Map<string, LayerRootRow[]>
-    /** Contract only: loaded children placed in another layer than their
-     *  parent's. They are rows of that layer, so not drawn under the parent. */
-    splitChildren?: ReadonlySet<string>
+    /** Contract only: the layer the canvas draws each loaded node in (null:
+     *  nowhere). A child is drawn under its parent only in its own layer. */
+    contractLayerOf?: ReadonlyMap<string, string | null>
     /** View-wide default sort, for the per-column menu's "View default" item. */
     defaultNodeSortMode?: LayerNodeSortAlgo
     onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
@@ -270,7 +270,8 @@ function AssignedEntityItem({
     inherited = false,
     rulePlaced = false,
     placedBy,
-    splitChildren,
+    contractLayerOf,
+    columnLayerId,
     onReorder,
 }: {
     entityId: string
@@ -281,14 +282,16 @@ function AssignedEntityItem({
      *  it is read-only here (no unassign, no drag: moving it would violate the
      *  containment rule the Studio already enforces). */
     inherited?: boolean
-    /** Placed by this layer's `entityTypes` rule, not by an assignment entry.
-     *  There is no entry to remove, so no unassign — but it stays DRAGGABLE:
-     *  dropping it on another layer writes the explicit override. */
+    /** Placed by a layer's rule (or, under the contract, the entity's own stamp),
+     *  not by an assignment entry. There is no entry to remove, so no unassign —
+     *  but it stays DRAGGABLE: dropping it on another layer writes the explicit
+     *  override. */
     rulePlaced?: boolean
     /** What placed a rulePlaced row (see LayerRootRow). */
     placedBy?: PlacedBy
-    /** Children listed in another layer, so left out here (contract only). */
-    splitChildren?: ReadonlySet<string>
+    /** Contract only (see LayerHierarchyPanel), with the column this row is in. */
+    contractLayerOf?: ReadonlyMap<string, string | null>
+    columnLayerId?: string
     /** Present on column roots: dropping another root on this row's top/bottom
      *  third reorders instead of re-assigning. Absent on inherited children,
      *  which have no independent position. */
@@ -308,8 +311,11 @@ function AssignedEntityItem({
     const dataPath = useContext(PlacementPathsContext).get(entityId)
     const isNodeLoading = entityIndex.isLoading(entityId)
     const loadedChildIds = entityIndex.childrenOf(entityId)
-    // A child placed in another layer is listed there, not here.
-    const childrenIds = splitChildren ? loadedChildIds.filter(id => !splitChildren.has(id)) : loadedChildIds
+    // A child placed in another layer is listed there, and one placed nowhere is
+    // not drawn; one the contract has not placed is shown as before.
+    const childrenIds = contractLayerOf
+        ? loadedChildIds.filter(id => !contractLayerOf.has(id) || contractLayerOf.get(id) === columnLayerId)
+        : loadedChildIds
 
     const isResolving = identity === undefined
     const name = identity?.name ?? fallbackNameFromUrn(entityId)
@@ -527,7 +533,8 @@ function AssignedEntityItem({
                                 entityIndex={entityIndex}
                                 onUnassign={onUnassign}
                                 inherited
-                                splitChildren={splitChildren}
+                                contractLayerOf={contractLayerOf}
+                                columnLayerId={columnLayerId}
                             />
                         ))}
                     </motion.div>
@@ -549,7 +556,7 @@ interface LogicalNodeItemProps {
     logicalNodes: UseLogicalNodesReturn
     entityAssignments: LayerEntityRef[]
     entityIndex: WizardEntityIndex
-    splitChildren?: ReadonlySet<string>
+    contractLayerOf?: ReadonlyMap<string, string | null>
     onSetActiveTarget: (target: ActiveTarget) => void
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
     onUnassign: (entityId: string) => void
@@ -565,7 +572,7 @@ function LogicalNodeItem({
     logicalNodes,
     entityAssignments,
     entityIndex,
-    splitChildren,
+    contractLayerOf,
     onSetActiveTarget,
     onDrop,
     onUnassign,
@@ -867,7 +874,7 @@ function LogicalNodeItem({
                                         logicalNodes={logicalNodes}
                                         entityAssignments={entityAssignments}
                                         entityIndex={entityIndex}
-                                        splitChildren={splitChildren}
+                                        contractLayerOf={contractLayerOf}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -884,7 +891,8 @@ function LogicalNodeItem({
                                         depth={depth + 1}
                                         entityIndex={entityIndex}
                                         onUnassign={onUnassign}
-                                        splitChildren={splitChildren}
+                                        contractLayerOf={contractLayerOf}
+                                        columnLayerId={layerId}
                                     />
                                 ))}
                             </div>
@@ -905,7 +913,7 @@ interface LayerRowProps {
     assignments: Record<string, LayerAssignmentEntry>
     /** This column's roots, already ordered by the Studio. */
     rows?: LayerRootRow[]
-    splitChildren?: ReadonlySet<string>
+    contractLayerOf?: ReadonlyMap<string, string | null>
     defaultNodeSortMode?: LayerNodeSortAlgo
     onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
     onApplySortToView?: (mode: LayerNodeSortAlgo) => void
@@ -930,7 +938,7 @@ function LayerRow({
     layerIndex,
     assignments,
     rows,
-    splitChildren,
+    contractLayerOf,
     defaultNodeSortMode,
     onSetLayerSortMode,
     onApplySortToView,
@@ -1292,7 +1300,7 @@ function LayerRow({
                                         logicalNodes={logicalNodes}
                                         entityAssignments={layerEntityAssignments}
                                         entityIndex={entityIndex}
-                                        splitChildren={splitChildren}
+                                        contractLayerOf={contractLayerOf}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -1335,7 +1343,8 @@ function LayerRow({
                                                 onUnassign={onUnassign}
                                                 rulePlaced={row.rulePlaced}
                                                 placedBy={row.placedBy}
-                                                splitChildren={splitChildren}
+                                                contractLayerOf={contractLayerOf}
+                                                columnLayerId={layer.id}
                                                 onReorder={onReorderRoot
                                                     ? (dragged, target, position) =>
                                                         onReorderRoot(layer.id, dragged, target, position)
@@ -1430,7 +1439,7 @@ export function LayerHierarchyPanel({
     layers,
     assignments,
     rootsByLayer,
-    splitChildren,
+    contractLayerOf,
     defaultNodeSortMode,
     onSetLayerSortMode,
     onApplySortToView,
@@ -1536,7 +1545,7 @@ export function LayerHierarchyPanel({
                                 layerIndex={i}
                                 assignments={assignments}
                                 rows={rootsByLayer?.get(layer.id)}
-                                splitChildren={splitChildren}
+                                contractLayerOf={contractLayerOf}
                                 defaultNodeSortMode={defaultNodeSortMode}
                                 onSetLayerSortMode={onSetLayerSortMode}
                                 onApplySortToView={onApplySortToView}
