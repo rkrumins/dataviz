@@ -1,7 +1,8 @@
 /**
  * BuildPanel — flag-on, it hands the canvas's contractRowLayer (Apply's own call for a top-level
- * row) to the Grid and the Paste preview, and its footer line uses it too, so all three agree with
- * where Apply puts a row. Grid and Paste are reduced to the prop.
+ * row) to the Grid and the Paste preview, so they agree with where Apply puts a row. Its footer
+ * asks it for every row, so a nested row its own rule sends to another column stops it naming one.
+ * Grid and Paste are reduced to the prop.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, it, expect, vi } from 'vitest'
@@ -40,5 +41,19 @@ describe('BuildPanel', () => {
     render(<BuildPanel onClose={() => {}} typeLayerMap={new Map([['dataset', 'a']])}
       contractRowLayer={(row) => (row.name.startsWith('raw') ? 'b' : 'a')} />)
     expect(screen.getByText('These land in Layer B.')).toBeInTheDocument()
+  })
+
+  it('names no single column when a nested row\'s own rule sends it elsewhere', () => {
+    useReferenceModelStore.getState().setLayers([
+      { id: 'a', name: 'Layer A', entityTypes: ['dataset'], order: 0 },
+      { id: 'b', name: 'Layer B', entityTypes: [], order: 1 },
+    ])
+    useBuildRowsStore.getState().setRows([
+      makeRow({ id: 'r', name: 'orders', typeId: 'dataset' }),
+      makeRow({ id: 'c', name: 'raw_lines', typeId: 'dataset', parentId: 'r' }),
+    ])
+    render(<BuildPanel onClose={() => {}} typeLayerMap={new Map([['dataset', 'a']])}
+      contractRowLayer={(row) => (row.name.startsWith('raw') ? 'b' : 'a')} />)
+    expect(screen.getByText('Top-level entities go to their column; nested items stay under their parent.')).toBeInTheDocument()
   })
 })

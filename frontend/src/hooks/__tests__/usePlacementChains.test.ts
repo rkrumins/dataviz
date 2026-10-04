@@ -115,6 +115,30 @@ describe('usePlacementChains', () => {
     }
   })
 
+  it('starts no wait for a fifth unanswered ask that lands after unmount', async () => {
+    vi.useFakeTimers()
+    try {
+      const late = deferred<Record<string, string[]>>()
+      let asks = 0
+      const getAncestorChains = vi.fn(async () => (++asks < 5 ? {} : late.promise))   // the 5th hangs
+      holder.current = { getAncestorChains }
+      const pass = () => act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      const { rerender, unmount } = mount(['a'])
+      await pass()
+      for (let i = 0; i < 4; i++) {
+        rerender({ urns: ['a'] })
+        await pass()
+      }
+      expect(getAncestorChains).toHaveBeenCalledTimes(5)
+      unmount()
+      late.resolve({})
+      await vi.advanceTimersByTimeAsync(0)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('stops asking a reader with no containment walk (501)', async () => {
     const getAncestorChains = vi.fn(async () => { throw Object.assign(new Error('no walk'), { status: 501 }) })
     holder.current = { getAncestorChains }

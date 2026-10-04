@@ -53,7 +53,8 @@ export interface BuildPanelProps {
   typeLayerMap?: Map<string, string>
   /** Flag-on (One Placement Contract): the canvas's own Apply-time call for a
    *  top-level row (its name, tags and properties count), so the Grid's Layer
-   *  cell, the Paste preview and the footer's placement line agree with Apply. */
+   *  cell and the Paste preview agree with Apply. The footer asks it for every
+   *  row, so it names one column only if no nested row's own rule picks another. */
   contractRowLayer?: ContractRowLayer
   /** Fired per staged row (full row + urn) so the canvas can make the matching
    *  optimistic layer assignment / expand parents. */
@@ -135,14 +136,15 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, o
 
   // Placement guidance (Task 8) — read-only: the view's own layer NAMES
   // (never hard-coded), for whichever column(s) the current rows actually
-  // resolve to via the SAME auto-by-type resolver Apply uses (flag-on, a
-  // top-level row through `contractRowLayer`, as Apply places it).
+  // resolve to via the SAME auto-by-type resolver Apply uses (flag-on, every
+  // row through `contractRowLayer`: a nested row's own rule can draw it away
+  // from its parent).
   const rawLayers = useLayers()
   const layerNameById = useMemo(() => new Map(rawLayers.map((l) => [l.id, l.name])), [rawLayers])
   const placementText = useMemo(() => {
     if (!typeLayerMap && !layerId) return null // non-layered canvas — nothing to say about columns
     const targets = new Set(
-      validated.map((r) => (contractRowLayer && r.depth === 0
+      validated.map((r) => (contractRowLayer
         ? contractRowLayer(r)
         : resolveRowLayer(r, { typeLayerMap: typeLayerMap ?? new Map(), fallbackLayerId: layerId }))).filter((t): t is string => !!t),
     )

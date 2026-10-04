@@ -42,11 +42,15 @@ export function usePlacementChains(urns: readonly string[]): Chains {
   const [wake, setWake] = useState(0)
   // One per batch of URNs given up on, until it asks them again.
   const givenUpTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>())
+  // True once unmounted, so an answer that lands after it starts no timer.
+  const disposedRef = useRef(false)
 
   // A given-up URN is a fact about one graph: a provider switch or unmount drops its timer.
   useEffect(() => {
+    disposedRef.current = false
     const timers = givenUpTimersRef.current
     return () => {
+      disposedRef.current = true
       timers.forEach(clearTimeout)
       timers.clear()
     }
@@ -92,7 +96,7 @@ export function usePlacementChains(urns: readonly string[]): Chains {
           chunks[i].forEach(again)
         }
       })
-      if (givenUp.length > 0) {
+      if (givenUp.length > 0 && !disposedRef.current) {
         const timer = setTimeout(() => {
           givenUpTimersRef.current.delete(timer)
           givenUp.forEach(urn => asked.delete(urn))
