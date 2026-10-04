@@ -1623,8 +1623,8 @@ export function LayerStudio({
      * in another layer than their parent's. The canvas draws such a child in that
      * layer, so the rail lists it there and not under its parent, with its path in
      * the data. Places what the rail has loaded below the column roots, nothing more.
-     * `layerOf` is each placed node's layer: the rail nests a child, or promotes an
-     * anchor's child, only in that layer, as the canvas does.
+     * `placed` is each node's placement: the rail nests a child, or promotes an
+     * anchor's child, only in its layer, as the canvas does.
      */
     const splitChildren = useMemo(() => {
         if (!placementSpec) return null
@@ -1686,9 +1686,7 @@ export function LayerStudio({
         roots.forEach(urn => {
             if (isMember(placed.get(urn)!)) walk(urn, topLevel.has(urn) ? [] : placementPaths.get(urn)?.slice())
         })
-        // The layer the canvas draws each in — a fallback too, as it is drawn there.
-        const layerOf = new Map([...placed].map(([urn, result]) => [urn, result.layerId]))
-        return { rows, paths, layerOf }
+        return { rows, paths, placed }
     }, [placementSpec, scannedTopLevel, snapshot, entityIndex, placementPaths])
     // An entry's path comes from its lookup; a split-out row's from the walk.
     const railPaths = useMemo(
@@ -1759,8 +1757,8 @@ export function LayerStudio({
             const others = (byLayer.get(layer.id) ?? []).filter(r => r.urn !== layer.anchorUrn)
             // Under the contract, only the children it places in this layer — the
             // canvas promotes no other, and one placed elsewhere is listed there.
-            const layerOf = splitChildren?.layerOf
-            const promoted = layerOf ? children.filter(c => !layerOf.has(c) || layerOf.get(c) === layer.id) : children
+            const placed = splitChildren?.placed
+            const promoted = placed ? children.filter(c => !placed.has(c) || placed.get(c)!.layerId === layer.id) : children
             byLayer.set(layer.id, [...others, ...promoted.map(childUrn => {
                 const identity = entityIndex.resolve(childUrn)
                 return {
@@ -2048,7 +2046,7 @@ export function LayerStudio({
                         layers={layers}
                         assignments={assignments}
                         rootsByLayer={rootsByLayer}
-                        contractLayerOf={splitChildren?.layerOf}
+                        contractPlacement={splitChildren?.placed}
                         defaultNodeSortMode={defaultNodeSortMode}
                         onSetLayerSortMode={handleSetLayerSortMode}
                         onApplySortToView={handleApplySortToView}

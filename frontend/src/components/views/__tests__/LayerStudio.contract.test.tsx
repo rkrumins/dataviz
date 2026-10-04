@@ -261,13 +261,15 @@ describe('LayerStudio — contract rail, loaded children', () => {
       layers: [layer('left', 'Left', 0)],
       assignments: { 'urn:p': { layerId: 'left', inheritsChildren: false } },
     })} updateFormData={vi.fn()} />)
+    // Not counted even before its page is in: nothing can inherit from Warehouse.
+    expect(left().queryByTitle(/children inherit this layer/)).not.toBeInTheDocument()
     fireEvent.click(left().getByRole('button', { name: 'Expand Warehouse' }))
-    fireEvent.click(left().getByRole('button', { name: 'Collapse Warehouse' }))
 
-    // Counted until its page is in, then not.
-    await waitFor(() => expect(left().queryByTitle(/children inherit this layer/)).not.toBeInTheDocument())
-    fireEvent.click(left().getByRole('button', { name: 'Expand Warehouse' }))
+    // Its page is in once the row stops loading.
+    await waitFor(() => expect(left().getByRole('button', { name: 'Collapse Warehouse' }).querySelector('.animate-spin')).toBeNull())
     expect(left().queryByText('Orders')).not.toBeInTheDocument()
+    fireEvent.click(left().getByRole('button', { name: 'Collapse Warehouse' }))
+    expect(left().queryByTitle(/children inherit this layer/)).not.toBeInTheDocument()
   })
 
   it('nests the child under its parent with the flag off (control)', async () => {

@@ -40,6 +40,7 @@ import {
 import { cn } from '@/lib/utils'
 import { PlacedTag } from '@/components/ui/PlacedTag'
 import { PlacementPathsContext } from './placementPathsContext'
+import type { PlacementResult } from '@/lib/placement/placement'
 import { groupSubtreeIds, listGroups } from '@/components/canvas/context-view/layerMutations'
 import type {
     ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry,
@@ -153,9 +154,9 @@ interface LayerHierarchyPanelProps {
      *  (which hold no assignment entry), so the rail is honest about what the
      *  canvas will render — see ViewWizard/effectivePlacement.ts. */
     rootsByLayer?: Map<string, LayerRootRow[]>
-    /** Contract only: the layer the canvas draws each loaded node in (null:
-     *  nowhere). A child is drawn under its parent only in its own layer. */
-    contractLayerOf?: ReadonlyMap<string, string | null>
+    /** Contract only: each loaded node's placement. A child is drawn under its
+     *  parent only in the layer the canvas draws it in (null: nowhere). */
+    contractPlacement?: ReadonlyMap<string, PlacementResult>
     /** View-wide default sort, for the per-column menu's "View default" item. */
     defaultNodeSortMode?: LayerNodeSortAlgo
     onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
@@ -270,7 +271,7 @@ function AssignedEntityItem({
     inherited = false,
     rulePlaced = false,
     placedBy,
-    contractLayerOf,
+    contractPlacement,
     columnLayerId,
     onReorder,
 }: {
@@ -290,7 +291,7 @@ function AssignedEntityItem({
     /** What placed a rulePlaced row (see LayerRootRow). */
     placedBy?: PlacedBy
     /** Contract only (see LayerHierarchyPanel), with the column this row is in. */
-    contractLayerOf?: ReadonlyMap<string, string | null>
+    contractPlacement?: ReadonlyMap<string, PlacementResult>
     columnLayerId?: string
     /** Present on column roots: dropping another root on this row's top/bottom
      *  third reorders instead of re-assigning. Absent on inherited children,
@@ -313,8 +314,8 @@ function AssignedEntityItem({
     const loadedChildIds = entityIndex.childrenOf(entityId)
     // A child placed in another layer is listed there, and one placed nowhere is
     // not drawn; one the contract has not placed is shown as before.
-    const childrenIds = contractLayerOf
-        ? loadedChildIds.filter(id => !contractLayerOf.has(id) || contractLayerOf.get(id) === columnLayerId)
+    const childrenIds = contractPlacement
+        ? loadedChildIds.filter(id => !contractPlacement.has(id) || contractPlacement.get(id)!.layerId === columnLayerId)
         : loadedChildIds
 
     const isResolving = identity === undefined
@@ -322,7 +323,11 @@ function AssignedEntityItem({
     const type = identity?.type ?? 'unknown'
     const childCount = identity?.childCount ?? loadedChildIds.length
     const hasChildren = childCount > 0
-    const inheritingCount = childCount - (loadedChildIds.length - childrenIds.length)
+    // A row that passes nothing down counts only the children drawn under it:
+    // no unloaded one can inherit its layer.
+    const inheritingCount = contractPlacement?.get(entityId)?.cascade === null
+        ? childrenIds.length
+        : childCount - (loadedChildIds.length - childrenIds.length)
     const isMissing = !!identity?.missing
 
     const handleToggle = (e: React.MouseEvent) => {
@@ -533,7 +538,7 @@ function AssignedEntityItem({
                                 entityIndex={entityIndex}
                                 onUnassign={onUnassign}
                                 inherited
-                                contractLayerOf={contractLayerOf}
+                                contractPlacement={contractPlacement}
                                 columnLayerId={columnLayerId}
                             />
                         ))}
@@ -556,7 +561,7 @@ interface LogicalNodeItemProps {
     logicalNodes: UseLogicalNodesReturn
     entityAssignments: LayerEntityRef[]
     entityIndex: WizardEntityIndex
-    contractLayerOf?: ReadonlyMap<string, string | null>
+    contractPlacement?: ReadonlyMap<string, PlacementResult>
     onSetActiveTarget: (target: ActiveTarget) => void
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
     onUnassign: (entityId: string) => void
@@ -572,7 +577,7 @@ function LogicalNodeItem({
     logicalNodes,
     entityAssignments,
     entityIndex,
-    contractLayerOf,
+    contractPlacement,
     onSetActiveTarget,
     onDrop,
     onUnassign,
@@ -874,7 +879,7 @@ function LogicalNodeItem({
                                         logicalNodes={logicalNodes}
                                         entityAssignments={entityAssignments}
                                         entityIndex={entityIndex}
-                                        contractLayerOf={contractLayerOf}
+                                        contractPlacement={contractPlacement}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -891,7 +896,7 @@ function LogicalNodeItem({
                                         depth={depth + 1}
                                         entityIndex={entityIndex}
                                         onUnassign={onUnassign}
-                                        contractLayerOf={contractLayerOf}
+                                        contractPlacement={contractPlacement}
                                         columnLayerId={layerId}
                                     />
                                 ))}
@@ -913,7 +918,7 @@ interface LayerRowProps {
     assignments: Record<string, LayerAssignmentEntry>
     /** This column's roots, already ordered by the Studio. */
     rows?: LayerRootRow[]
-    contractLayerOf?: ReadonlyMap<string, string | null>
+    contractPlacement?: ReadonlyMap<string, PlacementResult>
     defaultNodeSortMode?: LayerNodeSortAlgo
     onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
     onApplySortToView?: (mode: LayerNodeSortAlgo) => void
@@ -938,7 +943,7 @@ function LayerRow({
     layerIndex,
     assignments,
     rows,
-    contractLayerOf,
+    contractPlacement,
     defaultNodeSortMode,
     onSetLayerSortMode,
     onApplySortToView,
@@ -1300,7 +1305,7 @@ function LayerRow({
                                         logicalNodes={logicalNodes}
                                         entityAssignments={layerEntityAssignments}
                                         entityIndex={entityIndex}
-                                        contractLayerOf={contractLayerOf}
+                                        contractPlacement={contractPlacement}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -1343,7 +1348,7 @@ function LayerRow({
                                                 onUnassign={onUnassign}
                                                 rulePlaced={row.rulePlaced}
                                                 placedBy={row.placedBy}
-                                                contractLayerOf={contractLayerOf}
+                                                contractPlacement={contractPlacement}
                                                 columnLayerId={layer.id}
                                                 onReorder={onReorderRoot
                                                     ? (dragged, target, position) =>
@@ -1439,7 +1444,7 @@ export function LayerHierarchyPanel({
     layers,
     assignments,
     rootsByLayer,
-    contractLayerOf,
+    contractPlacement,
     defaultNodeSortMode,
     onSetLayerSortMode,
     onApplySortToView,
@@ -1545,7 +1550,7 @@ export function LayerHierarchyPanel({
                                 layerIndex={i}
                                 assignments={assignments}
                                 rows={rootsByLayer?.get(layer.id)}
-                                contractLayerOf={contractLayerOf}
+                                contractPlacement={contractPlacement}
                                 defaultNodeSortMode={defaultNodeSortMode}
                                 onSetLayerSortMode={onSetLayerSortMode}
                                 onApplySortToView={onApplySortToView}
