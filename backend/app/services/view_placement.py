@@ -495,7 +495,8 @@ def containment_parents(
 
 def facts_from_graph_node(node: GraphNode) -> NodeFacts:
     """A graph node's facts. The stamp is the top-level ``layerAssignment`` when it is a non-empty
-    string (even one naming no layer), else ``properties.layerAssignment``; '' is no stamp."""
+    string (even one naming no layer), else ``properties.layerAssignment``; '' is no stamp, and
+    a '' display name is no name."""
     properties = node.properties or {}
     stamp = node.layer_assignment
     if not (isinstance(stamp, str) and stamp):
@@ -503,7 +504,7 @@ def facts_from_graph_node(node: GraphNode) -> NodeFacts:
     return NodeFacts(
         urn=node.urn,
         entity_type=node.entity_type or "",
-        display_name=node.display_name,
+        display_name=node.display_name or None,
         tags=frozenset(t for t in node.tags or () if isinstance(t, str)),
         properties=properties,
         stamp=stamp if isinstance(stamp, str) and stamp else None,

@@ -370,6 +370,36 @@
       }
     },
     {
+      "name": "multi-parent-urn-order-is-by-code-point",
+      "summary": "PLACE multi-parent: the smallest URN is by code point (Python str order), not by UTF-16 unit, so U+FF01 sorts before U+1F600 although the emoji's surrogate unit is the smaller one.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "p\ud83d\ude00": { "layerId": "a", "inheritsChildren": true },
+              "p\uff01": { "layerId": "b", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p\ud83d\ude00" }, { "urn": "p\uff01" }, { "urn": "x" }],
+      "edges": [
+        { "source": "p\ud83d\ude00", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p\uff01", "target": "x", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p\ud83d\ude00": { "layerId": "a", "source": "explicit" },
+        "p\uff01": { "layerId": "b", "source": "explicit" },
+        "x": { "layerId": "b", "source": "inherited", "inheritedFrom": "p\uff01", "ambiguousParent": true }
+      }
+    },
+    {
       "name": "multi-parent-ambiguity-counts-only-the-deciding-tier",
       "summary": "PLACE ambiguousParent: only parents at the deciding (hand) tier are counted; a soft parent in a third layer neither wins nor adds ambiguity.",
       "view": {

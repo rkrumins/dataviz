@@ -362,6 +362,46 @@
       }
     },
     {
+      "name": "blank-display-name-is-absent",
+      "summary": "FACTS / VALUE: a '' displayName is no name ('' becomes None, as blank means absent everywhere else), so the name fallback is missing: notEquals and exists do not match it, and a name in the property bag still wins.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  { "id": "r1", "priority": 5, "propertyMatch": { "field": "name", "operator": "notEquals", "value": "orders" } }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "r2", "priority": 5, "propertyMatch": { "field": "name", "operator": "exists" } }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "n1", "displayName": "" },
+        { "urn": "n2", "displayName": "Orders" },
+        { "urn": "n3", "displayName": "", "properties": { "name": "Sales" } }
+      ],
+      "expect": {
+        "n1": { "source": "none" },
+        "n2": { "layerId": "b", "source": "rule", "ruleId": "r2" },
+        "n3": { "layerId": "a", "source": "rule", "ruleId": "r1" }
+      }
+    },
+    {
       "name": "property-not-equals-leaves-out-missing",
       "summary": "MATCH evaluate neq: a missing or null value is false (include_missing false); otherwise it is not-eq, so a list matches only when no element equals, an empty list included.",
       "view": {
@@ -911,6 +951,53 @@
         "y": { "layerId": "b", "source": "rule", "ruleId": "r2" },
         "z": { "layerId": "c", "source": "rule", "ruleId": "r3" },
         "w": { "source": "none" }
+      }
+    },
+    {
+      "name": "empty-list-or-object-operator-means-equals",
+      "summary": "CRITERIA op = map[operator or 'equals'] with the reference's truthiness: an empty list or object operator is blank, so it means equals; a non-empty list is an unknown operator, which makes the rule inert.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "r1", "priority": 5, "propertyMatch": { "field": "owner", "operator": [], "value": "finance" } }]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "r2", "priority": 5, "conditions": [{ "field": "dept", "operator": {}, "value": "ops" }] }]
+              },
+              {
+                "id": "c",
+                "name": "C",
+                "order": 2,
+                "entityTypes": [],
+                "rules": [
+                  { "id": "r3", "priority": 5, "tags": ["pii"], "conditions": [{ "field": "team", "operator": ["equals"], "value": "core" }] }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "properties": { "owner": "Finance" } },
+        { "urn": "y", "properties": { "dept": "OPS" } },
+        { "urn": "z", "tags": ["pii"], "properties": { "team": "core" } }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "r1" },
+        "y": { "layerId": "b", "source": "rule", "ruleId": "r2" },
+        "z": { "source": "none" }
       }
     },
     {

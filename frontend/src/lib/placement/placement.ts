@@ -209,7 +209,9 @@ function compileCriteria(rule: Record<string, unknown>): Pick<CompiledRule, 'typ
   for (const c of [rule.propertyMatch, ...(Array.isArray(rule.conditions) ? rule.conditions : [])]) {
     // A blank or non-string field is an unfinished condition: absent, like urnPattern ''.
     if (!isRecord(c) || typeof c.field !== 'string' || c.field === '') continue
-    const operator = c.operator || 'equals'
+    // Python's `operator or 'equals'`: an empty list or object is blank too.
+    const blank = !c.operator || (typeof c.operator === 'object' && Object.keys(c.operator).length === 0)
+    const operator = blank ? 'equals' : c.operator
     if (typeof operator !== 'string' || !Object.hasOwn(RULE_OPERATORS, operator)) {
       return `uses an unknown operator '${String(operator)}'`
     }
@@ -329,12 +331,25 @@ function inherit(spec: CompiledPlacementSpec, parents: readonly ParentContext[],
   for (const p of parents) {
     if (p.cascade !== cascade || !spec.layerIds.has(p.layerId)) continue
     if (chosen && p.layerId !== chosen.layerId) ambiguous = true
-    if (!chosen || p.urn < chosen.urn) chosen = p
+    if (!chosen || codePointBefore(p.urn, chosen.urn)) chosen = p
   }
   if (!chosen) return null
   const placed: PlacementResult = { layerId: chosen.layerId, source: 'inherited', inheritedFrom: chosen.urn, cascade }
   if (ambiguous) placed.ambiguousParent = true
   return placed
+}
+
+/** Python's str order: by code point, where JS `<` compares UTF-16 units —
+ *  they differ only when a surrogate (an astral character) meets
+ *  U+E000–U+FFFF, so lift the surrogates above that range. */
+function codePointBefore(a: string, b: string): boolean {
+  const rank = (unit: number) => (unit >= 0xe000 ? unit - 0x800 : unit >= 0xd800 ? unit + 0x2000 : unit)
+  for (let i = 0; i < a.length && i < b.length; i++) {
+    const x = a.charCodeAt(i)
+    const y = b.charCodeAt(i)
+    if (x !== y) return rank(x) < rank(y)
+  }
+  return a.length < b.length
 }
 
 const none = (): PlacementResult => ({ layerId: null, source: 'none', cascade: null })
