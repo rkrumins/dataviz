@@ -30,9 +30,9 @@ import { LineEndTag } from './LineEndTag'
 import type { LineEnd } from './lineEnd'
 
 /** Why a row is placed apart from its parent (One Placement Contract, flag-on): by hand (an
- *  explicit entry or a drag), by a stamp (the entity's own layerAssignment), or by a layer rule
- *  matching it. */
-export type PlacedReason = 'hand' | 'rule' | 'stamp'
+ *  explicit entry or a drag), by a stamp (the entity's own layerAssignment), by a layer rule
+ *  matching it, inherited from another parent, or caught by the view's fallback layer. */
+export type PlacedReason = 'hand' | 'rule' | 'stamp' | 'inherited' | 'fallback'
 
 /** Which modifier keys were held when a row was clicked. */
 export interface RowSelectModifiers {
@@ -844,7 +844,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             placement={placement}
             entityName={node.name}
             onReveal={onRevealPlacement}
-            // A layer rule or the entity's own stamp put it here, not an entry a return could remove.
+            // Only a hand placement is an entry a return could remove (no reason: the flag is off, as before).
             onReturn={onReturnPlacement && (placement.reason === undefined || placement.reason === 'hand') ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
           />
         )}

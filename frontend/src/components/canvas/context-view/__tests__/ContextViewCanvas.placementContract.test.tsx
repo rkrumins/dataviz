@@ -27,7 +27,7 @@ import type { ViewLayerConfig } from '@/types/schema'
 // canvas's placement of what they stage, not their own UI.
 const captured: {
   rail?: { onEntityStaged?: (tempUrn: string, parentUrn?: string) => void }
-  build?: { onRowStaged?: (row: BuildRow, urn: string, hasParent: boolean) => void }
+  build?: { onRowStaged?: (row: BuildRow, urn: string, hasParent: boolean) => void; contractTypeLayerMap?: Map<string, string> }
 } = {}
 vi.mock('@/components/canvas/create/HierarchyBuilderPanel', () => ({
   HierarchyBuilderPanel: (props: typeof captured.rail) => { captured.rail = props; return null },
@@ -150,6 +150,20 @@ describe('the canvas under the One Placement Contract', () => {
     expect(document.querySelector('#layer-node-K button[aria-label^="Return "]')).toBeNull()
   })
 
+  it('a child the view\'s fallback layer catches offers no return', async () => {
+    await renderCanvasWithTrace(estate(
+      [wn('P', 'container', 1), wn('K', 'dataset')], [['P', 'K']],
+      [
+        { ...layer('left', 'Left', 0), rules: [{ id: 'c', entityTypes: ['container'], priority: 0, inheritsFromParent: false }] },
+        { ...layer('right', 'Right', 1), showUnassigned: true },
+      ],
+    ), { focus: 'P', entityScope: 'all', placementContract: true })
+    expect(columnOf('K')).toBe('right')
+    expect(document.querySelector('#layer-node-K button[title^="Placed in"]')?.getAttribute('title'))
+      .toMatch(/^Placed in Right for this view only/)
+    expect(document.querySelector('#layer-node-K button[aria-label^="Return "]')).toBeNull()
+  })
+
   describe('rail and Build Mode pin a new root only when they must', () => {
     const stagedNode = (urn: string, type: string) => ({
       id: urn, type: 'generic', position: { x: 0, y: 0 },
@@ -198,6 +212,15 @@ describe('the canvas under the One Placement Contract', () => {
       expect(viewAssignments()['urn:staged:dataset:r1']).toBeUndefined()
       expect(viewAssignments()['urn:staged:misc:r2']?.layerId).toBe('left')
       expect(viewAssignments()['urn:staged:container:r3']?.layerId).toBe('right')
+      // The Grid and Paste previews get the same type map Apply uses.
+      expect(captured.build!.contractTypeLayerMap?.get('dataset')).toBe('right')
+    })
+
+    it('Build, flag off: no contract type map for the Grid and Paste previews', async () => {
+      const h = await renderCanvasWithTrace(splitByRule(), { focus: 'P', entityScope: 'all' })
+      act(() => { useHierarchyBuilderStore.setState({ isOpen: true, surface: 'build', layerId: 'left', parentUrn: null } as never) })
+      await h.settle()
+      expect(captured.build!.contractTypeLayerMap).toBeUndefined()
     })
 
     it('Build under a hand-placed parent: a row\'s own choice is written even where its rule agrees', async () => {

@@ -1988,15 +1988,16 @@ export function ContextViewCanvas({
     () => buildPlacements({ ...placementInputs, ancestry: placementAncestry }),
     [placementInputs, placementAncestry],
   )
-  // Flag-on: each says WHY it is apart from its parent — placed by hand, by its own stamp, or by a
-  // layer rule.
+  // Flag-on: each says WHY it is apart from its parent — placed by hand, by its own stamp, by a
+  // layer rule, inherited from another parent, or caught by the fallback layer.
   const placedApart = useMemo(() => {
     if (!contractPlacements) return placementResult.placements
     const out = new Map<string, PlacementInfo & { reason?: PlacedReason }>()
     placementResult.placements.forEach((info, id) => {
       const source = contractPlacements.get(id)?.source
       const reason: PlacedReason | undefined = source === 'rule' ? 'rule'
-        : source === 'stamped' ? 'stamp' : source === 'explicit' ? 'hand' : undefined
+        : source === 'stamped' ? 'stamp' : source === 'explicit' ? 'hand'
+        : source === 'inherited' || source === 'fallback' ? source : undefined
       out.set(id, reason ? { ...info, reason } : info)
     })
     return out
