@@ -39,6 +39,9 @@ import { BuildGrid } from './BuildGrid'
 import { BuildPaste } from './BuildPaste'
 import { useLayers } from '@/store/referenceModelStore'
 
+/** Flag-on (One Placement Contract): the layer Apply draws a new top-level row in. */
+export type ContractRowLayer = (row: Pick<BuildRow, 'name' | 'typeId' | 'tags' | 'properties' | 'layerId'>) => string | undefined
+
 export interface BuildPanelProps {
   onClose: () => void
   /** FALLBACK layer id (Context View only) — used when a row's TYPE maps to no
@@ -48,9 +51,10 @@ export interface BuildPanelProps {
    *  derived from the view's `sortedLayers[].entityTypes`. Each staged row's
    *  durable layer is resolved from this (else `layerId`). */
   typeLayerMap?: Map<string, string>
-  /** Flag-on (One Placement Contract): the contract's `typeId → layerId` map,
-   *  so the Grid's Layer cell and the Paste preview agree with Apply. */
-  contractTypeLayerMap?: Map<string, string>
+  /** Flag-on (One Placement Contract): the canvas's own Apply-time call for a
+   *  top-level row (its name, tags and properties count), so the Grid's Layer
+   *  cell, the Paste preview and the footer's placement line agree with Apply. */
+  contractRowLayer?: ContractRowLayer
   /** Fired per staged row (full row + urn) so the canvas can make the matching
    *  optimistic layer assignment / expand parents. */
   onRowStaged?: (row: BuildRow, urn: string, hasParent: boolean) => void
@@ -85,7 +89,7 @@ function Kbd({ children }: { children: React.ReactNode }) {
   )
 }
 
-export function BuildPanel({ onClose, layerId, typeLayerMap, contractTypeLayerMap, onRowStaged }: BuildPanelProps) {
+export function BuildPanel({ onClose, layerId, typeLayerMap, contractRowLayer, onRowStaged }: BuildPanelProps) {
   const parentUrn = useHierarchyBuilderStore((s) => s.parentUrn)
   const initialMode = useHierarchyBuilderStore((s) => s.initialMode)
   const [activeTab, setActiveTab] = useState<BuildTab>(initialMode === 'paste' || initialMode === 'grid' ? initialMode : 'outline')
@@ -131,20 +135,23 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractTypeLayerMa
 
   // Placement guidance (Task 8) — read-only: the view's own layer NAMES
   // (never hard-coded), for whichever column(s) the current rows actually
-  // resolve to via the SAME auto-by-type resolver Apply uses.
+  // resolve to via the SAME auto-by-type resolver Apply uses (flag-on, a
+  // top-level row through `contractRowLayer`, as Apply places it).
   const rawLayers = useLayers()
   const layerNameById = useMemo(() => new Map(rawLayers.map((l) => [l.id, l.name])), [rawLayers])
   const placementText = useMemo(() => {
     if (!typeLayerMap && !layerId) return null // non-layered canvas — nothing to say about columns
     const targets = new Set(
-      validated.map((r) => resolveRowLayer(r, { typeLayerMap: typeLayerMap ?? new Map(), fallbackLayerId: layerId })).filter((t): t is string => !!t),
+      validated.map((r) => (contractRowLayer && r.depth === 0
+        ? contractRowLayer(r)
+        : resolveRowLayer(r, { typeLayerMap: typeLayerMap ?? new Map(), fallbackLayerId: layerId }))).filter((t): t is string => !!t),
     )
     if (targets.size === 1) {
       const name = layerNameById.get([...targets][0])
       if (name) return `These land in ${name}.`
     }
     return 'Top-level entities go to their column; nested items stay under their parent.'
-  }, [typeLayerMap, layerId, validated, layerNameById])
+  }, [typeLayerMap, contractRowLayer, layerId, validated, layerNameById])
 
   const { stageBuildRows } = useStageBuildRows()
   const [applying, setApplying] = useState(false)
@@ -257,9 +264,9 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, contractTypeLayerMa
             {activeTab === 'outline' ? (
               <BuildOutline rows={validated} typeById={typeById} />
             ) : activeTab === 'grid' ? (
-              <BuildGrid rows={validated} typeById={typeById} fallbackLayerId={layerId} contractTypeLayerMap={contractTypeLayerMap} />
+              <BuildGrid rows={validated} typeById={typeById} fallbackLayerId={layerId} contractRowLayer={contractRowLayer} />
             ) : (
-              <BuildPaste ctx={ctx} typeById={typeById} rootParentType={parentType?.id ?? null} contractTypeLayerMap={contractTypeLayerMap} />
+              <BuildPaste ctx={ctx} typeById={typeById} rootParentType={parentType?.id ?? null} contractRowLayer={contractRowLayer} />
             )}
           </div>
 

@@ -1,10 +1,10 @@
 /**
  * usePlacementChains — the containment chains the placement contract climbs for loaded entities
  * whose parent is not loaded. Chunks of 500, two at a time; each URN asked once; an unanswered one
- * asked again on the next change, five asks at most; a reader with no containment walk (501) left
- * alone; a provider switch forgets everything, late answers included.
+ * asked again on the next change, five asks at most, then once more five minutes on; a reader with
+ * no containment walk (501) left alone; a provider switch forgets everything, late answers included.
  */
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 const holder: { current: Record<string, unknown> } = { current: {} }
@@ -66,6 +66,53 @@ describe('usePlacementChains', () => {
     }
     expect(getAncestorChains.mock.calls.map(([urns]) => urns)).toEqual([['a', 'b'], ['b', 'c'], ['b'], ['b'], ['b']])
     expect(result.current.has('b')).toBe(false)
+  })
+
+  it('asks a given-up URN once more five minutes on, so a passing overload does not leave it unknown', async () => {
+    vi.useFakeTimers()
+    try {
+      const shed = Object.assign(new Error('shed'), { status: 429 })
+      const getAncestorChains = vi.fn(async (urns: string[]) => rootChains(urns))
+      for (let i = 0; i < 5; i++) getAncestorChains.mockRejectedValueOnce(shed)
+      holder.current = { getAncestorChains }
+      const pass = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+
+      const { result, rerender } = mount(['a'])
+      await pass(0)
+      for (let i = 0; i < 6; i++) {
+        rerender({ urns: ['a'] })
+        await pass(0)
+      }
+      expect(getAncestorChains).toHaveBeenCalledTimes(5)
+      expect(result.current.has('a')).toBe(false)              // given up on: unknown
+
+      await pass(5 * 60_000 - 1_000)
+      expect(getAncestorChains).toHaveBeenCalledTimes(5)
+      await pass(1_000)
+      expect(getAncestorChains).toHaveBeenCalledTimes(6)
+      expect(result.current.get('a')).toEqual(['root'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops a given-up URN\'s wait on unmount', async () => {
+    vi.useFakeTimers()
+    try {
+      holder.current = { getAncestorChains: vi.fn(async () => ({})) }
+      const pass = () => act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      const { rerender, unmount } = mount(['a'])
+      await pass()
+      for (let i = 0; i < 4; i++) {
+        rerender({ urns: ['a'] })
+        await pass()
+      }
+      expect(vi.getTimerCount()).toBe(1)
+      unmount()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('stops asking a reader with no containment walk (501)', async () => {

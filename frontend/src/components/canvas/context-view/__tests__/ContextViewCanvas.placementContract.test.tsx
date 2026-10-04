@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 import { useHierarchyBuilderStore } from '@/components/canvas/create/hierarchyBuilderStore'
+import type { ContractRowLayer } from '@/components/canvas/create/buildmode/BuildPanel'
 import type { BuildRow } from '@/components/canvas/create/buildmode/buildRow'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { useAuthStore } from '@/store/auth'
@@ -27,7 +28,7 @@ import type { ViewLayerConfig } from '@/types/schema'
 // canvas's placement of what they stage, not their own UI.
 const captured: {
   rail?: { onEntityStaged?: (tempUrn: string, parentUrn?: string) => void }
-  build?: { onRowStaged?: (row: BuildRow, urn: string, hasParent: boolean) => void; contractTypeLayerMap?: Map<string, string> }
+  build?: { onRowStaged?: (row: BuildRow, urn: string, hasParent: boolean) => void; contractRowLayer?: ContractRowLayer }
 } = {}
 vi.mock('@/components/canvas/create/HierarchyBuilderPanel', () => ({
   HierarchyBuilderPanel: (props: typeof captured.rail) => { captured.rail = props; return null },
@@ -212,15 +213,38 @@ describe('the canvas under the One Placement Contract', () => {
       expect(viewAssignments()['urn:staged:dataset:r1']).toBeUndefined()
       expect(viewAssignments()['urn:staged:misc:r2']?.layerId).toBe('left')
       expect(viewAssignments()['urn:staged:container:r3']?.layerId).toBe('right')
-      // The Grid and Paste previews get the same type map Apply uses.
-      expect(captured.build!.contractTypeLayerMap?.get('dataset')).toBe('right')
+      // The Grid and Paste previews run the same call: each row previews the column Apply gave it.
+      const preview = captured.build!.contractRowLayer!
+      expect(preview(row('r1', 'dataset'))).toBe('right')
+      expect(preview(row('r2', 'misc'))).toBe('left')
+      expect(preview(row('r3', 'container', { layerId: 'right' }))).toBe('right')
     })
 
-    it('Build, flag off: no contract type map for the Grid and Paste previews', async () => {
+    it('Build, open view: the preview reads the row\'s name as Apply does', async () => {
+      const h = await renderCanvasWithTrace(estate([wn('P', 'container')], [], [
+        layer('left', 'Left', 0, ['container', 'dataset']),
+        { ...layer('right', 'Right', 1), rules: [{
+          id: 'raw', entityTypes: ['dataset'], priority: 5, conditions: [{ field: 'name', operator: 'startsWith', value: 'raw' }],
+        }] },
+      ]), { focus: 'P', entityScope: 'all', placementContract: true })
+      act(() => { useHierarchyBuilderStore.setState({ isOpen: true, surface: 'build', layerId: 'left', parentUrn: null } as never) })
+      await h.settle()
+      expect(captured.build!.contractRowLayer!(row('raw_orders', 'dataset'))).toBe('right')
+      expect(captured.build!.contractRowLayer!(row('orders', 'dataset'))).toBe('left')
+      // Apply: neither needs an entry, the rule already draws each where the preview says.
+      act(() => {
+        captured.build!.onRowStaged!(row('raw_orders', 'dataset'), 'urn:staged:dataset:raw_orders', false)
+        captured.build!.onRowStaged!(row('orders', 'dataset'), 'urn:staged:dataset:orders', false)
+      })
+      expect(viewAssignments()['urn:staged:dataset:raw_orders']).toBeUndefined()
+      expect(viewAssignments()['urn:staged:dataset:orders']).toBeUndefined()
+    })
+
+    it('Build, flag off: no contract preview for the Grid and Paste', async () => {
       const h = await renderCanvasWithTrace(splitByRule(), { focus: 'P', entityScope: 'all' })
       act(() => { useHierarchyBuilderStore.setState({ isOpen: true, surface: 'build', layerId: 'left', parentUrn: null } as never) })
       await h.settle()
-      expect(captured.build!.contractTypeLayerMap).toBeUndefined()
+      expect(captured.build!.contractRowLayer).toBeUndefined()
     })
 
     it('Build under a hand-placed parent: a row\'s own choice is written even where its rule agrees', async () => {

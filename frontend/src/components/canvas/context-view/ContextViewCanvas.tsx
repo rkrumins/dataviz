@@ -92,7 +92,7 @@ import { RelationshipDrawer } from '../../panels/RelationshipDrawer'
 import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeTarget'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
-import { BuildPanel } from '../create/buildmode/BuildPanel'
+import { BuildPanel, type ContractRowLayer } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, buildTypeLayerMapFromContract, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
 import { DataLoadsPanel } from './DataLoadsPanel'
@@ -255,6 +255,10 @@ function contractPin(
 ): string | undefined {
   const suggested = suggestPlacement(spec, facts, { chosenLayerId, defaultLayerId })
   return suggested.pin ? suggested.layerId ?? undefined : undefined
+}
+/** A Build row's facts for the contract: one builder for Apply (onRowStaged) and its preview. */
+function buildRowFacts(row: Parameters<ContractRowLayer>[0], urn: string): PlacementFacts {
+  return factsFromCanvasData({ type: row.typeId, label: row.name, classifications: row.tags, properties: row.properties }, urn)
 }
 /** Trailing edge for recording the reader's expansion into the history
  *  entry. One reveal opens a whole chain and one drill peels a level per
@@ -5857,6 +5861,13 @@ export function ContextViewCanvas({
   const buildTypeLayerMapMemo = useMemo(
     () => (placementSpec ? buildTypeLayerMapFromContract(placementSpec) : buildTypeLayerMap(sortedLayers)),
     [placementSpec, sortedLayers])
+  // Flag-on: the layer onRowStaged's contract call puts a top-level row in, pinned or not, for the
+  // Grid's Layer cell and the Paste preview. Before Apply a row has no urn, so a urnPattern rule is
+  // matched against an empty one there.
+  const buildContractRowLayer = useMemo<ContractRowLayer | undefined>(() => (placementSpec
+    ? row => suggestPlacement(placementSpec, buildRowFacts(row, ''),
+      { chosenLayerId: row.layerId, defaultLayerId: buildLayerId }).layerId ?? undefined
+    : undefined), [placementSpec, buildLayerId])
 
   // The drawers are memoised: what this canvas hands them must keep its identity across renders.
   const drawerTraceUp = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'up'), [startCanvasTrace])
@@ -7042,7 +7053,7 @@ export function ContextViewCanvas({
             onClose={() => useHierarchyBuilderStore.getState().close()}
             layerId={buildLayerId}
             typeLayerMap={buildTypeLayerMapMemo}
-            contractTypeLayerMap={placementSpec ? buildTypeLayerMapMemo : undefined}
+            contractRowLayer={buildContractRowLayer}
             onRowStaged={(row, urn, hasParent) => {
               // A top-level row is placed auto-by-type; a row with a parent follows its parent (see
               // onEntityStaged) unless the user chose its layer explicitly. Writes the canonical
@@ -7053,9 +7064,7 @@ export function ContextViewCanvas({
               const layer = hasParent && !row.layerId
                 ? undefined
                 : placementSpec && !hasParent
-                  ? contractPin(placementSpec,
-                    factsFromCanvasData({ type: row.typeId, label: row.name, classifications: row.tags, properties: row.properties }, urn),
-                    row.layerId, buildLayerId)
+                  ? contractPin(placementSpec, buildRowFacts(row, urn), row.layerId, buildLayerId)
                   : resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
               if (layer) {
                 assignEntityToLayer(urn, layer)

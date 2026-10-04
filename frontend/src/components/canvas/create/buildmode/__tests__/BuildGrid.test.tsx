@@ -11,12 +11,12 @@
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest'
-import { compilePlacementSpec } from '@/lib/placement/placement'
+import { compilePlacementSpec, factsFromCanvasData, suggestPlacement } from '@/lib/placement/placement'
 import type { EntityTypeSchema, ViewLayerConfig } from '@/types/schema'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useBuildRowsStore } from '../buildRowsStore'
 import { makeRow, type BuildRow } from '../buildRow'
-import { buildTypeLayerMapFromContract } from '../resolveRowLayer'
+import type { ContractRowLayer } from '../BuildPanel'
 
 const { entityTypes } = vi.hoisted(() => ({
   entityTypes: [
@@ -162,19 +162,51 @@ describe('BuildGrid Layer column', () => {
     expect(screen.getByText(/nested/i)).toBeInTheDocument()
   })
 
-  // Flag-on (One Placement Contract): the cell shows the column Apply puts the row in, which an
-  // authored rule can decide over a layer's entityTypes.
-  it('with the contract\'s map, an authored rule\'s priority beats a layer\'s entityTypes', () => {
+  // Flag-on (One Placement Contract): a top-level row's cell runs the call Apply makes, so a rule on
+  // the row's name counts, not only its type.
+  describe('with the contract', () => {
     const layers: ViewLayerConfig[] = [
       { id: 'a', name: 'Layer A', entityTypes: ['dataset'], order: 0 },
-      { id: 'b', name: 'Layer B', entityTypes: [], order: 1, rules: [{ id: 'r', entityTypes: ['dataset'], priority: 5 }] },
+      { id: 'b', name: 'Layer B', entityTypes: [], order: 1, rules: [{
+        id: 'raw', entityTypes: ['dataset'], priority: 5, conditions: [{ field: 'name', operator: 'startsWith', value: 'raw' }],
+      }] },
     ]
-    useReferenceModelStore.getState().setLayers(layers)
-    const contractTypeLayerMap = buildTypeLayerMapFromContract(compilePlacementSpec({ layout: { referenceLayout: { layers } } }))
-    useBuildRowsStore.getState().setRows([makeRow({ id: 'a', name: 'Alpha', typeId: 'dataset' })])
-    render(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} contractTypeLayerMap={contractTypeLayerMap} />)
+    // What the canvas hands BuildPanel (ContextViewCanvas's buildContractRowLayer).
+    const spec = compilePlacementSpec({ layout: { referenceLayout: { layers } } })
+    const contractRowLayer: ContractRowLayer = (row) => suggestPlacement(spec,
+      factsFromCanvasData({ type: row.typeId, label: row.name, classifications: row.tags, properties: row.properties }, ''),
+      { chosenLayerId: row.layerId }).layerId ?? undefined
+    beforeEach(() => useReferenceModelStore.getState().setLayers(layers))
 
-    expect(screen.getByRole('button', { name: 'Layer for Alpha' })).toHaveTextContent('Layer B')
+    it('a top-level row shows the column Apply puts it in, its name counting', () => {
+      useBuildRowsStore.getState().setRows([
+        makeRow({ id: 'r1', name: 'raw_orders', typeId: 'dataset' }),
+        makeRow({ id: 'r2', name: 'orders', typeId: 'dataset' }),
+      ])
+      render(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} contractRowLayer={contractRowLayer} />)
+
+      expect(screen.getByRole('button', { name: 'Layer for raw_orders' })).toHaveTextContent('Layer B')
+      expect(screen.getByRole('button', { name: 'Layer for orders' })).toHaveTextContent('Layer A')
+    })
+
+    it('a chosen layer wins, and Auto still names the column the contract picks', () => {
+      useBuildRowsStore.getState().setRows([{ ...makeRow({ id: 'r1', name: 'raw_orders', typeId: 'dataset' }), layerId: 'a' }])
+      render(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} contractRowLayer={contractRowLayer} />)
+
+      expect(screen.getByRole('button', { name: 'Layer for raw_orders' })).toHaveTextContent('Layer A')
+      fireEvent.click(screen.getByRole('button', { name: 'Layer for raw_orders' }))
+      expect(screen.getByRole('button', { name: /^Auto/ })).toHaveTextContent('Auto (Layer B)')
+    })
+
+    it('a nested row says its own layer rule can claim it', () => {
+      useBuildRowsStore.getState().setRows([
+        makeRow({ id: 'r1', name: 'orders', typeId: 'dataset' }),
+        makeRow({ id: 'r2', name: 'raw_lines', typeId: 'dataset', parentId: 'r1' }),
+      ])
+      render(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} contractRowLayer={contractRowLayer} />)
+
+      expect(screen.getByText(/nested/i).getAttribute('title')).toMatch(/unless its own layer rule claims it/)
+    })
   })
 })
 
