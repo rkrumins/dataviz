@@ -6,8 +6,9 @@
  *
  * URNs only, no names. Batched through the provider's bulk chain lookup, CHUNK URNs per request and
  * CONCURRENCY requests at a time. Each URN is asked once; one the provider could not answer is asked
- * again on the next change. A reader without the containment walk (501) is not asked again. A new
- * provider is a new graph, so everything is forgotten.
+ * again on the next change, up to MAX_ATTEMPTS asks in all, and then left unknown (no retry timer).
+ * A reader without the containment walk (501) is not asked again. A new provider is a new graph, so
+ * everything is forgotten.
  *
  * Returns urn → its ancestors, PARENT FIRST, root last ([] = a root). An absent urn is UNKNOWN.
  */
@@ -23,6 +24,8 @@ const NONE: Chains = new Map()
 /** The route answers up to 1,000 URNs; the same chunk as the other chain readers. */
 const CHUNK = 500
 const CONCURRENCY = 2
+/** Asks per URN before it is left unknown, as useAncestorChains gives up. */
+const MAX_ATTEMPTS = 5
 
 export function usePlacementChains(urns: readonly string[]): Chains {
   const provider = useGraphProvider()
@@ -30,16 +33,25 @@ export function usePlacementChains(urns: readonly string[]): Chains {
   const [known, setKnown] = useState<{ provider: GraphDataProvider | null; chains: Chains }>({ provider: null, chains: NONE })
   const providerRef = useRef<GraphDataProvider | null>(null)
   const askedRef = useRef(new Set<string>())
+  const attemptsRef = useRef(new Map<string, number>())
   const unsupportedRef = useRef(false)
 
   useEffect(() => {
     if (providerRef.current !== provider) {
       providerRef.current = provider
       askedRef.current = new Set()
+      attemptsRef.current = new Map()
       unsupportedRef.current = false
     }
     if (unsupportedRef.current || typeof provider.getAncestorChains !== 'function') return
     const asked = askedRef.current
+    const attempts = attemptsRef.current
+    // Unknown: asked again on a later change, until it has been asked MAX_ATTEMPTS times.
+    const again = (urn: string) => {
+      const n = (attempts.get(urn) ?? 0) + 1
+      attempts.set(urn, n)
+      if (n < MAX_ATTEMPTS) asked.delete(urn)
+    }
     const wanted = urns.filter(u => !asked.has(u))
     if (wanted.length === 0) return
     wanted.forEach(u => asked.add(u))
@@ -53,12 +65,12 @@ export function usePlacementChains(urns: readonly string[]): Chains {
           for (const urn of chunks[i]) {
             const chain = result.value[urn]
             if (chain) found.set(urn, chain)
-            else asked.delete(urn)                             // unknown: asked again later
+            else again(urn)
           }
         } else if ((result.reason as { status?: number } | undefined)?.status === 501) {
           unsupportedRef.current = true                        // no containment walk on this reader
         } else {
-          chunks[i].forEach(urn => asked.delete(urn))
+          chunks[i].forEach(again)
         }
       })
       if (found.size === 0) return

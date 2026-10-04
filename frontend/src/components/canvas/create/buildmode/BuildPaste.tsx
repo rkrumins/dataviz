@@ -35,6 +35,8 @@ export interface BuildPasteProps {
    *  level — feeds `parseIndentedOutline`'s `rootParentType` so the preview's
    *  legality matches the panel's own scope banner. */
   rootParentType: string | null
+  /** Flag-on: the contract's `typeId → layerId` map (`BuildPanelProps.contractTypeLayerMap`). */
+  contractTypeLayerMap?: Map<string, string>
 }
 
 const PLACEHOLDER = 'Sales Domain\n  Customers Platform\n    Orders Dataset'
@@ -82,7 +84,7 @@ function TypeChip({ type }: { type?: EntityTypeSchema }) {
   )
 }
 
-export function BuildPaste({ ctx, typeById, rootParentType }: BuildPasteProps) {
+export function BuildPaste({ ctx, typeById, rootParentType, contractTypeLayerMap }: BuildPasteProps) {
   const [text, setText] = useState('')
   const rawRows = useBuildRowsStore((s) => s.rows)
   const setRows = useBuildRowsStore((s) => s.setRows)
@@ -95,7 +97,7 @@ export function BuildPaste({ ctx, typeById, rootParentType }: BuildPasteProps) {
   // column derives from, so a row's previewed target always matches Apply-time placement.
   const rawLayers = useLayers()
   const sortedLayers = useMemo(() => [...rawLayers].sort((a, b) => a.order - b.order), [rawLayers])
-  const typeLayerMap = useMemo(() => buildTypeLayerMap(sortedLayers), [sortedLayers])
+  const typeLayerMap = useMemo(() => contractTypeLayerMap ?? buildTypeLayerMap(sortedLayers), [contractTypeLayerMap, sortedLayers])
   const layerNameById = useMemo(() => new Map(sortedLayers.map((l) => [l.id, l.name])), [sortedLayers])
 
   const rowsToAdd = useMemo(() => toBuildRows(parsed), [parsed])

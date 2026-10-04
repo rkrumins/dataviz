@@ -1784,7 +1784,7 @@ export function ContextViewCanvas({
 
   // Flag-on, and only while some valid entry cascades: a loaded node with no loaded parent and no
   // valid entry of its own asks for its containment chain, so a hand placement on an ancestor the
-  // canvas never loaded still reaches it.
+  // canvas never loaded still reaches it. Not a pending create: no server knows its temp urn.
   const placementChainUrns = useMemo(() => {
     if (!placementSpec?.hasCascadingExplicit) return NO_URNS
     const out: string[] = []
@@ -1793,7 +1793,7 @@ export function ContextViewCanvas({
       if (parent !== undefined && nodeMap.has(parent)) continue
       const own = placementSpec.explicit.get(n.id)
       if (own && placementSpec.layerIds.has(own.layerId)) continue
-      if (!n.id.startsWith('logical:')) out.push(n.id)
+      if (!n.id.startsWith('logical:') && !assignmentOps.isTempUrn(n.id)) out.push(n.id)
     }
     return out
   }, [placementSpec, nodes, parentMap, nodeMap])
@@ -1988,14 +1988,15 @@ export function ContextViewCanvas({
     () => buildPlacements({ ...placementInputs, ancestry: placementAncestry }),
     [placementInputs, placementAncestry],
   )
-  // Flag-on: each says WHY it is apart from its parent — placed by hand, or by a layer rule.
+  // Flag-on: each says WHY it is apart from its parent — placed by hand, by its own stamp, or by a
+  // layer rule.
   const placedApart = useMemo(() => {
     if (!contractPlacements) return placementResult.placements
     const out = new Map<string, PlacementInfo & { reason?: PlacedReason }>()
     placementResult.placements.forEach((info, id) => {
       const source = contractPlacements.get(id)?.source
       const reason: PlacedReason | undefined = source === 'rule' ? 'rule'
-        : source === 'explicit' || source === 'stamped' ? 'hand' : undefined
+        : source === 'stamped' ? 'stamp' : source === 'explicit' ? 'hand' : undefined
       out.set(id, reason ? { ...info, reason } : info)
     })
     return out
@@ -7040,14 +7041,17 @@ export function ContextViewCanvas({
             onClose={() => useHierarchyBuilderStore.getState().close()}
             layerId={buildLayerId}
             typeLayerMap={buildTypeLayerMapMemo}
+            contractTypeLayerMap={placementSpec ? buildTypeLayerMapMemo : undefined}
             onRowStaged={(row, urn, hasParent) => {
               // A top-level row is placed auto-by-type; a row with a parent follows its parent (see
               // onEntityStaged) unless the user chose its layer explicitly. Writes the canonical
               // view-config entry (keyed by the row's temp urn, remapped to its real urn on save)
               // plus the optimistic session assignment for immediate display.
+              // Flag-on: the contract's write policy covers roots only; a parented row's own choice
+              // is always written, or a hand-placed parent would draw it in the parent's column.
               const layer = hasParent && !row.layerId
                 ? undefined
-                : placementSpec
+                : placementSpec && !hasParent
                   ? contractPin(placementSpec,
                     factsFromCanvasData({ type: row.typeId, label: row.name, classifications: row.tags, properties: row.properties }, urn),
                     row.layerId, buildLayerId)

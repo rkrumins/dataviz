@@ -59,6 +59,8 @@ export interface BuildGridProps {
    *  default via `resolveRowLayer` so the Grid's displayed default always
    *  matches Apply-time placement (`resolveRowLayer.ts`). */
   fallbackLayerId?: string
+  /** Flag-on: the contract's `typeId → layerId` map (`BuildPanelProps.contractTypeLayerMap`). */
+  contractTypeLayerMap?: Map<string, string>
 }
 
 const ROW_HEIGHT = 44
@@ -550,7 +552,7 @@ function FillDownBar({
   )
 }
 
-export function BuildGrid({ rows, typeById, fallbackLayerId }: BuildGridProps) {
+export function BuildGrid({ rows, typeById, fallbackLayerId, contractTypeLayerMap }: BuildGridProps) {
   const rawRows = useBuildRowsStore((s) => s.rows)
   const addSibling = useBuildRowsStore((s) => s.addSibling)
   const addChild = useBuildRowsStore((s) => s.addChild)
@@ -565,7 +567,7 @@ export function BuildGrid({ rows, typeById, fallbackLayerId }: BuildGridProps) {
   // matches Apply-time placement.
   const rawLayers = useLayers()
   const sortedLayers = useMemo(() => [...rawLayers].sort((a, b) => a.order - b.order), [rawLayers])
-  const typeLayerMap = useMemo(() => buildTypeLayerMap(sortedLayers), [sortedLayers])
+  const typeLayerMap = useMemo(() => contractTypeLayerMap ?? buildTypeLayerMap(sortedLayers), [contractTypeLayerMap, sortedLayers])
 
   const rawIdSet = useMemo(() => new Set(rawRows.map((r) => r.id)), [rawRows])
   const displayIds = useMemo(() => rows.map((r) => r.id), [rows])

@@ -4,9 +4,10 @@
  * With the flag on, the canvas compiles one spec from the layers it renders and places every
  * loaded entity locally: the backend compute is never asked, a hand placement on an ancestor the
  * canvas never loaded still reaches a deep entity (through its fetched chain), a child its own
- * rule puts in another column carries the Placed tag naming why, rail and Build Mode pin a new
- * entity only when the view is curated or the contract would place it elsewhere, and the drawer's
- * auto-scroll follows the column an entity is actually drawn in.
+ * rule or stamp puts in another column carries the Placed tag naming why, rail and Build Mode pin a
+ * new root only when the view is curated or the contract would place it elsewhere (a parented Build
+ * row's own choice always), and the drawer's auto-scroll follows the column an entity is actually
+ * drawn in.
  */
 import { act, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -134,6 +135,21 @@ describe('the canvas under the One Placement Contract', () => {
     expect(document.querySelector('#layer-node-K button[aria-label^="Return "]')).not.toBeNull()
   })
 
+  it('a child its own stamp puts in another column says so, and offers no return', async () => {
+    const h = await renderCanvasWithTrace(estate(
+      [wn('P', 'container', 1), wn('K', 'dataset')], [['P', 'K']],
+      [layer('left', 'Left', 0, ['container']), layer('right', 'Right', 1)],
+    ), { focus: 'P', entityScope: 'all', placementContract: true })
+    // The harness's wire nodes carry no stamp: give K its own layerAssignment.
+    act(() => { useCanvasStore.getState().updateNode('K', { layerAssignment: 'right' } as never) })
+    await h.settle()
+    expect(columnOf('K')).toBe('right')
+    expect(document.querySelector('#layer-node-K button[title^="Placed in"]')?.getAttribute('title'))
+      .toMatch(/^Placed in Right by the entity's own layer setting\. In the data/)
+    // The stamp lives on the entity, not in a view entry a return could remove.
+    expect(document.querySelector('#layer-node-K button[aria-label^="Return "]')).toBeNull()
+  })
+
   describe('rail and Build Mode pin a new root only when they must', () => {
     const stagedNode = (urn: string, type: string) => ({
       id: urn, type: 'generic', position: { x: 0, y: 0 },
@@ -182,6 +198,17 @@ describe('the canvas under the One Placement Contract', () => {
       expect(viewAssignments()['urn:staged:dataset:r1']).toBeUndefined()
       expect(viewAssignments()['urn:staged:misc:r2']?.layerId).toBe('left')
       expect(viewAssignments()['urn:staged:container:r3']?.layerId).toBe('right')
+    })
+
+    it('Build under a hand-placed parent: a row\'s own choice is written even where its rule agrees', async () => {
+      const h = await renderCanvasWithTrace(estate([wn('X', 'container')], [], [
+        layer('left', 'Left', 0, ['container']), layer('right', 'Right', 1, ['dataset']), layer('far', 'Far', 2),
+      ], { X: { layerId: 'far' } }), { focus: 'X', entityScope: 'all', placementContract: true })
+      act(() => { useHierarchyBuilderStore.setState({ isOpen: true, surface: 'build', layerId: null, parentUrn: 'X' } as never) })
+      await h.settle()
+      // Without its own entry it would follow X's hand placement into Far.
+      act(() => { captured.build!.onRowStaged!(row('r', 'dataset', { layerId: 'right' }), 'urn:staged:dataset:r', true) })
+      expect(viewAssignments()['urn:staged:dataset:r']?.layerId).toBe('right')
     })
   })
 

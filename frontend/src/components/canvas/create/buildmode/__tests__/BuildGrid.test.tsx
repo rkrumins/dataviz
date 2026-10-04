@@ -11,10 +11,12 @@
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest'
-import type { EntityTypeSchema } from '@/types/schema'
+import { compilePlacementSpec } from '@/lib/placement/placement'
+import type { EntityTypeSchema, ViewLayerConfig } from '@/types/schema'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useBuildRowsStore } from '../buildRowsStore'
 import { makeRow, type BuildRow } from '../buildRow'
+import { buildTypeLayerMapFromContract } from '../resolveRowLayer'
 
 const { entityTypes } = vi.hoisted(() => ({
   entityTypes: [
@@ -158,6 +160,21 @@ describe('BuildGrid Layer column', () => {
     // Nested row: no editable Layer button — it isn't placed by its own type.
     expect(screen.queryByRole('button', { name: 'Layer for Beta' })).not.toBeInTheDocument()
     expect(screen.getByText(/nested/i)).toBeInTheDocument()
+  })
+
+  // Flag-on (One Placement Contract): the cell shows the column Apply puts the row in, which an
+  // authored rule can decide over a layer's entityTypes.
+  it('with the contract\'s map, an authored rule\'s priority beats a layer\'s entityTypes', () => {
+    const layers: ViewLayerConfig[] = [
+      { id: 'a', name: 'Layer A', entityTypes: ['dataset'], order: 0 },
+      { id: 'b', name: 'Layer B', entityTypes: [], order: 1, rules: [{ id: 'r', entityTypes: ['dataset'], priority: 5 }] },
+    ]
+    useReferenceModelStore.getState().setLayers(layers)
+    const contractTypeLayerMap = buildTypeLayerMapFromContract(compilePlacementSpec({ layout: { referenceLayout: { layers } } }))
+    useBuildRowsStore.getState().setRows([makeRow({ id: 'a', name: 'Alpha', typeId: 'dataset' })])
+    render(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} contractTypeLayerMap={contractTypeLayerMap} />)
+
+    expect(screen.getByRole('button', { name: 'Layer for Alpha' })).toHaveTextContent('Layer B')
   })
 })
 

@@ -48,6 +48,9 @@ export interface BuildPanelProps {
    *  derived from the view's `sortedLayers[].entityTypes`. Each staged row's
    *  durable layer is resolved from this (else `layerId`). */
   typeLayerMap?: Map<string, string>
+  /** Flag-on (One Placement Contract): the contract's `typeId → layerId` map,
+   *  so the Grid's Layer cell and the Paste preview agree with Apply. */
+  contractTypeLayerMap?: Map<string, string>
   /** Fired per staged row (full row + urn) so the canvas can make the matching
    *  optimistic layer assignment / expand parents. */
   onRowStaged?: (row: BuildRow, urn: string, hasParent: boolean) => void
@@ -82,7 +85,7 @@ function Kbd({ children }: { children: React.ReactNode }) {
   )
 }
 
-export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: BuildPanelProps) {
+export function BuildPanel({ onClose, layerId, typeLayerMap, contractTypeLayerMap, onRowStaged }: BuildPanelProps) {
   const parentUrn = useHierarchyBuilderStore((s) => s.parentUrn)
   const initialMode = useHierarchyBuilderStore((s) => s.initialMode)
   const [activeTab, setActiveTab] = useState<BuildTab>(initialMode === 'paste' || initialMode === 'grid' ? initialMode : 'outline')
@@ -254,9 +257,9 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
             {activeTab === 'outline' ? (
               <BuildOutline rows={validated} typeById={typeById} />
             ) : activeTab === 'grid' ? (
-              <BuildGrid rows={validated} typeById={typeById} fallbackLayerId={layerId} />
+              <BuildGrid rows={validated} typeById={typeById} fallbackLayerId={layerId} contractTypeLayerMap={contractTypeLayerMap} />
             ) : (
-              <BuildPaste ctx={ctx} typeById={typeById} rootParentType={parentType?.id ?? null} />
+              <BuildPaste ctx={ctx} typeById={typeById} rootParentType={parentType?.id ?? null} contractTypeLayerMap={contractTypeLayerMap} />
             )}
           </div>
 

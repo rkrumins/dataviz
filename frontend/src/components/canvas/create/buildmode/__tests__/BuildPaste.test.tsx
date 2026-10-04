@@ -13,9 +13,11 @@
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, beforeEach } from 'vitest'
-import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
+import { compilePlacementSpec } from '@/lib/placement/placement'
+import type { EntityTypeSchema, RelationshipTypeSchema, ViewLayerConfig } from '@/types/schema'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useBuildRowsStore } from '../buildRowsStore'
+import { buildTypeLayerMapFromContract } from '../resolveRowLayer'
 import type { BuildOntologyCtx } from '../validateBuildRows'
 import type { ParsedOutlineRow } from '../../outlineParser'
 import { BuildPaste, toBuildRows } from '../BuildPaste'
@@ -151,5 +153,20 @@ describe('BuildPaste component', () => {
     expect(screen.getByRole('button', { name: /Add 1 item/i })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Add 1 item/i }))
     expect(useBuildRowsStore.getState().rows.map((r) => r.name)).toEqual(['Sales'])
+  })
+
+  // Flag-on (One Placement Contract): the preview names the column Apply puts the row in.
+  it('with the contract\'s map, previews the column an authored rule picks over a layer\'s entityTypes', () => {
+    const layers: ViewLayerConfig[] = [
+      { id: 'lay-domain', name: 'Domain Column', entityTypes: ['domain'], order: 0 },
+      { id: 'lay-rule', name: 'Rule Column', entityTypes: [], order: 1, rules: [{ id: 'r', entityTypes: ['domain'], priority: 5 }] },
+    ]
+    useReferenceModelStore.getState().setLayers(layers)
+    const contractTypeLayerMap = buildTypeLayerMapFromContract(compilePlacementSpec({ layout: { referenceLayout: { layers } } }))
+    render(<BuildPaste ctx={ctx} typeById={typeById} rootParentType={null} contractTypeLayerMap={contractTypeLayerMap} />)
+    fireEvent.change(screen.getByPlaceholderText(/Sales/i), { target: { value: 'Sales' } })
+
+    expect(screen.getByText(/Rule Column/)).toBeInTheDocument()
+    expect(screen.queryByText(/Domain Column/)).not.toBeInTheDocument()
   })
 })

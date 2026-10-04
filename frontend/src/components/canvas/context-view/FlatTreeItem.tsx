@@ -29,9 +29,10 @@ import { useReparentNode } from './useReparentNode'
 import { LineEndTag } from './LineEndTag'
 import type { LineEnd } from './lineEnd'
 
-/** Why a row is placed apart from its parent (One Placement Contract, flag-on): by hand — an
- *  explicit entry, a drag, a stamp — or by a layer rule matching it. */
-export type PlacedReason = 'hand' | 'rule'
+/** Why a row is placed apart from its parent (One Placement Contract, flag-on): by hand (an
+ *  explicit entry or a drag), by a stamp (the entity's own layerAssignment), or by a layer rule
+ *  matching it. */
+export type PlacedReason = 'hand' | 'rule' | 'stamp'
 
 /** Which modifier keys were held when a row was clicked. */
 export interface RowSelectModifiers {
@@ -843,8 +844,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             placement={placement}
             entityName={node.name}
             onReveal={onRevealPlacement}
-            // A layer rule put it here, not an entry a return could remove.
-            onReturn={onReturnPlacement && placement.reason !== 'rule' ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
+            // A layer rule or the entity's own stamp put it here, not an entry a return could remove.
+            onReturn={onReturnPlacement && (placement.reason === undefined || placement.reason === 'hand') ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
           />
         )}
         {placedOut && <PlacedOutNote placedOut={placedOut} parentName={node.name} />}
@@ -1080,7 +1081,11 @@ function PlacementPath({ placement, entityName, onReveal, onReturn }: {
   const full = `${lead}${names.join(' › ')}`
   const parentName = names[names.length - 1] ?? 'its parent'
   const by = placement.reason === 'rule' ? ' by a layer rule' : placement.reason === 'hand' ? ' by hand' : ''
-  const explain = `Placed in ${placement.placedLayerName}${by} for this view only — the data source is unchanged. `
+  // A stamp lives on the entity, not only in this view.
+  const how = placement.reason === 'stamp'
+    ? `Placed in ${placement.placedLayerName} by the entity's own layer setting. `
+    : `Placed in ${placement.placedLayerName}${by} for this view only — the data source is unchanged. `
+  const explain = how
     + `In the data, ${entityName} is part of ${full} (shown in ${placement.parentLayerName}). `
     + 'Click to go to its parent.'
   return (

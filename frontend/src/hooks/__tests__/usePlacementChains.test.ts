@@ -1,8 +1,8 @@
 /**
  * usePlacementChains — the containment chains the placement contract climbs for loaded entities
  * whose parent is not loaded. Chunks of 500, two at a time; each URN asked once; an unanswered one
- * asked again on the next change; a reader with no containment walk (501) left alone; a provider
- * switch forgets everything, late answers included.
+ * asked again on the next change, five asks at most; a reader with no containment walk (501) left
+ * alone; a provider switch forgets everything, late answers included.
  */
 import { renderHook, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
@@ -47,7 +47,7 @@ describe('usePlacementChains', () => {
     expect(result.current.get('u7')).toEqual(['root'])
   })
 
-  it('asks each URN once across renders, and asks again for one the provider left out', async () => {
+  it('asks each URN once across renders, and asks again for one the provider left out, five times at most', async () => {
     const getAncestorChains = vi.fn(async (urns: string[]) =>
       Object.fromEntries(urns.filter(u => u !== 'b').map(u => [u, []])))
     holder.current = { getAncestorChains }
@@ -58,6 +58,14 @@ describe('usePlacementChains', () => {
     rerender({ urns: ['a', 'b', 'c'] })
     await waitFor(() => expect(result.current.has('c')).toBe(true))
     expect(getAncestorChains.mock.calls.map(([urns]) => urns)).toEqual([['a', 'b'], ['b', 'c']])
+
+    // Each change asks it again until it has been asked five times; then it is left unknown.
+    for (let i = 0; i < 4; i++) {
+      rerender({ urns: ['a', 'b', 'c'] })
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    expect(getAncestorChains.mock.calls.map(([urns]) => urns)).toEqual([['a', 'b'], ['b', 'c'], ['b'], ['b'], ['b']])
+    expect(result.current.has('b')).toBe(false)
   })
 
   it('stops asking a reader with no containment walk (501)', async () => {
