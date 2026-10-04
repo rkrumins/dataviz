@@ -488,7 +488,7 @@ export interface LayerAssignmentRuleConfig {
   name?: string;
   description?: string;
 
-  // Match criteria (OR logic between different fields, AND logic within same field if array)
+  // Match criteria: AND across fields, any-of within a list (entityTypes, tags)
   entityTypes?: string[];
   tags?: string[];
   urnPattern?: string;

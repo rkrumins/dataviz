@@ -29,6 +29,10 @@ import { useReparentNode } from './useReparentNode'
 import { LineEndTag } from './LineEndTag'
 import type { LineEnd } from './lineEnd'
 
+/** Why a row is placed apart from its parent (One Placement Contract, flag-on): by hand — an
+ *  explicit entry, a drag, a stamp — or by a layer rule matching it. */
+export type PlacedReason = 'hand' | 'rule'
+
 /** Which modifier keys were held when a row was clicked. */
 export interface RowSelectModifiers {
   /** Cmd/Ctrl — add or remove this row without disturbing the rest. */
@@ -38,8 +42,9 @@ export interface RowSelectModifiers {
 }
 
 interface FlatTreeItemProps {
-  /** Set when this row is PLACED in this column apart from its parent: its path in the data. */
-  placement?: PlacementInfo
+  /** Set when this row is PLACED in this column apart from its parent: its path in the data, and
+   *  (flag-on) why. */
+  placement?: PlacementInfo & { reason?: PlacedReason }
   /** Set on a parent whose children are placed in other columns (the other end of a placement). */
   placedOut?: PlacedOut
   onRevealPlacement?: (placement: PlacementInfo) => void
@@ -1063,7 +1068,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
  * there. A long path keeps its start and its last two steps; the tooltip carries all of it.
  */
 function PlacementPath({ placement, entityName, onReveal, onReturn }: {
-  placement: PlacementInfo
+  placement: PlacementInfo & { reason?: PlacedReason }
   entityName: string
   onReveal?: (placement: PlacementInfo) => void
   onReturn?: () => void
@@ -1073,7 +1078,8 @@ function PlacementPath({ placement, entityName, onReveal, onReturn }: {
   const lead = placement.complete ? '' : '… › '
   const full = `${lead}${names.join(' › ')}`
   const parentName = names[names.length - 1] ?? 'its parent'
-  const explain = `Placed in ${placement.placedLayerName} for this view only — the data source is unchanged. `
+  const by = placement.reason === 'rule' ? ' by a layer rule' : placement.reason === 'hand' ? ' by hand' : ''
+  const explain = `Placed in ${placement.placedLayerName}${by} for this view only — the data source is unchanged. `
     + `In the data, ${entityName} is part of ${full} (shown in ${placement.parentLayerName}). `
     + 'Click to go to its parent.'
   return (

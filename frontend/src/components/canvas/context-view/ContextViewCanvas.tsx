@@ -73,7 +73,12 @@ import { containmentUpPath, useAncestorChains } from '@/hooks/useAncestorChains'
 import { useHolderRollups } from '@/hooks/useHolderRollups'
 import { useContainerRollups } from '@/hooks/useContainerRollups'
 import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
+import { usePlacementChains } from '@/hooks/usePlacementChains'
+import {
+  compilePlacementSpec, factsFromCanvasData, suggestPlacement, type CompiledPlacementSpec, type PlacementFacts,
+} from '@/lib/placement/placement'
 import { buildPlacements, type PlacementInfo } from './placement'
+import type { PlacedReason } from './FlatTreeItem'
 import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
   type RevealSearchHit,
@@ -88,7 +93,7 @@ import { lineForTarget, targetFromLine, type DrawnLine } from '@/lib/drawerEdgeT
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
-import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
+import { buildTypeLayerMap, buildTypeLayerMapFromContract, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
 import { DataLoadsPanel } from './DataLoadsPanel'
 import { MemoryGauge } from './MemoryGauge'
@@ -240,6 +245,17 @@ const NO_HOLDER_EDGES: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
  *  a fresh array literal per render defeated that memo for every EMPTY column —
  *  so the columns with nothing in them re-rendered on every canvas render. */
 const EMPTY_LAYER_NODES: HierarchyNode[] = []
+const NO_URNS: readonly string[] = []
+
+/** Flag-on write policy for a NEW root entity (One Placement Contract): the layer to pin it to with
+ *  an explicit entry, or undefined when none is needed — an open view whose contract already places
+ *  it in the chosen column. A curated view always pins. */
+function contractPin(
+  spec: CompiledPlacementSpec, facts: PlacementFacts, chosenLayerId: string | null | undefined, defaultLayerId: string | undefined,
+): string | undefined {
+  const suggested = suggestPlacement(spec, facts, { chosenLayerId, defaultLayerId })
+  return suggested.pin ? suggested.layerId ?? undefined : undefined
+}
 /** Trailing edge for recording the reader's expansion into the history
  *  entry. One reveal opens a whole chain and one drill peels a level per
  *  click; without this each of those rewrites the entry (and its
@@ -884,6 +900,10 @@ export function ContextViewCanvas({
   const editModeEnabled = useFeature('editModeEnabled')
   const canEditGraph = isDraft && editModeEnabled
   const versioningEnabled = useFeature('versioningEnabled')
+  // One Placement Contract (Admin → Features, experimental). On: every placement surface on this
+  // canvas reads ONE spec compiled from the rendered layers (placementSpec below), and the backend
+  // compute is never asked. Read up here: the compute and auto-scroll effects run before that spec.
+  const placementContractOn = useFeature('placementContractEnabled')
   // Reconstruct committed-draft deletions as read-only rose "ghost" nodes (from the draft-vs-main
   // diff) so a deletion stays visible in red until merged — surviving refresh. Draft-only.
   useDeletionGhosts(isDraft)
@@ -1190,6 +1210,8 @@ export function ContextViewCanvas({
   }, [activeView?.id])
 
   useEffect(() => {
+    // Flag-on: the contract places everything locally — no compute, and no latch to clear later.
+    if (placementContractOn) return
     if (nodes.length === 0 || !provider || storeLayers.length === 0) return
     if (assignmentStatus !== 'idle') return
 
@@ -1218,7 +1240,7 @@ export function ContextViewCanvas({
       entityScope: deriveEntityScope(view?.content, norm),
       entityIds: loadedUrns,
     })
-  }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers, activeView?.id])
+  }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers, activeView?.id, placementContractOn])
 
   // Bounded recovery: the 'error' state is otherwise terminal (the compute
   // effect above only fires from 'idle', and the fingerprint ref stays
@@ -1601,6 +1623,9 @@ export function ContextViewCanvas({
   // eating the clicks that collapse them.
   useViewportReservation(edgeLegendRef, '--canvas-dock-height')
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
+  // Flag-on: each entity's RENDERED column, for the auto-scroll below (filled once useLayerAssignment
+  // has run, further down).
+  const renderedLayerRef = useRef<ReadonlyMap<string, string>>(new Map())
 
   // Zoom changes move every node card, but nothing else forces the edge
   // overlay to recompute geometry. Double-rAF so the transform commits
@@ -1644,7 +1669,7 @@ export function ContextViewCanvas({
     if (lastAutoScrolledForSelectionRef.current === selectedNodeId) return
 
     const layerId = effectiveAssignments.get(selectedNodeId)?.layerId
-    if (!layerId) return
+    if (!layerId && !placementContractOn) return
 
     // Defer two frames: first to let React commit the padding change, second
     // to let layout settle so getBoundingClientRect reads the new geometry.
@@ -1654,8 +1679,11 @@ export function ContextViewCanvas({
       cancelRaf2 = requestAnimationFrame(() => {
         const container = horizontalScrollRef.current
         if (!container) return
+        // Flag-on: the column it is drawn in — read now, after this commit's effects filled the ref.
+        const columnId = placementContractOn ? renderedLayerRef.current.get(selectedNodeId) : layerId
+        if (!columnId) return
         const column = container.querySelector(
-          `[data-layer-id="${CSS.escape(layerId)}"]`,
+          `[data-layer-id="${CSS.escape(columnId)}"]`,
         ) as HTMLElement | null
         if (!column) return
 
@@ -1698,7 +1726,7 @@ export function ContextViewCanvas({
       // change left redraws queued against a scroll that had been superseded.
       if (settleTimer != null) clearTimeout(settleTimer)
     }
-  }, [selectedNodeId, selectedNodeIds.length, isEdgePanelOpen, effectiveAssignments])
+  }, [selectedNodeId, selectedNodeIds.length, isEdgePanelOpen, effectiveAssignments, placementContractOn])
 
   const handleLayerScroll = useCallback(() => {
     if (triggerEdgeRedrawRef.current) {
@@ -1728,6 +1756,15 @@ export function ContextViewCanvas({
     [activeLayers]
   )
 
+  // Flag-on: the One Placement Contract's spec — the view's full config with the RENDERED layers,
+  // which may come from the layers prop or the defaults rather than the view itself.
+  const placementSpec = useMemo(() => (placementContractOn
+    ? compilePlacementSpec({
+      content: activeView?.content,
+      layout: { referenceLayout: { ...activeView?.layout?.referenceLayout, layers: activeLayers } },
+    })
+    : null), [placementContractOn, activeView?.content, activeView?.layout?.referenceLayout, activeLayers])
+
   // Layer Strip chips — stable identity so the strip's scroll-measure
   // effect doesn't re-attach on unrelated canvas re-renders.
   const stripLayers = useMemo(
@@ -1744,6 +1781,23 @@ export function ContextViewCanvas({
   const { nodeMap, childMap, parentMap } = useContainmentHierarchy({
     nodes, edges, isContainmentEdge, fingerprint: nodeEdgeFingerprint,
   })
+
+  // Flag-on, and only while some valid entry cascades: a loaded node with no loaded parent and no
+  // valid entry of its own asks for its containment chain, so a hand placement on an ancestor the
+  // canvas never loaded still reaches it.
+  const placementChainUrns = useMemo(() => {
+    if (!placementSpec?.hasCascadingExplicit) return NO_URNS
+    const out: string[] = []
+    for (const n of nodes) {
+      const parent = parentMap.get(n.id)
+      if (parent !== undefined && nodeMap.has(parent)) continue
+      const own = placementSpec.explicit.get(n.id)
+      if (own && placementSpec.layerIds.has(own.layerId)) continue
+      if (!n.id.startsWith('logical:')) out.push(n.id)
+    }
+    return out
+  }, [placementSpec, nodes, parentMap, nodeMap])
+  const placementChains = usePlacementChains(placementChainUrns)
 
   /**
    * How much of each ANCHORED column is still unloaded. The column draws the
@@ -1835,6 +1889,7 @@ export function ContextViewCanvas({
     viewId: activeView?.id ?? '',
     layers: sortedLayers,
     assignments: activeReferenceLayout.assignments,
+    placementSpec,
     revealHit: revealHitForSearch,
     prefetchHit: prefetchSearchHitSpine,
   })
@@ -1895,7 +1950,7 @@ export function ContextViewCanvas({
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
-  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors } = useLayerAssignment({
+  const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors, contractPlacements } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
@@ -1903,7 +1958,10 @@ export function ContextViewCanvas({
     entityScope: activeEntityScope,
     defaultNodeSortMode: activeReferenceLayout.defaultNodeSortMode,
     sortOverrides,
+    placementSpec,
+    placementChains,
   })
+  useEffect(() => { renderedLayerRef.current = nodeLayerMap }, [nodeLayerMap])
 
   // An entity PLACED in one column while its parent sits in another (view arrangement only — the
   // data is unchanged): it carries its full path in the data, so it reads as a deliberate placement
@@ -1930,7 +1988,18 @@ export function ContextViewCanvas({
     () => buildPlacements({ ...placementInputs, ancestry: placementAncestry }),
     [placementInputs, placementAncestry],
   )
-  const placedApart = placementResult.placements
+  // Flag-on: each says WHY it is apart from its parent — placed by hand, or by a layer rule.
+  const placedApart = useMemo(() => {
+    if (!contractPlacements) return placementResult.placements
+    const out = new Map<string, PlacementInfo & { reason?: PlacedReason }>()
+    placementResult.placements.forEach((info, id) => {
+      const source = contractPlacements.get(id)?.source
+      const reason: PlacedReason | undefined = source === 'rule' ? 'rule'
+        : source === 'explicit' || source === 'stamped' ? 'hand' : undefined
+      out.set(id, reason ? { ...info, reason } : info)
+    })
+    return out
+  }, [placementResult, contractPlacements])
   const placedOut = placementResult.placedOut
 
   // Live per-layer visual roots for custom-order seeding (ref, not a dep, so the
@@ -2111,7 +2180,8 @@ export function ContextViewCanvas({
       ? undefined
       : sortedLayers.find(l => l.showUnassigned === true)?.id,
     branchCreatedUrns,
-  }), [effectiveAssignments, viewIsCurated, sortedLayers, branchCreatedUrns])
+    ...(placementSpec ? { spec: placementSpec } : {}),
+  }), [effectiveAssignments, viewIsCurated, sortedLayers, branchCreatedUrns, placementSpec])
   const overlay = useTraceOverlay({
     model: traceModel,
     focusUrn: canvasTrace.tracedUrn,
@@ -5781,7 +5851,10 @@ export function ContextViewCanvas({
   // Auto-by-type placement: each Build row lands in the column configured for
   // ITS type (falling back to buildLayerId). Derived from the view's own layer
   // config — ontology-agnostic.
-  const buildTypeLayerMapMemo = useMemo(() => buildTypeLayerMap(sortedLayers), [sortedLayers])
+  // Flag-on: the column the contract picks for each type a rule names.
+  const buildTypeLayerMapMemo = useMemo(
+    () => (placementSpec ? buildTypeLayerMapFromContract(placementSpec) : buildTypeLayerMap(sortedLayers)),
+    [placementSpec, sortedLayers])
 
   // The drawers are memoised: what this canvas hands them must keep its identity across renders.
   const drawerTraceUp = useCallback((nodeId: string) => startCanvasTrace(nodeId, 'up'), [startCanvasTrace])
@@ -6945,7 +7018,12 @@ export function ContextViewCanvas({
               // orphan-looking root), and kept it there after it was moved. The pin writes the
               // canonical view-config entry (keyed by the temp urn, remapped on save) plus the
               // optimistic session assignment.
-              const layer = parentUrn ? undefined : (builderLayerId ?? sortedLayers[0]?.id)
+              // Flag-on: pinned only when the view is curated or the contract would place it elsewhere.
+              const layer = parentUrn ? undefined : placementSpec
+                ? contractPin(placementSpec,
+                  factsFromCanvasData(useCanvasStore.getState().nodes.find(n => n.id === tempUrn)?.data, tempUrn),
+                  builderLayerId, sortedLayers[0]?.id)
+                : (builderLayerId ?? sortedLayers[0]?.id)
               if (layer) {
                 assignEntityToLayer(tempUrn, layer)
                 persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [tempUrn], layer))
@@ -6969,7 +7047,11 @@ export function ContextViewCanvas({
               // plus the optimistic session assignment for immediate display.
               const layer = hasParent && !row.layerId
                 ? undefined
-                : resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
+                : placementSpec
+                  ? contractPin(placementSpec,
+                    factsFromCanvasData({ type: row.typeId, label: row.name, classifications: row.tags, properties: row.properties }, urn),
+                    row.layerId, buildLayerId)
+                  : resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
               if (layer) {
                 assignEntityToLayer(urn, layer)
                 persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [urn], layer))
