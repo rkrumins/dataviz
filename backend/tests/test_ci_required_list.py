@@ -118,6 +118,11 @@ def test_the_placement_contract_is_gated() -> None:
         "tests/test_layout_config.py",
         "tests/test_import_view_assignments.py",
         "tests/test_export_view_scope.py",
+        "tests/test_assignment_engine_contract.py",
+        "tests/test_import_view_assignments_contract.py",
+        "tests/test_view_layer_rule_validation.py",
+        "tests/test_placement_legacy_parity.py",
+        "tests/test_placement_dry_run.py",
     ):
         assert must in entries, f"{must} is not gated by the required job"
 

@@ -32,6 +32,7 @@ tests/test_aggregation_settings.py
 tests/test_alembic_revision_lengths.py
 tests/test_api_graph.py
 tests/test_assignment_engine.py
+tests/test_assignment_engine_contract.py
 tests/test_automation_holds.py
 tests/test_automation_holds_scope.py
 tests/test_background_tasks.py
@@ -81,6 +82,7 @@ tests/test_import_formats.py
 tests/test_import_job_liveness.py
 tests/test_import_uploads.py
 tests/test_import_view_assignments.py
+tests/test_import_view_assignments_contract.py
 tests/test_import_xlsx.py
 tests/test_index_ddl_once.py
 tests/test_insights_asset_endpoints.py
@@ -97,6 +99,8 @@ tests/test_nav_catalogue.py
 tests/test_node_property_hygiene.py
 tests/test_object_store.py
 tests/test_placement_conformance.py
+tests/test_placement_dry_run.py
+tests/test_placement_legacy_parity.py
 tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
@@ -137,6 +141,7 @@ tests/test_typed_patch_merge.py
 tests/test_versioned_branch_resolve_identities.py
 tests/test_versioning_read_only_queries.py
 tests/test_view_bundle_schema.py
+tests/test_view_layer_rule_validation.py
 tests/test_view_layout_rules_preserved.py
 tests/test_view_library.py
 tests/test_view_library_schema.py

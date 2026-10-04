@@ -9,6 +9,39 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — One placement rule for every view surface (preview)
+
+### Added
+
+**One placement contract, behind the `placementContractEnabled` flag (off by default).** Which layer
+of a view an entity is in used to be decided separately by the server compute, the canvas, the
+wizard, Layer Studio, the trace overlay, search badges, Build Mode and import, and they disagreed:
+entities jumped columns when the server answer arrived, the wizard preview contradicted the canvas,
+and property and condition rules placed nothing. With the flag on, every one of those surfaces uses
+one contract — a Python reference and a TypeScript twin proven equal by a shared corpus of 140+ cases
+in required CI. Rules are the AND of their criteria and finally work for tags, URN globs,
+`propertyMatch` and conditions; the first layer wins a tie; types match whatever their case; a child
+whose own type a layer claims is shown in that layer with the *Placed* path tag, while hand
+placements still carry their subtree. Saving a new or changed rule that can never match is refused
+with a message naming it. See `docs/services/ASSIGNMENTS.md`.
+
+**`python -m backend.scripts.placement_dry_run`** reports, per saved view, what turning the flag on
+would change and why, before anyone sees it.
+
+### Upgrading
+
+- Nothing changes until an admin turns the flag on. Before that, run the dry run and follow the
+  runbook in `docs/services/ASSIGNMENTS.md`. Turning the flag off again rewrites no view.
+
+### Known limitations
+
+- With the flag on, the canvas, trace and search still read containment as source = parent, so
+  `BELONGS_TO` children can be placed differently there than on the server.
+- Export, scoped replace, the search Layer filter, open-view type feeds and column totals keep
+  today's rules until server-side membership (the next phase).
+
+---
+
 ## [Unreleased] — Branding that saves, combined traces, and time for very large graphs
 
 ### Added

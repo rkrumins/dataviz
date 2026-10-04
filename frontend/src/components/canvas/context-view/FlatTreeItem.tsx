@@ -843,7 +843,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             placement={placement}
             entityName={node.name}
             onReveal={onRevealPlacement}
-            onReturn={onReturnPlacement ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
+            // A layer rule put it here, not an entry a return could remove.
+            onReturn={onReturnPlacement && placement.reason !== 'rule' ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
           />
         )}
         {placedOut && <PlacedOutNote placedOut={placedOut} parentName={node.name} />}

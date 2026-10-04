@@ -119,6 +119,8 @@ describe('the canvas under the One Placement Contract', () => {
     const tag = document.querySelector<HTMLElement>('#layer-node-K button[title^="Placed in"]')
     expect(tag?.textContent).toContain('Placed')
     expect(tag?.getAttribute('title')).toMatch(/^Placed in Right by a layer rule for this view only/)
+    // No entry to remove, so no "Return to parent" that would do nothing.
+    expect(document.querySelector('#layer-node-K button[aria-label^="Return "]')).toBeNull()
   })
 
   it('a child placed by hand says so', async () => {
@@ -129,6 +131,7 @@ describe('the canvas under the One Placement Contract', () => {
     expect(columnOf('K')).toBe('right')
     expect(document.querySelector('#layer-node-K button[title^="Placed in"]')?.getAttribute('title'))
       .toMatch(/^Placed in Right by hand for this view only/)
+    expect(document.querySelector('#layer-node-K button[aria-label^="Return "]')).not.toBeNull()
   })
 
   describe('rail and Build Mode pin a new root only when they must', () => {
