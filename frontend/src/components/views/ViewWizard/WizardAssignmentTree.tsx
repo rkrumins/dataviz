@@ -36,7 +36,7 @@ import {
     useEffectiveAssignments
 } from '@/store/referenceModelStore'
 import type { ViewLayerConfig, LayerAssignmentEntry, AssignmentConflict } from '@/types/schema'
-import { buildWizardPlacement } from './effectivePlacement'
+import { buildWizardPlacement, placedByOf, type PlacedBy } from './effectivePlacement'
 import { useContainmentEdgeTypes, useEntityTypes, useSchemaIsLoading } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
@@ -72,10 +72,13 @@ export interface EntityTreeNode {
     parentId?: string
     assignedLayerId?: string
     isInherited?: boolean
-    /** Placed by a layer's `entityTypes` rule rather than by an assignment entry.
-     *  There is nothing to un-assign — a rule is overridden, not removed — so the
-     *  row offers no remove button, only the re-assign dropdown. */
+    /** Placed by a layer's rule (or, under the contract, the entity's own stamp)
+     *  rather than by an assignment entry. There is nothing to un-assign — a rule
+     *  is overridden, not removed — so the row offers no remove button, only the
+     *  re-assign dropdown. */
     isRulePlaced?: boolean
+    /** Contract only: what placed an isRulePlaced node. Absent reads as 'type'. */
+    placedBy?: PlacedBy
     hasConflict?: boolean
     conflictMessage?: string
 }
@@ -368,14 +371,18 @@ function TreeRow({
                         {node.isInherited ? '↳ ' : ''}{assignedLayer.name}
                     </span>
                     {node.isRulePlaced ? (
-                        /* Placed by the layer's entity-type rule. Nothing to remove —
-                           picking another layer overrides it for this entity only. */
+                        /* Placed by the layer's rule (or the entity's stamp). Nothing to
+                           remove — picking another layer overrides it for this entity only. */
                         <span
                             data-testid="rule-placed-marker"
                             className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400"
-                            title={`Placed automatically because this layer covers the ${node.type} type. Assign it elsewhere to override.`}
+                            title={node.placedBy === 'rule'
+                                ? 'Placed automatically by a rule on this layer. Assign it elsewhere to override.'
+                                : node.placedBy === 'stamp'
+                                    ? "Placed by the entity's own layer setting. Assign it elsewhere to override."
+                                    : `Placed automatically because this layer covers the ${node.type} type. Assign it elsewhere to override.`}
                         >
-                            by type
+                            {node.placedBy === 'rule' ? 'by rule' : node.placedBy === 'stamp' ? 'stamped' : 'by type'}
                         </span>
                     ) : (
                         /* Remove assignment button */
@@ -584,6 +591,7 @@ export function WizardAssignmentTree({
             let effectiveLayerId: string | undefined
             let isInherited = false
             let isRulePlaced = false
+            let placedBy: PlacedBy | undefined
             let childContext: ParentContext | null = null
             if (placementSpec) {
                 // Contract: a hand placement cascades, an own rule or stamp beats
@@ -592,6 +600,7 @@ export function WizardAssignmentTree({
                 effectiveLayerId = isMember(placed) ? placed.layerId! : undefined
                 isInherited = placed.source === 'inherited'
                 isRulePlaced = placed.source === 'rule' || placed.source === 'stamped'
+                placedBy = placedByOf(placementSpec, placed)
                 childContext = parentContextOf(urn, placed)
             } else {
                 // Determine effective assignment (Top-Down)
@@ -619,7 +628,8 @@ export function WizardAssignmentTree({
 
             // "Unassigned only": an assigned node drops out together with its
             // subtree (children inherit its layer, so they're assigned too).
-            if (hideAssigned && effectiveLayerId) return null
+            // Not under the contract, where a placement need not cascade.
+            if (hideAssigned && effectiveLayerId && !placementSpec) return null
 
             // Recurse into loaded children only (lazy — children are loaded on expand)
             const children = entry.loaded
@@ -628,6 +638,9 @@ export function WizardAssignmentTree({
                     .filter((n): n is EntityTreeNode => n !== null)
                     .sort((a, b) => a.name.localeCompare(b.name))
                 : []
+
+            // Contract: an assigned node stays only as the path to an unassigned child.
+            if (hideAssigned && effectiveLayerId && children.length === 0) return null
 
             const conflict = conflictMap.get(urn)
 
@@ -644,6 +657,7 @@ export function WizardAssignmentTree({
                 assignedLayerId: effectiveLayerId,
                 isInherited,
                 isRulePlaced,
+                ...(placedBy ? { placedBy } : {}),
                 hasConflict: !!conflict,
                 conflictMessage: conflict?.message,
             }

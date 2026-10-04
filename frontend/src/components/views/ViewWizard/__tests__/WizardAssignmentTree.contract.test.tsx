@@ -139,7 +139,7 @@ describe('WizardAssignmentTree — contract tree', () => {
     expect(badge('Finance')).toHaveTextContent('Domains')
     expect(byType('Finance')).toBeInTheDocument()
     expect(badge('Ledger')).toHaveTextContent(/^Tables$/)
-    expect(byType('Ledger')).toBeInTheDocument()
+    expect(byType('Ledger')).toHaveTextContent('by type')
     expect(badge('Reports')).toHaveTextContent('↳ Domains')
     expect(byType('Reports')).not.toBeInTheDocument()
   })
@@ -166,6 +166,31 @@ describe('WizardAssignmentTree — contract tree', () => {
 
     expect(badge('Ledger')).toHaveTextContent(/^Tables$/)
     expect(badge('Reports')).not.toBeInTheDocument()
+  })
+
+  it('keeps an assigned parent under “Unassigned only” as the path to a child it leaves unassigned', () => {
+    renderTree(typed, { 'urn:d': { layerId: 'manual', inheritsChildren: false } })
+    expand('Finance')
+    fireEvent.click(screen.getByRole('button', { name: /Unassigned only/ }))
+
+    expect(screen.getByTitle('Finance')).toBeInTheDocument()
+    expect(screen.getByTitle('Reports')).toBeInTheDocument()
+    expect(screen.queryByTitle('Ledger')).not.toBeInTheDocument()
+  })
+
+  it('drops an assigned parent under “Unassigned only” when every child is assigned too', () => {
+    renderTree(typed)
+    expand('Finance')
+    fireEvent.click(screen.getByRole('button', { name: /Unassigned only/ }))
+    expect(screen.queryByTitle('Finance')).not.toBeInTheDocument()
+  })
+
+  it('drops the assigned parent with its whole subtree with the flag off (control)', () => {
+    setContract(false)
+    renderTree(typed, { 'urn:d': { layerId: 'manual', inheritsChildren: false } })
+    expand('Finance')
+    fireEvent.click(screen.getByRole('button', { name: /Unassigned only/ }))
+    expect(screen.queryByTitle('Reports')).not.toBeInTheDocument()
   })
 
   it('honours a rule’s inheritsFromParent: false', () => {
@@ -207,7 +232,8 @@ describe('WizardAssignmentTree — contract facts', () => {
     browse([entry({ urn: 'urn:g', entityType: 'Table', displayName: 'Gold', tags: ['gold'] })], ['urn:g'])
     renderTree([layer('gold', 'Gold tier', 0, { rules: [{ id: 'r', priority: 0, tags: ['gold'] }] })])
     expect(badge('Gold')).toHaveTextContent('Gold tier')
-    expect(byType('Gold')).toBeInTheDocument()
+    expect(byType('Gold')).toHaveTextContent('by rule')
+    expect(byType('Gold')).toHaveAttribute('title', 'Placed automatically by a rule on this layer. Assign it elsewhere to override.')
   })
 
   it('places a stamped node without offering to remove an entry it does not have', () => {
@@ -215,6 +241,8 @@ describe('WizardAssignmentTree — contract facts', () => {
     renderTree([layer('manual', 'Manual', 0)])
     expect(badge('Stamped')).toHaveTextContent('Manual')
     expect(within(row('Stamped')).queryByTitle('Remove assignment')).not.toBeInTheDocument()
+    expect(byType('Stamped')).toHaveTextContent('stamped')
+    expect(byType('Stamped')).toHaveAttribute('title', "Placed by the entity's own layer setting. Assign it elsewhere to override.")
   })
 
   it('publishes facts on snapshot entries only with the flag on', () => {

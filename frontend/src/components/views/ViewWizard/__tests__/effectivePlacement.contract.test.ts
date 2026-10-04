@@ -26,7 +26,7 @@ const contract = (
 describe('buildWizardPlacement — contract', () => {
     it('resolves a duplicated type to the FIRST layer (the flag-off resolver picks the later one)', () => {
         const layers = [layer('first', 0, { entityTypes: ['Domain'] }), layer('second', 1, { entityTypes: ['Domain'] })]
-        expect(contract(layers)({ urn: 'urn:a', type: 'Domain' })).toEqual({ layerId: 'first', source: 'rule' })
+        expect(contract(layers)({ urn: 'urn:a', type: 'Domain' })).toEqual({ layerId: 'first', source: 'rule', placedBy: 'type' })
         expect(buildWizardPlacement(layers, {})({ urn: 'urn:a', type: 'Domain' }).layerId).toBe('second')
     })
 
@@ -37,19 +37,19 @@ describe('buildWizardPlacement — contract', () => {
 
     it('folds the type case', () => {
         const place = contract([layer('domains', 0, { entityTypes: ['Domain'] })])
-        expect(place({ urn: 'urn:a', type: 'domain' })).toEqual({ layerId: 'domains', source: 'rule' })
+        expect(place({ urn: 'urn:a', type: 'domain' })).toEqual({ layerId: 'domains', source: 'rule', placedBy: 'type' })
     })
 
     it('lets an explicit entry beat the rule', () => {
         const place = contract([layer('domains', 0, { entityTypes: ['Domain'] }), layer('special', 1)], { 'urn:a': entry('special') }, 'all')
         expect(place({ urn: 'urn:a', type: 'Domain' })).toEqual({ layerId: 'special', source: 'explicit' })
-        expect(place({ urn: 'urn:b', type: 'Domain' })).toEqual({ layerId: 'domains', source: 'rule' })
+        expect(place({ urn: 'urn:b', type: 'Domain' })).toEqual({ layerId: 'domains', source: 'rule', placedBy: 'type' })
     })
 
     it('lets a stale entry fall through to the rule (the flag-off resolver strands it)', () => {
         const layers = [layer('domains', 0, { entityTypes: ['Domain'] })]
         const assignments = { 'urn:a': entry('deleted') }
-        expect(contract(layers, assignments, 'all')({ urn: 'urn:a', type: 'Domain' })).toEqual({ layerId: 'domains', source: 'rule' })
+        expect(contract(layers, assignments, 'all')({ urn: 'urn:a', type: 'Domain' })).toEqual({ layerId: 'domains', source: 'rule', placedBy: 'type' })
         expect(buildWizardPlacement(layers, assignments, 'all')({ urn: 'urn:a', type: 'Domain' })).toEqual({ source: 'none' })
     })
 
@@ -60,11 +60,11 @@ describe('buildWizardPlacement — contract', () => {
             layer('stamped', 2),
         ])
         expect(place({ urn: 'urn:t', type: 'Table', facts: facts('urn:t', 'Table', { tags: ['gold'] }) }))
-            .toEqual({ layerId: 'gold', source: 'rule' })
+            .toEqual({ layerId: 'gold', source: 'rule', placedBy: 'rule' })
         expect(place({ urn: 'urn:p', type: 'Table', facts: facts('urn:p', 'Table', { properties: { owner: 'finance' } }) }))
-            .toEqual({ layerId: 'finance', source: 'rule' })
+            .toEqual({ layerId: 'finance', source: 'rule', placedBy: 'rule' })
         expect(place({ urn: 'urn:s', type: 'Table', facts: facts('urn:s', 'Table', { stamp: 'stamped' }) }))
-            .toEqual({ layerId: 'stamped', source: 'stamped' })
+            .toEqual({ layerId: 'stamped', source: 'stamped', placedBy: 'stamp' })
         // Without facts it knows only the URN and type.
         expect(place({ urn: 'urn:t', type: 'Table' })).toEqual({ source: 'none' })
     })
@@ -76,6 +76,15 @@ describe('buildWizardPlacement — contract', () => {
         expect(place({ urn: 'urn:a', type: 'Table', facts: facts('urn:a', 'Table', { tags: ['gold'] }) }).source).toBe('rule')
         expect(place({ urn: 'urn:b', type: 'Table', facts: facts('urn:b', 'Table') }).source).toBe('none')
         expect(place({ urn: 'urn:c', type: 'View', facts: facts('urn:c', 'View', { tags: ['gold'] }) }).source).toBe('none')
+    })
+
+    it('calls a rule on entity types alone "type", authored or not, and any other rule "rule"', () => {
+        const place = contract([
+            layer('tables', 0, { rules: [{ id: 'typed', priority: 0, entityTypes: ['Table'] }] }),
+            layer('gold-views', 1, { rules: [{ id: 'mixed', priority: 0, entityTypes: ['View'], tags: ['gold'] }] }),
+        ])
+        expect(place({ urn: 'urn:a', type: 'Table', facts: facts('urn:a', 'Table') }).placedBy).toBe('type')
+        expect(place({ urn: 'urn:b', type: 'View', facts: facts('urn:b', 'View', { tags: ['gold'] }) }).placedBy).toBe('rule')
     })
 
     it('places nothing by rule or stamp in a curated view, but honours the entry', () => {

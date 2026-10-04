@@ -108,6 +108,7 @@ import {
     WIZARD_CHILDREN_PAGE_SIZE,
     type WizardEntityIndex,
 } from '@/components/views/ViewWizard/useWizardEntityIndex'
+import type { PlacedBy } from '@/components/views/ViewWizard/effectivePlacement'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -135,8 +136,11 @@ export interface LayerRootRow {
     name: string
     typeId: string
     childCount: number
-    /** Placed by the layer's `entityTypes` rule, so it holds no assignment. */
+    /** Placed by a layer's rule (or, under the contract, the entity's own
+     *  stamp), so it holds no assignment. */
     rulePlaced: boolean
+    /** Contract only: what placed a rulePlaced row. Absent reads as 'type'. */
+    placedBy?: PlacedBy
 }
 
 interface LayerHierarchyPanelProps {
@@ -149,6 +153,9 @@ interface LayerHierarchyPanelProps {
      *  (which hold no assignment entry), so the rail is honest about what the
      *  canvas will render — see ViewWizard/effectivePlacement.ts. */
     rootsByLayer?: Map<string, LayerRootRow[]>
+    /** Contract only: loaded children placed in another layer than their
+     *  parent's. They are rows of that layer, so not drawn under the parent. */
+    splitChildren?: ReadonlySet<string>
     /** View-wide default sort, for the per-column menu's "View default" item. */
     defaultNodeSortMode?: LayerNodeSortAlgo
     onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
@@ -262,6 +269,8 @@ function AssignedEntityItem({
     onUnassign,
     inherited = false,
     rulePlaced = false,
+    placedBy,
+    splitChildren,
     onReorder,
 }: {
     entityId: string
@@ -276,6 +285,10 @@ function AssignedEntityItem({
      *  There is no entry to remove, so no unassign — but it stays DRAGGABLE:
      *  dropping it on another layer writes the explicit override. */
     rulePlaced?: boolean
+    /** What placed a rulePlaced row (see LayerRootRow). */
+    placedBy?: PlacedBy
+    /** Children listed in another layer, so left out here (contract only). */
+    splitChildren?: ReadonlySet<string>
     /** Present on column roots: dropping another root on this row's top/bottom
      *  third reorders instead of re-assigning. Absent on inherited children,
      *  which have no independent position. */
@@ -294,13 +307,16 @@ function AssignedEntityItem({
     const identity = entityIndex.resolve(entityId)
     const dataPath = useContext(PlacementPathsContext).get(entityId)
     const isNodeLoading = entityIndex.isLoading(entityId)
-    const childrenIds = entityIndex.childrenOf(entityId)
+    const loadedChildIds = entityIndex.childrenOf(entityId)
+    // A child placed in another layer is listed there, not here.
+    const childrenIds = splitChildren ? loadedChildIds.filter(id => !splitChildren.has(id)) : loadedChildIds
 
     const isResolving = identity === undefined
     const name = identity?.name ?? fallbackNameFromUrn(entityId)
     const type = identity?.type ?? 'unknown'
-    const childCount = identity?.childCount ?? childrenIds.length
+    const childCount = identity?.childCount ?? loadedChildIds.length
     const hasChildren = childCount > 0
+    const inheritingCount = childCount - (loadedChildIds.length - childrenIds.length)
     const isMissing = !!identity?.missing
 
     const handleToggle = (e: React.MouseEvent) => {
@@ -443,9 +459,9 @@ function AssignedEntityItem({
                             {name}
                         </span>
                     )}
-                    {hasChildren && !isExpanded && (
-                        <span className="text-[9px] text-slate-400 shrink-0" title={`${childCount} children inherit this layer`}>
-                            {childCount}
+                    {hasChildren && !isExpanded && inheritingCount > 0 && (
+                        <span className="text-[9px] text-slate-400 shrink-0" title={`${inheritingCount} children inherit this layer`}>
+                            {inheritingCount}
                         </span>
                     )}
                 </div>
@@ -470,9 +486,13 @@ function AssignedEntityItem({
                     <span
                         data-testid="rail-rule-placed-marker"
                         className="text-[9px] px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 shrink-0"
-                        title={`Placed automatically because this layer covers the ${type} type. Drag it to another layer to override.`}
+                        title={placedBy === 'rule'
+                            ? 'Placed automatically by a rule on this layer. Drag it to another layer to override.'
+                            : placedBy === 'stamp'
+                                ? "Placed by the entity's own layer setting. Drag it to another layer to override."
+                                : `Placed automatically because this layer covers the ${type} type. Drag it to another layer to override.`}
                     >
-                        by type
+                        {placedBy === 'rule' ? 'by rule' : placedBy === 'stamp' ? 'stamped' : 'by type'}
                     </span>
                 )}
                 {/* Unassign — only the explicit placement can be removed. */}
@@ -506,6 +526,7 @@ function AssignedEntityItem({
                                 entityIndex={entityIndex}
                                 onUnassign={onUnassign}
                                 inherited
+                                splitChildren={splitChildren}
                             />
                         ))}
                     </motion.div>
@@ -527,6 +548,7 @@ interface LogicalNodeItemProps {
     logicalNodes: UseLogicalNodesReturn
     entityAssignments: LayerEntityRef[]
     entityIndex: WizardEntityIndex
+    splitChildren?: ReadonlySet<string>
     onSetActiveTarget: (target: ActiveTarget) => void
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
     onUnassign: (entityId: string) => void
@@ -542,6 +564,7 @@ function LogicalNodeItem({
     logicalNodes,
     entityAssignments,
     entityIndex,
+    splitChildren,
     onSetActiveTarget,
     onDrop,
     onUnassign,
@@ -843,6 +866,7 @@ function LogicalNodeItem({
                                         logicalNodes={logicalNodes}
                                         entityAssignments={entityAssignments}
                                         entityIndex={entityIndex}
+                                        splitChildren={splitChildren}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -859,6 +883,7 @@ function LogicalNodeItem({
                                         depth={depth + 1}
                                         entityIndex={entityIndex}
                                         onUnassign={onUnassign}
+                                        splitChildren={splitChildren}
                                     />
                                 ))}
                             </div>
@@ -879,6 +904,7 @@ interface LayerRowProps {
     assignments: Record<string, LayerAssignmentEntry>
     /** This column's roots, already ordered by the Studio. */
     rows?: LayerRootRow[]
+    splitChildren?: ReadonlySet<string>
     defaultNodeSortMode?: LayerNodeSortAlgo
     onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
     onApplySortToView?: (mode: LayerNodeSortAlgo) => void
@@ -903,6 +929,7 @@ function LayerRow({
     layerIndex,
     assignments,
     rows,
+    splitChildren,
     defaultNodeSortMode,
     onSetLayerSortMode,
     onApplySortToView,
@@ -1264,6 +1291,7 @@ function LayerRow({
                                         logicalNodes={logicalNodes}
                                         entityAssignments={layerEntityAssignments}
                                         entityIndex={entityIndex}
+                                        splitChildren={splitChildren}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -1305,6 +1333,8 @@ function LayerRow({
                                                 entityIndex={entityIndex}
                                                 onUnassign={onUnassign}
                                                 rulePlaced={row.rulePlaced}
+                                                placedBy={row.placedBy}
+                                                splitChildren={splitChildren}
                                                 onReorder={onReorderRoot
                                                     ? (dragged, target, position) =>
                                                         onReorderRoot(layer.id, dragged, target, position)
@@ -1399,6 +1429,7 @@ export function LayerHierarchyPanel({
     layers,
     assignments,
     rootsByLayer,
+    splitChildren,
     defaultNodeSortMode,
     onSetLayerSortMode,
     onApplySortToView,
@@ -1504,6 +1535,7 @@ export function LayerHierarchyPanel({
                                 layerIndex={i}
                                 assignments={assignments}
                                 rows={rootsByLayer?.get(layer.id)}
+                                splitChildren={splitChildren}
                                 defaultNodeSortMode={defaultNodeSortMode}
                                 onSetLayerSortMode={onSetLayerSortMode}
                                 onApplySortToView={onApplySortToView}

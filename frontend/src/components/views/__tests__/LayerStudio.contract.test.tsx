@@ -1,11 +1,12 @@
 /**
  * LayerStudio with placementContractEnabled on: the rail lists what the One
  * Placement Contract places as roots (stale entries skipped, stamped and
- * tag/property rule roots included), the conflict map ignores the store's
- * backend answer, and Auto-layer asks the contract what is already placed.
+ * tag/property rule roots included) and the loaded children it places apart
+ * from their parent, the conflict map ignores the store's backend answer, and
+ * Auto-layer asks the contract what is already placed.
  * Flag-off behaviour is pinned by the other LayerStudio tests, unedited.
  */
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WizardFormData } from '../ViewWizard/ViewWizard'
 import type { LayerRootRow } from '../LayerHierarchyPanel'
@@ -21,8 +22,9 @@ beforeAll(() => {
 })
 
 vi.mock('@/lib/queryClient', () => ({ getQueryClient: () => ({ removeQueries: vi.fn(), invalidateQueries: vi.fn() }) }))
+const { getChildrenWithEdges } = vi.hoisted(() => ({ getChildrenWithEdges: vi.fn() }))
 vi.mock('@/providers/GraphProviderContext', () => {
-  const provider = { getNodes: vi.fn().mockResolvedValue([]) }
+  const provider = { getNodes: vi.fn().mockResolvedValue([]), getChildrenWithEdges }
   return { useGraphProvider: () => provider }
 })
 
@@ -78,14 +80,18 @@ const fakeBrowser = {
 }
 vi.mock('@/hooks/useEntityBrowser', () => ({ useEntityBrowser: () => fakeBrowser }))
 
-// The rail is a stub that records the rows LayerStudio hands it.
-const rail = vi.hoisted(() => ({ rootsByLayer: null as Map<string, LayerRootRow[]> | null }))
-vi.mock('../LayerHierarchyPanel', () => ({
-  LayerHierarchyPanel: ({ rootsByLayer }: { rootsByLayer: Map<string, LayerRootRow[]> }) => {
-    rail.rootsByLayer = rootsByLayer
-    return <div data-testid="layer-hierarchy-panel-stub" />
-  },
-}))
+// The rail is a stub that records the rows LayerStudio hands it — the real
+// panel when a test sets `real`.
+const rail = vi.hoisted(() => ({ rootsByLayer: null as Map<string, LayerRootRow[]> | null, real: false }))
+vi.mock('../LayerHierarchyPanel', async (importOriginal) => {
+  const { LayerHierarchyPanel } = await importOriginal<typeof import('../LayerHierarchyPanel')>()
+  return {
+    LayerHierarchyPanel: (props: React.ComponentProps<typeof LayerHierarchyPanel>) => {
+      rail.rootsByLayer = props.rootsByLayer ?? null
+      return rail.real ? <LayerHierarchyPanel {...props} /> : <div data-testid="layer-hierarchy-panel-stub" />
+    },
+  }
+})
 
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
@@ -128,11 +134,20 @@ const railRows = () => Object.fromEntries(
   [...rail.rootsByLayer!.entries()].map(([layerId, rows]) => [layerId, rows.map(r => [r.name, r.rulePlaced])]),
 )
 
+/** name -> what placed it, for every rail row. */
+const railPlacedBy = () => Object.fromEntries([...rail.rootsByLayer!.values()].flat().map(r => [r.name, r.placedBy]))
+
+/** The real rail's row for `name` in a column. */
+const railRow = (layerId: string, name: string) =>
+  within(screen.getByTestId(`layer-rows-${layerId}`)).getByText(name).closest('[draggable]') as HTMLElement
+
 beforeEach(() => setContract(true))
 afterEach(() => {
   setContract(false)
   useReferenceModelStore.setState({ effectiveAssignments: new Map() })
   rail.rootsByLayer = null
+  rail.real = false
+  getChildrenWithEdges.mockReset()
 })
 
 describe('LayerStudio — contract rail', () => {
@@ -167,6 +182,25 @@ describe('LayerStudio — contract rail', () => {
       domains: [['Plain Domain', true], ['Stale Domain', true]],
       gold: [['Golden', true]],
     })
+    expect(railPlacedBy()).toEqual({
+      Explicit: undefined, Stamped: 'stamp', 'Plain Domain': 'type', 'Stale Domain': 'type', Golden: 'rule',
+    })
+  })
+
+  it('labels each placed row by what placed it', () => {
+    rail.real = true
+    render(<LayerStudio formData={formData} updateFormData={vi.fn()} />)
+    const marker = (layerId: string, name: string) => within(railRow(layerId, name)).getByTestId('rail-rule-placed-marker')
+
+    expect(marker('manual', 'Stamped')).toHaveTextContent('stamped')
+    expect(marker('manual', 'Stamped'))
+      .toHaveAttribute('title', "Placed by the entity's own layer setting. Drag it to another layer to override.")
+    expect(marker('gold', 'Golden')).toHaveTextContent('by rule')
+    expect(marker('gold', 'Golden'))
+      .toHaveAttribute('title', 'Placed automatically by a rule on this layer. Drag it to another layer to override.')
+    expect(marker('domains', 'Plain Domain')).toHaveTextContent('by type')
+    expect(marker('domains', 'Plain Domain'))
+      .toHaveAttribute('title', 'Placed automatically because this layer covers the Domain type. Drag it to another layer to override.')
   })
 
   it('lists the legacy rows with the flag off (control)', () => {
@@ -177,6 +211,51 @@ describe('LayerStudio — contract rail', () => {
       deleted: [['Stale', false], ['Stale Domain', false]],
       domains: [['Plain Domain', true]],
     })
+  })
+})
+
+describe('LayerStudio — contract rail, loaded children', () => {
+  // Warehouse (container) holds Orders (dataset); each type has its own column.
+  const formData = makeFormData({
+    entityScope: 'all',
+    layers: [layer('left', 'Left', 0, { entityTypes: ['container'] }), layer('right', 'Right', 1, { entityTypes: ['dataset'] })],
+  })
+
+  beforeEach(() => {
+    rail.real = true
+    browse([
+      node({ urn: 'urn:p', entityType: 'container', displayName: 'Warehouse' }, ['urn:k']),
+      node({ urn: 'urn:k', entityType: 'dataset', displayName: 'Orders' }),
+    ], ['urn:p'])
+    getChildrenWithEdges.mockResolvedValue({
+      children: [{ urn: 'urn:k', entityType: 'dataset', displayName: 'Orders', properties: {} }],
+      containmentEdges: [], lineageEdges: [],
+    })
+  })
+
+  const left = () => within(screen.getByTestId('layer-rows-left'))
+
+  it('lists a child its own rule places in another column there, not under its parent', async () => {
+    render(<LayerStudio formData={formData} updateFormData={vi.fn()} />)
+    expect(left().getByTitle('1 children inherit this layer')).toBeInTheDocument()
+    fireEvent.click(left().getByRole('button', { name: 'Expand Warehouse' }))
+
+    await waitFor(() => expect(screen.getByTestId('layer-rows-right')).toHaveTextContent('Orders'))
+    expect(railRows()).toEqual({ left: [['Warehouse', true]], right: [['Orders', true]] })
+    expect(railPlacedBy()).toMatchObject({ Orders: 'type' })
+    expect(left().queryByText('Orders')).not.toBeInTheDocument()
+    // Nor counted as a child that inherits Left.
+    fireEvent.click(left().getByRole('button', { name: 'Collapse Warehouse' }))
+    expect(left().queryByTitle(/children inherit this layer/)).not.toBeInTheDocument()
+  })
+
+  it('nests the child under its parent with the flag off (control)', async () => {
+    setContract(false)
+    render(<LayerStudio formData={formData} updateFormData={vi.fn()} />)
+    fireEvent.click(left().getByRole('button', { name: 'Expand Warehouse' }))
+
+    await waitFor(() => expect(left().getByText('Orders')).toBeInTheDocument())
+    expect(screen.queryByTestId('layer-rows-right')).not.toBeInTheDocument()
   })
 })
 

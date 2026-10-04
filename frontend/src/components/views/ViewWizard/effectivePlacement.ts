@@ -46,7 +46,9 @@ import {
   compilePlacementSpec,
   isMember,
   place,
+  type CompiledPlacementSpec,
   type PlacementFacts,
+  type PlacementResult,
   type PlacementSource,
 } from '@/lib/placement/placement'
 
@@ -54,10 +56,16 @@ import {
  *  explicit, rule or none; the contract any source. */
 export type { PlacementSource }
 
+/** What placed a member that holds no entry (contract only): its own stamp,
+ *  a rule on entity types alone, or any other rule. */
+export type PlacedBy = 'type' | 'rule' | 'stamp'
+
 export interface Placement {
   /** Absent when nothing places this entity — it would render nowhere. */
   layerId?: string
   source: PlacementSource
+  /** Contract only, on a stamped or rule placement. */
+  placedBy?: PlacedBy
 }
 
 export interface PlaceableEntity {
@@ -68,6 +76,15 @@ export interface PlaceableEntity {
 }
 
 const NOWHERE: Placement = { source: 'none' }
+
+/** A contract placement's PlacedBy, read from the rule its ruleId names.
+ *  Undefined unless it is stamped or placed by a rule. */
+export function placedByOf(spec: CompiledPlacementSpec, placed: PlacementResult): PlacedBy | undefined {
+  if (placed.source === 'stamped') return 'stamp'
+  if (placed.source !== 'rule') return undefined
+  const rule = spec.rules.find(r => r.id === placed.ruleId && r.layerId === placed.layerId)
+  return rule?.types && !rule.tags && !rule.glob && rule.checks.length === 0 ? 'type' : 'rule'
+}
 
 /**
  * Build a resolver for one draft layout. Layers are sorted by `order` first, the
@@ -97,7 +114,10 @@ export function buildWizardPlacement(
     return (entity: PlaceableEntity): Placement => {
       const facts = entity.facts ?? { urn: entity.urn, entityType: entity.type, tags: [], properties: {} }
       const placed = place(spec, entity.urn, facts, [])
-      return isMember(placed) ? { layerId: placed.layerId!, source: placed.source } : { source: placed.source }
+      const placedBy = placedByOf(spec, placed)
+      return isMember(placed)
+        ? { layerId: placed.layerId!, source: placed.source, ...(placedBy ? { placedBy } : {}) }
+        : { source: placed.source }
     }
   }
 
