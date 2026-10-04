@@ -1,10 +1,12 @@
 """Saving a layer rule that can never match (``view_repo.check_layer_rules``).
 
 While ``placementContractEnabled`` is on, a NEW or CHANGED layer rule whose criteria make it inert
-is refused with a 422 on every view write that carries rules: ``POST /views``, ``PUT /views/{id}``
-and ``PUT /views/{id}/layout`` (the base row and a draft's overlay alike), before anything is
-written. A rule stored earlier and sent back unchanged always passes, because the canvas rewrites
-the whole layout on every gesture. With the flag off every rule is accepted, as before.
+is refused with a 422 where rules are authored: ``POST /views`` and ``PUT /views/{id}/layout`` (the
+base row and a draft's overlay alike), before anything is written. A rule stored earlier and sent
+back unchanged always passes, because the canvas rewrites the whole layout on every gesture.
+``PUT /views/{id}`` is not checked: the wizard's save sends back the layout it read, a draft's
+overlay included, which need not match the base row. With the flag off every rule is accepted, as
+before.
 """
 from __future__ import annotations
 
@@ -172,13 +174,13 @@ async def test_create_refuses_an_inert_rule(test_client: AsyncClient):
     assert (await _create(test_client, ws_id, _config())).status_code == 201  # no layout at all
 
 
-async def test_update_refuses_only_a_new_or_changed_inert_rule(test_client: AsyncClient):
-    view_id = await _view_with(test_client, _layout(_EMPTY))
+async def test_update_does_not_check_layer_rules(test_client: AsyncClient):
+    """The wizard renames a draft by sending the layout it read: base plus overlay, whose inert
+    rule the base row does not hold."""
+    view_id = await _view_with(test_client, _layout(_VALID))
     _set_contract(True)
-    url = f"/api/v1/views/{view_id}"
 
-    assert (await test_client.put(url, json={"config": _config(_layout(_EMPTY, _VALID))})).status_code == 200
-    changed = await test_client.put(url, json={"config": _config(_layout({**_EMPTY, "name": "Renamed"}))})
-    assert changed.status_code == 422
-    assert "rule 'Renamed'" in changed.json()["detail"]
-    assert (await test_client.put(url, json={"name": "No config"})).status_code == 200
+    resp = await test_client.put(f"/api/v1/views/{view_id}", json={
+        "name": "Renamed", "config": _config(_layout(_VALID, _EMPTY))})
+
+    assert resp.status_code == 200, resp.text

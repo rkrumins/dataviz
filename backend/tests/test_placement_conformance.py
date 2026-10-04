@@ -4,7 +4,8 @@
 ``frontend/src/lib/placement/__tests__/conformance.test.ts`` runs the same files against the
 TypeScript twin, so the server and the canvas cannot drift apart without a red build on both
 sides. A case is a FULL stored view config, the graph nodes and edges, and the expected placement
-of every node; some cases also pin the write-path policy (``suggest``).
+of every node; some cases also pin the write-path policy (``suggest``) and the rules the compiled
+view reports inert (``inert``).
 
 ``_place`` is the only code here that knows the contract's API.
 """
@@ -31,7 +32,7 @@ _FRONTEND_RUNNER = _REPO / "frontend" / "src" / "lib" / "placement" / "__tests__
 _FRONTEND_WORKFLOW = _REPO / ".github" / "workflows" / "frontend-tests.yml"
 
 _CASE_KEYS = {"name", "summary", "view", "ontology", "nodes", "edges", "context", "expect", "suggest",
-              "legacy"}
+              "legacy", "inert"}
 _NODE_KEYS = {"urn", "entityType", "displayName", "tags", "layerAssignment", "properties"}
 _EDGE_KEYS = {"source", "target", "edgeType"}
 _PLACEMENT_KEYS = {"layerId", "source", "ruleId", "inheritedFrom", "staleExplicit", "ambiguousParent"}
@@ -49,6 +50,7 @@ def _load():
 _CASES = _load()
 _EACH = pytest.mark.parametrize("case", _CASES, ids=[c["name"] for c in _CASES])
 _SUGGESTING = [c for c in _CASES if c.get("suggest")]
+_INERT = [c for c in _CASES if "inert" in c]
 
 
 def _graph_node(node):
@@ -103,6 +105,12 @@ def test_suggest_matches_the_corpus(case):
         assert {"layerId": layer_id, "pin": pin} == s["expect"], s
 
 
+@pytest.mark.parametrize("case", _INERT, ids=[c["name"] for c in _INERT])
+def test_inert_rules_match_the_corpus(case):
+    spec, _, _ = _place(case)
+    assert sorted([layer_id, rule_id] for layer_id, rule_id, _reason in spec.inert) == case["inert"]
+
+
 @_EACH
 def test_every_case_is_well_formed(case):
     """A malformed case passes or fails for the wrong reason, on one side only."""
@@ -132,6 +140,9 @@ def test_every_case_is_well_formed(case):
     for s in case.get("suggest", []):
         assert set(s) <= _SUGGEST_KEYS and s["urn"] in urns, s
         assert set(s["expect"]) == {"layerId", "pin"}, s
+    if "inert" in case:
+        assert all(isinstance(p, list) and len(p) == 2 for p in case["inert"]), case["inert"]
+        assert case["inert"] == sorted(case["inert"]), "inert pairs are sorted"
 
 
 def test_the_corpus_names_are_unique_kebab_case():

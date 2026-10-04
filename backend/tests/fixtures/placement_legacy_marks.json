@@ -572,6 +572,14 @@
       "k4": null
     }
   },
+  "text-reads-exact-integers-past-2-53-and-negative-zero": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "i1": null,
+      "i2": null,
+      "z1": null
+    }
+  },
   "three-node-cycle-with-an-outside-parent": {
     "why": "Edges inside a containment cycle are ignored; the server let the cycle's members inherit from each other.",
     "legacy": {
@@ -609,5 +617,14 @@
   "unknown-operator-makes-the-rule-inert": {
     "why": "Rejected: the request the canvas builds fails validation today (a condition operator outside the six rule operators), so the server places nothing; the contract reads the stored config.",
     "legacy": "rejected"
+  },
+  "whole-float-past-int64-compares-as-a-number": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "x": {
+        "layerId": "b",
+        "source": "rule"
+      }
+    }
   }
 }

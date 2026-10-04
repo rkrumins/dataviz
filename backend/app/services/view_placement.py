@@ -513,9 +513,10 @@ def facts_from_graph_node(node: GraphNode) -> NodeFacts:
 
 def inert_rule_errors(layout: Optional[dict], previous_layout: Optional[dict]) -> List[str]:
     """The save check, over two BARE reference layouts: one message per authored rule that can
-    never match and is new or changed against ``previous_layout`` (by layer id and rule id). A
-    rule stored earlier and sent back unchanged passes, so a canvas gesture on an older view is
-    never refused for a rule it did not touch."""
+    never match and is new or changed against ``previous_layout`` (by content, within its layer).
+    A rule stored earlier and sent back unchanged passes, even moved, so a canvas gesture on an
+    older view is never refused for a rule it did not touch. Not by rule id: an id-less rule's id
+    is its position, which deleting a neighbour shifts."""
     def rules(raw: Optional[dict]):
         for layer in (raw.get("layers") if isinstance(raw, dict) else None) or ():
             if not (isinstance(layer, dict) and isinstance(layer.get("id"), str) and layer["id"]):
@@ -525,10 +526,12 @@ def inert_rule_errors(layout: Optional[dict], previous_layout: Optional[dict]) -
                 if isinstance(rule, dict):
                     yield layer, _rule_id(rule, layer["id"], index), rule
 
-    stored = {(layer["id"], rule_id): rule for layer, rule_id, rule in rules(previous_layout)}
+    stored: Dict[str, List[dict]] = {}
+    for layer, _, rule in rules(previous_layout):
+        stored.setdefault(layer["id"], []).append(rule)
     errors: List[str] = []
     for layer, rule_id, rule in rules(layout):
-        if stored.get((layer["id"], rule_id)) == rule:
+        if rule in stored.get(layer["id"], ()):
             continue
         criteria, reason = _criteria(rule)
         if criteria is None:

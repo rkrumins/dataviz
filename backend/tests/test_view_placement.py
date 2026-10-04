@@ -576,6 +576,17 @@ class TestSaveCheck:
         layout = self.with_rules({"id": "old", "urnPattern": "", "priority": 3})
         assert inert_rule_errors(layout, self.STORED) == [f"layer 'Sources': rule 'old' {NO_CRITERIA}"]
 
+    def test_deleting_an_earlier_rule_does_not_touch_a_stored_id_less_inert_rule(self):
+        """Its positional id shifts when a rule ahead of it goes; its content does not."""
+        for earlier in ({"id": "first", "entityTypes": ["T"]}, {"entityTypes": ["T"]}):
+            stored = self.with_rules(earlier, {"urnPattern": ""})
+            assert inert_rule_errors(self.with_rules({"urnPattern": ""}), stored) == []
+
+    def test_a_changed_id_less_inert_rule_is_refused(self):
+        stored = self.with_rules({"entityTypes": ["T"]}, {"urnPattern": ""})
+        layout = self.with_rules({"urnPattern": "", "priority": 3})
+        assert inert_rule_errors(layout, stored) == [f"layer 'Sources': rule '_rule_a_0' {NO_CRITERIA}"]
+
     def test_valid_rules_pass(self):
         layout = self.with_rules({"id": "old", "urnPattern": "urn:*"}, {"id": "new", "entityTypes": ["T"]})
         assert inert_rule_errors(layout, self.STORED) == []

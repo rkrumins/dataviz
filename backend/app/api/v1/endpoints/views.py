@@ -819,15 +819,9 @@ async def update_view(
     if req.view_type is not None and req.view_type != existing.view_type:
         await ensure_view_mode_allowed(req.view_type, session)
 
-    if req.config is not None:
-        try:
-            await view_repo.check_layer_rules(
-                session, view_repo._base_reference_layout(req.config),
-                view_repo._base_reference_layout(existing.config),
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=str(e))
-
+    # Layer rules are not checked here but where they are authored (create and PUT /layout):
+    # the wizard's save sends back the layout it read, a draft's overlay included, so a rename
+    # would be refused for a draft rule the base does not hold.
     digest = await _compute_ontology_digest(
         session, existing.workspace_id, existing.data_source_id,
     )

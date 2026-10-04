@@ -6,12 +6,15 @@
  * runs the same files against the Python reference, so the canvas and the
  * server cannot drift apart without a red build on both sides. Each case runs
  * as given and with its nodes and edges reversed; some also pin the
- * write-path policy (suggest).
+ * write-path policy (suggest) and the rules the compiled view reports inert
+ * (inert). The files are parsed as the canvas reads views and graph data
+ * (losslessJson), so an integer past 2^53 arrives as its digits in a string.
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
+import { parseJsonLossless } from '@/lib/losslessJson'
 import type { GraphNode } from '@/providers/GraphDataProvider'
 import { OPERATOR_TABLE } from '@/types/generated/searchOperators'
 
@@ -38,10 +41,12 @@ interface CorpusCase {
   context?: { createdInBranch?: string[] }
   expect: Record<string, Record<string, unknown>>
   suggest?: { urn: string; chosenLayerId?: string; defaultLayerId?: string; expect: { layerId: string | null; pin: boolean } }[]
+  /** [layerId, ruleId] pairs, sorted as Python sorts them. */
+  inert?: [string, string][]
 }
 
 const CASES: CorpusCase[] = readdirSync(CORPUS).filter((f) => f.endsWith('.json')).sort()
-  .flatMap((f) => (JSON.parse(readFileSync(join(CORPUS, f), 'utf-8')) as { cases: CorpusCase[] }).cases)
+  .flatMap((f) => parseJsonLossless<{ cases: CorpusCase[] }>(readFileSync(join(CORPUS, f), 'utf-8')).cases)
 
 /** view_placement.child_is_source: whether a containment edge points child -> parent. */
 function childIsSource(edgeType: string, direction: string | null): boolean {
@@ -98,6 +103,14 @@ describe('the shared placement corpus', () => {
           const opts = { chosenLayerId: s.chosenLayerId ?? null, defaultLayerId: s.defaultLayerId ?? null }
           expect(suggestPlacement(spec, facts.get(s.urn)!, opts), JSON.stringify(s)).toEqual(s.expect)
         }
+      })
+    }
+
+    if (c.inert) {
+      it('reports the inert rules the corpus names', () => {
+        const pairs = run(c).spec.inert.map((r) => [r.layerId, r.ruleId])
+        const order = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+        expect(pairs.sort((x, y) => order(x[0], y[0]) || order(x[1], y[1]))).toEqual(c.inert)
       })
     }
   })

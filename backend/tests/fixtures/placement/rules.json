@@ -482,7 +482,8 @@
         }
       },
       "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "folder" }],
-      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" }, "y": { "source": "none" } }
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" }, "y": { "source": "none" } },
+      "inert": [["a", "r"], ["a", "r2"], ["a", "r3"], ["a", "r4"]]
     },
     {
       "name": "blank-list-entries-are-dropped",

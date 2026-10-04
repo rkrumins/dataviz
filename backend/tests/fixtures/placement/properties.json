@@ -621,6 +621,71 @@
       }
     },
     {
+      "name": "text-reads-exact-integers-past-2-53-and-negative-zero",
+      "summary": "MATCH evaluate (string): an integer reads as all its digits, past 2^53 too (the canvas reads one as its digits in a string), and the float -0.0 reads '%.15g' as '-0' while the integer 0 reads '0'.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r1",
+                    "priority": 5,
+                    "propertyMatch": { "field": "code", "operator": "equals", "value": "9007199254740994" }
+                  }
+                ]
+              },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r2",
+                    "priority": 5,
+                    "propertyMatch": { "field": "code", "operator": "startsWith", "value": "900719925474099" }
+                  }
+                ]
+              },
+              {
+                "id": "c",
+                "name": "C",
+                "order": 2,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r3",
+                    "priority": 5,
+                    "propertyMatch": { "field": "delta", "operator": "equals", "value": "-0" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "i1", "properties": { "code": 9007199254740994 } },
+        { "urn": "i2", "properties": { "code": 9007199254740996 } },
+        { "urn": "z1", "properties": { "delta": -0.0 } },
+        { "urn": "z2", "properties": { "delta": 0 } }
+      ],
+      "expect": {
+        "i1": { "layerId": "a", "source": "rule", "ruleId": "r1" },
+        "i2": { "layerId": "b", "source": "rule", "ruleId": "r2" },
+        "z1": { "layerId": "c", "source": "rule", "ruleId": "r3" },
+        "z2": { "source": "none" }
+      }
+    },
+    {
       "name": "property-values-fold-case-per-character",
       "summary": "fold_case: the value '\u0130STANBUL' folds to 'istanbul' (\u0130 to i), so it matches istanbul in any case but not the dotless \u0131.",
       "view": {
@@ -785,7 +850,8 @@
         "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" },
         "y": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" },
         "z": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" }
-      }
+      },
+      "inert": [["a", "r1"], ["a", "r2"], ["a", "r3"], ["a", "r4"], ["a", "r5"]]
     },
     {
       "name": "unknown-operator-makes-the-rule-inert",
@@ -834,7 +900,47 @@
         }
       },
       "nodes": [{ "urn": "x", "entityType": "dataset", "properties": { "owner": "finance" } }],
-      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" } }
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" } },
+      "inert": [["a", "r1"], ["a", "r2"], ["a", "r3"], ["a", "r4"]]
+    },
+    {
+      "name": "whole-float-past-int64-compares-as-a-number",
+      "summary": "MATCH evaluate (number): 1e+21 is a float, which _to_number keeps as it is (_int64 holds only an integer to the 64-bit range), so notEquals 1e+21 is a number comparison, not an inert rule: it claims x (size 5) and leaves y and z (size 1e+21) to the later tiers.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "r1",
+                    "priority": 5,
+                    "propertyMatch": { "field": "size", "operator": "notEquals", "value": 1e+21 }
+                  }
+                ]
+              },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"], "showUnassigned": true }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset", "properties": { "size": 5 } },
+        { "urn": "y", "entityType": "folder", "properties": { "size": 1e+21 } },
+        { "urn": "z", "entityType": "dataset", "properties": { "size": 1e+21 } }
+      ],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "r1" },
+        "y": { "layerId": "b", "source": "fallback" },
+        "z": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" }
+      },
+      "inert": []
     },
     {
       "name": "blank-condition-field-counts-as-absent",
@@ -892,7 +998,8 @@
         "x": { "layerId": "a", "source": "rule", "ruleId": "r1" },
         "y": { "source": "none" },
         "z": { "layerId": "b", "source": "rule", "ruleId": "r3" }
-      }
+      },
+      "inert": [["a", "r2"], ["b", "r4"]]
     },
     {
       "name": "missing-operator-means-equals",

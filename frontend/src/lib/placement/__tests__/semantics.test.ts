@@ -34,6 +34,10 @@ describe('resolveRuleComparison', () => {
     expect(resolveRuleComparison('equals', ['x'])).toEqual({ op: 'eq', type: 'string', value: 'x' })
   })
 
+  it('compares a number past the 64-bit integers, which reached the canvas as a float', () => {
+    expect(resolveRuleComparison('notEquals', 1e21)).toEqual({ op: 'neq', type: 'number', value: 1e21 })
+  })
+
   it('accepts empty text for equals, which has more than one type', () => {
     expect(holds('', 'equals', '')).toBe(true)
     expect(holds('a', 'equals', '')).toBe(false)
@@ -77,6 +81,11 @@ describe('evaluate (search_semantics.evaluate, rule slice)', () => {
     expect(holds(true, 'equals', 'TRUE')).toBe(true)
   })
 
+  it('prints the float -0.0 as -0 and the integer 0 as 0', () => {
+    expect(holds(-0, 'equals', '-0')).toBe(true)
+    expect(holds(0, 'equals', '-0')).toBe(false)
+  })
+
   it.each([
     [1.5, '1.5'],
     [0.1, '0.1'],
@@ -84,6 +93,7 @@ describe('evaluate (search_semantics.evaluate, rule slice)', () => {
     [1e-5, '1e-05'],
     [0.000123, '0.000123'],
     [1e20, '1e+20'],
+    [1e16, '1e+16'],  // an integer past 2^53 reaches the canvas as text, so this was a float
     [123456789012345.6, '123456789012346'],
     [99999999999999.95, '100000000000000'],
     [999999999999999.5, '1e+15'],

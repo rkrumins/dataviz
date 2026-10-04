@@ -70,6 +70,10 @@ export function resolveRuleComparison(operator: string, value: unknown): Compari
   }
   const type = autoTypeOf(op, v) as 'string' | 'number' | 'boolean'
   if (type === 'number' && !Number.isFinite(v)) throw new SemanticsError(`${v} is not a number`)
+  // No _int64 refusal: the canvas reads an integer past 2^53 as its digits in
+  // a string (losslessJson), so a number past int64 here was a float, which
+  // the server compares too. An integer past int64 compares as text instead,
+  // where the server makes the rule inert; the string cannot say which it was.
   if (type !== 'string') return { op, type, value: v }
   const text = textOf(v) as string
   if (OPERATOR_TABLE[op].types.length === 1 && text === '') throw new SemanticsError('type some text to look for')
@@ -110,6 +114,10 @@ function test(k: string | number | boolean | null, op: PropertyOperator, v: Comp
 function textOf(e: unknown): string | null {
   if (typeof e === 'string') return e
   if (typeof e === 'boolean') return e ? 'true' : 'false'
+  // Python's float -0.0 prints '-0'; String(-0) is '0'.
+  if (Object.is(e, -0)) return '-0'
+  // An integer past 2^53 arrives as its digits in a string (losslessJson), so
+  // a whole number past it here was a float.
   if (typeof e === 'number') return Number.isSafeInteger(e) ? String(e) : formatG15(e)
   return null
 }
