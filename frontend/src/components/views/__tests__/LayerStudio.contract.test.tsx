@@ -259,6 +259,55 @@ describe('LayerStudio — contract rail, loaded children', () => {
   })
 })
 
+describe('LayerStudio — contract rail, a child under two parents', () => {
+  // Alpha and Beta (Domains) both hold Shared (dataset).
+  beforeEach(() => {
+    rail.real = true
+    browse([
+      node({ urn: 'urn:a', entityType: 'Domain', displayName: 'Alpha' }, ['urn:c']),
+      node({ urn: 'urn:b', entityType: 'Domain', displayName: 'Beta' }, ['urn:c']),
+      node({ urn: 'urn:c', entityType: 'dataset', displayName: 'Shared' }),
+    ], ['urn:a', 'urn:b'])
+    getChildrenWithEdges.mockResolvedValue({
+      children: [{ urn: 'urn:c', entityType: 'dataset', displayName: 'Shared', properties: {} }],
+      containmentEdges: [], lineageEdges: [],
+    })
+  })
+
+  const expandBoth = async (alphaLayer: string, betaLayer: string) => {
+    fireEvent.click(within(screen.getByTestId(`layer-rows-${alphaLayer}`)).getByRole('button', { name: 'Expand Alpha' }))
+    fireEvent.click(within(screen.getByTestId(`layer-rows-${betaLayer}`)).getByRole('button', { name: 'Expand Beta' }))
+    await waitFor(() => expect(screen.getAllByText('Shared')).toHaveLength(2))
+  }
+
+  it('does not list a child that only inherits as a root of either column', async () => {
+    render(<LayerStudio formData={makeFormData({
+      entityScope: 'all',
+      layers: [layer('left', 'Left', 0), layer('right', 'Right', 1)],
+      assignments: { 'urn:a': { layerId: 'left', inheritsChildren: true }, 'urn:b': { layerId: 'right', inheritsChildren: true } },
+    })} updateFormData={vi.fn()} />)
+    await expandBoth('left', 'right')
+
+    expect(railRows()).toEqual({ left: [['Alpha', false]], right: [['Beta', false]] })
+    expect(screen.queryByTestId('rail-rule-placed-marker')).not.toBeInTheDocument()
+  })
+
+  it('places the child from both parents: a hand parent beats its own rule', async () => {
+    render(<LayerStudio formData={makeFormData({
+      entityScope: 'all',
+      layers: [
+        layer('left', 'Left', 0, { entityTypes: ['Domain'] }),
+        layer('middle', 'Middle', 1),
+        layer('right', 'Right', 2, { entityTypes: ['dataset'] }),
+      ],
+      assignments: { 'urn:b': { layerId: 'middle', inheritsChildren: true } },
+    })} updateFormData={vi.fn()} />)
+    await expandBoth('left', 'middle')
+
+    expect(railRows()).toEqual({ left: [['Alpha', true]], middle: [['Beta', false]] })
+  })
+})
+
 describe('LayerStudio — contract conflict map', () => {
   // Parent contains Child; the store's (stale) backend answer puts Child in Other.
   beforeEach(() => {

@@ -95,10 +95,8 @@ import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
 import {
     compilePlacementSpec,
     isMember,
-    parentContextOf,
-    place as contractPlace,
+    placeAll,
     type PlacementFacts,
-    type PlacementResult,
 } from '@/lib/placement/placement'
 import { PlacementPathsContext } from './placementPathsContext'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
@@ -1622,8 +1620,8 @@ export function LayerStudio({
     /**
      * Contract only: the loaded children whose own entry, stamp or rule puts them
      * in another layer than their parent's. The canvas draws such a child in that
-     * layer, so the rail lists it there and not under its parent. Walks down from
-     * the column roots through what the rail has loaded, nothing more.
+     * layer, so the rail lists it there and not under its parent. Places what the
+     * rail has loaded below the column roots, nothing more.
      */
     const splitChildren = useMemo(() => {
         if (!placementSpec) return null
@@ -1635,39 +1633,52 @@ export function LayerStudio({
             const identity = entityIndex.resolve(urn)
             return identity ? { urn, entityType: identity.type, tags: [], properties: {} } : null
         }
-        const placed = new Map<string, PlacementResult>()
+        const roots = new Set([
+            ...scannedTopLevel.map(e => e.urn),
+            ...[...placementSpec.explicit].filter(([, e]) => placementSpec.layerIds.has(e.layerId)).map(([urn]) => urn),
+        ])
+        // Every loaded node below the roots with all its loaded parents, so a
+        // child under two parents is placed from both, as the canvas places it.
+        const parentsOf = new Map<string, string[]>([...roots].map(urn => [urn, []]))
+        const collect = (urn: string) => {
+            for (const child of entityIndex.childrenOf(urn)) {
+                const parents = parentsOf.get(child)
+                if (parents) {
+                    parents.push(urn)
+                    continue
+                }
+                parentsOf.set(child, [urn])
+                collect(child)
+            }
+        }
+        roots.forEach(collect)
+        const placed = placeAll(placementSpec, parentsOf.keys(), factsOf, urn => parentsOf.get(urn)!)
+
         const urns = new Set<string>()
         const rows: { layerId: string; urn: string; placedBy?: PlacedBy }[] = []
+        const walked = new Set<string>()
         const walk = (urn: string) => {
+            if (walked.has(urn)) return
+            walked.add(urn)
             const parent = placed.get(urn)!
-            const context = parentContextOf(urn, parent)
             const parentLayerId = isMember(parent) ? parent.layerId : null
             for (const child of entityIndex.childrenOf(urn)) {
-                const known = placed.get(child)
-                const result = known ?? contractPlace(placementSpec, child, factsOf(child), context ? [context] : [])
-                if (isMember(result) && result.layerId !== parentLayerId) {
+                const result = placed.get(child)!
+                // Only its own entry, stamp or rule takes a child out; an
+                // inherited one stays under the parent it inherits from.
+                if (isMember(result) && result.source !== 'inherited' && result.layerId !== parentLayerId) {
                     urns.add(child)
                     // An entry is listed as a row already.
                     if (result.source !== 'explicit') {
                         rows.push({ layerId: result.layerId!, urn: child, placedBy: placedByOf(placementSpec, result) })
                     }
                 }
-                if (known) continue
-                placed.set(child, result)
                 walk(child)
             }
         }
-        const roots = [
-            ...scannedTopLevel.map(e => e.urn),
-            ...[...placementSpec.explicit].filter(([, e]) => placementSpec.layerIds.has(e.layerId)).map(([urn]) => urn),
-        ]
-        for (const urn of roots) {
-            if (placed.has(urn) || entityIndex.childrenOf(urn).length === 0) continue
-            const result = contractPlace(placementSpec, urn, factsOf(urn), [])
-            if (!isMember(result)) continue
-            placed.set(urn, result)
-            walk(urn)
-        }
+        roots.forEach(urn => {
+            if (isMember(placed.get(urn)!)) walk(urn)
+        })
         return { urns, rows }
     }, [placementSpec, scannedTopLevel, snapshot, entityIndex])
 

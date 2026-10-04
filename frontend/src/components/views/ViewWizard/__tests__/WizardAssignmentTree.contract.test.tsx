@@ -178,6 +178,21 @@ describe('WizardAssignmentTree — contract tree', () => {
     expect(screen.queryByTitle('Ledger')).not.toBeInTheDocument()
   })
 
+  it('keeps it under “Unassigned only” before its children load, unless they inherit its layer', () => {
+    const [urn, finance] = entry({ urn: 'urn:d', entityType: 'Domain', displayName: 'Finance' }, ['urn:t', 'urn:f'])
+    browse([[urn, { ...finance, childIds: [], loaded: false }]], ['urn:d'])
+    const unassignedOnly = (inheritsChildren: boolean) => {
+      const { unmount } = renderTree(typed, { 'urn:d': { layerId: 'manual', inheritsChildren } })
+      fireEvent.click(screen.getByRole('button', { name: /Unassigned only/ }))
+      const shown = !!screen.queryByTitle('Finance')
+      unmount()
+      return shown
+    }
+
+    expect(unassignedOnly(false)).toBe(true)
+    expect(unassignedOnly(true)).toBe(false)
+  })
+
   it('drops an assigned parent under “Unassigned only” when every child is assigned too', () => {
     renderTree(typed)
     expand('Finance')

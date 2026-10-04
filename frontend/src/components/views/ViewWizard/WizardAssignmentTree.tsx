@@ -639,8 +639,10 @@ export function WizardAssignmentTree({
                     .sort((a, b) => a.name.localeCompare(b.name))
                 : []
 
-            // Contract: an assigned node stays only as the path to an unassigned child.
-            if (hideAssigned && effectiveLayerId && children.length === 0) return null
+            // Contract: an assigned node stays only as the path to an unassigned
+            // child, or to children not loaded yet when it passes them no layer.
+            const unloadedChildren = entry.loaded ? entry.hasMore : entry.totalChildren > 0
+            if (hideAssigned && effectiveLayerId && children.length === 0 && !(unloadedChildren && !childContext)) return null
 
             const conflict = conflictMap.get(urn)
 
