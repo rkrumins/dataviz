@@ -458,11 +458,12 @@ canvas sends). The second pass is the placement contract. Each change is counted
 by transition, such as `inherited->rule` (a typed child now leaves its rule-placed
 parent's column), `rule->none` (rule criteria now combine with AND, or the URN
 glob is now case-sensitive and treats regex characters other than `*` and `?`
-literally), `none->rule` (types match in any case, and property rules now
-work) or `explicit->rule +stale` (the entry names a layer that no longer exists).
-The report also lists inert rules, stale explicit entries, and `rejected` views,
-whose config the server refuses today. Counts are for the sample, not exact. A
-view whose sample hit a page limit is marked `capped`.
+literally), `none->rule` (types match in any case, property rules now work,
+or a URN glob holding regex characters such as `(` `)` now matches them
+literally) or `explicit->rule +stale` (the entry names a layer that no longer
+exists). The report also lists inert rules, stale explicit entries, and
+`rejected` views, whose config the server refuses today. Counts are for the
+sample, not exact. A view whose sample hit a page limit is marked `capped`.
 
 **What canvas-only means.** Today the canvas also places some entities itself,
 and it reads parts of the config differently from the server: a type claimed by

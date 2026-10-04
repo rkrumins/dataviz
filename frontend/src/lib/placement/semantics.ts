@@ -72,8 +72,9 @@ export function resolveRuleComparison(operator: string, value: unknown): Compari
   if (type === 'number' && !Number.isFinite(v)) throw new SemanticsError(`${v} is not a number`)
   // No _int64 refusal: the canvas reads an integer past 2^53 as its digits in
   // a string (losslessJson), so a number past int64 here was a float, which
-  // the server compares too. An integer past int64 compares as text instead,
-  // where the server makes the rule inert; the string cannot say which it was.
+  // the server compares too. An integer of 2^53 or more compares as text
+  // instead, where the server compares it as a number (or, past int64, makes
+  // the rule inert); the string cannot say which it was.
   if (type !== 'string') return { op, type, value: v }
   const text = textOf(v) as string
   if (OPERATOR_TABLE[op].types.length === 1 && text === '') throw new SemanticsError('type some text to look for')

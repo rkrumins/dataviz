@@ -187,10 +187,11 @@ replace, advanced-search view scope, the search Layer filter and layer aggregati
 3. Review the transitions (`<old source>-><new source>`, plus ` +stale`): `inherited->rule` means a
    typed child now leaves its parent's column; `rule->rule` first-layer-wins, priority or AND;
    `rule->none` AND, or the URN glob now being case-sensitive with only `*` and `?` special;
-   `none->rule` case-insensitive types or property rules now working; `*->* +stale` an entry
-   naming a deleted layer. `canvasOnly` flags (`duplicate-types`,
-   `authored-rules`, `empty-rule`, `glob-pattern`, `property-rule`, `fallback-layer`) change the
-   canvas even when the server counts do not. Fix stale entries, priorities and inert rules first.
+   `none->rule` case-insensitive types, property rules now working, or a URN glob holding regex
+   characters such as `(` `)` (DataHub dataset URNs) now matching them literally; `*->* +stale`
+   an entry naming a deleted layer. `canvasOnly` flags (`duplicate-types`, `authored-rules`,
+   `empty-rule`, `glob-pattern`, `property-rule`, `fallback-layer`) change the canvas even when the
+   server counts do not. Fix stale entries, priorities and inert rules first.
 4. Enable the flag. Servers pick it up within 30 s, open tabs within about a minute or on focus.
 5. Check the listed views: canvas, Layer Studio, search badges and trace lanes agree, and the
    canvas sends no `/assignments/compute` request.
@@ -203,11 +204,16 @@ replace, advanced-search view scope, the search Layer filter and layer aggregati
 - An ancestor the canvas has not loaded passes down only a hand placement (from its URN chain).
 - Placement still covers the loaded/rendered set; exact per-layer membership and totals come with
   server-side membership (next phase).
-- The browser cannot tell a whole-number float from an integer: a float property of 1e15 or more
-  (the server reads `1e+15`) reads as its digits there, so a text rule (`equals`, `startsWith`,
-  `contains`) on it can place differently on the canvas than on the server. Integers past 2^53
-  arrive exactly, as their digits, so a rule value past the 64-bit integers compares as text on the
-  canvas, where the server finds the rule inert; the dry run's `inertRules` lists those.
+- The browser cannot tell a whole-number float from an integer: a whole-number float from 1e15 up
+  to 2^53 in magnitude, as a property or a text rule's value, reads as its digits there where the
+  server reads `1e+15`, so a text rule (`equals`, `startsWith`, `contains`) on it can place
+  differently on the canvas than on the server. Integers of 2^53 or more arrive exactly, as their
+  digits in text, so a rule value stored as such an integer compares as text on the canvas. The
+  server compares it as a number while it fits in 64 bits, so a float property or a number spelled
+  another way (`1e+16`, `010000000000000000`) can match `equals` there and not on the canvas, and
+  `notEquals` the other way round; past 64 bits the server finds the rule inert, and the dry run's
+  `inertRules` lists it. The editors store rule values as text, so only a value written as a number
+  through the API or an import is affected.
 
 ## Limitations
 

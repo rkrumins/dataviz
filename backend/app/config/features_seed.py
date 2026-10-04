@@ -892,8 +892,9 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "help_url": None,
         "admin_hint": (
             "Run the placement dry run first (python -m backend.scripts.placement_dry_run) and "
-            "review the views it lists. While this is on, a new or changed layer rule that can "
-            "never match cannot be saved. Safe to switch back off at any time."
+            "review the views it lists. While this is on, creating a view or saving its layers "
+            "refuses a new or changed layer rule that can never match. Safe to switch back off "
+            "at any time."
         ),
         "sort_order": 3,
         "deprecated": False,

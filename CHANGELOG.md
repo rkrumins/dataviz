@@ -22,8 +22,9 @@ contract — a Python reference and a TypeScript twin held equal by a shared cor
 required CI. Rules are the AND of their criteria and finally work for tags, URN globs,
 `propertyMatch` and conditions; the first layer wins a tie; types match whatever their case; a child
 whose own type a layer claims is shown in that layer with the *Placed* path tag, while hand
-placements still carry their subtree. Saving a new or changed rule that can never match is refused
-with a message naming it. See `docs/services/ASSIGNMENTS.md`.
+placements still carry their subtree. Creating a view, or saving its layers, with a new or changed
+rule that can never match is refused with a message naming it (`PUT /views/{id}`, which the wizard
+uses to save a view's details, does not check rules). See `docs/services/ASSIGNMENTS.md`.
 
 **`python -m backend.scripts.placement_dry_run`** reports, per saved view, what turning the flag on
 would change and why, before anyone sees it.
@@ -39,9 +40,9 @@ would change and why, before anyone sees it.
   `BELONGS_TO` children can be placed differently there than on the server.
 - Export, scoped replace, the search Layer filter, open-view type feeds and column totals keep
   today's rules until server-side membership (the next phase).
-- The browser cannot tell a whole-number float from an integer, so a text rule on a float property
-  of 1e15 or more, or a rule value past the 64-bit integers, can place an entity differently on the
-  canvas than on the server.
+- The browser cannot tell a whole-number float from an integer, so a text rule on a whole-number
+  float from 1e15 up to 2^53, or a rule value stored as an integer of 2^53 or more, can place an
+  entity differently on the canvas than on the server.
 
 ---
 
