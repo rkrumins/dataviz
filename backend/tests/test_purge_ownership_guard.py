@@ -60,6 +60,18 @@ def _runner(*, ps, shared_with, client):
     return PurgeRunner(graph_factory=factory, session_factory=_session), job
 
 
+def _landing(job):
+    """The purge's lease, as one whose fenced checkpoint lands: the verdict reaches the job row."""
+    class _Lease:
+        job_id = job.id
+
+        async def checkpoint(self, _s, **values):
+            for column, value in values.items():
+                setattr(job, column, value)
+
+    return _Lease()
+
+
 def _ps(owned, name="cust_graph"):
     return SimpleNamespace(falkor_graph_name=name, owns_falkor_graph=owned, falkor_provider=None)
 
@@ -68,7 +80,7 @@ def test_external_graph_is_never_dropped():
     """owns_falkor_graph=False (the default; the federated/customer case) → PROTECTED, untouched."""
     client = _Client()
     runner, job = _runner(ps=_ps(owned=False), shared_with=0, client=client)
-    _run(runner._phase_falkor("job1", "g1"))
+    _run(runner._phase_falkor(_landing(job), "g1"))
     assert client.deletes == 0                       # the customer's data is never touched
     assert job.summary["falkor"]["owned"] is False
     assert "PROTECTED" in job.summary["falkor"]["verdict"]
@@ -78,7 +90,7 @@ def test_owned_managed_graph_is_dropped():
     """owns_falkor_graph=True (a graph we minted) and not shared → the drop really happens."""
     client = _Client()
     runner, job = _runner(ps=_ps(owned=True, name="blank_ds1"), shared_with=0, client=client)
-    _run(runner._phase_falkor("job1", "g1"))
+    _run(runner._phase_falkor(_landing(job), "g1"))
     assert client.deletes == 1                        # our managed/versioned graph is dropped
     assert job.summary["falkor"]["verdict"].startswith("dropped")
 
@@ -87,7 +99,7 @@ def test_owned_but_still_shared_graph_is_protected():
     """Even a graph we own is not dropped while another surviving graph still projects into it."""
     client = _Client()
     runner, job = _runner(ps=_ps(owned=True, name="blank_ds1"), shared_with=2, client=client)
-    _run(runner._phase_falkor("job1", "g1"))
+    _run(runner._phase_falkor(_landing(job), "g1"))
     assert client.deletes == 0
     assert "still projected" in job.summary["falkor"]["verdict"]
 
@@ -96,6 +108,6 @@ def test_no_projection_state_is_a_noop():
     """No projection row → nothing to drop; the phase is a no-op, not a destructive guess."""
     client = _Client()
     runner, job = _runner(ps=None, shared_with=0, client=client)
-    _run(runner._phase_falkor("job1", "g1"))
+    _run(runner._phase_falkor(_landing(job), "g1"))
     assert client.deletes == 0
     assert job.summary["falkor"]["verdict"] == "no projected graph"

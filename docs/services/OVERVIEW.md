@@ -50,10 +50,18 @@ Two subsystems run outside the FastAPI process entirely:
 - **Insights service** — a headless container started with
   `python -m backend.insights_service` (see `Dockerfile.insights`). It hosts its
   own scheduler + worker + health endpoint and does not serve the HTTP API.
-- **Versioning projection worker** — started with
-  `python -m backend.app.services.versioning` (or in-process in dev via
-  `GRAPHVER_PROJECTION_INPROCESS=1`). It also runs the import and export
-  jobs the API queues when `GRAPHVER_TRANSFER_INPROCESS=0`.
+- **Versioning worker** — started with
+  `python -m backend.app.services.versioning`. It runs the lanes
+  `GRAPHVER_WORKER_LANES` names: `projection` (FalkorDB projection and
+  sweeps), `transfer` (the import, export and publish jobs the API queues)
+  and `bootstrap` ("Enable version control" jobs and purges). Production
+  runs each lane as its own Deployment (`versioning-worker`,
+  `versioning-transfer`, `versioning-bootstrap`); compose runs projection
+  in `versioning-worker` and the other two in `versioning-jobs`. The API
+  only queues these jobs, so they run only where a lane runs. With
+  `SYNODIC_ROLE=dev` and `GRAPHVER_PROJECTION_INPROCESS=1`, the dev process
+  runs the lanes itself. The SQLite quickstart runs no versioning worker
+  (`docs/versioning/08-import-export.md` §2a).
 
 Backing stores are shared across roles:
 
@@ -75,7 +83,7 @@ flowchart TD
     end
 
     INS[Insights service<br/>python -m backend.insights_service]
-    VER[Versioning projection worker]
+    VER[Versioning worker<br/>projection / transfer / bootstrap lanes]
 
     PG[(PostgreSQL /<br/>SQLite)]
     RD[(Redis<br/>cache + streams)]
@@ -95,6 +103,7 @@ flowchart TD
     INS --> GP
     VER --> PG
     VER --> RD
+    VER --> GP
 ```
 
 ## Key endpoints
@@ -131,7 +140,7 @@ the health of these services to platform administrators.
 - Role separation is cooperative, not enforced: a misconfigured `SYNODIC_ROLE`
   falls back to `dev`, which starts every subsystem. Running two `controlplane`
   processes is unsupported (the control plane is a singleton).
-- The insights service and versioning projection worker are separate processes;
+- The insights service and the versioning worker lanes are separate processes;
   status endpoints served by the web tier reflect only what that process can see
   locally (see the Insights page for the split-process caveat).
 - The topology diagram is deliberately simplified; it omits the auth service,

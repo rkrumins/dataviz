@@ -1802,31 +1802,37 @@ def _bounded_refusal(detail):
 async def _publish_from_job(job: dict) -> dict:
     """Run a queued publish — or the merge of a draft's review — as the route runs one inside the
     request: the target's live ontology, a refusal as the HTTP answer the route gives, then what a
-    publish sets off. This may be the versioning worker, so the projection is started with
-    ``project_now``, which hands over to the worker when it can't finish here."""
+    publish sets off. It runs on the versioning worker's transfer lane, so the projection is left to
+    the projection lane (``nudge_projection``) rather than run here.
+
+    ``mergedCommitId`` says the draft is merged already — by an earlier attempt at the job, whose
+    worker died or was taken over before it finished the job: then nothing is published, and only
+    what a publish sets off runs again (each step is idempotent)."""
     from backend.app.db.engine import get_async_session
     svc = get_versioning_service()
     graph_id, branch_id, actor = job["graphId"], job["branchId"], job["actor"]
-    try:
-        with _domain_errors():
-            meta = await svc.get_graph(graph_id)
-            async with get_async_session() as session:
-                cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
-                rules = await _rules_for_meta(session, job["workspaceId"], meta)
-            if job.get("mergeRequestId"):
-                commit_id = await svc.merge_mr(
-                    mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
-                    resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
-            else:
-                commit_id = await svc.publish(
-                    graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
-                    resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
-    except HTTPException as exc:
-        return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
+    commit_id = job.get("mergedCommitId")
+    if commit_id is None:
+        try:
+            with _domain_errors():
+                meta = await svc.get_graph(graph_id)
+                async with get_async_session() as session:
+                    cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
+                    rules = await _rules_for_meta(session, job["workspaceId"], meta)
+                if job.get("mergeRequestId"):
+                    commit_id = await svc.merge_mr(
+                        mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
+                        resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
+                else:
+                    commit_id = await svc.publish(
+                        graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
+                        resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules)
+        except HTTPException as exc:
+            return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     await _bump_main_cache(graph_id)
     await _touch_views_data_updated(graph_id, actor)
     await _promote_view_layout_overlay(branch_id, actor)
-    await project_now(graph_id)
+    await nudge_projection(graph_id)
     return {"commitId": commit_id}
 
 

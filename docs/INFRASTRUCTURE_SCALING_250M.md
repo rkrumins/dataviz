@@ -138,7 +138,7 @@ Connectivity: private IP (PSC) only; app connects via the Cloud SQL connector or
 | `effective_cache_size` | `384 GB` | 75% of RAM — favors index scans on the hot `entity_hist`/urn indexes |
 | `work_mem` | `64 MB` | Per-sort/hash; bounded because worst-case concurrency is capped by pools |
 | `maintenance_work_mem` | `2 GB` | Index builds and vacuum on 64-way partitioned tables |
-| `max_wal_size` | `32 GB` | Bulk ingest windows (`IMPORT_COMMIT_WINDOW=50000`) without checkpoint storms |
+| `max_wal_size` | `32 GB` | Bulk ingest windows (`IMPORT_COMMIT_WINDOW=10000`) without checkpoint storms |
 | `checkpoint_completion_target` | `0.9` | Spread checkpoint I/O |
 | `wal_compression` | `lz4` | Version rows are JSONB-heavy and compress well |
 | `default_toast_compression` | `lz4` | Cheaper de/compression on payload JSONB |
@@ -177,7 +177,7 @@ The graphver instance budget is separate and small: each process opens one graph
 
 ### 3.4 Ingest and maintenance tuning
 
-- Batch knobs at 250M: `GRAPHVER_INGEST_BATCH_SIZE=10000`, `GRAPHVER_PROJECTION_BATCH_SIZE=10000` (from 5000 — larger UNWIND/COPY chunks amortize round trips; watch p99 lock times before going higher), `IMPORT_COMMIT_WINDOW=50000` (default is already sized for bulk).
+- Batch knobs at 250M: `GRAPHVER_INGEST_BATCH_SIZE=10000`, `GRAPHVER_PROJECTION_BATCH_SIZE=10000` (from 5000 — larger UNWIND/COPY chunks amortize round trips; watch p99 lock times before going higher), `IMPORT_COMMIT_WINDOW=10000` (the default: short windows keep each transaction and each resume step small).
 - BRIN on `commit_seq` plus partition pruning by `graph_id` is the read path — verify plans keep pruning after major version upgrades (`EXPLAIN` in CI smoke).
 - Backups: automated daily + PITR (7-day WAL window). Cross-region replica doubles as DR and as a long-scan offload target (exports, audits).
 
@@ -420,4 +420,4 @@ Phased, each gate verifiable before the next:
 | `CACHE_REDIS_URL` | same | `synodic-redis-cache` |
 | `REDIS_CACHE_*` / `REDIS_STREAMS_*` (`_HOST`, `_PORT`, `_DB`, `_PASSWORD`, `_TLS_*`, `_MAX_CONNECTIONS`) | same | cache / coord instances |
 | `AGGREGATION_MAX_PAIRS_PER_PAGE` | workers | 200000 (default) |
-| `IMPORT_COMMIT_WINDOW` | import worker | 50000 (default) |
+| `IMPORT_COMMIT_WINDOW` | import worker | 10000 (default) |

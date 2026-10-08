@@ -8,26 +8,39 @@ unchanged). ``as_of_seq`` gives point-in-time exports (E5).
 
 The job reads and writes a page at a time through :mod:`.stream`, as the streamed download does,
 so an export of any size runs in flat memory; this module keeps the row shape both share.
+
+It runs on the job's lease (:mod:`..job_lease`), and each attempt at it — each epoch — writes a
+file of its own (:func:`epoch_key`): a worker taken over while still writing never writes into the
+file its successor writes (a local store writes a file in place). The fenced finish names the
+attempt's file as the job's result, so a superseded attempt's file is never the one downloaded. An
+export has no cursor: taken over, it starts again.
 """
 from __future__ import annotations
 
-import asyncio
 import contextlib
-from datetime import datetime, timezone
+import time
 from typing import Any, Dict, List, Optional
 
 from .. import db
+from ..job_lease import Lease, Superseded
 from ..merkle import content_hash
 from ..models import JobORM
 from . import stream
-from .import_worker import heartbeat
+from .import_worker import lease_job
 from .rowmodel import denormalize_edge, denormalize_node
 
-# How often a running export says how far it has got (an import's heartbeat only says it's alive).
+# How often a running export says how far it has got (a fenced checkpoint between chunks).
 _PROGRESS_SECS = 5
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+
+def epoch_key(result_uri: str, epoch: int) -> str:
+    """Where attempt ``epoch`` of an export writes its file: the key the job was created with for
+    the first attempt, ``…/export-e<epoch>.<ext>`` beside it for each later one."""
+    if epoch <= 1:
+        return result_uri
+    head, sep, name = result_uri.rpartition("/")
+    stem, dot, ext = name.partition(".")
+    return f"{head}{sep}{stem}-e{epoch}{dot}{ext}"
 
 
 def records_from_state(nodes: Dict[str, dict], edges: Dict[str, dict]) -> List[Dict[str, Any]]:
@@ -81,15 +94,18 @@ class ExportWorker:
         self._select_ids = options.get("ids") or []
         self._select_types = options.get("types") or []
 
-    async def run(self, job_id: str) -> Dict[str, int]:
+    async def run(self, job_id: str, *, lease: Optional[Lease] = None) -> Dict[str, int]:
+        """Write the export on ``lease`` — the transfer lane's; called without one, the job is
+        taken here (:func:`lease_job`) — to this attempt's own file, and finish the job naming it.
+        Raises :class:`Superseded` once the job is no longer this worker's."""
         from .snapshot import open_snapshot
 
+        lease = lease or await lease_job(job_id)
         async with db.graphver_session() as s:
             job = await s.get(JobORM, job_id)
-            job.status = "running"
-            job.started_at = _now()
             graph_id, fmt = job.graph_id, job.import_format or "ndjson"
-            as_of_seq, result_uri, branch_id = job.as_of_seq, job.result_uri, job.branch_id
+            as_of_seq, branch_id = job.as_of_seq, job.branch_id
+            result_uri = epoch_key(job.result_uri, lease.epoch)
 
         # Read a page at a time from one pinned snapshot (stream.py), never the whole state. A
         # branch_id (a working draft) composes main + committed + staged changes — so a user can
@@ -101,37 +117,40 @@ class ExportWorker:
         # add, so a brand-new property is an empty column ready to fill.
         tally = {"node": 0, "edge": 0}
         written = 0
+        said = time.monotonic()
 
         async def counted(chunks):
-            nonlocal written
+            """The file's bytes, counted. At most every ``_PROGRESS_SECS``, as a chunk comes, the
+            job says how far it has got — this pass's records (a spreadsheet reads them all once
+            for its columns first) and the bytes so far — in a fenced checkpoint, which is also
+            where a superseded or stopping worker stops writing."""
+            nonlocal written, said
             async for chunk in chunks:
                 written += len(chunk)
+                if time.monotonic() - said >= _PROGRESS_SECS:
+                    said = time.monotonic()
+                    lease.check()
+                    async with db.graphver_session() as s:
+                        # Merged into the row's summary, not replacing it: its ``takeovers`` is
+                        # the claim's poison count, and an export that cleared it with every
+                        # tick would be taken over forever by a worker it keeps killing.
+                        row = await s.get(JobORM, job_id)
+                        await lease.checkpoint(s, summary={
+                            **(row.summary or {}), "nodes": tally["node"], "edges": tally["edge"],
+                            "passes": tally.get("passes", 0), "bytes": written})
                 yield chunk
 
-        # It takes its turn with the streamed exports; the heartbeat keeps it alive while it waits,
-        # and says how far it has got: this pass's records (a spreadsheet reads them all once for
-        # its columns first) and the bytes written.
+        # It takes its turn with the streamed exports (the lease keeps the job alive while it waits).
         body = stream.in_turn(stream.write_export(lambda: stream.record_pages(snap, selection, tally=tally),
                                                   fmt=fmt, props=self._extra_props))
-        beat = asyncio.create_task(heartbeat(job_id, every=_PROGRESS_SECS, progress=lambda: {
-            "nodes": tally["node"], "edges": tally["edge"], "passes": tally.get("passes", 0), "bytes": written}))
-        try:
-            async with contextlib.aclosing(body):       # its turn goes back even if the store fails
-                stat = await self._store.put_stream(result_uri, counted(body))
-        finally:
-            beat.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await beat                              # so no late beat overwrites the summary below
+        async with contextlib.aclosing(body):           # its turn goes back even if the store fails
+            stat = await self._store.put_stream(result_uri, counted(body))
 
         summary = {"nodes": tally["node"], "edges": tally["edge"], "bytes": stat.size}
         finished = (await self._after_write(job_id, result_uri, summary) or {}) if self._after_write else {}
         summary = {**summary, **(finished.get("summary") or {})}
-        async with db.graphver_session() as s:
-            row = await s.get(JobORM, job_id)
-            row.status = "completed"
-            row.completed_at = _now()
-            row.updated_at = _now()
-            row.summary = summary
-            if finished.get("resultUri"):
-                row.result_uri = finished["resultUri"]
+        if not await lease.finish("completed", summary=summary,
+                                  result_uri=finished.get("resultUri") or result_uri):
+            raise Superseded(f"export job {job_id} (epoch {lease.epoch}) was taken over before it "
+                             "could finish")
         return summary

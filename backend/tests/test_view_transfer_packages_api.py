@@ -51,6 +51,8 @@ class _ImportExport:
         self.exports: list = []
         self.imports: list = []
         self.ran: list = []
+        #: The failed jobs queued again, in order.
+        self.requeued: list = []
         #: A job's status, as the data source's import endpoints report it; pending until set.
         self.status: dict = {}
 
@@ -73,6 +75,13 @@ class _ImportExport:
     async def start_import(self, job_id):
         self.ran.append(job_id)
         return "running"
+
+    async def requeue_failed(self, job_id):
+        if self.status.get(job_id, "pending") != "failed":
+            return False
+        self.requeued.append(job_id)
+        self.status[job_id] = "pending"
+        return True
 
     async def get_job(self, job_id):
         job = next((j for j in self.imports if j["job_id"] == job_id), None)
@@ -202,7 +211,8 @@ async def test_a_package_brings_its_data_into_a_draft_and_the_view_follows(
         (started["branchId"], "Import: Finance lineage", None)
     [job] = jobs.imports
     assert (job["branch_id"], job["reconcile_mode"], job["import_format"], job["idempotency_key"]) == \
-        (started["branchId"], "upsert", "ndjson", upload), "adds and updates only, once per upload"
+        (started["branchId"], "upsert", "ndjson", f"pkgdata:{upload}:-"), \
+        "adds and updates only, once per upload and target"
     assert b"urn:new" in await _read(jobs.store, f"{uat}/{ds}/g_{ds}/{job['job_id']}/source.ndjson")
     again = await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds})
     assert again.json() == started and len(jobs.imports) == 1, "asking again answers with the same job"
@@ -213,18 +223,19 @@ async def test_a_package_brings_its_data_into_a_draft_and_the_view_follows(
         "the data already went with the first job: somewhere else needs the file again"
     assert len(jobs.imports) == 1 and len(versioning.drafts) == 1
 
-    # A job that failed runs again when asked, in place: same draft, the job's own copy of the data.
+    # Only a job that failed is queued again when asked — the same job, to resume into the same
+    # draft from its own copy of the data. One still queued or running is never queued twice.
+    for status in ("pending", "running", "completed"):
+        jobs.status[job["job_id"]] = status
+        assert (await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds})).json() == started
+    assert jobs.requeued == []
     jobs.status[job["job_id"]] = "failed"
     retried = await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds})
     assert retried.status_code == 200, retried.text
-    assert retried.json()["jobId"] != started["jobId"] and retried.json()["branchId"] == started["branchId"]
-    first, second = jobs.imports
-    assert (second["branch_id"], second["source_uri"], second["idempotency_key"]) == \
-        (started["branchId"], f"{uat}/{ds}/g_{ds}/{first['job_id']}/source.ndjson", f"{upload}:2")
-    assert len(versioning.drafts) == 1 and jobs.ran[-1] == second["job_id"]
-    assert (await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds})).json()["jobId"] == \
-        second["job_id"], "while the retry runs, asking again answers with it"
-    started = retried.json()
+    assert retried.json() == started and jobs.requeued == [job["job_id"]]
+    assert len(jobs.imports) == 1 and len(versioning.drafts) == 1, "no new job, no new draft"
+    assert (await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds})).json() == started
+    assert jobs.requeued == [job["job_id"]], "while the retry runs, asking again doesn't queue it again"
 
     # The view is checked against the draft, then staged into it: a new view claims the draft.
     view = body["views"][0]

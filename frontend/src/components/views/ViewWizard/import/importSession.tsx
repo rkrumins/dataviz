@@ -280,7 +280,6 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
       if (run.signal.aborted) return
       setData(d => ({ ...d, started }))
       const job = await pollJob(() => getImport(started.workspaceId, started.graphId, started.jobId), {
-        intervalMs: 1000,
         signal: run.signal,
         onTick: (tick) => { if (!run.signal.aborted) setData(d => ({ ...d, job: tick })) },
       })

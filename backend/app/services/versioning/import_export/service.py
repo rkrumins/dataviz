@@ -6,10 +6,10 @@ full traceability metadata (workspace/data source/provider/graph); the ``ImportW
 populates the draft. Terminal review/publish/PR reuse the existing draft workflow — this service
 never writes to ``main`` itself.
 
-A job runs in the API process that created it, as a task of its own, or — with
-``GRAPHVER_TRANSFER_INPROCESS`` off — on the versioning worker, which claims it from ``jobs``
-(:mod:`.runner`). Either way the caller starts it with :meth:`ImportExportService.start_import` /
-``start_export`` once its inputs are stored.
+A job never runs in the API process: once its inputs are stored the caller queues it with
+:meth:`ImportExportService.start_import` / ``start_export`` / ``start_publish``, and the versioning
+worker's transfer lane claims it from ``jobs`` and runs it on a lease (:mod:`.runner`,
+:mod:`..job_lease`).
 """
 from __future__ import annotations
 
@@ -18,33 +18,25 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 
-from backend.app.services.background import spawn_detached
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db
+from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import BranchORM, ImportRowORM, JobORM
 from ..service import GraphVersioningService
 from .export_worker import ExportWorker, example_template_records, records_from_state
 from .formats import get_adapter
-from .import_worker import ImportWorker, heartbeat
+from .import_worker import ImportWorker, lease_job
 from .rowmodel import column_order
-from .runner import JOB_TYPES, QUEUED
+from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED
 
 logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-# What a job reads when it stopped mid-run: its task was cancelled, or its server went away.
-_INTERRUPTED = ("The job stopped before it finished (the server restarted or it was interrupted). "
-                "Start it again.")
-# What a queued job reads when no worker took it in ``TRANSFER_QUEUE_TIMEOUT_SECS``.
-_NOT_STARTED = ("No worker started the job in time. Start it again, or ask an administrator whether "
-                "the versioning worker is running.")
 
 
 def _silent_secs(row: JobORM) -> float:
@@ -134,51 +126,51 @@ class ImportExportService:
         return {"job_id": job_id, "branch_id": branch_id, "source_uri": source_uri}
 
     async def start_import(self, job_id: str) -> str:
-        """Start the import once its file is stored. Returns the status to report."""
-        return await self._start(job_id, self.run_import_safe, "import")
+        """Queue the import once its file is stored. Returns the status to report."""
+        return await self._start(job_id)
 
     async def start_export(self, job_id: str) -> str:
-        """Start the export once its inputs are stored. Returns the status to report."""
-        return await self._start(job_id, self.run_export_safe, "export")
+        """Queue the export once its inputs are stored. Returns the status to report."""
+        return await self._start(job_id)
 
-    async def _start(self, job_id: str, run, kind: str) -> str:
-        """By default the job runs here, as a task of its own: a ``BackgroundTasks`` task would be
-        cancelled with its request at the timeout. With ``GRAPHVER_TRANSFER_INPROCESS`` off it is
-        only queued, and the versioning worker runs it (:mod:`.runner`)."""
-        if config.TRANSFER_INPROCESS:
-            spawn_detached(run(job_id), name=f"{kind} {job_id}")
-            return "running"
+    async def _start(self, job_id: str) -> str:
+        """Queue the job for the versioning worker's transfer lane (:mod:`.runner`). It never runs
+        in the API process: there it shared a web pod's CPU, memory and event loop with interactive
+        requests, and a restart or a worker timeout lost it."""
         async with db.graphver_session() as s:
             await s.execute(update(JobORM).where(JobORM.id == job_id, JobORM.status == "pending")
                             .values(current_phase=QUEUED, updated_at=_now()))
         return "pending"
 
-    async def run_import_safe(self, job_id: str) -> None:
-        """Run the import, marking the job ``failed`` on any error (dispatch entrypoint)."""
-        await self._run_safe(job_id, self.run_import)
+    async def run_import_safe(self, job_id: str, lease: Lease) -> None:
+        """Run the import on ``lease``, recording any error on the job (transfer-lane entry point)."""
+        await self._run_safe(job_id, lease, self.run_import)
 
-    async def _run_safe(self, job_id: str, runner) -> None:
+    async def _run_safe(self, job_id: str, lease: Lease, runner) -> None:
+        """Run ``runner(job_id, lease=lease)`` and settle the lease however it ends:
+
+        * superseded — another worker owns the job now; its last write rolled back. Stop quietly.
+        * draining, or cancelled (the worker is stopping) — hand the job back, so another worker
+          resumes it. Shielded: the release must land even as this task is cancelled.
+        * any other error — fail the job, fenced (a zombie's failure is a no-op)."""
         try:
-            await runner(job_id)
-        except asyncio.CancelledError:
-            # A shutdown or a cancelled task: record it, or the job reads "running" forever.
-            logger.warning("job %s was cancelled", job_id)
+            await runner(job_id, lease=lease)
+        except Superseded as exc:
+            logger.info("job %s handed off: %s", job_id, exc)
+        except (Draining, asyncio.CancelledError) as exc:
+            logger.warning("job %s stopped for the worker's shutdown; releasing it", job_id)
             try:
-                await self.mark_failed(job_id, _INTERRUPTED)
-            except Exception:  # noqa: BLE001 — the cancellation must still propagate
-                logger.exception("recording the cancellation of job %s failed", job_id)
-            raise
-        except Exception as exc:  # pragma: no cover - defensive; recorded on the job row
+                await asyncio.shield(lease.release())
+            except Exception:  # noqa: BLE001 — unreleased, it goes stale and is taken over
+                logger.exception("releasing job %s failed", job_id)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+        except Exception as exc:
             logger.exception("job %s failed", job_id)
-            await self.mark_failed(job_id, str(exc))
-
-    async def mark_failed(self, job_id: str, message: str) -> None:
-        async with db.graphver_session() as s:
-            row = await s.get(JobORM, job_id)
-            if row is not None and row.status in ("pending", "running"):
-                row.status = "failed"
-                row.error_message = message[:2000]
-                row.completed_at = _now()
+            if is_transient(exc):          # an outage that outlasted the retry budget: resumable
+                await lease.fail(friendly_infra_error(exc), "infrastructure", "resume")
+            else:
+                await lease.fail(str(exc), "internal")
 
     async def get_preview(self, job_id: str, *, sample_limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Job summary + a bounded sample of resolved rows (the inline preview; the full diff is
@@ -225,10 +217,10 @@ class ImportExportService:
                      "completedAt": r.completed_at, "errorMessage": r.error_message}
                     for r in rows]
 
-    async def run_import(self, job_id: str) -> Dict[str, int]:
-        """Run the import job to completion in-process (v1 dispatch). Resolves the live ontology
-        types (per-row gate) and — for a view-scoped **replace** — the view's scope, so absence-
-        deletes stay confined to the view's own entities."""
+    async def run_import(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, int]:
+        """Run the import job to completion (on ``lease`` when the transfer lane runs it). Resolves
+        the live ontology types (per-row gate) and — for a view-scoped **replace** — the view's
+        scope, so absence-deletes stay confined to the view's own entities."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             ws, ds, view_id, mode = ((row.workspace_id, row.data_source_id, row.scope_view_id,
@@ -241,7 +233,10 @@ class ImportExportService:
             ontology = await self._ontology_resolver(ws, ds)
         worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology,
                               facts=bool(view_id and self._layout_writer is not None))
-        summary = await worker.run(job_id)
+        # Called directly (tools, tests faking ImportWorker) there is no lease to pass on: the
+        # worker takes the job itself.
+        summary = await (worker.run(job_id, lease=lease) if lease is not None
+                         else worker.run(job_id))
         # Post-commit: a view-scoped import that created new top-level entities writes canonical layer
         # assignments so the curated view shows them right away. Best-effort — never fails the import.
         if view_id and self._layout_writer is not None and worker.created_node_facts:
@@ -326,7 +321,7 @@ class ImportExportService:
             job.result_uri = result_uri
         return {"job_id": job_id, "result_uri": result_uri}
 
-    async def run_export(self, job_id: str) -> Dict[str, int]:
+    async def run_export(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, int]:
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             ws, ds, view_id, branch_id, options = (
@@ -346,10 +341,10 @@ class ImportExportService:
             async def after_write(job_id, result_uri, summary):
                 return await finish_export(self._store, job_id, result_uri, summary, package=package)
         return await ExportWorker(self._svc, self._store, scope=scope, options=options or {},
-                                  after_write=after_write).run(job_id)
+                                  after_write=after_write).run(job_id, lease=lease)
 
-    async def run_export_safe(self, job_id: str) -> None:
-        await self._run_safe(job_id, self.run_export)
+    async def run_export_safe(self, job_id: str, lease: Lease) -> None:
+        await self._run_safe(job_id, lease, self.run_export)
 
     async def create_publish_job(
         self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, branch_id: str,
@@ -372,39 +367,65 @@ class ImportExportService:
             return {"job_id": job.id}
 
     async def start_publish(self, job_id: str) -> str:
-        """Start the publish job (see :meth:`_start`). Returns the status to report."""
-        return await self._start(job_id, self.run_publish_safe, "publish")
+        """Queue the publish job (see :meth:`_start`). Returns the status to report."""
+        return await self._start(job_id)
 
-    async def run_publish(self, job_id: str) -> Dict[str, Any]:
-        """Publish the job's draft (or merge its review) through the injected hook, beating the
-        whole way: a large squash says nothing until it lands. Its answer is the job's summary."""
+    async def run_publish(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, Any]:
+        """Publish the job's draft (or merge its review) through the injected hook, on ``lease`` —
+        the transfer lane's, which keeps a large squash alive while it says nothing until it lands;
+        called without one, the job is taken here (:func:`.import_worker.lease_job`). The hook's
+        answer is the job's summary, and a refusal fails the job; both through the fenced finish.
+
+        Safe to run again. An earlier attempt may have merged the draft and died (or been taken
+        over) before it finished the job: a merged draft is not published twice — the hook is told
+        the commit it landed as (``mergedCommitId``) and runs only what a publish sets off. So too
+        when the publish is refused because the draft merged under it: a superseded attempt's
+        squash landed first."""
+        lease = lease or await lease_job(job_id)
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
-            row.status = "running"
-            row.started_at = row.started_at or _now()
-            row.updated_at = _now()
             job = {**(row.field_scope or {}), "graphId": row.graph_id, "branchId": row.branch_id,
                    "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id}
-        beat = asyncio.create_task(heartbeat(job_id))
-        try:
-            result = await self._publish_hook(job)
-        finally:
-            beat.cancel()
-        async with db.graphver_session() as s:
-            row = await s.get(JobORM, job_id)
-            row.summary = result
-            if "error" in result:
-                detail = result["error"].get("detail")
-                row.status = "failed"
-                row.error_message = str(detail.get("message") or detail.get("type")
-                                        if isinstance(detail, dict) else detail)[:2000]
-            else:
-                row.status = "completed"
-            row.completed_at = row.updated_at = _now()
+        merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
+        result = await self._publish_hook(job if merged is None else {**job, "mergedCommitId": merged})
+        if "error" in result:
+            merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
+            if merged is not None:
+                result = await self._publish_hook({**job, "mergedCommitId": merged})
+        values: Dict[str, Any] = {"summary": result}
+        if "error" in result:
+            detail = result["error"].get("detail")
+            values.update(status="failed", error_message=str(
+                detail.get("message") or detail.get("type") if isinstance(detail, dict) else detail)[:2000])
+        if not await lease.finish(**values):
+            raise Superseded(f"publish job {job_id} (epoch {lease.epoch}) was taken over before it "
+                             "could finish")
         return result
 
-    async def run_publish_safe(self, job_id: str) -> None:
-        await self._run_safe(job_id, self.run_publish)
+    async def run_publish_safe(self, job_id: str, lease: Lease) -> None:
+        await self._run_safe(job_id, lease, self.run_publish)
+
+    async def requeue_failed(self, job_id: str) -> bool:
+        """Queue a FAILED job again — a person asked to retry it — to resume from its cursor.
+
+        Only a failed job: a pending or running one belongs to the queue or to the worker running
+        it, and queuing it again would give two workers one epoch. Its takeover count starts over
+        (a person decided to run it again) and its failure is cleared; the next claim bumps the
+        epoch. A job with no cursor starts over: rows staged by a worker from before leases (with
+        no cursor to resume them by) are dropped, or the claim would fail it again on sight.
+        True when the job was queued."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id, with_for_update=True)
+            if row is None or row.status != "failed":
+                return False
+            if row.last_cursor is None:
+                await s.execute(delete(ImportRowORM).where(ImportRowORM.job_id == job_id))
+            summary = row.summary if isinstance(row.summary, dict) else {}
+            row.summary = {k: v for k, v in summary.items() if k not in ("takeovers", "failure")} or None
+            row.status, row.current_phase = "pending", QUEUED
+            row.error_message = row.completed_at = None
+            row.updated_at = _now()
+        return True
 
     async def build_template(self, *, graph_id: str, export_format: str = "csv", limit: int = 5) -> bytes:
         """A small, prepopulated starter template so users learn the format instantly: the column
@@ -431,27 +452,23 @@ class ImportExportService:
         return b"".join(chunks)
 
     async def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """Job as a camelCase dict (frontend wire shape). A pending or running import/export silent
-        for ``JOB_STALE_AFTER_SECS`` is reported failed: the process running it went away (a
-        restart, a killed pod) and nothing will finish it, while a live import beats every few
-        seconds (``ImportWorker``). A job queued for the versioning worker waits its turn instead,
-        for up to ``TRANSFER_QUEUE_TIMEOUT_SECS``, with ``queuedAhead`` the jobs queued before it."""
+        """Job as a camelCase dict (frontend wire shape). READ-ONLY: polled by every open dialog, so
+        it never writes. A job whose worker died is not reported failed here — it reads ``stale``
+        (silent past ``INGEST_STALE_SECS``) until another worker takes it over and resumes it; one
+        nothing will run is failed by the transfer lane's :class:`.runner.JobReaper`. A queued job
+        says how many jobs of its slot are queued before it (``queuedAhead``), and every job how
+        far it has got (``phase``, ``progress``, ``processed``/``total``) and which attempt this is
+        (``attempt``: each claim is one)."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             if row is None:
                 return None
-            queued = row.status == "pending" and row.current_phase == QUEUED
             ahead = None
-            if row.job_type in JOB_TYPES and row.status in ("pending", "running"):
-                if _silent_secs(row) > (config.TRANSFER_QUEUE_TIMEOUT_SECS if queued
-                                        else config.JOB_STALE_AFTER_SECS):
-                    row.status = "failed"
-                    row.error_message = _NOT_STARTED if queued else _INTERRUPTED
-                    row.completed_at = _now()
-                elif queued:
-                    ahead = (await s.execute(select(func.count()).select_from(JobORM).where(
-                        JobORM.job_type.in_(JOB_TYPES), JobORM.status == "pending",
-                        JobORM.current_phase == QUEUED, JobORM.created_at < row.created_at))).scalar_one()
+            if row.status == "pending" and row.current_phase == QUEUED:
+                slot = INSPECT_TYPES if row.job_type in INSPECT_TYPES else JOB_TYPES
+                ahead = (await s.execute(select(func.count()).select_from(JobORM).where(
+                    JobORM.job_type.in_(slot), JobORM.status == "pending",
+                    JobORM.current_phase == QUEUED, JobORM.created_at < row.created_at))).scalar_one()
             return {
                 "jobId": row.id, "jobType": row.job_type, "status": row.status,
                 "graphId": row.graph_id, "branchId": row.branch_id,
@@ -464,6 +481,11 @@ class ImportExportService:
                 "createdAt": row.created_at, "completedAt": row.completed_at,
                 # Queued for the versioning worker: how many jobs it waits behind (else None).
                 "queuedAhead": ahead,
+                "phase": row.current_phase, "progress": row.progress,
+                "processed": row.processed, "total": row.total, "attempt": row.retry_count,
+                # Running, but its worker has not beaten in a takeover's time: it is about to be
+                # resumed elsewhere (or no worker is running).
+                "stale": row.status == "running" and _silent_secs(row) > config.INGEST_STALE_SECS,
                 # The download's name: the export's own, or a view package's (view_transfer.package).
                 "fileName": (row.field_scope.get("fileName")
                              or (row.field_scope.get("package") or {}).get("fileName"))

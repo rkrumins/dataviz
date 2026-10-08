@@ -131,7 +131,9 @@ case "$cmd" in
         echo ""
         echo "  Run apps on the host against this infra:"
         echo "    source .venv/bin/activate && set -a && source .env.dev && set +a"
-        echo "    python -m uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000"
+        echo "    GRAPHVER_PROJECTION_INPROCESS=1 python -m uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000"
+        echo "    (=1 runs the versioning job lanes in the API: with no worker container, imports,"
+        echo "     exports, publishes and 'Enable version control' would otherwise stay queued)"
         echo "    (cd frontend && npm run dev)"
         ;;
     down)

@@ -180,15 +180,24 @@ describe('ExportDialog', () => {
   })
 
   it('checks again on an export it lost touch with, rather than starting another', async () => {
-    vi.mocked(planExport).mockResolvedValue(plan())
-    vi.mocked(getExport).mockRejectedValueOnce(new Error('Failed to fetch'))
-    open()
-    await userEvent.click(screen.getByRole('button', { name: /Export CSV/ }))
+    // A failed poll is asked again (the export runs on regardless) until the export has gone
+    // unanswered for two minutes: only then has the dialog lost touch with it.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.mocked(planExport).mockResolvedValue(plan())
+      vi.mocked(getExport).mockRejectedValue(new Error('Failed to fetch'))
+      open()
+      await userEvent.click(screen.getByRole('button', { name: /Export CSV/ }))
+      await vi.advanceTimersByTimeAsync(125_000)
 
-    await screen.findByText('Lost touch with the export')
-    await userEvent.click(screen.getByRole('button', { name: /Try again/ }))
-    await screen.findByText('Your download has started')
-    expect(createExport).toHaveBeenCalledTimes(1)
+      await screen.findByText('Lost touch with the export')
+      vi.mocked(getExport).mockResolvedValue(exportJob())
+      await userEvent.click(screen.getByRole('button', { name: /Try again/ }))
+      await screen.findByText('Your download has started')
+      expect(createExport).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('never downloads an empty file: it says why there is nothing to export', async () => {

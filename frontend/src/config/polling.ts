@@ -160,3 +160,16 @@ export function withJitter(baseMs: number, frac = 0.3): number {
 export function lookupRetryDelayMs(failures: number): number {
   return withJitter(Math.min(60_000, 2_000 * 2 ** Math.max(0, failures - 1)))
 }
+
+/**
+ * How long a job's progress poll (an import, an export, a publish, enabling
+ * version control) waits before asking again after its `tick`th answer
+ * (0-based): 1s for the first five, so a short job's result shows at once,
+ * then 2s, and 5s once thirty answers have shown the job to be a long one:
+ * each dialog watching a job that runs for an hour asks about 700 times,
+ * rather than 3,600 at a steady second. Jittered, so dialogs opened together
+ * don't keep asking together.
+ */
+export function jobPollDelayMs(tick: number): number {
+  return withJitter(tick < 5 ? 1_000 : tick < 30 ? 2_000 : 5_000)
+}

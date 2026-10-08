@@ -11,7 +11,12 @@ the live E2E; here we pin the JOB's contract):
 * the projection is FAST-FORWARDED, never reseeded (a reseed would drop the very
   graph we just copied);
 * integrity failures (source changed mid-copy, untrackable items, dropped
-  connections) fail the job with a plain-language reason and no visible damage.
+  connections) fail the job with a plain-language reason and no visible damage;
+* every job-row write is fenced on the worker's lease: a worker that lost the job
+  (taken over, abandoned) rolls its window back;
+* user actions touch only stopped jobs — a failed job is never re-run by enabling
+  again, a live one is never retried — and restart and abandon run on the worker
+  (the ``reset`` phase, a queued purge), never inside the request.
 """
 import asyncio
 import os
@@ -20,13 +25,15 @@ import pytest
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.bootstrap_worker import (
+    BootstrapConflict,
     BootstrapRunner,
-    BootstrapSuperseded,
     abandon_bootstrap,
     bootstrap_status,
     create_bootstrap_job,
     retry_bootstrap,
 )
+from backend.app.services.versioning.job_lease import Lease, Superseded
+from backend.app.services.versioning.purge_worker import PurgeRunner
 from backend.app.services.versioning.models import (
     CommitORM,
     EdgeVersionORM,
@@ -158,11 +165,27 @@ async def _enable(ds, ws="ws1", actor="alice"):
         falkor_graph_name=f"g_{ds}", falkor_provider="prov_1")
 
 
-async def _drive(runner, job_id):
+async def _take(job_id) -> Lease:
+    """Claim THIS job as ``job_lease.claim`` would — a new epoch, running — and return its
+    lease. (The test DB may hold other claimable jobs; the claim's order is not the subject.)"""
     async with db.graphver_session() as s:
         job = await s.get(JobORM, job_id)
+        job.retry_count += 1
         job.status = "running"
-    return await runner.run_job(job_id)
+        job.updated_at = models._now()
+        return Lease(job_id=job.id, job_type=job.job_type, epoch=job.retry_count,
+                     workspace_id=job.workspace_id, graph_id=job.graph_id)
+
+
+async def _drive(runner, job_id):
+    return await runner.run_job(await _take(job_id))
+
+
+async def _conflict(coro) -> str:
+    """The ``type`` of the 409 a user action is refused with."""
+    with pytest.raises(BootstrapConflict) as err:
+        await coro
+    return err.value.detail["type"]
 
 
 async def _counts(graph_id, commit_id):
@@ -194,7 +217,10 @@ async def _run() -> None:
     # (This runs against the shared dev DB, so an unrelated bootstrap job may legitimately
     # be claimable — the invariant is that the FILE-IMPORT job is never one of them.)
     claimed = await BootstrapRunner(lambda name, provider_id=None: _graph()).claim_one()
-    assert claimed != import_job_id, "the bootstrap worker claimed a file-import job"
+    assert claimed is None or claimed.job_id != import_job_id, \
+        "the bootstrap worker claimed a file-import job"
+    if claimed is not None:
+        await claimed.release()                               # not this test's to run
     async with db.graphver_session() as s:
         untouched = await s.get(JobORM, import_job_id)
         assert untouched.status == "pending" and untouched.current_phase == "parse", \
@@ -242,8 +268,11 @@ async def _run() -> None:
     assert report["stored"] == {"nodes": 6, "edges": 3}
     assert report["labels"] == {"Table": 6} and report["edgeTypes"] == {"FLOWS_TO": 3}
     assert report["merkle"] == "inline"
+    assert job.provider_id == "prov_1", "the per-provider claim cap counts by it"
     status = await bootstrap_status(data_source_id=d)
     assert status["status"] == "completed" and status["percent"] == 100
+    assert (status["origin"], status["attempt"], status["stale"], status["failure"],
+            status["queuedAhead"]) == ("graph", 1, False, None, None)
 
     # Re-enqueueing an enabled source is a no-op.
     again = await _enable(d)
@@ -257,25 +286,36 @@ async def _run() -> None:
     runner = _runner(fake)
 
     # Run only the counting + first two node windows, then "crash".
-    await runner._phase_counting(job_id, gid)
+    first = await _take(job_id)
+    await runner._phase_counting(first, gid)
     await _set_phase(job_id, "nodes")
-    await runner._phase_nodes(job_id, gid)                  # window 1 (2 nodes)
-    await runner._phase_nodes(job_id, gid)                  # window 2 (2 nodes)
+    await runner._phase_nodes(first, gid)                   # window 1 (2 nodes)
+    await runner._phase_nodes(first, gid)                   # window 2 (2 nodes)
     n_before, _ = await _counts(gid, await _commit_id(gid))
     assert n_before == 4, n_before
     async with db.graphver_session() as s:
         job = await s.get(JobORM, job_id)
         assert job.last_cursor == "nodes:4"
 
-    # A second worker takes over the (stale) job and drives it to completion.
-    out = await _drive(BootstrapRunner(lambda name, provider_id=None: fake), job_id)
+    # A second worker takes the (stale) job over: a new epoch. The first was only slow, and
+    # writes its next window — fenced out, so it rolls back, rows and all.
+    second = await _take(job_id)
+    with pytest.raises(Superseded):
+        await runner._phase_nodes(first, gid)
+    n_zombie, _ = await _counts(gid, await _commit_id(gid))
+    assert n_zombie == 4, "a superseded worker's window must roll back with its job-row write"
+    async with db.graphver_session() as s:
+        assert (await s.get(JobORM, job_id)).last_cursor == "nodes:4"
+
+    # The new owner drives it to completion from the cursor.
+    out = await BootstrapRunner(lambda name, provider_id=None: fake).run_job(second)
     assert out["status"] == "completed", out
     n, e = await _counts(gid, await _commit_id(gid))
     assert (n, e) == (6, 3), f"resume must not duplicate rows: {(n, e)}"
 
     # Replaying an already-written window is a no-op (deterministic ids).
     await _set_phase(job_id, "nodes", cursor="nodes:0")
-    await runner._phase_nodes(job_id, gid)
+    await runner._phase_nodes(await _take(job_id), gid)
     n2, _ = await _counts(gid, await _commit_id(gid))
     assert n2 == 6, "a replayed window must not duplicate rows"
 
@@ -285,7 +325,7 @@ async def _run() -> None:
     res = await _enable(d)
     gid, job_id = res["graph_id"], res["job_id"]
     runner = _runner(fake)
-    await runner._phase_counting(job_id, gid)               # counts 6 nodes
+    await runner._phase_counting(await _take(job_id), gid)  # counts 6 nodes
     fake.nodes.append(_node("urn:late"))                    # someone writes to the source
     await _set_phase(job_id, "nodes")
     out = await _drive(runner, job_id)
@@ -300,15 +340,46 @@ async def _run() -> None:
     st = await svc.materialize_state(graph_id=gid, branch_id=(await _main(gid)))
     assert st["nodes"] == {} and st["edges"] == {}
 
+    # The failure says what the user can do: a copy that didn't match needs a fresh read.
+    status = await bootstrap_status(data_source_id=d)
+    assert status["status"] == "failed"
+    assert {k: status["failure"][k] for k in ("code", "action", "phase")} == {
+        "code": "integrity", "action": "restart", "phase": "validate"}, status["failure"]
+
+    # Enabling again returns the failed job as it is — it is NOT quietly re-run.
+    again = await _enable(d)
+    assert (again["job_id"], again["status"]) == (job_id, "failed")
+    assert again["failure"]["action"] == "restart"
+    async with db.graphver_session() as s:
+        assert (await s.get(JobORM, job_id)).status == "failed"
+
+    # ...and resuming it would only fail the same check again.
+    assert await _conflict(retry_bootstrap(data_source_id=d)) == "resume_not_possible"
+
     # ...and writing to a graph mid-enablement is refused.
     d2 = ds()
     r2 = await _enable(d2)
     with pytest.raises(ConcurrencyError):
         await svc.open_draft(graph_id=r2["graph_id"], owner="bob")
 
-    # Restart re-reads the source from scratch and now succeeds.
+    # A job that hasn't stopped is never retried: re-queueing it would hand it to a second
+    # worker while the first still runs it.
+    for mode in ("resume", "restart"):
+        assert await _conflict(retry_bootstrap(data_source_id=d2, mode=mode)) == "job_active"
+    live = await _take(r2["job_id"])
+    assert await _conflict(retry_bootstrap(data_source_id=d2, mode="restart")) == "job_active"
+    await live.release()
+
+    # Restart re-reads the source from scratch and now succeeds. The request only re-queues
+    # the job at `reset`; the old copy is deleted on the worker, in windows.
     out = await retry_bootstrap(data_source_id=d, mode="restart")
     assert out["status"] == "pending"
+    async with db.graphver_session() as s:
+        job = await s.get(JobORM, job_id)
+        assert (job.current_phase, job.last_cursor, job.summary) == ("reset", None,
+                                                                    {"actor": "alice"})
+    assert (await _counts(gid, await _commit_id(gid)))[0] == 7, \
+        "the restart request itself must delete nothing"
     out = await _drive(BootstrapRunner(lambda name, provider_id=None: fake), out["jobId"])
     assert out["status"] == "completed", out
     n, _ = await _counts(gid, await _commit_id(gid))
@@ -339,11 +410,38 @@ async def _run() -> None:
     res = await _enable(d)
     out = await _drive(_runner(dangling), res["job_id"])
     assert out["status"] == "failed", out
-    # Abandon puts the data source back exactly as it was.
-    await abandon_bootstrap(data_source_id=d)
+    # Abandon puts the data source back exactly as it was: at once to every reader (the graph
+    # is soft-deleted), and for good once the purge it queued has run on the worker.
+    gone = await abandon_bootstrap(data_source_id=d, actor="alice")
+    assert gone["status"] == "cancelled" and gone["purgeJobId"], gone
+    assert await svc.get_graph_by_data_source(d) is None
+    async with db.graphver_session() as s:
+        assert (await s.get(GraphORM, res["graph_id"])).deleted_at is not None
+        purge = await s.get(JobORM, gone["purgeJobId"])
+        assert (purge.job_type, purge.status) == ("purge", "pending")
+    # Abandoning again is a no-op returning the same purge; enabling again waits for it.
+    assert (await abandon_bootstrap(data_source_id=d))["purgeJobId"] == gone["purgeJobId"]
+    assert await _conflict(_enable(d)) == "cleanup_in_progress"
+    # A purge that failed (an outage past its retry budget) is queued again by abandoning
+    # again — the same job, carrying on, not a second one colliding with its key.
+    assert await (await _take(gone["purgeJobId"])).fail("Postgres went away", "infrastructure",
+                                                        "resume")
+    assert (await abandon_bootstrap(data_source_id=d))["purgeJobId"] == gone["purgeJobId"]
+    async with db.graphver_session() as s:
+        purge = await s.get(JobORM, gone["purgeJobId"])
+        assert (purge.status, purge.error_message, "failure" in purge.summary) == \
+            ("pending", None, False)
+    purged = await PurgeRunner(lambda name, provider_id=None: dangling).run_job(
+        await _take(gone["purgeJobId"]))                     # (FakeGraph.delete would raise)
+    assert purged["status"] == "completed", purged
     async with db.graphver_session() as s:
         assert await s.get(GraphORM, res["graph_id"]) is None
-    assert await svc.get_graph_by_data_source(d) is None
+        for model in (NodeVersionORM, EdgeVersionORM, CommitORM):
+            left = await s.scalar(select(func.count()).select_from(model).where(
+                model.graph_id == res["graph_id"]))
+            assert left == 0, f"the purge left {left} {model.__tablename__} row(s)"
+    fresh = await _enable(d)
+    assert fresh["status"] == "pending" and fresh["graph_id"] != res["graph_id"]
 
     # ══ D2. a FAILED copy must not leave the graph writable ══════════════════
     # This is the sharpest edge in the whole design: a half-imported graph has its
@@ -374,20 +472,18 @@ async def _run() -> None:
     res = await _enable(d)
     gid, job_id = res["graph_id"], res["job_id"]
     runner = _runner(fake)
-    await runner._phase_counting(job_id, gid)
+    lease = await _take(job_id)                              # the worker holds the claim
+    await runner._phase_counting(lease, gid)
     await _set_phase(job_id, "nodes")
-    async with db.graphver_session() as s:                  # the worker holds the claim
-        job = await s.get(JobORM, job_id)
-        job.status = "running"
-    runner._epoch[job_id] = 0
     await abandon_bootstrap(data_source_id=d)               # user gives up mid-copy
-    with pytest.raises(BootstrapSuperseded):
-        await runner._phase_nodes(job_id, gid)              # the in-flight window aborts
+    with pytest.raises(Superseded):
+        await runner._phase_nodes(lease, gid)               # the in-flight window aborts
+    assert (await runner.run_job(lease))["status"] == "superseded", "and the driver stops"
     async with db.graphver_session() as s:
-        assert await s.get(GraphORM, gid) is None
+        assert (await s.get(GraphORM, gid)).deleted_at is not None
         orphans = await s.scalar(select(func.count()).select_from(NodeVersionORM).where(
             NodeVersionORM.graph_id == gid))
-        assert orphans == 0, "the fenced worker must not write rows into a deleted graph"
+        assert orphans == 0, "the fenced worker must not write rows into an abandoned graph"
 
     # ══ D4. an edge window is sized by EDGES, not nodes ══════════════════════
     # Real models cluster node ids by entity type, so one node window can hold 15k edges
@@ -419,6 +515,7 @@ async def _run() -> None:
     res = await _enable(d)
     out = await _drive(_runner(dupes), res["job_id"])
     assert out["status"] == "failed" and "share an identifier" in out["error"], out
+    assert await _conflict(retry_bootstrap(data_source_id=d)) == "resume_not_possible"
 
     d = ds()
     parallel = FakeGraph(
@@ -432,6 +529,15 @@ async def _run() -> None:
     assert status["report"]["mergedDuplicateConnections"] == 1
     _, e = await _counts(res["graph_id"], await _commit_id(res["graph_id"]))
     assert e == 1, "the read layer merges these too — one stored connection"
+
+    # ══ F. concurrent "enable" calls create ONE graph and ONE job ════════════
+    # Two clicks, two tabs: every caller but the winner of the uq_graphs_data_source race
+    # gets the winner's job back — not a 500.
+    d = ds()
+    outs = await asyncio.gather(*[_enable(d) for _ in range(4)])
+    assert len({o["graph_id"] for o in outs}) == 1 and len({o["job_id"] for o in outs}) == 1, outs
+    status = await bootstrap_status(data_source_id=d)
+    assert status["status"] == "pending" and isinstance(status["queuedAhead"], int)
 
     await db.dispose_engine()
 

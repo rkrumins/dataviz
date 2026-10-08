@@ -9,7 +9,7 @@ spinner with no idea whether anything survived.
 
 This module replaces it with a job:
 
-  counting → nodes → edges → validate → heads → merkle → backfill → finalize → done
+  [reset →] counting → nodes → edges → validate → heads → merkle → backfill → finalize → done
 
 **Bounded memory.** The source is scanned in ID-RANGE windows (never OFFSET — deep
 offsets re-scan and go quadratic) and written in per-window transactions, so peak
@@ -19,7 +19,9 @@ memory is O(window), not O(graph).
 transaction, so a crash rewinds to the last committed window exactly. Version rows
 carry DETERMINISTIC ids (hash of commit+entity) and insert ON CONFLICT DO NOTHING,
 so replaying a window is a no-op. A `running` job whose heartbeat goes stale is
-taken over by another worker.
+taken over by another worker — and the window's job-row write is a compare-and-set on
+the worker's lease (``job_lease``), so a worker that lost the job rolls its window back
+instead of writing beside the new owner.
 
 **Invisible until proven.** The import commit is written at seq 2 while the graph's
 head stays at genesis (seq 1). Every read path composes state bounded by
@@ -53,19 +55,18 @@ import inspect
 import logging
 import random
 import time
+from datetime import datetime, timezone
 from hashlib import blake2b
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import (
-    DisconnectionError,
-    InterfaceError,
-    OperationalError,
-    SQLAlchemyError,
-)
+from sqlalchemy.exc import IntegrityError
 
-from . import config, db
+from . import config, db, job_lease
+from .job_lease import AWAITING_DECISION, Draining, Lease, Superseded
+from .job_lease import friendly_infra_error as _friendly_infra_error
+from .job_lease import is_transient as _is_transient
 from .merkle import content_hash
 from .merkle_store import MerkleStore
 from .models import (
@@ -79,6 +80,7 @@ from .models import (
     _now,
 )
 from .projection import _q, _READ_TIMEOUT_MS, _WRITE_TIMEOUT_MS
+from .purge_worker import create_purge_job, delete_window
 from .service import (
     ConcurrencyError,
     GraphVersioningService,
@@ -106,13 +108,38 @@ BOOTSTRAP_JOB_TYPE = "bootstrap"
 # where the graph is editable but the projector cannot anchor: an edit would MERGE a
 # DUPLICATE node beside the original, and a delete would match nothing and silently leave
 # the entity on the canvas.
-PHASES = ("counting", "nodes", "edges", "validate", "heads", "merkle", "backfill", "finalize")
+#
+# `reset` is first and only ever entered by a restart (:func:`retry_bootstrap`): a new job
+# starts at `counting`, with nothing to throw away.
+PHASES = ("reset", "counting", "nodes", "edges", "validate", "heads", "merkle", "backfill",
+          "finalize")
 
 # Percent shown to the user. Scanning dominates the wall clock, so it owns the bulk
 # of the bar; the tail phases are bounded work with honest, distinct labels.
-_PHASE_FLOOR = {"counting": 0, "nodes": 2, "edges": 2, "validate": 72,
+_PHASE_FLOOR = {"reset": 0, "counting": 0, "nodes": 2, "edges": 2, "validate": 72,
                 "heads": 76, "merkle": 88, "backfill": 92, "finalize": 98}
 _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
+
+# What a restart throws away before re-reading the source: the import commit's version rows
+# and Merkle tree, and main's entity heads — as (table, its PK, which rows), each deleted in
+# PK-ordered windows like a purge's (see purge_worker). The commit itself stays: the re-read
+# writes into it. (The duplicate pre-flight's `bootstrap_nodes` joins this list when it exists.)
+_RESET = (
+    ("node_versions", "graph_id, id", "commit_id = :c"),
+    ("edge_versions", "graph_id, id", "commit_id = :c"),
+    ("merkle_nodes", "graph_id, commit_id, path", "commit_id = :c"),
+    ("entity_heads", "graph_id, branch_id, entity_id", "branch_id = :b"),
+)
+
+# What a person can do about a failed job, by its failure code: an INTEGRITY failure (the copy
+# didn't match the source) only fails the same way again unless the source is re-read; an
+# INFRASTRUCTURE one resumes where it stopped; an internal one is a bug — no action fixes it.
+_FAILURE_ACTIONS = {"integrity": "restart", "infrastructure": "resume"}
+
+# What a job IS survives a restart — who asked, and (for a package seed) what to copy where.
+# What it FOUND does not: tallies, report, failure, and any decision about duplicates the new
+# read may no longer have.
+_KEPT_ON_RESTART = ("actor", "origin", "package", "ontology", "target")
 
 
 # --------------------------------------------------------------------------- #
@@ -223,7 +250,8 @@ class _Reservoir:
 
 
 class BootstrapRunner:
-    """Executes bootstrap (`job_type='bootstrap'`) jobs. Hosted by the versioning worker."""
+    """Executes bootstrap (`job_type='bootstrap'`) jobs. Hosted by the versioning worker's
+    bootstrap lane, on the job lease (``job_lease``)."""
 
     def __init__(self, graph_factory, *, session_factory=None, consumer: str = "boot-1"):
         self._factory = graph_factory
@@ -231,7 +259,6 @@ class BootstrapRunner:
         self._consumer = consumer
         self._svc = GraphVersioningService()
         self._merkle = MerkleStore()
-        self._epoch: Dict[str, int] = {}     # job_id → the claim we hold (see _own)
         self._logged: Dict[str, float] = {}  # job_id → last progress log (see _due)
 
     # ---------------------------------------------------------------- infra --
@@ -241,136 +268,78 @@ class BootstrapRunner:
             c = await c
         return c
 
-    async def claim_one(self) -> Optional[str]:
+    async def claim_one(self) -> Optional[Lease]:
         """Claim a pending job, or take over one whose worker looks dead (stale heartbeat).
 
-        `JobORM` IS the durable queue — no second Redis stream to keep alive. The heartbeat
-        is `updated_at`, refreshed on every window commit. `retry_count` doubles as the
-        CLAIM EPOCH: a takeover bumps it, so the previous owner — which may be slow rather
-        than dead, e.g. stuck in a long scan retry — discovers on its next commit that it no
-        longer holds the job and stops instead of double-writing (see :meth:`_own`).
+        `JobORM` IS the durable queue — no second Redis stream to keep alive. Every claim is a
+        new EPOCH (``job_lease.claim``), so the previous owner — which may be slow rather than
+        dead, e.g. stuck in a long scan retry — finds out at its next write that it no longer
+        holds the job, and stops instead of double-writing. A job paused for a person's decision
+        is never claimed, and at most ``BOOTSTRAP_PER_PROVIDER`` jobs of one origin copy from one
+        FalkorDB provider at once: every window is a scan of the source, and the canvases reading
+        from that provider must not queue behind a wall of them.
         """
-        stale_before = _now_minus(config.INGEST_STALE_SECS)
-        async with self._session() as s:
-            row = (await s.execute(
-                select(JobORM).where(
-                    JobORM.job_type == BOOTSTRAP_JOB_TYPE,
-                    text("(status = 'pending' OR (status = 'running' AND updated_at < :stale))")
-                    .bindparams(stale=stale_before),
-                ).order_by(JobORM.created_at).limit(1).with_for_update(skip_locked=True)
-            )).scalars().first()
-            if row is None:
-                return None
-            if row.status == "running":
-                row.retry_count += 1                    # fence out the previous owner
-                logger.warning("taking over stale bootstrap job %s (phase=%s cursor=%s)",
-                               row.id, row.current_phase, row.last_cursor)
-            row.status = "running"
-            row.started_at = row.started_at or _now()
-            row.updated_at = _now()
-            row.error_message = None
-            self._epoch[row.id] = row.retry_count
-            return row.id
-
-    def _own(self, job: JobORM) -> JobORM:
-        """Assert we still hold this job, INSIDE the transaction that is about to write.
-
-        Two things can pull the job out from under a running worker: another worker taking
-        it over (stale heartbeat), and the user abandoning it (which deletes the graph).
-        Checking here means the losing worker's write transaction aborts and rolls back
-        rather than committing rows into a job — or a graph — that is no longer its own.
-        """
-        if job.status == "cancelled":
-            raise BootstrapSuperseded("the job was cancelled")
-        if self._epoch.get(job.id) is not None and job.retry_count != self._epoch[job.id]:
-            raise BootstrapSuperseded("another worker took over this job")
-        return job
+        return await job_lease.claim(self._session, job_lease.BOOTSTRAP_TYPES,
+                                     phase_pred=job_lease.BOOTSTRAP_READY,
+                                     provider_cap=config.BOOTSTRAP_PER_PROVIDER, lane="bootstrap")
 
     # ---------------------------------------------------------------- driver --
-    async def run_job(self, job_id: str) -> Dict[str, object]:
+    async def run_job(self, lease: Lease) -> Dict[str, object]:
         """Drive a claimed job to a terminal state. Each phase is individually
         resumable; a raised error marks the job failed with a plain-language reason
-        and leaves everything it wrote intact (a retry resumes from the cursor)."""
-        beat = asyncio.create_task(self._heartbeat(job_id))
+        and leaves everything it wrote intact (a retry resumes from the cursor).
+
+        Every write to the job row is fenced on ``lease``: a worker that lost the job — taken
+        over, or abandoned by the user — finds out at its next write, which rolls back, and
+        stops. The lease is checked between units of work, so a stopping worker hands the job
+        back there (pending, cursor kept) for another worker to resume."""
+        job_id = lease.job_id
         try:
             while True:
+                lease.check()
                 async with self._session() as s:
                     job = await s.get(JobORM, job_id)
-                    if job is None or job.status in ("completed", "cancelled"):
-                        return {"job_id": job_id, "status": job.status if job else "missing"}
-                    self._own(job)
-                    phase = job.current_phase or "counting"
+                    if job is None or job.status != "running" or job.retry_count != lease.epoch:
+                        raise Superseded("the job was abandoned or taken over")
+                    phase, cursor = job.current_phase or "counting", job.last_cursor
                     graph_id = job.graph_id
                 runner = getattr(self, f"_phase_{phase}")
-                done = await self._run_phase(runner, job_id, graph_id, phase)
-                if done:
-                    nxt = _next_phase(phase)
-                    async with self._session() as s:
-                        job = self._own(await s.get(JobORM, job_id))
-                        if nxt is None:
-                            job.status = "completed"
-                            job.current_phase = None
-                            job.progress = 100
-                            job.completed_at = _now()
-                            job.updated_at = _now()
-                            logger.info("bootstrap %s completed (graph=%s)", job_id, graph_id)
-                            return {"job_id": job_id, "status": "completed"}
-                        job.current_phase = nxt
-                        job.last_cursor = None
-                        # Each phase re-learns its own window size (edge payloads are a
-                        # different weight from node payloads).
-                        job.batch_size = config.BOOTSTRAP_SCAN_WIDTH
-                        job.updated_at = _now()
-        except BootstrapSuperseded as exc:
+                if not await self._run_phase(lease, runner, graph_id, phase):
+                    continue                                   # same phase, next window
+                nxt = _next_phase(phase)
+                if nxt is None:
+                    if not await lease.finish("completed", current_phase=None, progress=100):
+                        raise Superseded("the job was abandoned or taken over")
+                    logger.info("bootstrap %s completed (graph=%s)", job_id, graph_id)
+                    return {"job_id": job_id, "status": "completed"}
+                async with self._session() as s:
+                    # Compare-and-set: still ours, and still where this phase ended.
+                    await lease.checkpoint(s, expect_cursor=cursor)
+                    _advance_phase(await s.get(JobORM, job_id), nxt)
+        except Superseded as exc:
             # Not an error: someone else owns this job now (a takeover, or the user
             # abandoned it). Our last write rolled back; stop quietly.
             logger.info("bootstrap %s handed off: %s", job_id, exc)
-            self._epoch.pop(job_id, None)
             return {"job_id": job_id, "status": "superseded"}
+        except (Draining, asyncio.CancelledError) as exc:
+            # The worker is stopping: hand the job back so another resumes it from its cursor.
+            # Shielded — the release must land even as this task is cancelled.
+            try:
+                await asyncio.shield(lease.release())
+            except Exception:  # noqa: BLE001 — unreleased, it goes stale and is taken over
+                logger.exception("releasing bootstrap %s failed", job_id)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return {"job_id": job_id, "status": "released"}
         except BootstrapFailure as exc:
-            await self._fail(job_id, exc.reason, exc.code)
+            await self._fail(lease, exc.reason, exc.code)
             return {"job_id": job_id, "status": "failed", "error": exc.reason}
         except Exception as exc:                                   # pragma: no cover - infra
             logger.exception("bootstrap %s crashed", job_id)
-            await self._fail(job_id, _friendly_infra_error(exc), "infrastructure")
+            await self._fail(lease, _friendly_infra_error(exc), "infrastructure")
             return {"job_id": job_id, "status": "failed"}
-        finally:
-            beat.cancel()
 
-    async def _heartbeat(self, job_id: str) -> None:
-        """Say "still alive" on a timer, not just at window boundaries.
-
-        `claim_one` takes over any `running` job whose heartbeat is older than
-        INGEST_STALE_SECS. Beating only when a window COMMITS makes that a trap: a scan that
-        halves its way down the ladder, or a validate pass anti-joining a 10M-row commit, is
-        working hard and saying nothing — so a second worker declares it dead and steals the
-        job. Fencing means the theft costs no data (the loser's write rolls back), but the
-        loser then re-claims in turn, and two healthy workers hand the same slow window back
-        and forth forever. The job is safe and never finishes.
-
-        A timer decouples "alive" from "made progress", which is what the stale check actually
-        wants to know. It stops the moment we no longer own the job — a superseded worker that
-        kept beating would fight the new owner for it.
-        """
-        while True:
-            try:
-                await asyncio.sleep(config.INGEST_HEARTBEAT_SECS)
-                async with self._session() as s:
-                    job = await s.get(JobORM, job_id)
-                    if job is None or job.status != "running":
-                        return
-                    mine = self._epoch.get(job_id)
-                    if mine is not None and job.retry_count != mine:
-                        return                          # not ours any more — go quiet
-                    job.updated_at = _now()
-            except asyncio.CancelledError:
-                raise
-            except Exception:                           # pragma: no cover - infra
-                # Postgres is unreachable. Nothing to beat with, and nothing to do about it:
-                # a takeover needs the same Postgres, so nobody can steal the job either.
-                logger.debug("bootstrap %s: heartbeat skipped", job_id)
-
-    async def _run_phase(self, runner, job_id: str, graph_id: str, phase: str) -> bool:
+    async def _run_phase(self, lease: Lease, runner, graph_id: str, phase: str) -> bool:
         """Run one unit of a phase, waiting out transient infrastructure faults.
 
         Copying a 10M-entity graph takes tens of minutes — long enough to span a FalkorDB
@@ -384,74 +353,81 @@ class BootstrapRunner:
         A fresh client is built per attempt, so a retry never reuses a dead connection.
         The budget is per unit of work — a successful window resets it — so it bounds how
         long an OUTAGE may last, not how long the job may take. Past it the job fails
-        honestly and stays resumable from its cursor; nothing is lost either way.
+        honestly and stays resumable from its cursor; nothing is lost either way. (The
+        mechanics are ``Lease.retry_transient``; an integrity failure is never retried, and
+        neither is a lost lease or a stopping worker.)
         """
-        deadline = time.monotonic() + config.BOOTSTRAP_RETRY_BUDGET_SECS
-        delay, attempt = 1.0, 0
-        while True:
-            try:
-                return await runner(job_id, graph_id)
-            except (BootstrapSuperseded, BootstrapFailure):
-                raise                                  # ours, and deliberate — never retried
-            except Exception as exc:
-                if not _is_transient(exc) or time.monotonic() + delay > deadline:
-                    raise
-                attempt += 1
-                logger.warning(
-                    "bootstrap %s: %s hit a transient fault (%s: %s); retrying in %.0fs "
-                    "(attempt %d, %.0fs of budget left)",
-                    job_id, phase, type(exc).__name__, str(exc)[:120], delay, attempt,
-                    max(0.0, deadline - time.monotonic()))
-                await self._note_interruption(job_id, phase, exc)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, config.BOOTSTRAP_RETRY_MAX_DELAY_SECS)
+        return await lease.retry_transient(
+            lambda: runner(lease, graph_id), never=(BootstrapFailure,),
+            on_retry=lambda exc: self._note_interruption(lease, phase, exc))
 
-    async def _note_interruption(self, job_id: str, phase: str, exc: Exception) -> None:
-        """Heartbeat through the outage and record it.
+    async def _note_interruption(self, lease: Lease, phase: str, exc: Exception) -> None:
+        """Record the outage on the job.
 
-        The heartbeat matters: without it a patient worker looks dead to `claim_one`, and
-        a second worker takes the job over mid-wait. Best-effort by design — if Postgres is
-        the thing that is down, there is nothing to write and nothing to be done about it.
         The count is surfaced in the report, so "we hit turbulence and rode it out" is
-        something the user is TOLD, not something we quietly paper over.
+        something the user is TOLD, not something we quietly paper over. Best-effort by
+        design — if Postgres is the thing that is down, there is nothing to write and nothing
+        to be done about it. (Staying alive through the outage is the LeaseKeeper's job.)
         """
         try:
             async with self._session() as s:
-                job = await s.get(JobORM, job_id)
+                job = await s.get(JobORM, lease.job_id)
                 if job is None:
                     return
                 summary = dict(job.summary or {})
                 seen = list(summary.get("interruptions") or [])
                 seen.append({"phase": phase, "error": type(exc).__name__, "at": _now()})
                 summary["interruptions"] = seen[-20:]        # a tail, not a log
-                job.summary = summary
-                job.updated_at = _now()                      # ← the heartbeat
+                await lease.checkpoint(s, summary=summary)
+        except Superseded:
+            raise                                            # not ours any more: stop waiting
         except Exception:                                    # pragma: no cover - infra
-            logger.debug("bootstrap %s: could not record the interruption", job_id)
+            logger.debug("bootstrap %s: could not record the interruption", lease.job_id)
 
-    async def _fail(self, job_id: str, reason: str, code: str) -> None:
+    async def _fail(self, lease: Lease, reason: str, code: str) -> None:
+        """Fail the job, fenced, recording ``summary.failure = {code, action, phase, reason}``:
+        the action is what the UI offers (``_FAILURE_ACTIONS``). A job that is no longer ours is
+        its owner's to record."""
+        if not await lease.fail(reason, code, _FAILURE_ACTIONS.get(code)):
+            logger.info("bootstrap %s: not failed — it is no longer this worker's", lease.job_id)
+            return
         async with self._session() as s:
-            job = self._own(await s.get(JobORM, job_id))
-            if job is None:
-                return
-            job.status = "failed"
-            job.error_message = reason
-            job.updated_at = _now()
-            summary = dict(job.summary or {})
-            summary["failure"] = {"code": code, "reason": reason, "phase": job.current_phase}
-            job.summary = summary
-            # An integrity failure (duplicate urns, dangling edges) raises BootstrapFailure,
-            # which is CAUGHT — so without this line the most important event this worker can
-            # report would be written to a table and to nothing else. Carry the identifiers an
-            # on-call actually greps by; the job id alone means a Postgres round-trip.
-            logger.error(
-                "bootstrap %s FAILED in %s [%s]: %s (graph=%s data_source=%s workspace=%s "
-                "cursor=%s processed=%s/%s)",
-                job_id, job.current_phase, code, reason, job.graph_id, job.data_source_id,
-                job.workspace_id, job.last_cursor, job.processed, job.total)
+            job = await s.get(JobORM, lease.job_id)
+        # An integrity failure (duplicate urns, dangling edges) raises BootstrapFailure,
+        # which is CAUGHT — so without this line the most important event this worker can
+        # report would be written to a table and to nothing else. Carry the identifiers an
+        # on-call actually greps by; the job id alone means a Postgres round-trip.
+        logger.error(
+            "bootstrap %s FAILED in %s [%s]: %s (graph=%s data_source=%s workspace=%s "
+            "cursor=%s processed=%s/%s)",
+            lease.job_id, job.current_phase, code, reason, job.graph_id, job.data_source_id,
+            job.workspace_id, job.last_cursor, job.processed, job.total)
 
     # ---------------------------------------------------------------- phases --
-    async def _phase_counting(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_reset(self, lease: Lease, graph_id: str) -> bool:
+        """Throw away what an earlier run imported, so a restart re-reads the source from scratch.
+
+        Restart used to do this inside the HTTP request: one DELETE per table over a whole
+        commit — millions of rows in one transaction, under a request timeout. Here it is a
+        phase, in purge-sized windows (:func:`purge_worker.delete_window`), each its own fenced
+        transaction. ``reset:<n>`` names the table in hand (``_RESET``); DELETE is idempotent, so
+        a window replayed after a crash just deletes whatever is still there."""
+        async with self._session() as s:
+            job = await s.get(JobORM, lease.job_id)
+            at = job.last_cursor
+            step = int(at.split(":")[1]) if at else 0
+            if step >= len(_RESET):
+                return True
+            commit = await self._import_commit(s, graph_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            table, pk, rows = _RESET[step]
+            deleted = await delete_window(s, table, pk, graph_id, where=rows,
+                                          params={"c": commit.id, "b": main_id})
+            await lease.checkpoint(s, expect_cursor=at, progress=_PHASE_FLOOR["reset"],
+                                   last_cursor=at if deleted else f"reset:{step + 1}")
+        return False
+
+    async def _phase_counting(self, lease: Lease, graph_id: str) -> bool:
         """Read the source's own totals — the denominator every later check compares
         against (and the progress bar's total). Counted with the SAME predicates the
         scan uses, so "scanned == source" is a meaningful statement."""
@@ -463,7 +439,7 @@ class BootstrapRunner:
         inv_nodes = await self._count(client, _COUNT_INVISIBLE_NODES)
         inv_edges = await self._count(client, _COUNT_INVISIBLE_EDGES)
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            job = await s.get(JobORM, lease.job_id)
             summary = dict(job.summary or {})
             summary["source"] = {
                 "nodes": nodes, "edges": edges,
@@ -476,12 +452,9 @@ class BootstrapRunner:
             summary.setdefault("rejected", {"duplicateUrns": 0, "danglingEdges": 0, "samples": []})
             summary.setdefault("collapsedParallelEdges", 0)
             summary.setdefault("sample", {"nodes": [], "nodesSeen": 0})
-            job.summary = summary
-            job.total = nodes + edges
-            job.processed = 0
-            job.updated_at = _now()
+            await lease.checkpoint(s, summary=summary, total=nodes + edges, processed=0)
         logger.info("bootstrap %s: source has %d nodes / %d edges (%d/%d without an identifier)",
-                    job_id, nodes, edges, inv_nodes, inv_edges)
+                    lease.job_id, nodes, edges, inv_nodes, inv_edges)
         return True
 
     async def _count(self, client, cypher: str) -> int:
@@ -493,21 +466,18 @@ class BootstrapRunner:
         rs = getattr(res, "result_set", None) or []
         return int(rs[0][0]) if rs and rs[0] and rs[0][0] is not None else 0
 
-    async def _phase_nodes(self, job_id: str, graph_id: str) -> bool:
-        return await self._scan_phase(job_id, graph_id, kind="nodes")
+    async def _phase_nodes(self, lease: Lease, graph_id: str) -> bool:
+        return await self._scan_phase(lease, graph_id, kind="nodes")
 
-    async def _phase_edges(self, job_id: str, graph_id: str) -> bool:
-        return await self._scan_phase(job_id, graph_id, kind="edges")
+    async def _phase_edges(self, lease: Lease, graph_id: str) -> bool:
+        return await self._scan_phase(lease, graph_id, kind="edges")
 
-    async def _scan_phase(self, job_id: str, graph_id: str, *, kind: str) -> bool:
+    async def _scan_phase(self, lease: Lease, graph_id: str, *, kind: str) -> bool:
         """One ID-range window: scan the source, convert, write version rows, and
         checkpoint tallies + cursor — all in ONE transaction, so the counters can
         never drift from the rows (and a crash rewinds both together)."""
         async with self._session() as s:
-            # Own it before touching anything: if the job was abandoned, the graph and its
-            # import commit are already gone, and the honest answer is "not mine any more"
-            # — not "the import commit is missing".
-            job = self._own(await s.get(JobORM, job_id))
+            job = await s.get(JobORM, lease.job_id)
             ps = await s.get(ProjectionStateORM, graph_id)
             commit = await self._import_commit(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
@@ -525,7 +495,7 @@ class BootstrapRunner:
         if max_id is None or lo > max_id:
             return True                                        # nothing (left) to scan
 
-        rules = await _ontology_rules(job_id)
+        rules = await _ontology_rules(lease.job_id)
         if kind == "edges":
             width = await self._fit_edge_window(client, lo, width)
         rows, width = await self._scan(client, kind, lo, width)
@@ -533,7 +503,7 @@ class BootstrapRunner:
 
         # Convert → validate → rows. Rejections are counted, never silent. A window is up to
         # ~100k rows of pure-Python conversion and hashing: run it off the event loop, which
-        # also carries this job's heartbeat and every other job on the worker.
+        # carries every other job on the worker.
         if kind == "nodes":
             dicts, tallies, rejects, sample, dupes = await asyncio.to_thread(
                 self._nodes_to_rows, rows, commit, main_id, graph_id, actor, rules, summary)
@@ -545,13 +515,14 @@ class BootstrapRunner:
 
         model = NodeVersionORM if kind == "nodes" else EdgeVersionORM
         async with self._session() as s:
-            job = self._own(await s.get(JobORM, job_id))    # abort before writing if fenced
+            job = await s.get(JobORM, lease.job_id)
             # ON CONFLICT DO NOTHING is what makes a replayed window a no-op — but it also
             # silently swallows a genuine duplicate identifier that first appeared in an
             # EARLIER window (the in-window `seen` set can't see across windows). So trust
             # the rowcount, not the batch size: whatever didn't insert is a duplicate, and
-            # duplicates fail the job. (Rows and cursor commit together, so a resume never
-            # re-scans a window that landed — a conflict here really is a duplicate.)
+            # duplicates fail the job. (Rows and cursor commit together, and only from the
+            # cursor this window started at, so a resume never re-scans a window that landed —
+            # a conflict here really is a duplicate.)
             inserted = 0
             for batch in _chunks(dicts, _rows_per_insert(dicts)):
                 res = await s.execute(
@@ -566,22 +537,22 @@ class BootstrapRunner:
             summary = _merge_scan_summary(
                 dict(job.summary or {}), kind, scanned=len(rows), written=inserted,
                 tallies=tallies, rejects=rejects, sample=sample, dupes=dupes)
-            job.summary = summary
-            job.processed = int(summary["written"]["nodes"]) + int(summary["written"]["edges"])
-            job.progress = _percent(kind, job.processed, job.total)
-            job.last_cursor = f"{kind}:{hi}"
-            if kind == "nodes":
-                job.batch_size = width                     # see the width note above
-            job.updated_at = _now()
-            job.last_sequence = job.last_sequence + 1
-            done, total = job.processed, job.total
+            done, total = (int(summary["written"]["nodes"]) + int(summary["written"]["edges"]),
+                           job.total)
+            # LAST, so the job row is locked only for the commit. Fenced on the lease AND on the
+            # cursor this window started from: a worker that lost the job, or a window that
+            # somehow landed twice, rolls back here — rows, tallies and all.
+            await lease.checkpoint(
+                s, expect_cursor=cursor, summary=summary, processed=done,
+                progress=_percent(kind, done, total), last_cursor=f"{kind}:{hi}",
+                **({"batch_size": width} if kind == "nodes" else {}))  # see the width note above
         # Copying 7.7M entities is thousands of windows and, without this, hours of total
         # silence between "source has N nodes" and "integrity checks passed" — from which an
         # on-call cannot tell a stuck job from a slow one. Throttled, so it stays a progress
         # line and not a log flood.
-        if self._due(job_id):
+        if self._due(lease.job_id):
             logger.info("bootstrap %s: %s %s/%s (%d%%) cursor=%s:%d window=%d graph=%s",
-                        job_id, kind, done, total, _percent(kind, done, total),
+                        lease.job_id, kind, done, total, _percent(kind, done, total),
                         kind, hi, width, graph_id)
         return False                                           # more windows may remain
 
@@ -593,13 +564,13 @@ class BootstrapRunner:
         self._logged[job_id] = now
         return True
 
-    async def _phase_validate(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_validate(self, lease: Lease, graph_id: str) -> bool:
         """Prove the copy before ANY of it becomes visible.
 
         Runs before `entity_heads` exists and long before the head flip, so a failure
         leaves a graph that is still, in every sense, un-versioned."""
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            job = await s.get(JobORM, lease.job_id)
             ps = await s.get(ProjectionStateORM, graph_id)
             commit = await self._import_commit(s, graph_id)
             summary = dict(job.summary or {})
@@ -667,7 +638,7 @@ class BootstrapRunner:
         #    counts alone can't catch a mangled payload.
         sampled = list((summary.get("sample") or {}).get("nodes") or [])
         matched, mismatched = await self._verify_sample(
-            graph_id, commit.id, ps, sampled, await _ontology_rules(job_id))
+            graph_id, commit.id, ps, sampled, await _ontology_rules(lease.job_id))
         check("sample_matches", not mismatched,
               f"{matched} of {len(sampled)} re-checked items match exactly")
 
@@ -690,26 +661,26 @@ class BootstrapRunner:
             "merkle": "pending",
         }
         async with self._session() as s:
-            job = self._own(await s.get(JobORM, job_id))
+            job = await s.get(JobORM, lease.job_id)
             summary = dict(job.summary or {})
             summary["report"] = report
-            job.summary = summary
-            job.progress = _PHASE_FLOOR["validate"]
-            job.updated_at = _now()
+            await lease.checkpoint(s, summary=summary, progress=_PHASE_FLOOR["validate"])
 
         if blocking:
             raise BootstrapFailure(_explain_failed_checks(blocking), "integrity")
-        logger.info("bootstrap %s: integrity checks passed (%d checks)", job_id, len(checks))
+        logger.info("bootstrap %s: integrity checks passed (%d checks)", lease.job_id,
+                    len(checks))
         return True
 
-    async def _phase_heads(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_heads(self, lease: Lease, graph_id: str) -> bool:
         """Publish the entity head pointers (keyset-windowed, server-side INSERT…SELECT
         so no rows travel through Python). Only reached once validation has passed."""
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            job = await s.get(JobORM, lease.job_id)
             commit = await self._import_commit(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
-            cursor = job.last_cursor or "heads:nodes:"
+            at = job.last_cursor
+            cursor = at or "heads:nodes:"
             kind = "edges" if cursor.startswith("heads:edges") else "nodes"
             after = cursor.split(":", 2)[2] if cursor.count(":") >= 2 else ""
             table = "node_versions" if kind == "nodes" else "edge_versions"
@@ -729,26 +700,23 @@ class BootstrapRunner:
                          kind=("node" if kind == "nodes" else "edge"),
                          now=_now(), w=config.BOOTSTRAP_WINDOW))).one()
             n, last = int(row[0]), row[1]
-            job = self._own(await s.get(JobORM, job_id))
             if n == 0:
                 if kind == "nodes":
-                    job.last_cursor = "heads:edges:"
-                    job.updated_at = _now()
+                    await lease.checkpoint(s, expect_cursor=at, last_cursor="heads:edges:")
                     return False                               # switch to the edge pass
                 return True                                    # both passes done
-            job.last_cursor = f"heads:{kind}:{last}"
-            job.progress = _PHASE_FLOOR["heads"]
-            job.updated_at = _now()
+            await lease.checkpoint(s, expect_cursor=at, last_cursor=f"heads:{kind}:{last}",
+                                   progress=_PHASE_FLOOR["heads"])
         return False
 
-    async def _phase_merkle(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_merkle(self, lease: Lease, graph_id: str) -> bool:
         """The commit's Merkle root — the integrity fingerprint later commits inherit.
 
         Built inline while the tree fits in memory. Above the cap the root is left
         NULL (the column is expressly "async-filled for bulk") and the report SAYS so,
         rather than OOM-ing to produce a number nobody asked for yet."""
         async with self._session() as s:
-            job = self._own(await s.get(JobORM, job_id))
+            job = await s.get(JobORM, lease.job_id)
             commit = await self._import_commit(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
             total = int(job.total or 0)
@@ -757,9 +725,9 @@ class BootstrapRunner:
             if total > config.BOOTSTRAP_MERKLE_INLINE_MAX:
                 report["merkle"] = "deferred"
                 summary["report"] = report
-                job.summary = summary
-                job.updated_at = _now()
-                logger.info("bootstrap %s: merkle deferred (%d entities > cap)", job_id, total)
+                await lease.checkpoint(s, summary=summary)
+                logger.info("bootstrap %s: merkle deferred (%d entities > cap)", lease.job_id,
+                            total)
                 return True
             # Replay-safety. Every other phase is idempotent through ON CONFLICT DO NOTHING;
             # `commit_tree` is not — it INSERTs bare, and its parent lookup is as-of
@@ -783,12 +751,10 @@ class BootstrapRunner:
                 s, graph_id, main_id, commit.id, commit.commit_seq, changes)
             report["merkle"] = "inline"
             summary["report"] = report
-            job.summary = summary
-            job.progress = _PHASE_FLOOR["merkle"]
-            job.updated_at = _now()
+            await lease.checkpoint(s, summary=summary, progress=_PHASE_FLOOR["merkle"])
         return True
 
-    async def _phase_finalize(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_finalize(self, lease: Lease, graph_id: str) -> bool:
         """Flip the head — the single moment the versioned graph becomes real — and
         fast-forward the projection watermark instead of reseeding.
 
@@ -797,9 +763,14 @@ class BootstrapRunner:
         every entity (and wipe the `:AGGREGATED` rollups) to arrive back where we are.
         """
         async with self._session() as s:
-            job = self._own(await s.get(JobORM, job_id))
-            graph = await s.get(GraphORM, graph_id)
+            job = await s.get(JobORM, lease.job_id)
             commit = await self._import_commit(s, graph_id)
+            # Fence FIRST: it takes the job row's lock before the flip touches the graph's —
+            # the order abandon takes them in — so the two serialize rather than deadlock, and a
+            # job abandoned under us rolls the flip back with it.
+            await lease.checkpoint(s, target_commit_id=commit.id,
+                                   progress=_PHASE_FLOOR["finalize"])
+            graph = await s.get(GraphORM, graph_id)
             main = await s.get(BranchORM, await self._main_branch_id(s, graph_id))
             summary = dict(job.summary or {})
             stored = (summary.get("report") or {}).get("stored") or {}
@@ -813,22 +784,20 @@ class BootstrapRunner:
                 ps.target_commit_seq = commit.commit_seq
                 ps.status = "idle"
                 ps.last_projected_at = _now()
-            job.target_commit_id = commit.id
-            job.progress = _PHASE_FLOOR["finalize"]
-            job.updated_at = _now()
         logger.info("bootstrap %s: head flipped to seq %s (projection fast-forwarded)",
-                    job_id, commit.commit_seq)
+                    lease.job_id, commit.commit_seq)
         return True
 
-    async def _phase_backfill(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_backfill(self, lease: Lease, graph_id: str) -> bool:
         """Stamp the projector's delete-anchoring keys (`n.entityId`, `r.id`) onto the
         source graph, in ID-range windows. Additive and idempotent — a no-op on graphs
         the platform itself wrote. Runs before writes are unblocked, so the first
         incremental projection after enablement can anchor its deletes."""
         async with self._session() as s:
-            job = await s.get(JobORM, job_id)
+            job = await s.get(JobORM, lease.job_id)
             ps = await s.get(ProjectionStateORM, graph_id)
-            cursor = job.last_cursor or "backfill:nodes:0"
+            at = job.last_cursor
+            cursor = at or "backfill:nodes:0"
             width = config.BOOTSTRAP_SCAN_WIDTH
         parts = cursor.split(":")
         kind, lo = (parts[1], int(parts[2])) if len(parts) >= 3 else ("nodes", 0)
@@ -837,18 +806,14 @@ class BootstrapRunner:
         if max_id is None or lo > max_id:
             if kind == "nodes":
                 async with self._session() as s:
-                    job = self._own(await s.get(JobORM, job_id))
-                    job.last_cursor = "backfill:edges:0"
-                    job.updated_at = _now()
+                    await lease.checkpoint(s, expect_cursor=at, last_cursor="backfill:edges:0")
                 return False
             return True
         cypher = _BACKFILL_NODES if kind == "nodes" else _BACKFILL_EDGES
         await _q(client, cypher, {"lo": lo, "hi": lo + width}, timeout_ms=_WRITE_TIMEOUT_MS)
         async with self._session() as s:
-            job = self._own(await s.get(JobORM, job_id))
-            job.last_cursor = f"backfill:{kind}:{lo + width}"
-            job.progress = _PHASE_FLOOR["backfill"]
-            job.updated_at = _now()
+            await lease.checkpoint(s, expect_cursor=at, last_cursor=f"backfill:{kind}:{lo + width}",
+                                   progress=_PHASE_FLOOR["backfill"])
         return False
 
     # ------------------------------------------------------------- internals --
@@ -1128,13 +1093,36 @@ async def create_bootstrap_job(
     purpose: the graph is pinned to the SOURCE FalkorDB graph, so a projector that
     thought it had work to do would DROP that graph and reseed it from an empty
     genesis — i.e. wipe the user's data. Nothing may project until finalize.
+
+    A job that already exists is RETURNED, never acted on — in flight, paused, or failed
+    (with its ``failure``): only the user's explicit retry knows whether to resume or restart,
+    and re-queueing a live job would hand it to a second worker. Concurrent calls create one
+    graph and one job — the loser of the ``uq_graphs_data_source`` race returns the winner's.
+    While an abandoned attempt's graph is still being purged there is nothing to enable yet:
+    :class:`BootstrapConflict` ``cleanup_in_progress``.
     """
-    svc = GraphVersioningService()
+    args = dict(data_source_id=data_source_id, workspace_id=workspace_id, actor=actor,
+                falkor_graph_name=falkor_graph_name, falkor_provider=falkor_provider, kind=kind)
+    try:
+        return await _enqueue_bootstrap(**args)
+    except IntegrityError:
+        # Lost a concurrent enable race (uq_graphs_data_source): the winner's graph and job are
+        # committed by now, so a second look finds them and returns its job.
+        return await _enqueue_bootstrap(**args)
+
+
+async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: str,
+                             falkor_graph_name: Optional[str], falkor_provider: Optional[str],
+                             kind: str) -> Dict[str, object]:
     async with db.graphver_session() as s:
         graph = (await s.execute(select(GraphORM).where(
             GraphORM.data_source_id == data_source_id))).scalars().first()
 
         if graph is not None:
+            if graph.deleted_at is not None:
+                raise BootstrapConflict(
+                    "cleanup_in_progress",
+                    "The previous attempt is still being cleaned up. Try again in a few minutes.")
             if graph.kind == "blank":
                 raise ValueError("blank models start empty by design; there is nothing to import")
             if graph.main_head_commit_seq > 1:
@@ -1143,16 +1131,13 @@ async def create_bootstrap_job(
                 JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.graph_id == graph.id,
             ).order_by(JobORM.created_at.desc()))).scalars().first()
             if job is not None:
-                if job.status in ("pending", "running"):
-                    return {"graph_id": graph.id, "job_id": job.id, "status": job.status}
-                job.status = "pending"                    # failed/cancelled → resume in place
-                job.error_message = None
-                job.updated_at = _now()
-                return {"graph_id": graph.id, "job_id": job.id, "status": "pending"}
+                return {"graph_id": graph.id, "job_id": job.id, "status": job.status,
+                        "failure": (job.summary or {}).get("failure")
+                        if job.status == "failed" else None}
             main_id = await _main_branch(s, graph.id)
             gid = graph.id
         else:
-            res = await svc.create_graph(
+            res = await GraphVersioningService().create_graph(
                 data_source_id=data_source_id, workspace_id=workspace_id, kind=kind,
                 actor=actor, falkor_graph_name=falkor_graph_name,
                 falkor_provider=falkor_provider, session=s)
@@ -1167,6 +1152,8 @@ async def create_bootstrap_job(
         job = JobORM(
             job_type=BOOTSTRAP_JOB_TYPE, graph_id=gid, workspace_id=workspace_id,
             data_source_id=data_source_id, branch_id=main_id, status="pending",
+            # What the claim's per-provider cap counts by.
+            provider_id=falkor_provider,
             current_phase="counting", idempotency_key=f"bootstrap:{gid}",
             batch_size=config.BOOTSTRAP_SCAN_WIDTH, target_commit_id=commit.id,
             summary={"actor": actor},
@@ -1179,7 +1166,12 @@ async def create_bootstrap_job(
 async def bootstrap_status(
     *, data_source_id: str, workspace_id: Optional[str] = None,
 ) -> Optional[Dict[str, object]]:
-    """The data source's latest enablement job, in the shape the UI polls.
+    """The data source's latest enablement job, in the shape the UI polls. Read-only.
+
+    Besides progress: ``origin`` (``graph``, or ``package`` for a seed), ``queuedAhead`` (the
+    bootstraps a pending job waits behind), ``attempt`` (each claim is one), ``stale`` (running,
+    but its worker has not beaten in a takeover's time — it is about to resume elsewhere) and
+    ``failure`` (``{code, action, phase, reason}`` — what the user can do about a failed job).
 
     ``workspace_id`` scopes the lookup for tenant isolation — a graph must belong to the
     workspace in the URL, and existence isn't leaked across tenants (the rest of the
@@ -1193,6 +1185,14 @@ async def bootstrap_status(
         ).order_by(JobORM.created_at.desc()))).scalars().first()
         if job is None:
             return None
+        ahead = None
+        if job.status == "pending" and job.current_phase != AWAITING_DECISION:
+            ahead = (await s.execute(select(func.count()).select_from(JobORM).where(
+                JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.status == "pending",
+                JobORM.current_phase.is_distinct_from(AWAITING_DECISION),
+                JobORM.created_at < job.created_at))).scalar_one()
+        last = datetime.fromisoformat(job.updated_at or job.started_at or job.created_at)
+        silent = (datetime.now(timezone.utc) - last).total_seconds()
         summary = job.summary or {}
         return {
             "jobId": job.id, "graphId": job.graph_id, "status": job.status,
@@ -1201,6 +1201,11 @@ async def bootstrap_status(
             "startedAt": job.started_at, "updatedAt": job.updated_at,
             "error": job.error_message,
             "report": summary.get("report") if job.status in ("completed", "failed") else None,
+            "origin": summary.get("origin") or "graph",
+            "queuedAhead": ahead,
+            "attempt": int(job.retry_count or 0),
+            "stale": job.status == "running" and silent > config.INGEST_STALE_SECS,
+            "failure": summary.get("failure") if job.status == "failed" else None,
         }
 
 
@@ -1211,6 +1216,13 @@ async def retry_bootstrap(
     was imported and re-reads the source from scratch (for a source that changed
     mid-copy). Neither can touch a graph whose head already flipped.
 
+    Both only RE-QUEUE the job: a restart's deletes are the worker's ``reset`` phase, in
+    windows, never this request's. And only a job that has stopped is re-queued — a FAILED one,
+    or (to restart) one paused for a decision. Re-queueing a live job would hand it to a second
+    worker while the first still runs it; that is :class:`BootstrapConflict` ``job_active``.
+    Resuming an integrity failure would only fail the same check again: ``resume_not_possible``
+    (restart instead).
+
     ``workspace_id`` scopes the job for tenant isolation (the API also checks the data
     source belongs to the workspace; this is the belt to that's braces)."""
     async with db.graphver_session() as s:
@@ -1218,8 +1230,9 @@ async def retry_bootstrap(
                  JobORM.data_source_id == data_source_id]
         if workspace_id is not None:
             conds.append(JobORM.workspace_id == workspace_id)
+        # Locked, so the check and the re-queue are one decision against one row.
         job = (await s.execute(select(JobORM).where(*conds).order_by(
-            JobORM.created_at.desc()))).scalars().first()
+            JobORM.created_at.desc()).limit(1).with_for_update())).scalars().first()
         if job is None:
             raise ValueError("no enablement job for this data source")
         if job.status == "completed":
@@ -1227,38 +1240,46 @@ async def retry_bootstrap(
         graph = await s.get(GraphORM, job.graph_id)
         if graph is not None and graph.main_head_commit_seq > 1:
             return {"jobId": job.id, "status": "completed"}
+        paused = job.status == "pending" and job.current_phase == AWAITING_DECISION
+        if not (job.status == "failed" or (mode == "restart" and paused)):
+            raise BootstrapConflict(
+                "job_active", "Enabling version control is still under way for this data source; "
+                              "it can be retried once it stops.")
+        summary = dict(job.summary or {})
+        if mode == "resume" and (summary.get("failure") or {}).get("code") == "integrity":
+            raise BootstrapConflict(
+                "resume_not_possible",
+                "Resuming would fail the same check again. Start over to re-read the source.",
+                action="restart")
         if mode == "restart":
-            commit_id = job.target_commit_id
-            for table in ("node_versions", "edge_versions"):
-                await s.execute(text(
-                    f'DELETE FROM {_t(table)} WHERE graph_id = :g AND commit_id = :c'
-                ).bindparams(g=job.graph_id, c=commit_id))
-            await s.execute(text(
-                f'DELETE FROM {_t("entity_heads")} WHERE graph_id = :g AND branch_id = :b'
-            ).bindparams(g=job.graph_id, b=job.branch_id))
-            job.current_phase = "counting"
-            job.summary = {"actor": (job.summary or {}).get("actor", "system")}
+            _advance_phase(job, "reset")
+            summary = {k: v for k, v in summary.items() if k in _KEPT_ON_RESTART}
             job.processed = 0
             job.progress = 0
-        job.last_cursor = None if mode == "restart" else job.last_cursor
+        summary.pop("failure", None)
+        summary.pop("takeovers", None)          # a person chose to go again: a fresh poison count
+        job.summary = summary
         job.status = "pending"
         job.error_message = None
+        job.completed_at = None
         job.updated_at = _now()
         return {"jobId": job.id, "status": "pending", "mode": mode}
 
 
 async def abandon_bootstrap(
-    *, data_source_id: str, workspace_id: Optional[str] = None,
+    *, data_source_id: str, workspace_id: Optional[str] = None, actor: str = "system",
 ) -> Dict[str, object]:
     """Give up on enablement and leave the data source exactly as it was: the graph shell
     and everything the job imported are removed, so it reads as un-versioned again.
     Refuses once the head has flipped (that graph is live — use the versioning UI).
 
-    Safe to call while a worker is mid-copy. ``status='cancelled'`` and the deletes land in
-    ONE transaction, and every worker write re-reads the job in its own transaction and
-    aborts if the job is cancelled (``BootstrapRunner._own``) — so the worker either
-    committed its window before us (and we delete those rows too) or rolls back after us.
-    It cannot commit rows into a graph we have deleted.
+    Off the request, and safe while a worker is mid-copy. ONE transaction cancels the job —
+    which fences its worker: every job-row write it makes is a compare-and-set on a RUNNING job
+    at its epoch, so its in-flight window rolls back — and soft-deletes the graph and queues its
+    purge (``purge_worker.create_purge_job``). The purge removes the shell and the copy in
+    windows on the worker; from this commit on the graph resolves as no graph at all, and
+    enabling again waits for the purge (``cleanup_in_progress``). Idempotent: abandoning again
+    returns the purge already queued — or, if it failed, queues it again.
 
     ``workspace_id`` scopes the job for tenant isolation — this call DELETES a graph, so it
     must never act on another tenant's data source id."""
@@ -1268,25 +1289,21 @@ async def abandon_bootstrap(
         if workspace_id is not None:
             conds.append(JobORM.workspace_id == workspace_id)
         job = (await s.execute(select(JobORM).where(*conds).order_by(
-            JobORM.created_at.desc()).with_for_update())).scalars().first()
+            JobORM.created_at.desc()).limit(1).with_for_update())).scalars().first()
         if job is None:
             raise ValueError("no enablement job for this data source")
-        if job.status == "cancelled":
-            return {"jobId": job.id, "status": "cancelled"}
         graph = await s.get(GraphORM, job.graph_id)
         if graph is not None and graph.main_head_commit_seq > 1:
             raise ConcurrencyError("version control is already enabled for this data source")
-        job.status = "cancelled"                  # fences the worker (see _own)
-        job.updated_at = _now()
-        gid = job.graph_id
-        for table in ("node_versions", "edge_versions", "merkle_nodes", "working_changes"):
-            await s.execute(text(f'DELETE FROM {_t(table)} WHERE graph_id = :g').bindparams(g=gid))
-        for table in ("entity_heads", "commits", "branches", "projection_state"):
-            await s.execute(text(f'DELETE FROM {_t(table)} WHERE graph_id = :g').bindparams(g=gid))
-        if graph is not None:
-            await s.delete(graph)
-        logger.info("bootstrap %s abandoned; graph %s removed", job.id, gid)
-        return {"jobId": job.id, "status": "cancelled"}
+        if job.status != "cancelled":
+            job.status = "cancelled"              # fences the worker
+            job.completed_at = job.updated_at = _now()
+        purge_id = await create_purge_job(
+            graph_id=job.graph_id, workspace_id=job.workspace_id, actor=actor,
+            data_source_id=job.data_source_id, session=s)
+        logger.info("bootstrap %s abandoned; graph %s queued for purge (%s)",
+                    job.id, job.graph_id, purge_id)
+        return {"jobId": job.id, "status": "cancelled", "purgeJobId": purge_id}
 
 
 async def _ensure_import_commit(s, graph_id: str, main_id: str, actor: str) -> CommitORM:
@@ -1326,9 +1343,24 @@ class BootstrapFailure(Exception):
         self.reason, self.code = reason, code
 
 
-class BootstrapSuperseded(Exception):
-    """We no longer own this job — another worker took it over, or the user abandoned it.
-    Not a failure: the write that discovered it rolls back, and we simply stop."""
+class BootstrapConflict(Exception):
+    """The job's state refuses this request (``job_active``, ``resume_not_possible``,
+    ``cleanup_in_progress``). The API answers 409 with :attr:`detail` — ``{type, message, …}`` —
+    so the UI can say why, and offer what IS possible."""
+
+    def __init__(self, kind: str, message: str, **extra):
+        super().__init__(message)
+        self.detail = {"type": kind, "message": message, **extra}
+
+
+def _advance_phase(job: JobORM, phase: str) -> None:
+    """Put ``job`` at the START of ``phase``: no cursor, and the full scan width — each phase
+    re-learns its own window size (edge payloads are a different weight from node payloads).
+    The one way a bootstrap changes phase: the worker's advance (after its compare-and-set) and
+    a restart's ``reset`` both go through here."""
+    job.current_phase = phase
+    job.last_cursor = None
+    job.batch_size = config.BOOTSTRAP_SCAN_WIDTH
 
 
 def _explain_failed_checks(failed: List[dict]) -> str:
@@ -1350,60 +1382,8 @@ def _explain_failed_checks(failed: List[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------- #
-# Transient vs. terminal                                                        #
+# Transient vs. terminal (``job_lease.is_transient``) — and which faults SHRINK  #
 # ---------------------------------------------------------------------------- #
-# Which faults a long copy should WAIT OUT, and which mean something is really wrong.
-# The distinction is load-bearing in two directions:
-#   * a broken pipe must be waited out — the window was fine, the connection wasn't, and
-#     shrinking the window fixes nothing;
-#   * an oversized-query timeout must SHRINK the window — waiting fixes nothing, because
-#     the same query will blow the same budget again.
-# Get it backwards and you either wedge a 40-minute job on a one-second blip, or retry an
-# impossible query until the budget runs out.
-_TRANSIENT_TYPES: Tuple[type, ...] = (
-    ConnectionError,          # builtin: ConnectionReset/Refused/Aborted
-    asyncio.TimeoutError,     # `_q`'s client-side hang net tripped
-    OSError,                  # socket layer: EPIPE, ECONNRESET, DNS, host unreachable
-)
-try:                          # pragma: no cover - depends on the installed client
-    # redis-py shadows the builtins with its OWN ConnectionError/TimeoutError, and they do
-    # NOT subclass them — catching only the builtins would miss every FalkorDB fault there is.
-    from redis.exceptions import BusyLoadingError as _RedisBusy
-    from redis.exceptions import ConnectionError as _RedisConnErr
-    from redis.exceptions import TimeoutError as _RedisTimeout
-    _TRANSIENT_TYPES = _TRANSIENT_TYPES + (_RedisConnErr, _RedisTimeout, _RedisBusy)
-except Exception:                                              # pragma: no cover
-    pass
-
-# The server killed OUR query for being too expensive. Not an outage — the scan's halving
-# ladder owns this one, and must see it rather than have it retried behind its back.
-_OVERSIZED = ("query timed out", "query's execution time exceeded")
-# Text fallbacks, for clients that signal an outage with a plain error string.
-_TRANSIENT_TEXT = (
-    "loading",                # FalkorDB/Redis replaying its RDB/AOF after a restart
-    "masterdown", "clusterdown", "readonly", "try again",
-    "connection reset", "broken pipe", "connection refused", "connection closed",
-    "server closed the connection", "not connected", "no route to host",
-    "temporarily unavailable", "too many connections", "the database system is",
-)
-
-
-def _is_transient(exc: BaseException) -> bool:
-    """True if waiting and reconnecting is a sane response to `exc`."""
-    blurb = f"{type(exc).__name__}: {exc}".lower()
-    if any(t in blurb for t in _OVERSIZED):
-        return False                                   # shrink the window, don't wait
-    if isinstance(exc, _TRANSIENT_TYPES):
-        return True
-    if isinstance(exc, SQLAlchemyError):
-        # A restarted / failed-over Postgres surfaces as one of these, or as an invalidated
-        # DBAPI connection. A constraint violation is an IntegrityError and is NOT any of
-        # them — it must fail loudly rather than be retried into the same wall.
-        return (isinstance(exc, (DisconnectionError, InterfaceError, OperationalError))
-                or bool(getattr(exc, "connection_invalidated", False)))
-    return any(t in blurb for t in _TRANSIENT_TEXT)
-
-
 def _is_timeout(exc: BaseException) -> bool:
     """A TIMEOUT, as opposed to a broken pipe — the difference decides whether SHRINKING the
     window is a sane response, and the two are easy to conflate.
@@ -1419,16 +1399,6 @@ def _is_timeout(exc: BaseException) -> bool:
     """
     blurb = f"{type(exc).__name__}: {exc}".lower()
     return "timeout" in blurb or "timed out" in blurb
-
-
-def _friendly_infra_error(exc: Exception) -> str:
-    mins = max(1, config.BOOTSTRAP_RETRY_BUDGET_SECS // 60)
-    if _is_transient(exc):
-        return (f"The graph service stayed unreachable for over {mins} minutes, so we stopped "
-                "waiting. Nothing was lost — resume to pick up exactly where this left off. "
-                f"({type(exc).__name__})")
-    return ("We couldn't finish reading the source graph — the graph service may be busy or "
-            f"unavailable. You can resume this safely. ({type(exc).__name__})")
 
 
 def _tally_matches(pg: Dict[str, int], src: Dict[str, int], *, allow_lower: bool = False) -> bool:

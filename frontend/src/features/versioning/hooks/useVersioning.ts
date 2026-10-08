@@ -11,6 +11,7 @@ import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
 import { recordEvent } from '@/services/telemetryService'
+import { jobPollDelayMs } from '@/config/polling'
 
 export const VERSIONING_KEYS = {
   all: ['versioning'] as const,
@@ -442,7 +443,8 @@ export function useBootstrapGraph(wsId: string) {
 
 /** Live progress of the enablement job. Polls ONLY while a job is actually running —
  *  a completed/failed/absent job settles to no network at all (the storm-safe pattern
- *  the projection watermark uses). `seed` renders instantly from /resolve on reload. */
+ *  the projection watermark uses) — and less often the longer it runs (`jobPollDelayMs`):
+ *  a copy takes minutes to hours. `seed` renders instantly from /resolve on reload. */
 export function useBootstrapStatus(
   wsId?: string, dataSourceId?: string | null,
   opts: { enabled?: boolean; seed?: api.BootstrapJob | null } = {},
@@ -456,7 +458,7 @@ export function useBootstrapStatus(
     retry: false,                          // 404 = never started; don't hammer
     refetchInterval: (q) => {
       const s = (q.state.data as api.BootstrapJob | undefined)?.status
-      return s === 'pending' || s === 'running' ? 2500 : false
+      return s === 'pending' || s === 'running' ? jobPollDelayMs(q.state.dataUpdateCount) : false
     },
     refetchIntervalInBackground: false,    // a hidden tab doesn't poll
   })

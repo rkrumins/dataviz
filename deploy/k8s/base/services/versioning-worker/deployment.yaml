@@ -7,6 +7,9 @@ metadata:
     app.kubernetes.io/name: versioning-worker
     app.kubernetes.io/component: worker
 spec:
+  # The projection lane of the versioning worker. Its job lanes run beside it:
+  # transfer.yaml (import / export / publish) and bootstrap.yaml ("Enable
+  # version control", purges), which the API only queues.
   # Projection is serialized per graph_id by a cross-pod Postgres advisory
   # lock + a Redis consumer group, so replicas never double-project. Start at
   # 1; scale for throughput on many concurrently-lagging graphs.
@@ -24,6 +27,7 @@ spec:
       labels:
         app.kubernetes.io/name: versioning-worker
         app.kubernetes.io/component: worker
+        synodic.io/lane: projection
     spec:
       serviceAccountName: synodic-backend
       terminationGracePeriodSeconds: 60
@@ -68,7 +72,22 @@ spec:
                   name: app-secrets
                   key: REDIS_CACHE_PASSWORD
                   optional: true
+            - name: GRAPHVER_WORKER_LANES
+              value: "projection"
+            # The WEB pool only serves management-database lookups here; its
+            # default (20) is sized for request handlers.
+            - name: DB_WEB_POOL_SIZE
+              value: "4"
+            # Only the "event_loop_lag CRITICAL" ERROR line keys on this. No
+            # request waits on a worker's loop, so keep the page for
+            # multi-second stalls; GRAPHVER_JOB_WEDGE_SECS exits on a dead one.
+            - name: EVENT_LOOP_CRITICAL_THRESHOLD_S
+              value: "5"
+            - name: TMPDIR
+              value: /spool
           volumeMounts:
+            - name: spool
+              mountPath: /spool
             - name: redis-streams-certs
               mountPath: /certs/streams
               readOnly: true
@@ -87,6 +106,9 @@ spec:
           # the Deployment restarts it; a dedicated liveness endpoint is a
           # follow-up. Projection is idempotent + PEL-recovered on restart.
       volumes:
+        - name: spool
+          emptyDir:
+            sizeLimit: 12Gi
         - name: redis-streams-certs
           secret:
             secretName: redis-streams-certs

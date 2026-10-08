@@ -112,6 +112,13 @@ services:
     # Headless projection worker (WS1.1). Pick up code changes with:
     #   ./dev.sh restart versioning-worker
 
+  versioning-jobs:
+    volumes:
+      - ./backend:/app/backend
+    # Import / export / publish and "Enable version control" jobs: the API
+    # only queues them, as in production. Pick up code changes with:
+    #   ./dev.sh restart versioning-jobs
+
   stats-service:
     volumes:
       - ./backend:/app/backend

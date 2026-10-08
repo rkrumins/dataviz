@@ -427,8 +427,13 @@ class FalkorProjector:
         second concurrent projection finds the lock held and returns ``skipped: in-flight``
         without touching the cache; the lock is released (and the connection closed) in a
         finally so a later projection is never wedged. Different graphs use different keys.
+
+        The lock's connection is a NullPool one of its own (``db.graphver_lock_session``), not one
+        of the store pool's: it is held for the whole projection, and PROJECTION_CONCURRENCY of
+        them out of the shared pool would leave the poll loop and the worker's jobs waiting.
         """
-        lock_scope = self._session()
+        lock_scope = (db.graphver_lock_session() if self._session is db.graphver_session
+                      else self._session())
         lock_s = await lock_scope.__aenter__()
         lock_arg = func.hashtext(f"gvproj:{graph_id}")
         acquired = False

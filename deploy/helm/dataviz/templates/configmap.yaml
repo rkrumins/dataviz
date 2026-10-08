@@ -58,6 +58,15 @@ data:
   PROFILING_ALERT_INTERVAL_SECS: {{ .Values.config.profiling.alertIntervalSecs | quote }}
   PROFILING_SILENT_AFTER_SECS: {{ .Values.config.profiling.silentAfterSecs | quote }}
 
+  # The versioning lanes run in their own Deployments (versioning-worker.yaml),
+  # never in viz-service. The code ignores this outside SYNODIC_ROLE=dev; it is
+  # explicit so the topology never depends on a code default.
+  GRAPHVER_PROJECTION_INPROCESS: "0"
+  # Read by viz-service, which stores uploads, and by every versioning lane,
+  # which reads them back and writes exports: one ConfigMap, so one answer.
+  OBJECT_STORE_BACKEND: {{ .Values.config.objectStore.backend | quote }}
+  OBJECT_STORE_TTL_HOURS: {{ .Values.config.objectStore.ttlHours | quote }}
+
   # Read by two roles on purpose: the controlplane warms on this cadence and
   # every web process snaps its analytics windows to the same grid. One
   # ConfigMap serves both, so they cannot drift apart.

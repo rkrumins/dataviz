@@ -75,9 +75,10 @@ async def _run() -> None:
         edges = [(e["sourceUrn"], e["targetUrn"], e["edgeType"]) for e in delta["edgesUpsert"]]
         assert ("ent_A", b_eid, "LINEAGE") in edges, delta
 
-        # job records the tally + terminal state
+        # job records the tally + terminal state, and how far it got: every row, at its one attempt
         got = await ie.get_job(job["job_id"])
         assert got["status"] == "completed" and got["summary"]["updated"] == 1
+        assert (got["processed"], got["total"], got["progress"], got["attempt"]) == (3, 3, 100, 1), got
 
         # re-import the SAME file onto the SAME draft is fully IDEMPOTENT — every row matches and
         # nothing actually changed, so there are ZERO new/updated changes (the "81 changes when I

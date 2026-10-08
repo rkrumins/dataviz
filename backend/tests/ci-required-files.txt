@@ -34,6 +34,8 @@ tests/test_api_graph.py
 tests/test_automation_holds.py
 tests/test_automation_holds_scope.py
 tests/test_background_tasks.py
+tests/test_bootstrap_resilience.py
+tests/test_bootstrap_routes.py
 tests/test_branding_endpoint.py
 tests/test_branding_repo.py
 tests/test_cache_refresh_route.py
@@ -48,6 +50,7 @@ tests/test_cube_estimate_calibration.py
 tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_drift_probe_cost.py
+tests/test_edge_integrity_index.py
 tests/test_edge_update_patch_semantics.py
 tests/test_edges_beneath.py
 tests/test_entity_audit_unit.py
@@ -75,16 +78,20 @@ tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
 tests/test_heal_native_leftovers.py
+tests/test_helm_worker_lanes.py
 tests/test_import_formats.py
 tests/test_import_job_liveness.py
+tests/test_import_resume.py
 tests/test_import_uploads.py
 tests/test_import_xlsx.py
 tests/test_index_ddl_once.py
 tests/test_insights_asset_endpoints.py
+tests/test_job_lease.py
 tests/test_job_list_overlay.py
 tests/test_job_reaping.py
 tests/test_label_cache_warmup.py
 tests/test_layout_promote.py
+tests/test_lease_keeper.py
 tests/test_loadtest_manifests.py
 tests/test_loadtest_protection_gate.py
 tests/test_loadtest_retry_model.py
@@ -103,6 +110,7 @@ tests/test_provider_failover_pause.py
 tests/test_provider_fleet_admission.py
 tests/test_provider_refresh_batch.py
 tests/test_publish_async_api.py
+tests/test_publish_job_resume.py
 tests/test_purge_then_rebuild.py
 tests/test_raw_properties.py
 tests/test_read_pressure_yield.py
@@ -110,6 +118,7 @@ tests/test_reconcile_detectors.py
 tests/test_reconcile_sweeper.py
 tests/test_request_body_limit.py
 tests/test_run_step_ledger.py
+tests/test_schema_upgrades.py
 tests/test_search_catalog.py
 tests/test_search_engine.py
 tests/test_search_export.py
@@ -146,3 +155,4 @@ tests/test_view_transfer_reconcile_merge.py
 tests/test_view_transfer_references.py
 tests/test_view_transfer_staging.py
 tests/test_view_versions.py
+tests/test_worker_lanes.py

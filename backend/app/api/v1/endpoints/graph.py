@@ -221,22 +221,29 @@ async def bootstrap_versioned_graph_endpoint(
     **202 + a job id** — the copy runs on the versioning worker in resumable windows
     (a 10M-entity source cannot be paged into one request, and the old inline path
     made the web tier's memory O(graph)). Poll ``GET /graph/bootstrap/status``.
-    Idempotent: an in-flight job returns itself; an already-versioned data source
-    returns 200 ``alreadyEnabled``. Nothing becomes visible until the copy has been
-    integrity-checked against the source."""
-    from backend.app.services.versioning.bootstrap_worker import create_bootstrap_job
+    Idempotent: an existing job returns itself, as it is — a failed one with its ``failure``,
+    to be resumed or restarted through ``/bootstrap/retry``, never silently re-run — and
+    concurrent calls return one job; an already-versioned data source returns 200
+    ``alreadyEnabled``; 409 ``cleanup_in_progress`` while an abandoned attempt is still being
+    removed. Nothing becomes visible until the copy has been integrity-checked against the
+    source."""
+    from backend.app.services.versioning.bootstrap_worker import (
+        BootstrapConflict, create_bootstrap_job)
     actor = user.id if user else "system"
     provider_id, graph_name = await _pin_projection_target(session, dataSourceId, ws_id)
     try:
         res = await create_bootstrap_job(
             data_source_id=dataSourceId, workspace_id=ws_id, actor=actor,
             falkor_graph_name=graph_name, falkor_provider=provider_id)
+    except BootstrapConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     if res.get("already_enabled"):
         response.status_code = 200
         return {"graphId": res["graph_id"], "alreadyEnabled": True}
-    return {"jobId": res["job_id"], "graphId": res["graph_id"], "status": res["status"]}
+    return {"jobId": res["job_id"], "graphId": res["graph_id"], "status": res["status"],
+            "failure": res.get("failure")}
 
 
 @router.get("/bootstrap/status")
@@ -269,14 +276,20 @@ async def bootstrap_retry_endpoint(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Resume a failed copy from its last committed window, or start it over (for a
-    source that changed while it was being read)."""
-    from backend.app.services.versioning.bootstrap_worker import retry_bootstrap
+    source that changed while it was being read) — both queued for the worker; a restart's
+    clean-up is its ``reset`` phase. Only a job that has stopped can be retried: 409
+    ``job_active`` otherwise (to restart, a job paused for a decision counts as stopped), and
+    409 ``resume_not_possible`` (``action: restart``) to resume an integrity failure."""
+    from backend.app.services.versioning.bootstrap_worker import (
+        BootstrapConflict, retry_bootstrap)
     if mode not in ("resume", "restart"):
         raise HTTPException(status_code=422, detail="mode must be resume or restart")
     await _data_source_in_workspace(session, dataSourceId, ws_id)
     try:
         return await retry_bootstrap(data_source_id=dataSourceId, mode=mode,
                                      workspace_id=ws_id)
+    except BootstrapConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -287,16 +300,18 @@ async def bootstrap_abandon_endpoint(
     dataSourceId: str = Query(...),
     _gate: None = Depends(require_versioning_enabled),
     _perm=Depends(require_ws_manage),
-    _user=Depends(get_optional_user),
+    user=Depends(get_optional_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Give up on enablement: everything the job imported is removed and the data source
-    reads exactly as it did before. Refused once version control is actually live."""
+    """Give up on enablement: the job is cancelled and the data source reads exactly as it
+    did before, at once; everything the job imported is removed by a queued purge
+    (``{status: 'cancelled', purgeJobId}``). Refused once version control is actually live."""
     from backend.app.services.versioning.bootstrap_worker import abandon_bootstrap
     from backend.app.services.versioning.service import ConcurrencyError
     await _data_source_in_workspace(session, dataSourceId, ws_id)
     try:
-        return await abandon_bootstrap(data_source_id=dataSourceId, workspace_id=ws_id)
+        return await abandon_bootstrap(data_source_id=dataSourceId, workspace_id=ws_id,
+                                       actor=user.id if user else "system")
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:

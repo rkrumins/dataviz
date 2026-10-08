@@ -15,6 +15,7 @@
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { pollJob } from './importExportApiService'
 import { useHealthStore } from '@/store/health'
 import { readJsonLossless } from '@/lib/losslessJson'
 
@@ -649,7 +650,7 @@ export interface BootstrapResult {
 
 export type BootstrapJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type BootstrapPhase =
-  | 'counting' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle' | 'finalize' | 'backfill'
+  | 'reset' | 'counting' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle' | 'finalize' | 'backfill'
 
 /** One integrity check from the job's report — rendered verbatim in the report card. */
 export interface BootstrapCheck {
@@ -686,6 +687,27 @@ export interface BootstrapJob {
   updatedAt?: string | null
   error?: string | null
   report?: BootstrapReport | null
+  /** What it copies from: the data source's graph, or (a seed) a view package. */
+  origin?: 'graph' | 'package'
+  /** Waiting its turn: how many enablement jobs are ahead of it; else null. */
+  queuedAhead?: number | null
+  /** Each time a server takes the job up is one attempt: past the first, it resumed where an
+   *  earlier one stopped. */
+  attempt?: number
+  /** Running, but its server stopped answering: another one is about to take it over. */
+  stale?: boolean
+  /** A failed job: why, and what can be done about it. */
+  failure?: JobFailure | null
+}
+
+/** Why a job failed, and what can be done: an `integrity` failure (the copy didn't match its source)
+ *  only fails the same way again unless it is restarted; an `infrastructure` one resumes where it
+ *  stopped; an `internal` one is a bug, which no action fixes. */
+export interface JobFailure {
+  code: 'integrity' | 'infrastructure' | 'internal'
+  action: 'restart' | 'resume' | null
+  phase?: string | null
+  reason?: string | null
 }
 
 /**
@@ -1196,30 +1218,21 @@ interface PublishJob {
   error: { status: number; detail: RefusalDetail } | null
 }
 
-/** How often a queued publish is asked about, and for how long it may go unanswered (tests shorten
- *  both). */
-export const PUBLISH_JOB_POLL = { ms: 2000, patienceMs: 120_000 }
+/** How long a queued publish may go unanswered before the publish gives up (tests shorten it). */
+export const PUBLISH_JOB_POLL = { patienceMs: 120_000 }
 
 /** The commit a publish (or review merge) made — at once, or once the job it queued is done. A
- *  refused job raises the error the request would have raised. A failed poll (a network blip, a web
- *  pod restarting) doesn't stop the job, so it is asked again until it goes unanswered too long. */
+ *  refused job raises the error the request would have raised. Followed like every job
+ *  (`pollJob`): a failed poll (a network blip, a web pod restarting) doesn't stop the job, so it is
+ *  asked again until it goes unanswered too long. */
 async function followPublish(wsId: string, answer: CommitResponse | QueuedPublish): Promise<CommitResponse> {
   if (!('jobId' in answer)) return answer
-  let answeredAt = Date.now()
-  for (;;) {
-    let job: PublishJob | null = null
-    try {
-      job = await vfetch<PublishJob>(`${base(wsId)}/graphs/${answer.graphId}/publish-jobs/${answer.jobId}`)
-      answeredAt = Date.now()
-    } catch (err) {
-      if (Date.now() - answeredAt >= PUBLISH_JOB_POLL.patienceMs) throw err
-    }
-    if (job?.status === 'completed' && job.commitId) return { commitId: job.commitId }
-    if (job?.status === 'failed' || job?.status === 'cancelled') {
-      throw versioningError(job.error?.status ?? 500, job.error?.detail, 'Publishing failed')
-    }
-    await new Promise((resolve) => setTimeout(resolve, PUBLISH_JOB_POLL.ms))
-  }
+  const job = await pollJob(
+    () => vfetch<PublishJob>(`${base(wsId)}/graphs/${answer.graphId}/publish-jobs/${answer.jobId}`),
+    { patienceMs: PUBLISH_JOB_POLL.patienceMs },
+  )
+  if (job.status === 'completed' && job.commitId) return { commitId: job.commitId }
+  throw versioningError(job.error?.status ?? 500, job.error?.detail, 'Publishing failed')
 }
 
 // ============================================

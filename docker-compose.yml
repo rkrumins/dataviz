@@ -382,14 +382,11 @@ services:
       # CPU-bound and, on the web event loop, wedged the loop
       # (event_loop_lag CRITICAL) and froze EVERY request (auth, /docs,
       # health) while FalkorDB loaded/projected. Keep 0 here — the
-      # versioning-worker service owns projection. Only set 1 for a
-      # single-process dev run with no worker container.
+      # versioning-worker service owns projection, and versioning-jobs runs
+      # the import, export, publish and bootstrap jobs this service only
+      # queues. 1 takes effect only with SYNODIC_ROLE=dev (a single-process
+      # run with no worker containers); on this web role it is ignored.
       GRAPHVER_PROJECTION_INPROCESS: "${GRAPHVER_PROJECTION_INPROCESS:-0}"
-      # Import and export jobs are only queued here: the versioning-worker
-      # service claims them from the jobs table and runs them, so a large
-      # import or export never shares this container's CPU with requests.
-      # Only set 1 for a single-process dev run with no worker container.
-      GRAPHVER_TRANSFER_INPROCESS: "${GRAPHVER_TRANSFER_INPROCESS:-0}"
 
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -485,12 +482,15 @@ services:
   # provider outage here cannot affect the web tier. Does NOT gate on
   # FalkorDB — connects lazily and retries, so it starts even when the graph
   # is down/loading. Scale: docker compose up --scale versioning-worker=2
-  versioning-worker:
+  # This is the projection lane (GRAPHVER_WORKER_LANES); versioning-jobs
+  # below runs the job lanes from the same definition.
+  versioning-worker: &versioning-worker
     build:
       context: .
       dockerfile: backend/Dockerfile.aggregation
     command: ["python", "-m", "backend.app.services.versioning"]
-    environment:
+    environment: &versioning-worker-env
+      GRAPHVER_WORKER_LANES: projection
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
       CACHE_REDIS_URL: redis://redis:6379/1
@@ -505,14 +505,15 @@ services:
       FALKORDB_SERVER_TIMEOUT_MAX_MS: "${FALKORDB_SERVER_TIMEOUT_MAX_MS:-180000}"
       SYNODIC_ROLE: worker
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # The bootstrap lane reads provider credentials, which viz-service encrypts with this key.
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
     # Headless projector: no HTTP health server yet, so disable the inherited
     # Dockerfile healthcheck (which probes the aggregation worker's port 8090)
     # rather than flap to "unhealthy". restart: unless-stopped covers crashes;
     # a dedicated liveness endpoint is a follow-up.
     healthcheck:
       disable: true
-    # On stop it gives running import/export jobs 40 s to finish, then
-    # records the rest as interrupted: allow for that, as the Deployment does.
+    # The same grace as the Deployments (terminationGracePeriodSeconds: 60).
     stop_grace_period: 60s
     depends_on:
       upgrade:
@@ -522,6 +523,23 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+
+  # ── Versioning Job Worker (Data Plane) ────────────────────────────
+  # The versioning worker's job lanes: import / export / publish (transfer)
+  # and "Enable version control" / purge (bootstrap). The API only queues
+  # these jobs in graphver.jobs, so without this service none of them runs.
+  # Same image, command and environment as versioning-worker; only the lanes
+  # differ. Scale: docker compose up --scale versioning-jobs=2 (claims skip
+  # rows another worker holds, so replicas share the queue).
+  versioning-jobs:
+    <<: *versioning-worker
+    environment:
+      <<: *versioning-worker-env
+      GRAPHVER_WORKER_LANES: transfer,bootstrap
+    # On stop it gives running jobs 40 s (GRAPHVER_DRAIN_SECS) to hand
+    # themselves back at a window boundary, then cancels and releases the
+    # rest: allow for that, as the Deployments do.
+    stop_grace_period: 60s
 
   # ── Stats Service (Background Poller) ─────────────────────────────
   # Headless refresh loop that keeps per-data-source graph stats

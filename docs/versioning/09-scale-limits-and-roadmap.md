@@ -128,10 +128,11 @@ frontend-only gap.)*
 
 See [08](08-import-export.md) for detail; the load-bearing ones:
 
-- **An interrupted job starts over.** Jobs queue in Postgres and run on the versioning worker
-  (`GRAPHVER_TRANSFER_INPROCESS=0`, as the compose and Kubernetes manifests set it), or in the web
-  process by default. Either way, a process that stops mid-import/export takes the job with it: it
-  is reported `failed` once silent for `JOB_STALE_AFTER_SECS`, and runs again from the start.
+- **An interrupted export starts over; an import resumes.** Jobs queue in Postgres and run only on
+  the versioning worker's transfer lane (the web tier never runs them). A worker that stops hands
+  its job back (drain) or loses its lease (crash, after `INGEST_STALE_SECS`), and another worker
+  takes it over: an import resumes from its last committed window (`parse:` / `node:` / `edge:`
+  cursor); an export is rewritten from the start under a new attempt key.
 - **A 50 GB export takes hours.** An export reads one snapshot a page at a time, in flat memory at any
   size, and the Export dialog has the workers write it to the object store, then downloads it in
   pieces that resume. One export runs on one worker, at about 10 MB a second as NDJSON and 3.5 as
@@ -169,7 +170,7 @@ Every knob lives in `backend/app/services/versioning/config.py` and is env-overr
 | `GRAPHVER_DRAFT_TTL_DAYS` / `_SWEEP_SECS` | `30` / daily | auto-abandon idle drafts |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `commit_seq`-collision retry budget |
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
-| `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `50000` / `5000` | import windowing / inline-vs-async threshold |
+| `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `10000` / `5000` | import windowing / inline-vs-async threshold |
 
 ## 10. Roadmap (prioritized)
 

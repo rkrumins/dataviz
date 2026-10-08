@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 
 # In-graph bookkeeping nodes that live in a FalkorDB cache graph but are NOT
@@ -264,8 +265,10 @@ def import_store_root() -> str:
     return os.getenv("IMPORT_STORE_ROOT", "/tmp/synodic-import-store")
 
 
-# Accepted deltas per windowed ``checkpoint`` commit the import worker writes onto the draft.
-IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "50000"))
+# Staged rows per import window: one commit onto the draft, together with the job's checkpoint. A
+# window is also what a resumed import redoes at most, and what the job's lease waits out before a
+# stopping worker hands the job back — so a few seconds of work, not minutes.
+IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
 # Rows returned inline in a preview before the full diff must be downloaded.
 PREVIEW_SAMPLE_LIMIT: int = int(os.getenv("IMPORT_PREVIEW_SAMPLE_LIMIT", "200"))
 # Two-tier threshold: imports at/below this stage client-side (existing Review & Save); above
@@ -278,14 +281,13 @@ STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
 # The worker's daily sweep deletes object-store artifacts (uploads, exports, view packages)
 # written more than this many hours ago.
 OBJECT_STORE_TTL_HOURS: float = float(os.getenv("OBJECT_STORE_TTL_HOURS", "24"))
-# A pending/running import or export job silent this long (no ``updated_at`` heartbeat) is
-# reported failed: the process running it went away, and nothing else will ever finish it.
-JOB_STALE_AFTER_SECS: int = int(os.getenv("JOB_STALE_AFTER_SECS", "900"))
-# Where import and export jobs run. On (the default): in the API process that took the request,
-# as a task of its own. Off: API processes only queue them and the versioning worker runs them
-# (import_export/runner.py) — for deployments that run that worker, so a large import or export
-# never shares an API pod's CPU and memory with interactive requests.
-TRANSFER_INPROCESS: bool = os.getenv("GRAPHVER_TRANSFER_INPROCESS", "1").lower() in ("1", "true", "yes")
+# Import, export and publish jobs run ONLY on the versioning worker's transfer lane: the API queues
+# them. Running them in the web process (the old default) shared its CPU, memory and event loop
+# with interactive requests, and a restart or gunicorn's 120 s worker timeout lost the job.
+if os.getenv("GRAPHVER_TRANSFER_INPROCESS"):
+    logging.getLogger(__name__).warning(
+        "GRAPHVER_TRANSFER_INPROCESS is set but no longer read: import, export and publish jobs "
+        "always run on the versioning worker's transfer lane (GRAPHVER_WORKER_LANES). Remove it.")
 # Jobs one versioning-worker process runs at once. An export job also takes one of its pod's export
 # turns (GRAPH_EXPORT_CONCURRENCY, 2), so raise the two together.
 TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
@@ -373,6 +375,67 @@ PURGE_GRACE_DAYS: int = int(os.getenv("GRAPHVER_PURGE_GRACE_DAYS", "30"))
 # and gets reaped at 09:15 has cost nobody anything — and a slow scan keeps the trash query off
 # the hot path. It is deliberately NOT the 5s job poll.
 REAP_POLL_SECS: int = int(os.getenv("GRAPHVER_REAP_POLL_SECS", "900"))
+
+
+# --------------------------------------------------------------------------- #
+# Worker lanes and the job lease (job_lease.py)                                #
+# --------------------------------------------------------------------------- #
+# A versioning-worker process runs one or more LANES, so production can scale and isolate them as
+# separate pods while compose and dev run all three in one process:
+#   projection  the FalkorDB projection (poll, stream, idle-draft sweep, cache eviction);
+#   transfer    import / export / publish jobs, plus one dedicated package_inspect slot;
+#   bootstrap   "enable version control" and package seeds, purges, and the undo-window reaper.
+LANES = ("projection", "transfer", "bootstrap")
+
+
+def worker_lanes() -> frozenset:
+    """The lanes this process runs (``GRAPHVER_WORKER_LANES``, comma-separated; all by default).
+
+    An unknown name fails start-up rather than being skipped: a pod whose lane is misspelt would
+    otherwise run nothing, healthily, while its jobs queue forever."""
+    raw = os.getenv("GRAPHVER_WORKER_LANES", ",".join(LANES))
+    lanes = frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
+    unknown = lanes - set(LANES)
+    if unknown or not lanes:
+        raise ValueError(f"GRAPHVER_WORKER_LANES={raw!r}: expected a comma-separated subset of "
+                         f"{', '.join(LANES)}")
+    return lanes
+
+
+# Bootstrap and package-seed jobs one process runs at once, and at most this many at once per
+# (FalkorDB provider, origin) across ALL workers: a bootstrap scans the customer's FalkorDB, and
+# several scans of one instance at once slow every reader of it.
+BOOTSTRAP_SLOTS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SLOTS", "2"))
+BOOTSTRAP_PER_PROVIDER: int = int(os.getenv("GRAPHVER_BOOTSTRAP_PER_PROVIDER", "2"))
+# A SOFT per-workspace share of a lane's running jobs: a claim prefers the job of a workspace
+# running fewer than this, so one tenant queueing 50 imports doesn't hold every slot while
+# another's single job waits. Soft (work-conserving): with nobody else waiting it still runs.
+JOBS_PER_WORKSPACE: int = int(os.getenv("GRAPHVER_JOBS_PER_WORKSPACE", "2"))
+# How long a stopping worker gives its running jobs to hand themselves back at a window boundary
+# (release: pending again, cursor kept) before cancelling them. Inside the deployment's 60 s
+# termination grace, with time left to release the cancelled ones.
+DRAIN_SECS: float = float(os.getenv("GRAPHVER_DRAIN_SECS", "40"))
+# A standalone worker whose event loop has not ticked for this long is WEDGED (a synchronous call
+# that never returns): its jobs would never finish while the heartbeat thread kept them leased,
+# so it dumps every thread's stack and exits for the orchestrator to restart it.
+JOB_WEDGE_SECS: float = float(os.getenv("GRAPHVER_JOB_WEDGE_SECS", "900"))
+
+
+def lane_pool_size(lanes) -> int:
+    """graphver connections a worker running ``lanes`` needs, when ``GRAPHVER_POOL_SIZE`` is unset.
+
+    Sized from what each lane holds at once — projection: one per concurrent graph plus the poll,
+    stream and sweep; transfer: two per slot (the job's window and a nested read) plus the inspect
+    slot; bootstrap: three per slot (window, phase driver, a validation read) plus purge and reaper —
+    so a busy lane waits on its own work, never on a pool sized for a web process."""
+    size = 2
+    if "projection" in lanes:
+        size += PROJECTION_CONCURRENCY + 3
+    if "transfer" in lanes:
+        size += 2 * (TRANSFER_SLOTS + 1)
+    if "bootstrap" in lanes:
+        size += 3 * BOOTSTRAP_SLOTS + 2
+    return size
 
 
 def _selftest() -> None:

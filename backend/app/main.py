@@ -1520,20 +1520,29 @@ async def lifespan(_app: FastAPI):
         _app.state._event_loop_shutdown.is_set,
     )
 
-    # Versioning projection worker (in-process; dev / single-node). In
-    # production the standalone `python -m backend.app.services.versioning`
-    # runs instead. Gated by GRAPHVER_PROJECTION_INPROCESS; never blocks boot.
+    # Versioning worker lanes (in-process; dev only). Everywhere else the
+    # standalone `python -m backend.app.services.versioning` runs them: a web
+    # process never runs jobs. Gated by GRAPHVER_PROJECTION_INPROCESS AND
+    # SYNODIC_ROLE=dev; never blocks boot.
     _app.state._versioning_worker = None
     _app.state._versioning_worker_task = None
     try:
         from .services.versioning import config as _vcfg
-        if _vcfg.PROJECTION_INPROCESS:
-            from .services.versioning.bootstrap_worker import BootstrapRunner
-            from .services.versioning.purge_worker import PurgeRunner, Reaper
+        from .runtime.role import SynodicRole, current_role
+        if _vcfg.PROJECTION_INPROCESS and current_role() != SynodicRole.DEV:
+            # A web pod running jobs shares its CPU, memory and event loop with every
+            # interactive request, and loses the job to its next restart.
+            logger.error(
+                "GRAPHVER_PROJECTION_INPROCESS=1 is ignored: versioning worker lanes run "
+                "in the web process only when SYNODIC_ROLE=dev (this is %s). Deploy the "
+                "versioning worker, or nothing projects and no job runs.",
+                current_role().value,
+            )
+        elif _vcfg.PROJECTION_INPROCESS:
+            from .services.versioning.job_lease import LeaseKeeper, running_keeper
             from .services.versioning.projection import FalkorProjector
             from .providers.falkor_graph_registry import make_registry_graph_factory
-            from .services.versioning.worker import ProjectionWorker
-            from .services.versioning.service import GraphVersioningService
+            from .services.versioning.worker import build_worker
             from .services.projection_target import (
                 make_rollup_rebuild_hook,
                 after_projection,
@@ -1541,7 +1550,8 @@ async def lifespan(_app: FastAPI):
                 resolve_aggregation_edge_types,
             )
             from .providers.eviction_budget import make_registry_budget_resolver
-            _vw = ProjectionWorker(
+            from .api.v1.endpoints.versioning import get_import_export_service
+            _vw = build_worker(
                 # Self-heal the projection target on every worker-driven projection, the same way the
                 # interactive project_now path does — else a worker-only graph projects into an orphan
                 # gv_<id> the canvas never reads and merged main never surfaces.
@@ -1559,22 +1569,24 @@ async def lifespan(_app: FastAPI):
                         lambda: getattr(_app.state, "aggregation_service", None)),
                     on_projected=after_projection,
                 ),
-                versioning=GraphVersioningService(),
+                make_registry_graph_factory(),
+                lanes=_vcfg.worker_lanes(),
+                # Import, export and publish jobs the API queues run here too, in dev.
+                import_export=get_import_export_service,
                 # Per-provider eviction budgets come from the provider registry
                 # (env GRAPHVER_FALKOR_* as fallback); the loop no-ops until a
                 # provider's falkorMaxResident is set.
                 evict_budget=make_registry_budget_resolver(),
-                # "Enable version control" jobs (dev / single-node: the standalone
-                # versioning-worker hosts them when INPROCESS=0).
-                bootstrap=BootstrapRunner(make_registry_graph_factory()),
-                purge=PurgeRunner(make_registry_graph_factory()),
-                reaper=Reaper(),
             )
+            # Job leases renewed off the event loop. A dev server is never exited on a
+            # wedged loop (exit_on_wedge=False): its leases just stop being renewed.
+            if running_keeper() is None:
+                LeaseKeeper(exit_on_wedge=False).start()
             _app.state._versioning_worker = _vw
             _app.state._versioning_worker_task = asyncio.create_task(
                 _vw.run(), name="versioning-projection-worker",
             )
-            logger.info("In-process versioning projection worker started")
+            logger.info("In-process versioning worker lanes started")
         else:
             # R-M4: make the delegated-projection topology observable — with
             # INPROCESS=0 the reconciling poll-loop backstop runs ONLY in the

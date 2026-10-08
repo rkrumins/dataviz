@@ -77,6 +77,12 @@ _WEDGE_CHECK_INTERVAL_S: float = float(os.getenv("EVENT_LOOP_WEDGE_CHECK_S", "2"
 _heartbeat: list = [0.0]
 
 
+def last_tick() -> float:
+    """``time.monotonic()`` of the monitor's last tick, 0.0 until it has ticked. Safe to call from
+    any thread: the versioning worker's lease keeper reads it to tell a wedged loop from a busy one."""
+    return _heartbeat[0]
+
+
 def start_wedge_watchdog(is_stopped: Callable[[], bool]) -> threading.Thread:
     """Spawn a DAEMON THREAD that dumps all thread stacks when the event loop
     stops ticking (i.e. is wedged by synchronous/CPU-bound work). Independent

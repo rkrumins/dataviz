@@ -27,7 +27,8 @@ import contextlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Collection, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, NamedTuple, Optional,
+                    Sequence, Tuple)
 
 from sqlalchemy import Boolean, Text, bindparam, insert, select, func, delete, null, text, update, or_, tuple_
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -3887,6 +3888,24 @@ class GraphVersioningService:
         async with self._session() as s:
             return await self._change_count(s, graph_id, branch_id)
 
+    async def merged_commit_id(self, *, graph_id: str, branch_id: str) -> Optional[str]:
+        """The ``main`` commit a MERGED draft landed as, or ``None`` while the draft is not merged.
+
+        How a publish job knows its publish already happened: its worker may have died (or been
+        superseded) after the squash committed and before the job finished, and publishing again
+        only fails on a merged draft. The squash commit names the draft (``source_branch_id``); a
+        draft whose squash changed nothing is merged with no commit of its own, and then the answer
+        is what the publish returned, the draft's head (``""`` when it has none)."""
+        async with self._session() as s:
+            draft = await s.get(BranchORM, branch_id)
+            if draft is None or draft.graph_id != graph_id or draft.status != "merged":
+                return None
+            squash = await s.scalar(select(CommitORM.id).where(
+                CommitORM.graph_id == graph_id, CommitORM.kind == "squash_publish",
+                CommitORM.source_branch_id == branch_id,
+            ).order_by(CommitORM.commit_seq.desc()).limit(1))
+            return squash or draft.head_commit_id or ""
+
     @staticmethod
     async def _change_count(s, graph_id: str, branch_id: str) -> int:
         return await s.scalar(select(func.count()).select_from(EntityHeadORM).where(
@@ -5395,6 +5414,7 @@ class GraphVersioningService:
         message: str = "edit", branch_id: Optional[str] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -5411,10 +5431,17 @@ class GraphVersioningService:
         unique-constraint collision this retries (bounded backoff) before giving up with
         :class:`ConcurrencyError`. Under ``strict`` ontology enforcement the written
         entities are validated (the write-through gate, parity with publish/stage).
+
+        ``on_commit(session)``, when given, is awaited at the end of the batch's transaction, in
+        its session — after the commit is written, or when the ops turn out to change nothing —
+        so what the caller records with it lands or rolls back WITH the batch: an import window's
+        row resolutions and its job checkpoint. A retry re-runs it with the batch; anything it
+        raises rolls the batch back and propagates.
         """
         result = await self.apply_ops_detailed(
             graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
-            containment_edge_types=containment_edge_types, ontology_rules=ontology_rules)
+            containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
+            on_commit=on_commit)
         return result.commit_id
 
     async def apply_ops_detailed(
@@ -5422,6 +5449,7 @@ class GraphVersioningService:
         message: str = "edit", branch_id: Optional[str] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> ApplyResult:
         """:meth:`apply_ops`, answering with every addressed entity's value after the batch."""
         return await self._retry_seq(
@@ -5429,7 +5457,7 @@ class GraphVersioningService:
             lambda: self._apply_ops_once(
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules),
+                ontology_rules=ontology_rules, on_commit=on_commit),
         )
 
     async def _apply_ops_once(
@@ -5437,6 +5465,7 @@ class GraphVersioningService:
         message: str, branch_id: Optional[str],
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -5593,6 +5622,8 @@ class GraphVersioningService:
                     if v is not None and not _is_edge_payload(v)}
             deltas = net_delta({k: cur_vals.get(k) for k in new_vals}, new_vals)
             if not deltas:
+                if on_commit is not None:
+                    await on_commit(s)
                 return ApplyResult(None, written, urns)
             for d in deltas:
                 kind_by_entity.setdefault(
@@ -5623,6 +5654,11 @@ class GraphVersioningService:
                 ps = await s.get(ProjectionStateORM, graph_id)
                 if ps is not None:
                     ps.target_commit_seq = new_seq
+            if on_commit is not None:
+                # The commit's pending ORM writes first, so the hook's (a job-row checkpoint) is
+                # the last statement and holds that row's lock only until the commit.
+                await s.flush()
+                await on_commit(s)
             return ApplyResult(commit.id, written, urns)
 
     async def _bulk_insert_versions(self, s, graph_id, branch_id, commit, node_deltas, edge_deltas, actor) -> None:

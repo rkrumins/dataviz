@@ -43,13 +43,15 @@ The job row itself is deliberately NOT deleted: it is the receipt.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import func, select, text
 
-from . import config, db
+from . import config, db, job_lease
+from .job_lease import Draining, Lease, Superseded
 from .models import GraphORM, JobORM, ProjectionStateORM, _now
 
 logger = logging.getLogger(__name__)
@@ -80,10 +82,6 @@ _PHASE_FLOOR = {"count": 0, "edges": 1, "nodes": 25, "heads": 50, "merkle": 70,
                 "working": 80, "commits": 82, "falkor": 92, "meta": 95, "finalize": 99}
 
 
-class PurgeSuperseded(Exception):
-    """Another worker took this job over, or it was cancelled. Stop; do not write."""
-
-
 class PurgeRefused(Exception):
     """A guardrail said no. The job fails and NOTHING is deleted."""
 
@@ -102,158 +100,131 @@ def _sch() -> str:
     return config.graphver_schema()
 
 
+async def delete_window(s, table: str, pk: str, graph_id: str, *, where: str = "",
+                        params: Optional[dict] = None) -> int:
+    """Delete up to one ``PURGE_WINDOW`` of ``table``'s rows for ``graph_id`` in the caller's
+    transaction, and say how many went. ``where`` narrows the rows (SQL over the table, ANDed — a
+    constant, never input; its binds go in ``params``): a purge takes a graph's every row, a
+    bootstrap restart only what its import commit wrote.
+
+    ORDER BY the PK is load-bearing (see the module docstring): without it this is a Seq Scan
+    that re-walks every dead tuple the earlier windows left, and the delete goes quadratic.
+    """
+    narrow = f"AND {where} " if where else ""
+    res = await s.execute(text(
+        f'WITH doomed AS ('
+        f'  SELECT ctid FROM "{_sch()}"."{table}" WHERE graph_id = :g {narrow}'
+        f'  ORDER BY {pk} LIMIT :n'
+        f') '
+        f'DELETE FROM "{_sch()}"."{table}" t USING doomed d '
+        f'WHERE t.graph_id = :g AND t.ctid = d.ctid'
+    ), {"g": graph_id, "n": max(1000, int(config.PURGE_WINDOW)), **(params or {})})
+    return res.rowcount or 0
+
+
 class PurgeRunner:
-    """Executes `job_type='purge'` jobs. Hosted by the versioning worker, beside bootstrap."""
+    """Executes `job_type='purge'` jobs. Hosted by the versioning worker's bootstrap lane, on the
+    job lease (``job_lease``) like every other job."""
 
     def __init__(self, graph_factory=None, *, session_factory=None, consumer: str = "purge-1"):
         self._factory = graph_factory          # None => FalkorDB drop is skipped and disclosed
         self._session = session_factory or db.graphver_session
         self._consumer = consumer
-        self._epoch: Dict[str, int] = {}
 
     # ---------------------------------------------------------------- infra --
-    async def claim_one(self) -> Optional[str]:
+    async def claim_one(self) -> Optional[Lease]:
         """Claim a pending purge, or take over one whose worker looks dead.
 
-        Identical contract to the bootstrap runner: `JobORM` is the durable queue, `updated_at`
-        is the heartbeat, and `retry_count` is the CLAIM EPOCH so a slow-but-alive worker that
-        gets taken over discovers it on its next write and stops rather than double-deleting.
-        (Double-deleting is harmless here — that is the point of DELETE — but a superseded worker
-        that kept running would fight the new owner for every window.)
+        The bootstrap's contract (``job_lease.claim``): `JobORM` is the durable queue, `updated_at`
+        is the heartbeat, and every claim is a new EPOCH, so a slow-but-alive worker that gets taken
+        over discovers it at its next write and stops rather than double-deleting. (Double-deleting
+        is harmless here — that is the point of DELETE — but a superseded worker that kept running
+        would fight the new owner for every window.)
         """
-        stale_before = _now_minus(config.INGEST_STALE_SECS)
-        async with self._session() as s:
-            row = (await s.execute(
-                select(JobORM).where(
-                    JobORM.job_type == PURGE_JOB_TYPE,
-                    text("(status = 'pending' OR (status = 'running' AND updated_at < :stale))")
-                    .bindparams(stale=stale_before),
-                ).order_by(JobORM.created_at).limit(1).with_for_update(skip_locked=True)
-            )).scalars().first()
-            if row is None:
-                return None
-            if row.status == "running":
-                row.retry_count += 1
-                logger.warning("taking over stale purge job %s (phase=%s)",
-                               row.id, row.current_phase)
-            row.status = "running"
-            row.started_at = row.started_at or _now()
-            row.updated_at = _now()
-            row.error_message = None
-            self._epoch[row.id] = row.retry_count
-            return row.id
-
-    def _own(self, job: JobORM) -> JobORM:
-        if job.status == "cancelled":
-            raise PurgeSuperseded("the job was cancelled")
-        if self._epoch.get(job.id) is not None and job.retry_count != self._epoch[job.id]:
-            raise PurgeSuperseded("another worker took over this job")
-        return job
+        return await job_lease.claim(self._session, job_lease.PURGE_TYPES,
+                                     phase_pred=job_lease.PURGE_READY, lane="bootstrap")
 
     # ---------------------------------------------------------------- driver --
-    async def run_job(self, job_id: str) -> Dict[str, object]:
-        beat = asyncio.create_task(self._heartbeat(job_id))
+    async def run_job(self, lease: Lease) -> Dict[str, object]:
+        """Drive a claimed purge to the end. Every write to its row is fenced on ``lease``; the
+        lease is checked between windows, and a stopping worker hands the job back (DELETE is
+        idempotent, so the next owner just carries on). A refusal or a crash is recorded on the
+        job, never raised."""
+        job_id = lease.job_id
         try:
             while True:
+                lease.check()
                 async with self._session() as s:
                     job = await s.get(JobORM, job_id)
-                    if job is None or job.status in ("completed", "cancelled"):
-                        return {"job_id": job_id, "status": job.status if job else "missing"}
-                    self._own(job)
+                    if job is None or job.status != "running" or job.retry_count != lease.epoch:
+                        raise Superseded("the job was cancelled or taken over")
                     phase = job.current_phase or "count"
-                    graph_id = job.graph_id
-                done = await self._run_phase(phase, job_id, graph_id)
+                    graph_id, deleted = job.graph_id, job.processed
+                # A Postgres failover or a dropped connection is waited out, not failed: every
+                # unit is idempotent (DELETEs, a count), so a retry re-runs one that rolled back
+                # or finds its rows already gone. A refusal is never retried.
+                done = await lease.retry_transient(
+                    lambda: self._run_phase(phase, lease, graph_id), never=(PurgeRefused,))
                 if not done:
                     continue                                   # same phase, next window
                 nxt = PHASES[PHASES.index(phase) + 1] if phase != PHASES[-1] else None
+                if nxt is None:
+                    if not await lease.finish("completed", current_phase=None, progress=100):
+                        raise Superseded("the job was cancelled or taken over")
+                    logger.info("purge %s completed (graph=%s, %s rows)", job_id, graph_id, deleted)
+                    return {"job_id": job_id, "status": "completed", "deleted": deleted}
                 async with self._session() as s:
-                    job = self._own(await s.get(JobORM, job_id))
-                    if nxt is None:
-                        job.status = "completed"
-                        job.current_phase = None
-                        job.progress = 100
-                        job.completed_at = _now()
-                        job.updated_at = _now()
-                        logger.info("purge %s completed (graph=%s, %s rows)",
-                                    job_id, graph_id, job.processed)
-                        return {"job_id": job_id, "status": "completed",
-                                "deleted": job.processed}
-                    job.current_phase = nxt
-                    job.progress = _PHASE_FLOOR[nxt]
-                    job.updated_at = _now()
-        except PurgeSuperseded as exc:
+                    await lease.checkpoint(s, current_phase=nxt, progress=_PHASE_FLOOR[nxt])
+        except Superseded as exc:
             logger.info("purge %s handed off: %s", job_id, exc)
-            self._epoch.pop(job_id, None)
             return {"job_id": job_id, "status": "superseded"}
+        except (Draining, asyncio.CancelledError) as exc:
+            # The worker is stopping: hand the job back for another to carry on. Shielded — the
+            # release must land even as this task is cancelled.
+            try:
+                await asyncio.shield(lease.release())
+            except Exception:  # noqa: BLE001 — unreleased, it goes stale and is taken over
+                logger.exception("releasing purge %s failed", job_id)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return {"job_id": job_id, "status": "released"}
         except PurgeRefused as exc:
             logger.error("purge %s REFUSED: %s", job_id, exc.reason)
-            await self._fail(job_id, exc.reason, exc.code)
+            await self._fail(lease, exc.reason, exc.code)
             return {"job_id": job_id, "status": "failed", "error": exc.reason}
         except Exception as exc:                                # pragma: no cover - infra
             logger.exception("purge %s crashed", job_id)
-            await self._fail(job_id, str(exc)[:400], "infrastructure")
+            await self._fail(lease, str(exc)[:400], "infrastructure")
             return {"job_id": job_id, "status": "failed"}
-        finally:
-            beat.cancel()
 
-    async def _heartbeat(self, job_id: str) -> None:
-        """Say "still alive" on a timer. A single 50k-row window on a bloated table can outlast
-        the stale window all by itself; beating only at window boundaries would let a healthy
-        worker be declared dead and its job stolen, over and over."""
-        try:
-            while True:
-                await asyncio.sleep(config.INGEST_HEARTBEAT_SECS)
-                async with self._session() as s:
-                    job = await s.get(JobORM, job_id)
-                    if job is None or job.status != "running":
-                        return
-                    if self._epoch.get(job_id) is not None \
-                            and job.retry_count != self._epoch[job_id]:
-                        return                                  # superseded; stop beating
-                    job.updated_at = _now()
-        except asyncio.CancelledError:
-            pass
+    async def _fail(self, lease: Lease, reason: str, code: str) -> None:
+        # Fenced: a purge taken over (or cancelled) is its owner's to record, not ours.
+        if not await lease.fail(reason, code, "resume" if code == "infrastructure" else None):
+            logger.info("purge %s: not failed — it is no longer this worker's", lease.job_id)
 
-    async def _fail(self, job_id: str, reason: str, code: str) -> None:
-        async with self._session() as s:
-            job = await s.get(JobORM, job_id)
-            if job is None or job.status == "cancelled":
-                return
-            job.status = "failed"
-            job.error_message = reason
-            job.updated_at = _now()
-            summary = dict(job.summary or {})
-            summary["failure"] = {"code": code, "reason": reason}
-            job.summary = summary
-
-    async def _run_phase(self, phase: str, job_id: str, graph_id: str) -> bool:
+    async def _run_phase(self, phase: str, lease: Lease, graph_id: str) -> bool:
         if phase == "count":
-            return await self._phase_count(job_id, graph_id)
+            return await self._phase_count(lease, graph_id)
         if phase in _PHASE_TABLE:
-            return await self._delete_window(job_id, graph_id, *_PHASE_TABLE[phase])
+            return await self._delete_window(lease, graph_id, *_PHASE_TABLE[phase])
         if phase == "falkor":
-            return await self._phase_falkor(job_id, graph_id)
+            return await self._phase_falkor(lease, graph_id)
         if phase == "meta":
-            return await self._phase_meta(job_id, graph_id)
+            return await self._phase_meta(lease, graph_id)
         if phase == "finalize":
-            return await self._phase_finalize(job_id, graph_id)
+            return await self._phase_finalize(lease, graph_id)
         raise PurgeRefused(f"unknown purge phase {phase!r}", "internal")
 
     # ---------------------------------------------------------------- phases --
-    async def _phase_count(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_count(self, lease: Lease, graph_id: str) -> bool:
         """Establish the denominator — and check, ONCE, that we are allowed to do this at all."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 # Already gone. A replayed purge is a no-op, not an error.
-                logger.info("purge %s: graph %s already gone", job_id, graph_id)
-                job = self._own(await s.get(JobORM, job_id))
-                job.status = "completed"
-                job.current_phase = None
-                job.progress = 100
-                job.completed_at = _now()
-                job.updated_at = _now()
-                raise PurgeSuperseded("nothing to purge")
+                logger.info("purge %s: graph %s already gone", lease.job_id, graph_id)
+                await lease.finish("completed", current_phase=None, progress=100)
+                raise Superseded("nothing to purge")
 
             # ── THE GATE ── Soft-delete is the ONLY thing that authorises destruction. It is
             # set by the one code path a human actually confirmed. Without this, a stray job row
@@ -269,44 +240,30 @@ class PurgeRunner:
                     f'SELECT count(*) FROM "{_sch()}"."{table}" WHERE graph_id = :g'
                 ), {"g": graph_id}) or 0)
 
-            job = self._own(await s.get(JobORM, job_id))
-            job.total = total
-            job.processed = 0
-            job.updated_at = _now()
+            job = await s.get(JobORM, lease.job_id)
             summary = dict(job.summary or {})
             summary["rows"] = total
-            job.summary = summary
-        logger.info("purge %s: %s rows to reclaim for graph %s", job_id, total, graph_id)
+            await lease.checkpoint(s, total=total, processed=0, summary=summary)
+        logger.info("purge %s: %s rows to reclaim for graph %s", lease.job_id, total, graph_id)
         return True
 
-    async def _delete_window(self, job_id: str, graph_id: str, table: str, pk: str) -> bool:
-        """Delete up to one window of rows. Returns True when the table is empty for this graph.
-
-        ORDER BY the PK is load-bearing (see the module docstring): without it this is a Seq Scan
-        that re-walks every dead tuple the earlier windows left, and the purge goes quadratic.
-        """
-        width = max(1000, int(config.PURGE_WINDOW))
+    async def _delete_window(self, lease: Lease, graph_id: str, table: str, pk: str) -> bool:
+        """Delete up to one window of rows (:func:`delete_window`). Returns True when the table is
+        empty for this graph. The window's progress is a fenced checkpoint in the same transaction,
+        so a worker that lost the job rolls its delete back rather than racing the new owner."""
         async with self._session() as s:
-            self._own(await s.get(JobORM, job_id))            # fence BEFORE we delete anything
-            res = await s.execute(text(
-                f'WITH doomed AS ('
-                f'  SELECT ctid FROM "{_sch()}"."{table}" WHERE graph_id = :g '
-                f'  ORDER BY {pk} LIMIT :n'
-                f') '
-                f'DELETE FROM "{_sch()}"."{table}" t USING doomed d '
-                f'WHERE t.graph_id = :g AND t.ctid = d.ctid'
-            ), {"g": graph_id, "n": width})
-            deleted = res.rowcount or 0
+            deleted = await delete_window(s, table, pk, graph_id)
             if deleted:
-                job = self._own(await s.get(JobORM, job_id))
-                job.processed = (job.processed or 0) + deleted
+                job = await s.get(JobORM, lease.job_id)
+                processed = (job.processed or 0) + deleted
+                progress = {}
                 if job.total:
                     span = 92 - _PHASE_FLOOR["edges"]          # count..falkor occupy 1%..92%
-                    job.progress = min(92, 1 + int(span * job.processed / job.total))
-                job.updated_at = _now()
+                    progress["progress"] = min(92, 1 + int(span * processed / job.total))
+                await lease.checkpoint(s, processed=processed, **progress)
         return deleted == 0
 
-    async def _phase_falkor(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_falkor(self, lease: Lease, graph_id: str) -> bool:
         """Drop the projected FalkorDB graph — if, and only if, it is ours to drop."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
@@ -342,31 +299,30 @@ class PurgeRunner:
                     client = await client
                 await client.delete()
                 verdict = f"dropped '{name}'"
-                logger.warning("purge %s DROPPED FalkorDB graph %s (we created it)", job_id, name)
+                logger.warning("purge %s DROPPED FalkorDB graph %s (we created it)",
+                               lease.job_id, name)
                 # A graph later written under the same name gets a new id catalogue;
                 # every long-lived reader must drop its old one (graph_generation).
                 from backend.app.providers.graph_generation import bump_graph_generation
-                await bump_graph_generation(name, reason=f"purge {job_id}")
+                await bump_graph_generation(name, reason=f"purge {lease.job_id}")
             except Exception as exc:                            # pragma: no cover - infra
                 # A leaked FalkorDB graph is recoverable (cleanup script). Failing the whole
                 # purge over it — and stranding millions of SQL rows — is not an improvement.
                 verdict = f"could not drop '{name}': {exc}"
-                logger.warning("purge %s: %s", job_id, verdict)
+                logger.warning("purge %s: %s", lease.job_id, verdict)
 
         async with self._session() as s:
-            job = self._own(await s.get(JobORM, job_id))
+            job = await s.get(JobORM, lease.job_id)
             summary = dict(job.summary or {})
             summary["falkor"] = {"name": name, "owned": owned, "verdict": verdict}
-            job.summary = summary
-            job.updated_at = _now()
-        logger.info("purge %s falkor: %s", job_id, verdict)
+            await lease.checkpoint(s, summary=summary)
+        logger.info("purge %s falkor: %s", lease.job_id, verdict)
         return True
 
-    async def _phase_meta(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_meta(self, lease: Lease, graph_id: str) -> bool:
         """The small tables. Bounded by branch/job count, so one statement each is fine."""
         sch = _sch()
         async with self._session() as s:
-            self._own(await s.get(JobORM, job_id))
             for sql in (
                 f'DELETE FROM "{sch}"."branch_members" WHERE branch_id IN '
                 f'  (SELECT id FROM "{sch}"."branches" WHERE graph_id = :g)',
@@ -379,31 +335,38 @@ class PurgeRunner:
                 # receipt: what was deleted, when, by whom, and what we refused to touch.
                 f'DELETE FROM "{sch}"."jobs" WHERE graph_id = :g AND id <> :j',
             ):
-                await s.execute(text(sql), {"g": graph_id, "j": job_id})
+                await s.execute(text(sql), {"g": graph_id, "j": lease.job_id})
+            await lease.checkpoint(s)                          # fenced: still ours, or roll back
         return True
 
-    async def _phase_finalize(self, job_id: str, graph_id: str) -> bool:
+    async def _phase_finalize(self, lease: Lease, graph_id: str) -> bool:
         async with self._session() as s:
-            self._own(await s.get(JobORM, job_id))
             await s.execute(text(f'DELETE FROM "{_sch()}"."graphs" WHERE id = :g'),
                             {"g": graph_id})
+            await lease.checkpoint(s)                          # fenced: still ours, or roll back
         return True
 
 
 # ------------------------------------------------------------------ enqueue --
 async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor: str,
                            data_source_id: Optional[str] = None,
-                           session_factory=None) -> Optional[str]:
+                           session_factory=None, session=None) -> Optional[str]:
     """Soft-delete the graph and enqueue its purge, in ONE transaction.
 
     The two must be atomic. A soft-delete with no job leaks the rows forever (that is exactly the
     bug we are fixing). A job with no soft-delete is refused by `_phase_count` — safe, but it
     would mean a delete that silently did nothing.
 
-    Idempotent: a second delete of the same graph returns the job already in flight.
+    ``session`` makes that transaction the caller's: abandoning a bootstrap cancels its job and
+    queues this purge as one commit, so the graph is never cancelled-but-not-queued.
+
+    Idempotent: a second delete of the same graph returns the job already in flight, and queues
+    a FAILED one again (its phase kept — DELETE is idempotent, so it carries on) rather than
+    adding another beside it: ``purge:{graph_id}`` is unique whatever the job's status
+    (``ix_jobs_idem_active``), and nothing else retries a purge.
     """
     sf = session_factory or db.graphver_session
-    async with sf() as s:
+    async with (contextlib.nullcontext(session) if session is not None else sf()) as s:
         graph = await s.get(GraphORM, graph_id)
         if graph is None:
             return None
@@ -412,13 +375,24 @@ async def create_purge_job(*, graph_id: str, workspace_id: Optional[str], actor:
             select(JobORM).where(
                 JobORM.job_type == PURGE_JOB_TYPE,
                 JobORM.graph_id == graph_id,
-                JobORM.status.in_(("pending", "running")),
+                JobORM.status.in_(("pending", "running", "failed")),
             ).limit(1))).scalars().first()
-        if existing is not None:
+        if existing is not None and existing.status != "failed":
             return existing.id
 
         graph.deleted_at = graph.deleted_at or _now()
         graph.deleted_by = graph.deleted_by or actor
+
+        if existing is not None:
+            summary = dict(existing.summary or {})
+            summary.pop("failure", None)
+            summary.pop("takeovers", None)       # a fresh poison count: someone asked again
+            existing.summary = summary
+            existing.status = "pending"
+            existing.error_message = existing.completed_at = None
+            existing.updated_at = _now()
+            logger.info("purge re-queued for graph %s (job=%s, by %s)", graph_id, existing.id, actor)
+            return existing.id
 
         job = JobORM(
             job_type=PURGE_JOB_TYPE,

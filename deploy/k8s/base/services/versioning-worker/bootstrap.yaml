@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: versioning-bootstrap
+  namespace: synodic
+  labels:
+    app.kubernetes.io/name: versioning-bootstrap
+    app.kubernetes.io/component: worker
+spec:
+  # The bootstrap lane of the versioning worker: "Enable version control" jobs
+  # (a copy of the data source into the versioned store, in resumable
+  # windows), purges, and the undo-window reaper. GRAPHVER_BOOTSTRAP_SLOTS (2)
+  # jobs per pod, and at most GRAPHVER_BOOTSTRAP_PER_PROVIDER (2) at once
+  # against one FalkorDB provider across all pods, so more replicas only help
+  # with many providers.
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: versioning-bootstrap
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: versioning-bootstrap
+        app.kubernetes.io/component: worker
+        synodic.io/lane: bootstrap
+    spec:
+      serviceAccountName: synodic-backend
+      # A stopping pod gives running jobs GRAPHVER_DRAIN_SECS (40) to hand
+      # themselves back at a window boundary, then cancels and releases the
+      # rest; all of it has to fit before the SIGKILL.
+      terminationGracePeriodSeconds: 60
+      # No init gates, as in deployment.yaml: the worker retries both stores.
+      containers:
+        - name: versioning-bootstrap
+          image: REGISTRY/aggregation-worker:latest
+          # The worker image bundles the whole backend; run the versioning
+          # worker instead of the aggregation one (Dockerfile CMD).
+          command: ["python", "-m", "backend.app.services.versioning"]
+          envFrom:
+            - configMapRef:
+                name: common-config
+            - configMapRef:
+                name: worker-config
+          env:
+            - name: MANAGEMENT_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: MANAGEMENT_DB_URL
+            # Decrypts the provider credentials a bootstrap reads the
+            # customer's FalkorDB with (R-M3).
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: CREDENTIAL_ENCRYPTION_KEY
+            - name: REDIS_STREAMS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: REDIS_STREAMS_PASSWORD
+                  optional: true
+            - name: REDIS_CACHE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: REDIS_CACHE_PASSWORD
+                  optional: true
+            - name: GRAPHVER_WORKER_LANES
+              value: "bootstrap"
+            # The WEB pool only serves management-database lookups here; its
+            # default (20) is sized for request handlers.
+            - name: DB_WEB_POOL_SIZE
+              value: "4"
+            # Only the "event_loop_lag CRITICAL" ERROR line keys on this. No
+            # request waits on a worker's loop, so keep the page for
+            # multi-second stalls; GRAPHVER_JOB_WEDGE_SECS exits on a dead one.
+            - name: EVENT_LOOP_CRITICAL_THRESHOLD_S
+              value: "5"
+            - name: TMPDIR
+              value: /spool
+          volumeMounts:
+            - name: spool
+              mountPath: /spool
+            - name: redis-streams-certs
+              mountPath: /certs/streams
+              readOnly: true
+            - name: redis-cache-certs
+              mountPath: /certs/cache
+              readOnly: true
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          # No HTTP health server on this worker yet, so no httpGet probes
+          # (they would flap and restart-loop). A crash exits the process and
+          # the Deployment restarts it; its jobs' leases lapse and another pod
+          # takes them over.
+      volumes:
+        - name: spool
+          emptyDir:
+            sizeLimit: 12Gi
+        - name: redis-streams-certs
+          secret:
+            secretName: redis-streams-certs
+            optional: true
+        - name: redis-cache-certs
+          secret:
+            secretName: redis-cache-certs
+            optional: true

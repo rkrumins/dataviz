@@ -15,6 +15,8 @@
  */
 import { authFetch } from './apiClient'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { httpStatusOf } from './graphRequestFailure'
+import { jobPollDelayMs } from '@/config/polling'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`
@@ -57,6 +59,19 @@ export interface Job {
   queuedAhead?: number | null
   /** A finished export: whether its file is still kept to download (it is for a day). */
   kept?: boolean
+  /** The step it is on: `queued` while it waits, then an import's `parse`, `nodes`, `edges` and
+   *  (an import that replaces) `replace`; null between them. */
+  phase?: string | null
+  /** Percent done (an export says how far it has got in its `summary` instead). */
+  progress?: number | null
+  /** An import's rows applied so far, of all it has (while parsing, `total` is the rows read). */
+  processed?: number | null
+  total?: number | null
+  /** Each time a server takes the job up is one attempt: past the first, it resumed where an
+   *  earlier one stopped. */
+  attempt?: number | null
+  /** Running, but its server stopped answering: another one is about to take it over. */
+  stale?: boolean
 }
 
 /** "2 jobs ahead of it" for a job waiting its turn on the server's workers; null when it isn't. */
@@ -65,6 +80,33 @@ export function queuePosition(job: Job | null | undefined): string | null {
   if (ahead == null) return null
   if (ahead === 0) return 'It starts next.'
   return `${ahead} ${ahead === 1 ? 'job is' : 'jobs are'} ahead of it.`
+}
+
+/** "Applying the changes… 4,000 of 10,000 rows" for a running import; null when there is nothing
+ *  to tell (not running, between steps, or a job that tells its progress in its `summary`). */
+export function jobProgressText(job: Job | null | undefined): string | null {
+  if (job?.status !== 'running') return null
+  const processed = (job.processed ?? 0).toLocaleString()
+  const total = job.total ?? 0
+  switch (job.phase) {
+    case 'parse': return `Reading the file… ${total.toLocaleString()} rows so far`
+    case 'nodes':
+    case 'edges': return total ? `Applying the changes… ${processed} of ${total.toLocaleString()} rows` : 'Applying the changes…'
+    case 'replace': return 'Removing what the file no longer holds…'
+    default: return null
+  }
+}
+
+/** Why a job takes longer than it might: its server stopped answering (it is `stale` until another
+ *  takes it over), or one did and the job resumed where it left off (`attempt` past the first).
+ *  Null for a job on its first run, and for one that ended. */
+export function resumeNote(job: Job | null | undefined): string | null {
+  if (!job || TERMINAL.includes(job.status)) return null
+  if (job.stale) return 'The server running it stopped answering. Another one carries on from where it got to.'
+  const attempt = job.attempt ?? 0
+  // A queued job has not been taken up again yet: any attempt was an earlier run.
+  if (job.status === 'pending') return attempt >= 1 ? 'It resumes where it left off.' : null
+  return attempt > 1 ? `Resumed where it left off (attempt ${attempt}).` : null
 }
 
 export interface CreateImportResult {
@@ -388,18 +430,86 @@ export function exportStreamUrl(
   })}`
 }
 
-/** Poll a job until it reaches a terminal state (or the signal aborts). */
-export async function pollJob(
-  fetcher: () => Promise<Job>,
-  opts: { intervalMs?: number; onTick?: (job: Job) => void; signal?: AbortSignal } = {},
-): Promise<Job> {
-  const interval = opts.intervalMs ?? 800
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    if (opts.signal?.aborted) throw new DOMException('aborted', 'AbortError')
-    const job = await fetcher()
-    opts.onTick?.(job)
-    if (TERMINAL.includes(job.status)) return job
-    await new Promise((r) => setTimeout(r, interval))
+/** A failed poll worth asking again: all but a refusal. The job GETs throw a plain Error for any
+ *  answer but a 2xx (`authFetch`, `vfetch`), so a dropped connection, a client timeout and a web pod
+ *  restarting (502/503) look alike there, and all are asked again. Final at once: a session that
+ *  ended (the fetch layer already tried to renew it) and a refusal whose status the error carries
+ *  (4xx, but for a timeout or a busy server). */
+function isTransientPollError(err: unknown): boolean {
+  if (err instanceof Error && err.message === 'Session expired') return false
+  const status = httpStatusOf(err)
+  return status == null || status >= 500 || status === 408 || status === 429
+}
+
+/** Resolves once the hidden tab is shown, or the signal aborts. */
+function whileHidden(signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (document.hidden && !signal?.aborted) return
+      document.removeEventListener('visibilitychange', check)
+      signal?.removeEventListener('abort', check)
+      resolve()
+    }
+    document.addEventListener('visibilitychange', check)
+    signal?.addEventListener('abort', check)
+  })
+}
+
+/** Resolves after `ms`, or as soon as the signal aborts. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done)
+  })
+}
+
+/**
+ * Poll a job until it ends (or the signal aborts, which rejects with an `AbortError`), every
+ * `jobPollDelayMs`: often while it may still be a short job, then less. Read-only and cheap for
+ * the server, but every open dialog does it, so it also stops asking while the tab is hidden and
+ * asks at once when it is shown again.
+ *
+ * A failed poll doesn't stop the job, which runs on the server's workers whatever this sees: a
+ * transient failure (see `isTransientPollError`) is asked again until the job has gone unanswered
+ * for `patienceMs` (counted while the tab is shown), and only then is it this poll's error.
+ */
+export async function pollJob<J extends { status: JobStatus }>(
+  fetcher: () => Promise<J>,
+  opts: {
+    onTick?: (job: J) => void
+    signal?: AbortSignal
+    patienceMs?: number
+    /** @deprecated Ignored: the poll paces itself (`jobPollDelayMs`). */
+    intervalMs?: number
+  } = {},
+): Promise<J> {
+  const { signal, patienceMs = 120_000 } = opts
+  const aborted = () => new DOMException('aborted', 'AbortError')
+  let answeredAt = Date.now()
+  for (let tick = 0; ; tick++) {
+    if (typeof document !== 'undefined' && document.hidden) {
+      await whileHidden(signal)
+      answeredAt = Date.now()          // a hidden tab wasn't asking: its silence isn't the job's
+    }
+    if (signal?.aborted) throw aborted()
+    let job: J | null = null
+    try {
+      job = await fetcher()
+      answeredAt = Date.now()
+    } catch (err) {
+      if (signal?.aborted) throw aborted()
+      if (!isTransientPollError(err) || Date.now() - answeredAt >= patienceMs) throw err
+    }
+    if (signal?.aborted) throw aborted()
+    if (job) {
+      opts.onTick?.(job)
+      if (TERMINAL.includes(job.status)) return job
+    }
+    await pause(jobPollDelayMs(tick), signal)
   }
 }

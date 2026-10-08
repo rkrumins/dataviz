@@ -529,7 +529,7 @@ export async function exportViewPackage(
     message: options.message || null,
   })
   const job = await pollJob(() => getExport(started.workspaceId, started.graphId, started.jobId), {
-    intervalMs: 1000, onTick: onJob, signal,
+    onTick: onJob, signal,
   })
   if (job.status !== 'completed') {
     throw new ViewTransferError(job.errorMessage || 'The package could not be built.', 500)

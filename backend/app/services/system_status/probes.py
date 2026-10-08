@@ -1692,10 +1692,16 @@ async def probe_bootstrap_jobs() -> Optional[dict]:
     the takeover threshold and that no worker has picked up — i.e. the whole worker tier is
     gone, not merely one pod. It reuses `claim_one`'s own staleness predicate, so the
     dashboard and the worker cannot disagree about what "dead" means.
+
+    `lanes` asks the same of every job-running lane of the versioning worker (transfer,
+    bootstrap): how many jobs a worker of it could claim now, and how long the oldest has
+    waited. Web pods only queue jobs, so a lane whose pods are missing shows as a backlog that
+    only ages — measured with `job_lease.claim`'s own predicate.
     """
     from sqlalchemy import case, func, select
 
     from backend.app.services.versioning import config as gv_config
+    from backend.app.services.versioning import job_lease
     from backend.app.services.versioning.bootstrap_worker import (
         BOOTSTRAP_JOB_TYPE,
         _now_minus,
@@ -1727,6 +1733,7 @@ async def probe_bootstrap_jobs() -> Optional[dict]:
                     .order_by(case((JobORM.status == "failed", 0), else_=1),
                               JobORM.updated_at.asc())
                     .limit(8))).all()
+                lanes = await job_lease.claimable_backlog(s)
     except Exception as exc:
         logger.warning("bootstrap-jobs probe failed: %s", exc)
         return None
@@ -1742,4 +1749,6 @@ async def probe_bootstrap_jobs() -> Optional[dict]:
             "status": r[4], "phase": r[5], "processed": int(r[6] or 0),
             "total": int(r[7] or 0), "error": r[8], "updatedAt": r[9],
         } for r in worst],
+        # {lane: {claimable, oldestClaimableSecs}} — the job lanes' backlog.
+        "lanes": lanes,
     }

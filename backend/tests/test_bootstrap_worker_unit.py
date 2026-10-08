@@ -9,11 +9,13 @@ import types
 
 import pytest
 
+from backend.app.services.versioning import config
 from backend.app.services.versioning.bootstrap_worker import (
     PHASES,
     BootstrapFailure,
     BootstrapRunner,
     _Reservoir,
+    _advance_phase,
     _explain_failed_checks,
     _label_of,
     _merge_scan_summary,
@@ -49,6 +51,19 @@ def test_phase_order_validates_before_anything_becomes_visible():
         "r.id) aren't stamped yet, an edit duplicates nodes and a delete silently no-ops"
     )
     assert PHASES[-1] == "finalize"
+
+
+def test_a_restart_clears_the_old_copy_before_anything_is_read_again():
+    # `reset` deletes what an earlier run imported (on the worker, in windows); it must come
+    # before the counts that the re-read is checked against.
+    assert PHASES[0] == "reset" and _next_phase("reset") == "counting"
+
+
+def test_advancing_a_phase_starts_it_from_scratch():
+    job = types.SimpleNamespace(current_phase="nodes", last_cursor="nodes:400", batch_size=7)
+    _advance_phase(job, "edges")
+    assert (job.current_phase, job.last_cursor, job.batch_size) == (
+        "edges", None, config.BOOTSTRAP_SCAN_WIDTH)
 
 
 def test_next_phase_walks_to_the_end():
