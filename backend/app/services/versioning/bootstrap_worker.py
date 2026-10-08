@@ -531,15 +531,17 @@ class BootstrapRunner:
         rows, width = await self._scan(client, kind, lo, width)
         hi = lo + width
 
-        # Convert → validate → rows. Rejections are counted, never silent.
+        # Convert → validate → rows. Rejections are counted, never silent. A window is up to
+        # ~100k rows of pure-Python conversion and hashing: run it off the event loop, which
+        # also carries this job's heartbeat and every other job on the worker.
         if kind == "nodes":
-            dicts, tallies, rejects, sample, dupes = self._nodes_to_rows(
-                rows, commit, main_id, graph_id, actor, rules, summary)
+            dicts, tallies, rejects, sample, dupes = await asyncio.to_thread(
+                self._nodes_to_rows, rows, commit, main_id, graph_id, actor, rules, summary)
         else:
             endpoint_urns = {u for r in rows for u in (r[0], r[1]) if u}
             live = await self._known_nodes(graph_id, commit.id, endpoint_urns)
-            dicts, tallies, rejects, sample, dupes = self._edges_to_rows(
-                rows, commit, main_id, graph_id, actor, rules, live)
+            dicts, tallies, rejects, sample, dupes = await asyncio.to_thread(
+                self._edges_to_rows, rows, commit, main_id, graph_id, actor, rules, live)
 
         model = NodeVersionORM if kind == "nodes" else EdgeVersionORM
         async with self._session() as s:

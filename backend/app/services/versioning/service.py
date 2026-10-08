@@ -837,8 +837,10 @@ class GraphVersioningService:
                 s, graph_id, branch_id, commit, deltas, kind_by_entity, actor
             )
 
-            # Merkle root over the branch's full effective live state.
-            commit.merkle_root = await self._merkle_root(s, graph_id, branch_id)
+            # Merkle root over the branch's full effective live state — for main only: nothing
+            # reads a draft's fingerprint, and building it composes the whole graph again.
+            commit.merkle_root = (await self._merkle_root(s, graph_id, branch_id)
+                                  if branch.kind == "main" else None)
             commit.stats = _delta_stats(deltas)
 
             for c in changes:
@@ -1157,7 +1159,7 @@ class GraphVersioningService:
             s.add(commit)
             await s.flush()
             await self._write_deltas(s, graph_id, draft.id, commit, deltas, kind_by_entity, actor)
-            commit.merkle_root = await self._merkle_root(s, graph_id, draft.id)
+            commit.merkle_root = None              # a draft carries no fingerprint (_commit_merkle)
             # `stats` describes what CAME IN, not the rewrite to your own edits — it's what the user
             # means by "what did I just pull". The rebase of your edits is reported separately as
             # `changes`, and its version rows are the commit's actual data.
@@ -2304,9 +2306,14 @@ class GraphVersioningService:
         rebuild is already in flight (``status in {projecting, rebuilding}`` and still behind its
         target), so a double-click or a poll-loop overlap can't rewind an in-progress apply. Takes
         the same per-graph advisory lock the main-advancing writes take, so two concurrent rebuild
-        requests serialise on the watermark reset."""
+        requests serialise on the watermark reset.
+
+        Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
+        unfinished: a rebuild would wipe the data source's own FalkorDB graph and reseed it from a
+        main parked at genesis."""
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
+            await self._assert_not_bootstrapping(s, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if ps is None or graph is None:
@@ -2950,30 +2957,25 @@ class GraphVersioningService:
 
     async def _containment_parents_climb(
         self, s, graph_id: str, branch_id: str, node_ids: set,
-        cset: set, as_of_seq: Optional[int], max_climb: int = 64,
+        cset: set, as_of_seq: Optional[int], max_climb: int = 64, *, skeleton: bool = False,
     ) -> Tuple[set, Dict[str, dict]]:
         """:meth:`_containment_ancestors`, reading only what a climb needs: per level, the
         edges whose TARGET is on the frontier and whose type is containment
         (``ix_ev_target``), then their values as-of. The general helper reads every edge
         touching the frontier in both directions, lineage included — for a batch of
-        endpoints under wide containers that is millions of rows to find a few parents."""
+        endpoints under wide containers that is millions of rows to find a few parents.
+        ``skeleton`` returns the edges as :meth:`_skeletons_at` (no payload read)."""
         seen = set(node_ids)
         edges: Dict[str, dict] = {}
         frontier = set(node_ids)
-        cupper = [c.upper() for c in cset]
+        cupper = {c.upper() for c in cset}
+        read = self._current_skeletons if skeleton else self._current_values
         for _ in range(max_climb):
             if not frontier:
                 break
-            cand: set = set()
-            for chunk in _chunks(list(frontier), _IN_LIST_MAX):
-                cand.update((await s.execute(
-                    select(EdgeVersionORM.entity_id).where(
-                        EdgeVersionORM.graph_id == graph_id,
-                        EdgeVersionORM.target_entity_id.in_(chunk),
-                        func.upper(EdgeVersionORM.edge_type).in_(cupper),
-                    ).distinct()
-                )).scalars().all())
-            vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
+            cand = await self._incident_edge_ids(s, graph_id, branch_id, frontier,
+                                                 sides=("target",), edge_types=cupper)
+            vals = await read(s, graph_id, branch_id, cand, as_of_seq)
             nxt: set = set()
             for eid, p in vals.items():
                 if p is None or (p.get("edgeType") or "").upper() not in cset:
@@ -3080,7 +3082,7 @@ class GraphVersioningService:
                 elif ep not in written:
                     unknown.add(ep)
         if unknown:
-            for ep, ev in (await self._current_values(s, graph_id, branch_id, list(unknown))).items():
+            for ep, ev in (await self._current_skeletons(s, graph_id, branch_id, list(unknown))).items():
                 if ev and ev.get("entityType"):
                     endpoint_types[ep] = ev["entityType"]
         viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
@@ -3122,9 +3124,10 @@ class GraphVersioningService:
         if not candidates:
             return []
         unknown = [c for c in candidates if c not in written]
-        values = dict(await self._current_values(s, graph_id, branch_id, unknown)) if unknown else {}
+        values = dict(await self._current_skeletons(s, graph_id, branch_id, unknown)) if unknown else {}
         values.update({c: written[c] for c in candidates if c in written})
-        stored = await self._incident_live_edges(s, graph_id, branch_id, list(candidates))
+        stored = await self._incident_live_edge_skeletons(s, graph_id, branch_id, list(candidates),
+                                                          sides=("target",))
         has_parent: set = set()
         for eid, v in stored.items():
             if eid not in written and _cont(v) and _edge_src_tgt(v)[1] in candidates:
@@ -3155,15 +3158,32 @@ class GraphVersioningService:
         containment parent, or (c) form a containment cycle. Shared by the write path
         (:meth:`_apply_ops_once`) and the merge/squash path (:meth:`_apply_draft_squash`),
         so an invariant no single commit can violate can't be composed onto ``main`` by
-        merging two individually-clean drafts either. Returns ``[{entity_id, kind, reason}]``."""
+        merging two individually-clean drafts either. Returns ``[{entity_id, kind, reason}]``.
+
+        Linear in the batch and the live edges it touches: the live edges into the batch's
+        targets are read once (without payloads) and indexed, and cycles are found with one
+        batched ancestor climb and one strongly-connected-components pass — never a scan of
+        every live edge per created edge, which held an import window's CPU for minutes."""
         cset = {t.upper() for t in (containment_edge_types or [])}
 
         def _etype(p: Mapping) -> str:
             return str(p.get("edgeType") or p.get("edge_type") or "").upper()
 
         create_targets = {t for _e, v in edge_creates for _s2, t in [_edge_src_tgt(v)] if t}
-        existing_incident = (await self._incident_live_edges(s, graph_id, branch_id, create_targets)
-                             if create_targets else {})
+        existing_incident = (await self._incident_live_edge_skeletons(
+            s, graph_id, branch_id, create_targets, sides=("target",)) if create_targets else {})
+        # Index the live edges into the batch's targets once: (source, target, type) → their ids,
+        # and child → {containment edge id: parent}.
+        by_triple: Dict[Tuple[str, str, str], set] = {}
+        parents_of: Dict[str, Dict[str, str]] = {}
+        for oeid, op_ in existing_incident.items():
+            if oeid in deleted_edge_ids:
+                continue
+            osrc, otgt = _edge_src_tgt(op_)
+            oet = _etype(op_)
+            by_triple.setdefault((osrc, otgt, oet), set()).add(oeid)
+            if oet in cset and osrc:
+                parents_of.setdefault(otgt, {})[oeid] = osrc
         viol: List[dict] = []
         batch_parent: Dict[str, set] = {}     # target → containment sources added in THIS batch
         batch_seen: set = set()               # (src,tgt,type) created in THIS batch
@@ -3173,20 +3193,14 @@ class GraphVersioningService:
                 continue
             etype = _etype(v)
             # (a) duplicate — against existing live edges + earlier creates in this batch.
-            dup = (src, tgt, etype) in batch_seen or any(
-                oeid != eid and oeid not in deleted_edge_ids
-                and _edge_src_tgt(op_) == (src, tgt) and _etype(op_) == etype
-                for oeid, op_ in existing_incident.items())
-            if dup:
+            key = (src, tgt, etype)
+            if key in batch_seen or any(oeid != eid for oeid in by_triple.get(key, ())):
                 viol.append({"entity_id": eid, "kind": "edge",
                              "reason": "These entities are already connected by this relationship."})
-            batch_seen.add((src, tgt, etype))
+            batch_seen.add(key)
             # (b) second containment parent.
             if etype in cset:
-                parents = {osrc for oeid, op_ in existing_incident.items()
-                           if oeid != eid and oeid not in deleted_edge_ids
-                           and _etype(op_) in cset
-                           for osrc, otgt in [_edge_src_tgt(op_)] if otgt == tgt and osrc}
+                parents = {osrc for oeid, osrc in parents_of.get(tgt, {}).items() if oeid != eid}
                 parents |= batch_parent.get(tgt, set())
                 if parents - {src}:
                     viol.append({"entity_id": eid, "kind": "edge",
@@ -3200,36 +3214,27 @@ class GraphVersioningService:
         #     entirely inside one batch (create A→B + create B→A).
         if cset:
             batch_cont = {eid: v for eid, v in edge_creates if _etype(v) in cset}
-
-            async def _ancestors_effective(start: str, skip: str) -> set:
-                seen_a, frontier = {start}, {start}
-                for _ in range(64):                    # bounded by hierarchy depth
-                    if not frontier:
-                        break
-                    inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, None)
-                    cand = [(oeid, p) for oeid, p in inc.items()
-                            if oeid != skip and oeid not in deleted_edge_ids]
-                    cand += [(beid, bp) for beid, bp in batch_cont.items() if beid != skip]
-                    nxt: set = set()
-                    for _oeid, p in cand:
-                        if _etype(p) not in cset:
-                            continue
-                        a, b = _edge_src_tgt(p)        # a = parent, b = child
-                        if b in frontier and a and a not in seen_a:
-                            seen_a.add(a)
-                            nxt.add(a)
-                    frontier = nxt
-                return seen_a
-
-            for eid, v in batch_cont.items():
-                src, tgt = _edge_src_tgt(v)
-                if not src or not tgt:
-                    continue
+            checks = [(eid, *_edge_src_tgt(v)) for eid, v in batch_cont.items()]
+            checks = [(eid, a, b) for eid, a, b in checks if a and b]
+            looped: set = set()
+            if any(a != b for _e, a, b in checks):
+                # Every live containment edge on a path up from any batch endpoint: one climb
+                # for the whole batch, a query per hierarchy LEVEL.
+                ends = {x for _e, a, b in checks for x in (a, b)}
+                _seen, live = await self._containment_parents_climb(
+                    s, graph_id, branch_id, ends, cset, None, skeleton=True)
+                graph_edges = [(oeid, *_edge_src_tgt(p)) for oeid, p in live.items()
+                               if oeid not in deleted_edge_ids]
+                graph_edges += checks
+                if len(graph_edges) > _CYCLE_THREAD_MIN:
+                    looped = await asyncio.to_thread(_containment_cycle_edges, graph_edges, checks)
+                else:
+                    looped = _containment_cycle_edges(graph_edges, checks)
+            for eid, src, tgt in checks:
                 if src == tgt:
                     viol.append({"entity_id": eid, "kind": "edge",
                                  "reason": "An entity can’t contain itself."})
-                    continue
-                if tgt in await _ancestors_effective(src, eid):
+                elif eid in looped:
                     viol.append({"entity_id": eid, "kind": "edge",
                                  "reason": "This move would create a containment loop."})
         return viol
@@ -4772,10 +4777,16 @@ class GraphVersioningService:
         live = {eid: content_hash(p) for eid, p in state.items() if p is not None}
         return MerkleTree.build(live).root
 
-    async def _commit_merkle(self, s, graph_id: str, branch_id: str, commit, deltas: List[Delta]) -> str:
+    async def _commit_merkle(self, s, graph_id: str, branch_id: str, commit,
+                             deltas: List[Delta]) -> Optional[str]:
         """Merkle root for a commit. For a **non-fork `main`** (linear, long-lived)
         this is the incremental persisted CoW build — O(changed·depth), writing
-        only changed-path rows. Forks fall back to the full build."""
+        only changed-path rows. Forks fall back to the full build. A draft commit gets
+        none: only ``main``'s roots are ever read (the projector's diff), and an import
+        window would otherwise write tens of thousands of tree rows nobody reads."""
+        branch = await s.get(BranchORM, branch_id)
+        if branch is not None and branch.kind != "main":
+            return None
         graph = await s.get(GraphORM, graph_id)
         if graph is not None and graph.fork_parent_graph_id:
             return await self._merkle_root(s, graph_id, branch_id)
@@ -5356,7 +5367,13 @@ class GraphVersioningService:
         for attempt in range(config.COMMIT_MAX_RETRIES):
             try:
                 return await fn()
-            except (IntegrityError, _StaleHead):
+            except (IntegrityError, _StaleHead) as exc:
+                # Only a unique-key race is "the branch moved": any other integrity error (a
+                # check or a not-null) fails the same way every time, and re-running a large
+                # import window or publish for it only multiplies the work.
+                state = getattr(getattr(exc, "orig", None), "sqlstate", None)
+                if isinstance(exc, IntegrityError) and state not in (None, "23505"):
+                    raise
                 # IntegrityError = commit_seq collision; _StaleHead = per-entity head CAS miss. Both
                 # mean "the branch moved under us" — re-run the thunk, which re-reads current state
                 # and recomputes (auto-rebase / 3-way merge) against the new head.
@@ -5528,7 +5545,9 @@ class GraphVersioningService:
             endpoints.discard(None)
             unknown = [e for e in endpoints if e not in new_vals and e not in cur_vals]
             if unknown:
-                cur_vals.update(await self._current_values(s, graph_id, bid, unknown))
+                # Liveness, urn and type are all the endpoints are read for — never their payloads
+                # (an import edge window's endpoints are ~100k nodes).
+                cur_vals.update(await self._current_skeletons(s, graph_id, bid, unknown))
 
             def _live(eid) -> bool:
                 return (new_vals[eid] if eid in new_vals else cur_vals.get(eid)) is not None
@@ -5948,6 +5967,40 @@ class GraphVersioningService:
                         out[eid] = _Stored(kind, chash, urn, typ)
         return out
 
+    async def _skeletons_at(self, s, graph_id, branch_id, ids, seq) -> Dict[str, Optional[dict]]:
+        """:meth:`_values_at` built from the version row's identity columns instead of its payload:
+        a node as ``{urn, entityType}``, an edge as ``{edgeType, sourceEntityId, targetEntityId}``,
+        an empty payload as ``{}``. Deleted → ``None``; absent ids omitted — the same liveness as
+        :meth:`_values_at`, for the checks that only need to know what an entity is and where an
+        edge points (integrity, typing an edge's ends) and not what it holds."""
+        out: Dict[str, Optional[dict]] = {}
+        id_list = list(ids)
+        if not id_list:
+            return out
+        for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
+            named = ((model.urn, model.entity_type, null(), null()) if kind == "node" else
+                     (null(), func.coalesce(model.edge_type, model.payload["edge_type"].astext),
+                      model.source_entity_id, model.target_entity_id))
+            for chunk in _chunks(id_list, _IN_LIST_MAX):
+                stmt = (
+                    select(model.entity_id, model.op, model.content_hash, *named)
+                    .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                           model.entity_id.in_(chunk), model.commit_seq <= seq)
+                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                    .distinct(model.entity_id)
+                )
+                for eid, op, chash, urn, typ, src, tgt in (await s.execute(stmt)).all():
+                    if op == "delete" or chash == _HASH_NONE:    # a null payload reads as None too
+                        out[eid] = None
+                    elif chash == _HASH_EMPTY:
+                        out[eid] = {}
+                    elif kind == "node":
+                        out[eid] = {k: v for k, v in (("urn", urn), ("entityType", typ)) if v is not None}
+                    else:
+                        out[eid] = {k: v for k, v in (("edgeType", typ), ("sourceEntityId", src),
+                                                      ("targetEntityId", tgt)) if v}
+        return out
+
     async def _head_index(self, s, graph_id: str, branch_id: str) -> Dict[str, "_Head"]:
         """A branch's own heads without their payloads: a :class:`_Head` per entity it changed —
         the urn from a node head's version row. What a draft changed, at any draft size."""
@@ -5989,24 +6042,72 @@ class GraphVersioningService:
         out.update(await self._values_at(s, graph_id, branch_id, ids, overlay_seq))
         return out
 
+    async def _current_skeletons(
+        self, s, graph_id: str, branch_id: str, ids, as_of_seq: Optional[int] = None,
+    ) -> Dict[str, Optional[dict]]:
+        """:meth:`_current_values` as :meth:`_skeletons_at` — the same layering (``main`` at the
+        seq, or a draft over ``main`` at its branch point) and liveness, without a payload."""
+        ids = list(ids)
+        if not ids:
+            return {}
+        main_id = await self._main_branch_id(s, graph_id)
+        if branch_id == main_id:
+            graph = await s.get(GraphORM, graph_id)
+            seq = graph.main_head_commit_seq if as_of_seq is None else as_of_seq
+            return await self._skeletons_at(s, graph_id, main_id, ids, seq)
+        branch = await s.get(BranchORM, branch_id)
+        base_seq = branch.base_commit_seq or 0
+        if as_of_seq is not None:
+            base_seq = min(base_seq, as_of_seq)
+        out = await self._skeletons_at(s, graph_id, main_id, ids, base_seq)
+        overlay_seq = (1 << 62) if as_of_seq is None else as_of_seq
+        out.update(await self._skeletons_at(s, graph_id, branch_id, ids, overlay_seq))
+        return out
+
+    async def _incident_edge_ids(
+        self, s, graph_id: str, branch_id: str, node_ids, *, sides=("source", "target"),
+        edge_types: Optional[Collection[str]] = None,
+    ) -> set:
+        """Ids of every edge that ever touched *node_ids* on the branch's own layers — ``main`` and,
+        for a draft, the draft (the only rows :meth:`_current_values` composes) — via
+        ix_ev_source/ix_ev_target. ``edge_types`` (upper-case) narrows to those types, keeping
+        rows whose type column is unset so a payload-only spelling is still judged."""
+        ids = list(node_ids)
+        if not ids:
+            return set()
+        main_id = await self._main_branch_id(s, graph_id)
+        layers = [main_id] if branch_id == main_id else [main_id, branch_id]
+        cols = {"source": EdgeVersionORM.source_entity_id, "target": EdgeVersionORM.target_entity_id}
+        cand: set = set()
+        for side in sides:
+            for chunk in _chunks(ids, _IN_LIST_MAX):   # bind-param-safe IN-list (see _values_at)
+                stmt = select(EdgeVersionORM.entity_id).where(
+                    EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(layers),
+                    cols[side].in_(chunk))
+                if edge_types is not None:
+                    stmt = stmt.where(or_(func.upper(EdgeVersionORM.edge_type).in_(list(edge_types)),
+                                          EdgeVersionORM.edge_type.is_(None)))
+                cand.update((await s.execute(stmt.distinct())).scalars().all())
+        return cand
+
     async def _incident_live_edges(
         self, s, graph_id: str, branch_id: str, node_ids, as_of_seq: Optional[int] = None,
     ) -> Dict[str, dict]:
         """Currently-live edges on a branch incident to any of *node_ids* — bounded by
         node degree via ix_ev_source/ix_ev_target. Returns {edge_entity_id: payload}."""
-        ids = list(node_ids)
-        if not ids:
-            return {}
-        cand: set = set()
-        for col in (EdgeVersionORM.source_entity_id, EdgeVersionORM.target_entity_id):
-            for chunk in _chunks(ids, _IN_LIST_MAX):   # bind-param-safe IN-list (see _values_at)
-                rows = (await s.execute(
-                    select(EdgeVersionORM.entity_id).where(
-                        EdgeVersionORM.graph_id == graph_id, col.in_(chunk),
-                    ).distinct()
-                )).scalars().all()
-                cand.update(rows)
+        cand = await self._incident_edge_ids(s, graph_id, branch_id, node_ids)
         vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
+        return {eid: p for eid, p in vals.items() if p is not None}
+
+    async def _incident_live_edge_skeletons(
+        self, s, graph_id: str, branch_id: str, node_ids, *, sides=("source", "target"),
+        edge_types: Optional[Collection[str]] = None,
+    ) -> Dict[str, dict]:
+        """:meth:`_incident_live_edges` at head as skeletons (:meth:`_skeletons_at`) — where each
+        live edge points and its type, never its payload."""
+        cand = await self._incident_edge_ids(s, graph_id, branch_id, node_ids, sides=sides,
+                                             edge_types=edge_types)
+        vals = await self._current_skeletons(s, graph_id, branch_id, cand)
         return {eid: p for eid, p in vals.items() if p is not None}
 
     async def _expand_moves(
@@ -6551,6 +6652,96 @@ def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
 def _chunks(seq, n):
     for i in range(0, len(seq), max(1, n)):
         yield seq[i:i + max(1, n)]
+
+
+# Above this many edges the containment-loop pass runs in a thread, off the event loop.
+_CYCLE_THREAD_MIN = 5000
+
+
+def _containment_cycle_edges(edges: Sequence[Tuple[str, str, str]],
+                             checks: Sequence[Tuple[str, str, str]]) -> set:
+    """The ids in *checks* — ``(edge_id, parent, child)`` — whose edge closes a containment
+    loop in *edges* (the same shape, the checked edges included): the child is an ancestor of
+    the parent once every version of the edge itself is set aside. O(V+E).
+
+    An edge whose ends sit in different strongly connected components is on no loop. Inside
+    one, an edge with no other version in *edges* always is: a shortest way back from its child
+    to its parent never runs along the edge itself. Only a re-pointed edge — its stored version
+    still listed beside the new one — needs a search that sets both aside."""
+    adj: Dict[str, List[Tuple[str, str]]] = {}
+    versions: Dict[str, int] = {}
+    for eid, a, b in edges:
+        if a and b:
+            adj.setdefault(a, []).append((eid, b))
+            adj.setdefault(b, [])
+            versions[eid] = versions.get(eid, 0) + 1
+    comp = _strongly_connected(adj)
+    out: set = set()
+    for eid, a, b in checks:
+        ca = comp.get(a)
+        if a == b or ca is None or ca != comp.get(b):
+            continue
+        if versions.get(eid, 0) <= 1:
+            out.add(eid)
+            continue
+        seen, stack = {b}, [b]
+        while stack and eid not in out:
+            for oeid, m in adj[stack.pop()]:
+                if oeid == eid or m in seen or comp.get(m) != ca:
+                    continue
+                if m == a:
+                    out.add(eid)
+                    break
+                seen.add(m)
+                stack.append(m)
+    return out
+
+
+def _strongly_connected(adj: Mapping[str, Sequence[Tuple[str, str]]]) -> Dict[str, int]:
+    """Tarjan's strongly connected components, iteratively (a hierarchy can be deeper than
+    Python's recursion limit): node → component number."""
+    index: Dict[str, int] = {}
+    low: Dict[str, int] = {}
+    on_stack: set = set()
+    stack: List[str] = []
+    comp: Dict[str, int] = {}
+    counter = ncomp = 0
+    for root in adj:
+        if root in index:
+            continue
+        index[root] = low[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        work = [(root, 0)]
+        while work:
+            v, i = work[-1]
+            nbrs = adj[v]
+            if i < len(nbrs):
+                work[-1] = (v, i + 1)
+                w = nbrs[i][1]
+                if w not in index:
+                    index[w] = low[w] = counter
+                    counter += 1
+                    stack.append(w)
+                    on_stack.add(w)
+                    work.append((w, 0))
+                elif w in on_stack:
+                    low[v] = min(low[v], index[w])
+                continue
+            work.pop()
+            if work:
+                u = work[-1][0]
+                low[u] = min(low[u], low[v])
+            if low[v] == index[v]:
+                while True:
+                    w = stack.pop()
+                    on_stack.discard(w)
+                    comp[w] = ncomp
+                    if w == v:
+                        break
+                ncomp += 1
+    return comp
 
 
 # asyncpg caps bind parameters at 32767 (signed int16) per statement — stricter than

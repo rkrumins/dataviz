@@ -249,12 +249,11 @@ class ImportWorker:
         adapter = get_adapter(fmt)
         batch: List[Dict[str, Any]] = []
         idx = 0
-        async for raw in adapter.parse(open_source(self._store, source_uri)):
-            kind = raw.get("kind")
-            if kind not in ("node", "edge"):
-                continue  # tallied as skipped; a malformed record never aborts the parse
-            batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": normalize(raw, kind)})
-            idx += 1
+        async for page in _record_pages(adapter, open_source(self._store, source_uri)):
+            # Normalizing is per-row Python work: a page at a time, off the event loop.
+            for kind, row in await asyncio.to_thread(_normalize_page, page):
+                batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": row})
+                idx += 1
             if len(batch) >= _PARSE_BATCH:
                 await self._flush(batch)
                 batch = []
@@ -284,8 +283,9 @@ class ImportWorker:
                     break
                 after = rows[-1]["_row_index"]
                 lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
-                ops, resolutions = resolve_rows(rows, lookups, mint_id=lambda: prefixed_id("ent"),
-                                                ontology=self._ontology)
+                ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
+                    resolve_rows, rows, lookups, mint_id=lambda: prefixed_id("ent"),
+                    ontology=self._ontology)
                 self._collect_facts(ops)
                 await self._persist_resolutions(job_id, resolutions)
                 if ops:
@@ -414,6 +414,34 @@ async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> i
             if gone < batch:
                 break
     return removed
+
+
+async def _record_pages(adapter, chunks):
+    """The adapter's records a page at a time — decoded off the event loop where the adapter can
+    (``parse_pages``), else gathered from its record stream."""
+    if hasattr(adapter, "parse_pages"):
+        async for page in adapter.parse_pages(chunks, _PARSE_BATCH):
+            yield page
+        return
+    page: List[Dict[str, Any]] = []
+    async for raw in adapter.parse(chunks):
+        page.append(raw)
+        if len(page) >= _PARSE_BATCH:
+            yield page
+            page = []
+    if page:
+        yield page
+
+
+def _normalize_page(page: List[Dict[str, Any]]) -> List[tuple]:
+    """``(kind, normalized row)`` for each node or edge record; anything else is skipped (tallied
+    as skipped — a malformed record never aborts the parse)."""
+    out = []
+    for raw in page:
+        kind = raw.get("kind") if isinstance(raw, dict) else None
+        if kind in ("node", "edge"):
+            out.append((kind, normalize(raw, kind)))
+    return out
 
 
 async def _payloads(snap, kind: str, eids) -> Dict[str, dict]:

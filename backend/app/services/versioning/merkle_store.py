@@ -11,20 +11,22 @@ The in-memory hashing/bucketing lives in :mod:`merkle`; this module is the
 Postgres-backed persistence + as-of reconstruction + tree-diff + integrity check.
 
 Scope: used for a **non-fork graph's `main`** (the long-lived linear branch where
-the full rebuild hurts at scale). Draft checkpoints and fork mains keep the
-in-memory ``MerkleTree.build`` fallback (cross-branch CoW is a later step).
+the full rebuild hurts at scale). Fork mains keep the in-memory ``MerkleTree.build``
+fallback (cross-branch CoW is a later step); draft commits carry no root at all.
 """
 from __future__ import annotations
 
 from typing import Dict, Iterable, Optional, Tuple
 
-from sqlalchemy import literal, select
+from sqlalchemy import insert, literal, select
 
 from . import config
 from .merkle import _EMPTY, _FANOUT, _leaf_hash, _leaf_path
 from .models import MerkleNodeORM
 
 Path = Tuple[int, ...]
+
+_INSERT_ROWS = 2000
 
 
 def _path_str(path: Path) -> str:
@@ -95,15 +97,20 @@ class MerkleStore:
                     else config.hash_parts(*(h.encode("ascii") for h in child_hashes))
                 )
 
+        rows = []
         for path, h in new_hash.items():
             prow = parent.get(path)
             if prow is not None and prow["hash"] == h:
                 continue                       # unchanged subtree — inherit, write nothing
-            s.add(MerkleNodeORM(
+            rows.append(dict(
                 graph_id=graph_id, branch_id=branch_id, commit_id=commit_id,
                 commit_seq=commit_seq, path=_path_str(path), level=len(path), hash=h,
                 bucket=(new_bucket.get(path) if len(path) == depth else None),
             ))
+        # Multi-row INSERTs, not an ORM object per row: a large commit changes tens of
+        # thousands of paths. 2,000 rows × 8 columns stays under asyncpg's bind cap.
+        for i in range(0, len(rows), _INSERT_ROWS):
+            await s.execute(insert(MerkleNodeORM.__table__), rows[i:i + _INSERT_ROWS])
         return new_hash.get((), _EMPTY)
 
     async def root_at(self, s, graph_id: str, branch_id: str, seq: int) -> str:

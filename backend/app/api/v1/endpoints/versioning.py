@@ -1969,7 +1969,10 @@ async def rebuild_projection(
     # projector's unpinned skip). Nothing is cached, so there is nothing to rebuild.
     if not name or name == f"gv_{graph_id}":
         raise HTTPException(status_code=409, detail="no FalkorDB projection target for this graph")
-    started = await svc.request_projection_rebuild(graph_id)
+    try:
+        started = await svc.request_projection_rebuild(graph_id)
+    except ConcurrencyError as exc:            # enabling version control hasn't finished
+        raise HTTPException(status_code=409, detail={"type": "bootstrapping", "message": str(exc)})
     # Schedule the catch-up unconditionally: even on the already-in-flight (started=False) path,
     # rebuild_now is an idempotent catch-up (and self-deduplicates per graph), so a status
     # stranded by a lost worker self-heals. Unlike project_now's 10s interactive ceiling, the
