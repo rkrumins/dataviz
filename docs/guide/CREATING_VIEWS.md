@@ -56,6 +56,14 @@ give the graph structure. Common layerings:
 Good layering is what turns a tangle into a diagram. See
 [The Semantic Layer](/guide/semantic-layer) for how types and layers relate.
 
+**Advanced: Orphans only.** An *orphan* is an entity whose type normally sits
+inside another but which has no parent in the data, for example a Table with no
+Schema. To list only those, open the **⋯** (*More filters*) button next to
+**Unassigned only** and tick **Orphans only** under **Advanced**. The menu shows
+how many the data source holds, or *many* when the server couldn't count them in
+time. Each row is tagged *orphan*, and you place it in a layer like any other
+entity. Untick it to see everything again.
+
 ### Step 4 — Choose the canvas type
 Pick how the View is laid out:
 
