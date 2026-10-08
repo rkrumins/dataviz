@@ -46,6 +46,44 @@ would change and why, before anyone sees it.
 
 ---
 
+## [Unreleased] — Every page scrolls
+
+### Fixed
+
+**The sign-in page, and every page like it, scrolls when the window is shorter than the page.**
+On a window shorter than the sign-in card, the single sign-on buttons and everything under the
+form (*Forgot your password?*, *Sign up*, *Documentation*, the version line) were out of reach,
+and nothing showed there was more. The app shell never let the document scroll and clipped
+whatever a page drew below the window. The same happened on sign-up, both password-reset pages,
+the invitation page, the dev and portal sign-in pages, and the forced password change, where the
+submit button is the only way forward. These pages now scroll, and a page opened from a scrolled
+one starts at its top.
+
+**Signed-in pages that clipped instead of scrolling.** The Review Center had no scroll area at
+all, and the Administration menu ran off the bottom of a 1080p screen with no way to reach Single
+Sign-On, Audit Log or its footer. On short windows, landscape phones and at 200% zoom, Ingestion
+(including its Jobs tab), Analytics and Semantic Layers squeezed their content to nothing under
+their pinned headers. They now keep at least 10rem for it and scroll the whole page when the
+header does not leave that. The access-denied and feature-off panels, the 404 page, the error
+screens and the access-revoked notice now scroll instead of cutting off their top or bottom.
+
+**On phones, the app fits the visible screen.** The shell used `100vh`, which on a phone is the
+height with the browser's toolbar hidden, so the bottom of every page sat behind the toolbar. It
+now uses the dynamic viewport height where the browser supports it.
+
+### Known limitations
+
+- Dialogs and drawers were not part of this sweep. A few with no height cap (the docs search, the
+  permissions dialog, the sign-in account-collision notice) can still run off a very short window.
+- On narrow screens (a phone held upright, or a small laptop at 200% zoom), the main navigation
+  stays expanded and takes most of the width. Pages with their own side rail (Administration,
+  Semantic Layers) then push content off the right edge, Ingestion → Freshness wraps its sticky
+  filter bar over the table, and on a phone the top bar's search box wraps over the page.
+  Collapsing the navigation fixes this. It is a width problem, which this change does not
+  address.
+- The list in Admin → Features sets its maximum height from the window, not from the space left
+  under the banners, so while a banner shows its last row can sit below the fold.
+
 ## [Unreleased] — Branding that saves, combined traces, and time for very large graphs
 
 ### Added

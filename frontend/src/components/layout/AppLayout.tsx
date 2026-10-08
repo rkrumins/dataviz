@@ -211,8 +211,8 @@ function BootLoader() {
 function PageError({ error, onReset }: { error: Error; onReset: () => void }) {
   const navigate = useNavigate()
   return (
-    <div className="w-full h-full flex items-center justify-center bg-canvas">
-      <div className="flex flex-col items-center gap-4 max-w-lg text-center">
+    <div className="w-full h-full flex overflow-y-auto bg-canvas p-6">
+      <div className="m-auto flex flex-col items-center gap-4 max-w-lg text-center">
         <div className="w-14 h-14 rounded-full bg-red-100 dark:bg-red-950/40 flex items-center justify-center">
           <AlertTriangle className="w-7 h-7 text-red-500" />
         </div>
