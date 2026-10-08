@@ -242,8 +242,8 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
 
 function CanvasError({ error, onRetry }: { error: Error; onRetry: () => void }) {
   return (
-    <div className="w-full h-full flex items-center justify-center bg-canvas">
-      <div className="flex flex-col items-center gap-4 max-w-md text-center">
+    <div className="w-full h-full flex overflow-y-auto bg-canvas p-6">
+      <div className="m-auto flex flex-col items-center gap-4 max-w-md text-center">
         <div className="w-12 h-12 rounded-full bg-red-100 dark:bg-red-950/40 flex items-center justify-center">
           <AlertTriangle className="w-6 h-6 text-red-500" />
         </div>

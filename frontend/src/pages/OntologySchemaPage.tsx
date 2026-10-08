@@ -1523,8 +1523,9 @@ export function OntologySchemaPage() {
             onToggleDashboard={toggleDashboard}
           />
 
-        {/* Detail pane */}
-        <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+        {/* Detail pane — scrolls only when its header stack (picker, alerts)
+            and the tab content's min-h-40 floor outgrow the window */}
+        <div className="flex-1 min-w-0 flex flex-col overflow-x-hidden overflow-y-auto">
           {dashboardMode ? (
             <div className="flex-1 overflow-y-auto">
               <DeploymentDashboardPanel
@@ -1687,7 +1688,7 @@ export function OntologySchemaPage() {
               )}
 
               {/* Tab content + editor panel */}
-              <div className="flex-1 min-h-0 flex relative">
+              <div className="flex-1 min-h-40 flex relative">
                 <div className={cn('min-w-0 overflow-y-auto flex-1', editorPanel && 'mr-[440px]')}>
                   <AnimatePresence mode="wait">
                     <motion.div

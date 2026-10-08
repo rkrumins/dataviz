@@ -30,28 +30,31 @@ export function RequireAnalytics({ children }: { children: ReactNode }) {
     if (allowed) return <>{children}</>
 
     return (
-        <div className="flex items-center justify-center min-h-[60vh] p-8">
-            <div className="max-w-sm text-center">
-                <div className="relative w-16 h-16 mx-auto mb-5">
-                    <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-indigo-500/0 border border-indigo-500/20 flex items-center justify-center">
-                        <BarChart3 className="w-7 h-7 text-indigo-500" />
+        <div className="h-full overflow-y-auto">
+            {/* Its own scroller: this can render straight into AppLayout's <main>, which clips. */}
+            <div className="flex items-center justify-center min-h-[60vh] p-8">
+                <div className="max-w-sm text-center">
+                    <div className="relative w-16 h-16 mx-auto mb-5">
+                        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-indigo-500/0 border border-indigo-500/20 flex items-center justify-center">
+                            <BarChart3 className="w-7 h-7 text-indigo-500" />
+                        </div>
+                        <div className="absolute -bottom-1 -right-1 w-7 h-7 rounded-xl bg-canvas-elevated border border-glass-border flex items-center justify-center shadow-sm">
+                            <Lock className="w-3.5 h-3.5 text-ink-muted" />
+                        </div>
                     </div>
-                    <div className="absolute -bottom-1 -right-1 w-7 h-7 rounded-xl bg-canvas-elevated border border-glass-border flex items-center justify-center shadow-sm">
-                        <Lock className="w-3.5 h-3.5 text-ink-muted" />
-                    </div>
+                    <h2 className="text-base font-bold text-ink mb-1.5">
+                        Analytics isn't open on this deployment
+                    </h2>
+                    <p className="text-sm text-ink-muted leading-relaxed">
+                        Platform insights are currently limited to administrators and
+                        auditors. An administrator can open a redacted version to
+                        everyone under Admin → Features.
+                    </p>
+                    <p className="text-xs text-ink-muted/80 mt-3">
+                        Nothing is missing from your account — this is a deployment
+                        setting, not a permission.
+                    </p>
                 </div>
-                <h2 className="text-base font-bold text-ink mb-1.5">
-                    Analytics isn't open on this deployment
-                </h2>
-                <p className="text-sm text-ink-muted leading-relaxed">
-                    Platform insights are currently limited to administrators and
-                    auditors. An administrator can open a redacted version to
-                    everyone under Admin → Features.
-                </p>
-                <p className="text-xs text-ink-muted/80 mt-3">
-                    Nothing is missing from your account — this is a deployment
-                    setting, not a permission.
-                </p>
             </div>
         </div>
     )

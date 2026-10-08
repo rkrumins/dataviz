@@ -800,8 +800,12 @@ export function RegistryJobHistory() {
                 </PageContainer>
             </div>
 
-            {/* ── Scrollable content area ── */}
-            <div className="flex-1 min-h-0 overflow-y-auto">
+            {/* ── Scrollable content area ── never below 6rem: on a short window
+                the Ingestion page scrolls instead. 6, not the page's 10: under
+                its own toolbar this list is only ~7rem on a 768px laptop.
+                `relative` keeps absolutely positioned content inside it, out of
+                the page's scroll range. */}
+            <div className="relative flex-1 min-h-24 overflow-y-auto">
                 <PageContainer className="py-4">
 
             {/* ── Grouped View ── */}

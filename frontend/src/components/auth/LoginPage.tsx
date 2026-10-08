@@ -532,7 +532,7 @@ function AlreadySignedIn({ email }: { email: string }) {
     }
 
     return (
-        <div className="min-h-screen w-full flex items-center justify-center bg-canvas font-sans p-6">
+        <div className="min-h-full w-full flex items-center justify-center bg-canvas font-sans p-6">
             <div className="glass-panel w-full max-w-[420px] p-8 rounded-[2rem] border-white/20 dark:border-white/5 shadow-2xl text-center">
                 <div className="w-14 h-14 mb-5 mx-auto rounded-2xl bg-gradient-to-br from-accent-lineage to-accent-lineage/80 flex items-center justify-center shadow-lg shadow-accent-lineage/30">
                     <ShieldCheck className="w-7 h-7 text-white" />
@@ -946,7 +946,7 @@ export function LoginPage() {
     // checked.
     if (status === 'idle' || status === 'loading') {
         return (
-            <div className="min-h-screen w-full flex items-center justify-center bg-canvas">
+            <div className="min-h-full w-full flex items-center justify-center bg-canvas">
                 <div className="w-8 h-8 border-2 border-ink-muted/30 border-t-accent-lineage rounded-full animate-spin" />
             </div>
         )
@@ -959,7 +959,7 @@ export function LoginPage() {
     }
 
     return (
-        <div className="relative min-h-screen w-full flex items-center justify-center overflow-hidden bg-canvas font-sans">
+        <div className="relative min-h-full w-full flex items-center justify-center py-8 overflow-hidden bg-canvas font-sans">
             {collision && (
                 <CollisionModal
                     email={collision.email}

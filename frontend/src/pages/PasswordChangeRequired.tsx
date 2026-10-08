@@ -58,7 +58,7 @@ export function PasswordChangeRequired() {
     }
 
     return (
-        <div className="min-h-screen w-full flex items-center justify-center bg-canvas px-4 py-10">
+        <div className="min-h-full w-full flex items-center justify-center bg-canvas px-4 py-10">
             <div className="w-full max-w-md">
                 <div className="flex items-start gap-3 mb-6">
                     <div className="w-11 h-11 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
