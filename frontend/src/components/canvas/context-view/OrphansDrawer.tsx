@@ -68,9 +68,7 @@ function OrphansPanel({ onClose, provider, layers, layerOf, onReveal, onPlace }:
   // State is written only once the reply lands; a first page replaces the list.
   const load = useCallback((from: string | null) => {
     const req = ++reqRef.current
-    // `orphansOnly` is TopLevelNodesQuery's own field (the backend change); the intersection
-    // keeps this compiling whether or not the type already declares it.
-    const query: TopLevelNodesQuery & { orphansOnly: boolean } = {
+    const query: TopLevelNodesQuery = {
       orphansOnly: true, limit: PAGE_SIZE, cursor: from, includeChildCount: true,
     }
     void provider.getTopLevelNodes(query).then((page) => {

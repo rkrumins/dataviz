@@ -32,11 +32,7 @@ import type {
     GraphDataProvider,
     GraphNode,
     EntityTypeDefinition,
-    TopLevelNodesQuery,
 } from '@/providers/GraphDataProvider'
-
-// `orphansOnly` joins TopLevelNodesQuery with the provider change; until then it is widened here.
-type TopLevelQuery = TopLevelNodesQuery & { orphansOnly?: boolean }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -474,7 +470,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 limit: PAGE_SIZE,
                 cursor: null,
                 includeChildCount: true,
-            } as TopLevelQuery)
+            })
             mergeTopLevelResult(result, 'replace', orphans)
         } catch (err) {
             console.error('[useEntityBrowser] Failed to load top-level nodes:', err)
@@ -503,7 +499,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 limit: PAGE_SIZE,
                 cursor: topLevelCursor,
                 includeChildCount: true,
-            } as TopLevelQuery)
+            })
             mergeTopLevelResult(result, 'append', orphans, epoch)
         } catch (err) {
             console.error('[useEntityBrowser] Failed to load more top-level nodes:', err)
@@ -657,7 +653,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                     limit: BULK_TOP_LEVEL_PAGE_SIZE,
                     cursor,
                     includeChildCount: true,
-                } as TopLevelQuery)
+                })
                 mergeTopLevelResult(result, 'append', orphans, epoch)
 
                 if (!result.hasMore) break
@@ -710,7 +706,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                     limit: PAGE_SIZE,
                     cursor: null,
                     includeChildCount: true,
-                } as TopLevelQuery)
+                })
                 mergeTopLevelResult(result, 'replace', orphans)
             } catch (err) {
                 console.error('[useEntityBrowser] Search failed:', err)
@@ -758,7 +754,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             limit: PAGE_SIZE,
             cursor: null,
             includeChildCount: true,
-        } as TopLevelQuery)
+        })
         return result.totalCount ?? (result.hasMore ? null : result.nodes.length)
     }, [provider])
 
