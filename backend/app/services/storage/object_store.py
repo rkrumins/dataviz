@@ -369,10 +369,11 @@ class DatabaseObjectStore:
 
 def get_object_store() -> ObjectStore:
     """Return the configured object store (``OBJECT_STORE_BACKEND``): the management database by
-    default, which every API pod shares; ``local`` for files under ``IMPORT_STORE_ROOT``.
+    default, which every API pod shares; ``local`` for files under ``IMPORT_STORE_ROOT``; ``s3``
+    (optional) for an S3-compatible bucket, GCS included (``OBJECT_STORE_S3_*``).
 
-    S3/GCS backends implement the same Protocol; they're wired here when added. Kept as a
-    call-time factory (not a module constant) so env changes take effect without re-import."""
+    Kept as a call-time factory (not a module constant) so env changes take effect without
+    re-import. Only ``s3`` imports its module, and with it boto3."""
     from backend.app.services.versioning import config
 
     backend = config.object_store_backend()
@@ -380,6 +381,14 @@ def get_object_store() -> ObjectStore:
         return DatabaseObjectStore()
     if backend == "local":
         return LocalFsObjectStore(config.import_store_root())
+    if backend == "s3":
+        settings = config.object_store_s3()
+        if not settings["bucket"]:
+            raise RuntimeError("OBJECT_STORE_BACKEND=s3 needs OBJECT_STORE_S3_BUCKET, the bucket to keep "
+                               "import/export artifacts in")
+        from backend.app.services.storage.s3_store import shared
+
+        return shared(**settings)
     raise NotImplementedError(
-        f"OBJECT_STORE_BACKEND={backend!r} not yet implemented (use 'database' or 'local')"
+        f"OBJECT_STORE_BACKEND={backend!r} not yet implemented (use 'database', 'local' or 's3')"
     )

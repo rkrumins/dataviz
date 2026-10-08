@@ -375,6 +375,7 @@ class ImportWorker:
         kind, after = _window_after(pos.cursor)
         rows = await self._window(job_id, kind, after) if kind else []
         if not rows and kind == "node":             # the node windows are done: on to the edges
+            await _analyze_graph(graph_id)
             kind, rows = "edge", await self._window(job_id, "edge", -1)
         if not rows:
             return False
@@ -545,6 +546,25 @@ class ImportWorker:
                 "eids": [r["matched_entity_id"] for r in chunk],
                 "ops": [r["resolved_op"] for r in chunk], "statuses": [r["status"] for r in chunk],
                 "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk]})
+
+
+async def _analyze_graph(graph_id: str) -> None:
+    """Refresh the planner's statistics of the graph's partitions once the node windows are in.
+
+    Until autovacuum gets to them, they describe the partitions without what those windows wrote
+    (100k draft heads and versions into a new graph): the first edge window's lookups of its ends'
+    draft heads, planned for a handful of rows, took 88 s of a 100k import where later windows
+    take 5 s. Best effort (it needs the tables' owner): without it the plans only come later."""
+    try:
+        async with db.graphver_session() as s:
+            for table in ("entity_heads", "node_versions", "edge_versions"):
+                part = await s.scalar(text(
+                    f'SELECT tableoid::regclass::text FROM "{config.graphver_schema()}"."{table}" '
+                    "WHERE graph_id = :g LIMIT 1"), {"g": graph_id})
+                if part:
+                    await s.execute(text(f"ANALYZE {part}"))
+    except Exception as exc:                                     # noqa: BLE001 — best effort
+        logger.warning("import into %s: could not refresh statistics: %s", graph_id, exc)
 
 
 async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> int:

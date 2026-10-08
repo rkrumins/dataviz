@@ -37,6 +37,7 @@ tests/test_background_tasks.py
 tests/test_bootstrap_duplicates_unit.py
 tests/test_bootstrap_resilience.py
 tests/test_bootstrap_routes.py
+tests/test_bootstrap_window_writes.py
 tests/test_branding_endpoint.py
 tests/test_branding_repo.py
 tests/test_cache_refresh_route.py
@@ -104,6 +105,9 @@ tests/test_metrics_backend.py
 tests/test_nav_catalogue.py
 tests/test_node_property_hygiene.py
 tests/test_object_store.py
+tests/test_package_ndjson_cursor.py
+tests/test_package_new_source_api.py
+tests/test_package_seed_rows.py
 tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
@@ -124,6 +128,7 @@ tests/test_reconcile_detectors.py
 tests/test_reconcile_sweeper.py
 tests/test_request_body_limit.py
 tests/test_run_step_ledger.py
+tests/test_s3_object_store.py
 tests/test_schema_upgrades.py
 tests/test_search_catalog.py
 tests/test_search_engine.py

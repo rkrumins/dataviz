@@ -17,6 +17,8 @@ a large view's identity check is legitimately longer than the 30s default.
     POST /packages/{uploadId}/data    its data → a new draft of the target, by an import job that
                                       reads the upload in place; the view then follows into that
                                       draft (/import, stage)
+    POST /packages/{uploadId}/new-source  its data → a NEW data source, whose first version a job
+                                      seeds from the upload in place; the views then follow, live
 
 Import is one view per call: every request stays well inside the timeout tier, a multi-view
 import reports honest progress, one failure doesn't block the rest, and ``requestId`` makes a
@@ -30,7 +32,7 @@ import logging
 import os
 import re
 import tempfile
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Type, TypeVar
 
@@ -317,7 +319,9 @@ async def _package_upload(ie, upload_id: str, user) -> Dict[str, Any]:
 async def _upload_state(ie, record: Dict[str, Any], *, received: bool = False) -> Dict[str, Any]:
     """The upload as its dialog follows it: ``uploading`` until it is completed, ``inspecting``
     while its job checks it (with the job's progress), then ``ready`` or ``invalid`` (with why).
-    ``received`` adds the parts stored whole (every part, once the upload is completed)."""
+    ``received`` adds the parts stored whole (every part, once the upload is completed). While it
+    is uploading, ``partUrls`` says where each part goes straight to the store, if the store hands
+    out such URLs; parts sent there count as received like any other."""
     state = {"uploadId": record["uploadId"], "fileName": record["fileName"], "size": record["size"],
              "partBytes": record["partBytes"], "parts": record["parts"],
              "expiresAt": uploads.expires_at(record).isoformat(), "jobId": record.get("jobId")}
@@ -335,10 +339,25 @@ async def _upload_state(ie, record: Dict[str, Any], *, received: bool = False) -
                          processed=job.get("processed"), total=job.get("total"))
     else:
         state["status"] = "uploading"
+        # Signing a 10 GiB upload's 640 URLs takes a quarter of a second of CPU: off the loop.
+        part_urls = await asyncio.to_thread(_part_urls, ie.store, record)
+        if part_urls:
+            state["partUrls"] = part_urls
     if received:
         state["received"] = (list(range(record["parts"])) if record.get("jobId")
                              else await uploads.received(ie.store, record))
     return state
+
+
+def _part_urls(store, record: Dict[str, Any]) -> Optional[List[str]]:
+    """A presigned PUT per part, each signed for its part's exact size, when the store presigns
+    (only one that does takes ``size``); ``None`` when parts go through ``PUT …/parts/{n}``."""
+    def key(n: int) -> str:
+        return uploads.upload_key(record, f"part-{n:05d}")
+
+    if store.upload_target(key(0)).mode != "presigned":
+        return None
+    return [store.upload_target(key(n), size=uploads.part_size(record, n)).url for n in range(record["parts"])]
 
 
 async def _inspect(ie, record: Dict[str, Any]) -> Dict[str, Any]:
@@ -681,6 +700,233 @@ def _data_started(job: Dict[str, Any], body: PackageDataRequest, draft_name: str
     return {"jobId": job["jobId"], "branchId": job["branchId"], "graphId": job["graphId"],
             "workspaceId": body.workspaceId, "dataSourceId": body.dataSourceId, "viewId": body.viewId,
             "draftName": draft_name}
+
+
+# ── A new data source from a package ─────────────────────────────────────────
+
+
+class NewSourceRequest(BaseModel):
+    #: Makes the request safe to send again: the browser keeps it per file.
+    requestId: str = Field(..., pattern=r"^nsr_[0-9a-f]{32}$")
+    workspaceId: str = Field(..., max_length=128)
+    providerId: str = Field(..., max_length=128)
+    label: str = Field(..., min_length=1, max_length=200)
+    graphName: str = Field(..., min_length=1, max_length=64)
+    #: The semantic layer to bind — a draft one too (made from the package's types) — or none.
+    ontologyId: Optional[str] = Field(None, max_length=128)
+
+
+#: Where an upload notes the data source it created (``new-source.json`` beside its record): the
+#: record itself is never written once checked — its imports read it while they run.
+_NEW_SOURCE_HINT = "new-source.json"
+_NEW_SOURCE_PERMISSION = "workspace:datasource:manage"
+_SEED_ENFORCEMENT = "permissive"
+
+
+@asynccontextmanager
+async def _per_upload(upload_id: str):
+    """One new-source request per upload at a time, across every API pod: an advisory lock held by
+    a transaction of its own, on a dedicated management connection, from before the upload's
+    existing source is looked for until the new one's job is queued — so a retry racing the first
+    request finds what it created instead of creating a second. Transaction-scoped, so it goes with
+    the transaction whatever ends the request (and holds behind a transaction-mode pooler)."""
+    from sqlalchemy import text
+
+    from backend.app.db.engine import PoolRole, get_engine
+
+    async with get_engine(PoolRole.WEB).connect() as conn:
+        async with conn.begin():
+            await conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                               {"k": f"pkg-new-source:{upload_id}"})
+            yield
+
+
+async def _bundle_origin(store, record: Dict[str, Any]) -> Dict[str, Any]:
+    """What the new source records of the views' file: its hash and where it was made."""
+    key = uploads.upload_key(record, package.UPLOAD_BUNDLE)
+    if not (await store.stat(key)).exists:
+        raise _gone()
+    raw = b"".join([c async for c in store.open_stream(key)])
+    bundle = await asyncio.to_thread(json.loads, raw)
+    source = next(iter((bundle.get("sources") or {}).values()), None) or {}
+    return {"bundleHash": bundle.get("bundleHash"),
+            "sourceEnvironment": (bundle.get("generator") or {}).get("environment"),
+            "sourceDataSource": (source.get("dataSource") or {}).get("id")}
+
+
+async def _seed_ontology(session: AsyncSession, claims: PermissionClaims, ontology_id: Optional[str],
+                         workspace_id: str):
+    """The semantic layer a new source binds: one that exists and the caller can see — a draft
+    too. 422 ``ontology_unknown`` otherwise (for one the caller can't see as well: its existence
+    is not leaked).
+
+    A workspace-scoped caller sees only layers some data source of theirs is bound to, so the
+    draft "Create from this package" has just made is invisible to them until something binds it.
+    One who may manage semantic layers in the workspace may therefore bind a draft nothing is
+    bound to yet — never a published layer, nor one another source already reads."""
+    from sqlalchemy import func, select
+
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.db.repositories import ontology_definition_repo
+    from backend.app.services.workspace_visibility import ensure_ontology_visible
+
+    if not ontology_id:
+        return None
+    unknown = HTTPException(status_code=422, detail={
+        "type": "ontology_unknown",
+        "message": "That semantic layer doesn't exist here. Choose another, or none."})
+    ont = await ontology_definition_repo.get_ontology(session, ontology_id)
+    if ont is None or getattr(ont, "deleted_at", None):
+        raise unknown
+    try:
+        await ensure_ontology_visible(session, claims, ontology_id)
+    except HTTPException:
+        unbound_draft = (
+            not getattr(ont, "is_published", True)
+            and has_permission(claims, "workspace:ontology:manage", workspace_id=workspace_id)
+            and not await session.scalar(select(func.count()).select_from(WorkspaceDataSourceORM).where(
+                WorkspaceDataSourceORM.ontology_id == ontology_id,
+                WorkspaceDataSourceORM.deleted_at.is_(None))))
+        if not unbound_draft:
+            raise unknown
+    return ont
+
+
+def _new_source_answer(ds, origin: Dict[str, Any], job: Dict[str, Any]) -> Dict[str, Any]:
+    return {"dataSourceId": ds.id, "graphId": job["graph_id"], "jobId": job["job_id"],
+            "status": job["status"], "label": ds.label, "graphName": ds.graph_name,
+            "ontologyId": ds.ontology_id, "enforcement": _SEED_ENFORCEMENT,
+            "requestId": origin.get("requestId")}
+
+
+@router.post("/packages/{upload_id}/new-source", status_code=202,
+             dependencies=[Depends(require_feature("viewImportEnabled"))])
+async def create_source_from_package(
+    upload_id: str,
+    response: Response,
+    body: NewSourceRequest = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Make a brand-new data source of a checked package's data: a managed source on the chosen
+    FalkorDB provider, under a graph name nothing else uses, bound to the chosen semantic layer (or
+    none), whose first version on main IS the package's data — copied by a job (``origin:
+    'package'``) that keeps the package's entity ids. No draft, nothing to publish; follow the job
+    through the data source's bootstrap status. The views then follow, imported live.
+
+    The request moves no data: it provisions the source, queues the job and answers 202. Asking
+    again with the same ``requestId`` — or for the same target, once this upload has made one —
+    answers 200 with what the first request made, finishing anything it left undone (a request
+    that died after making the data source queues its job). One upload makes one source per
+    workspace: another target is 409 ``upload_consumed``. 409 ``not_inspected`` until the package
+    is checked; 410 ``upload_expired`` when the upload is gone or about to expire; 422 for a provider
+    that isn't usable, a semantic layer that isn't there, or a graph name that is taken (with a free
+    ``suggestion``); 502 ``provisioning_failed`` when the version store couldn't be made — the data
+    source this request made is removed, never one it found."""
+    from backend.app.services import managed_sources
+    from backend.app.services.versioning.bootstrap_worker import (
+        BootstrapConflict, create_bootstrap_job)
+
+    await _importer(user)
+    record = await _package_to_read(ie, upload_id, user)
+    if not record.get("archive"):
+        state = await _upload_state(ie, record)
+        raise HTTPException(status_code=409, detail={
+            "type": "not_inspected", "status": state["status"],
+            "message": "This package hasn't been checked yet. Wait for its check to finish."})
+    workspace = await session.get(WorkspaceORM, body.workspaceId)
+    if workspace is None or workspace.deleted_at is not None:
+        raise HTTPException(status_code=404, detail=f"Workspace '{body.workspaceId}' not found")
+    if not has_permission(claims, _NEW_SOURCE_PERMISSION, workspace_id=body.workspaceId):
+        raise HTTPException(status_code=403, detail=f"Missing permission: {_NEW_SOURCE_PERMISSION}")
+
+    async with _per_upload(upload_id):
+        ds = await managed_sources.find_origin_data_source(session, body.workspaceId, upload_id)
+        created, ont = ds is None, None
+        if ds is not None:
+            origin = managed_sources.origin_of(ds.extra_config) or {}
+            same = (origin.get("requestId") == body.requestId
+                    or (ds.provider_id == body.providerId
+                        and ds.graph_name == body.graphName.strip().lower()))
+            if not same:
+                raise HTTPException(status_code=409, detail={
+                    "type": "upload_consumed", "dataSourceId": ds.id,
+                    "message": "This package already made a data source here. Open it, or give it "
+                               "up to make another."})
+        else:
+            if datetime.now(timezone.utc) >= uploads.expires_at(record) - _EXPIRY_MARGIN:
+                raise HTTPException(status_code=410, detail={
+                    "type": "upload_expired",
+                    "message": "This package upload is about to expire. Choose the file again."})
+            await managed_sources.assert_provider_usable(session, body.workspaceId, body.providerId,
+                                                         subject="New data sources")
+            ont = await _seed_ontology(session, claims, body.ontologyId, body.workspaceId)
+            graph_name = await managed_sources.claim_graph_name(session, body.providerId,
+                                                                body.graphName)
+            origin = {"kind": "viewPackage", "uploadId": upload_id, "requestId": body.requestId,
+                      **await _bundle_origin(ie.store, record),
+                      "createdAt": datetime.now(timezone.utc).isoformat()}
+            ds_id, _name = await managed_sources.create_managed_data_source(
+                session, body.workspaceId, provider_id=body.providerId,
+                ontology_id=body.ontologyId, label=body.label, actor=user.id,
+                graph_name=graph_name, origin=origin)
+            ds = await data_source_repo.get_data_source_orm(session, ds_id)
+
+        inspection = await _read_json(ie.store, uploads.upload_key(record, package.INSPECTION)) or {}
+        found = inspection.get("package") or {}
+        data = found.get("data") or {}
+        type_stats = data.get("typeStats")
+        if ds.ontology_id and not created:
+            try:                                    # only for a job not queued yet: never refuses
+                ont = await _seed_ontology(session, claims, ds.ontology_id, body.workspaceId)
+            except HTTPException:
+                ont = None
+        coverage = managed_sources.ontology_coverage(type_stats, ont) if ont is not None else None
+        try:
+            job = await create_bootstrap_job(
+                data_source_id=ds.id, workspace_id=body.workspaceId, actor=user.id,
+                falkor_graph_name=ds.graph_name, falkor_provider=ds.provider_id,
+                base_ontology_id=ds.ontology_id, ontology_enforcement=_SEED_ENFORCEMENT,
+                origin="package", payload_uri=uploads.record_key(record), upload_id=upload_id,
+                package={"integrity": found.get("integrity"), "scope": found.get("scope"),
+                         "manifest": {"nodes": data.get("nodes"), "edges": data.get("edges"),
+                                      "version": data.get("version")},
+                         "typeStats": type_stats, "bytes": record["archive"].get("bytes"),
+                         "bundleHash": origin.get("bundleHash"),
+                         "sourceEnvironment": origin.get("sourceEnvironment")},
+                coverage=coverage)
+        except BootstrapConflict as exc:
+            raise HTTPException(status_code=409, detail=exc.detail)
+        except Exception:
+            logger.exception("new source from package %s: the version store failed (ds=%s)",
+                             upload_id, ds.id)
+            # Only what THIS request made, and only while nothing stands on it: a data source found
+            # here is someone's earlier attempt, and one with a graph has a job to give up instead.
+            if created and await svc.get_graph_by_data_source(ds.id) is None:
+                await managed_sources.drop_managed_data_source(session, ds.id)
+            raise HTTPException(status_code=502, detail={
+                "type": "provisioning_failed",
+                "message": "The new data source's version store could not be created."})
+        # No aggregation is registered here: a job dispatched now would run on the still-empty key
+        # and stamp its marker there, which the seed's emptiness check then finds. The seed's
+        # finalize queues the first rollup build, once the copy is live.
+
+    answer = _new_source_answer(ds, origin, job)
+    try:
+        await ie.store.put_stream(uploads.upload_key(record, _NEW_SOURCE_HINT), _bytes_of(
+            json.dumps({**answer, "workspaceId": body.workspaceId}).encode("utf-8")))
+    except Exception:                                   # a hint: the data source is the record
+        logger.warning("could not note the new source on upload %s", upload_id, exc_info=True)
+    if not created:
+        response.status_code = 200
+    return answer
+
+
+async def _bytes_of(data: bytes):
+    yield data
 
 
 # ── Import ──────────────────────────────────────────────────────────────────

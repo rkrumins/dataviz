@@ -1237,7 +1237,8 @@ class GraphVersioningService:
                      else ontology_rules.canonical_edge_type(h.type))
             return bool(canon) and canon != h.type
 
-        rows, lane = _plan_squash(heads, main, gone, reread)
+        # Pure CPU over every entity the draft changed (200k at a large publish): off the loop.
+        rows, lane = await asyncio.to_thread(_plan_squash, heads, main, gone, reread)
         # The Python lane: the payload, canonicalized and hashed as the full path does.
         deltas: List[Delta] = []
         if lane:
@@ -1269,10 +1270,7 @@ class GraphVersioningService:
         kind_by_entity = {r.entity_id: r.kind for r in rows}
         kind_by_entity.update({eid: heads[eid].table for eid in lane})
         kind_by_entity.update({eid: "edge" for eid in cascaded})
-        written: Dict[str, Optional[dict]] = {r.entity_id: _head_skeleton(heads[r.entity_id])
-                                              for r in copies}
-        written.update({d.entity_id: d.payload for d in deltas})
-        written = {eid: written[eid] for eid in sorted(written)}
+        written = await asyncio.to_thread(_written_values, copies, heads, deltas)
         prior = await self._skeletons_at(s, gid, main_id, list(written), head_seq)
         strict = graph.ontology_enforcement == "strict"
         known: Optional[Dict[str, Optional[dict]]] = None
@@ -7134,6 +7132,16 @@ def _plan_squash(
         elif live and b.content_hash != h.content_hash:
             rows.append(_SquashRow(eid, h.table, "update", h.version_id, b.content_hash, h.content_hash))
     return rows, lane
+
+
+def _written_values(copies: Sequence["_SquashRow"], heads: Mapping[str, "_Head"],
+                    deltas: Sequence[Delta]) -> Dict[str, Optional[dict]]:
+    """What a narrow squash writes, in entity order as the gates judge it: a copied row's value as
+    its identity columns give it (:func:`_head_skeleton`), a delta's payload."""
+    written: Dict[str, Optional[dict]] = {r.entity_id: _head_skeleton(heads[r.entity_id])
+                                          for r in copies}
+    written.update({d.entity_id: d.payload for d in deltas})
+    return {eid: written[eid] for eid in sorted(written)}
 
 
 def _head_skeleton(h: "_Head") -> dict:

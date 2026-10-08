@@ -9,7 +9,8 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  importPackageData, inspectViewFile, inspectViewPackage, isViewPackage, reconcileViews, ViewTransferError,
+  getPackageUpload, getViewPackage, importPackageData, inspectViewFile, inspectViewPackage, isViewPackage,
+  reconcileViews, ViewTransferError,
   type IdentityMatch, type ImportAction, type InspectResult, type InspectedView, type PackageDataStarted,
   type PackageInspectResult, type PackageProgress, type ReconciledView, type Resolutions, type TargetSuggestion,
   type TransferTarget, type UpdateStrategy,
@@ -29,15 +30,30 @@ export interface ImportTargetView {
   canEdit?: boolean
 }
 
-/** Where a package's data goes: a data source here, and the view the package will update, if any
- *  (the draft is then that view's). */
-export interface PackageDataTarget {
-  workspaceId: string
-  dataSourceId: string
-  viewId?: string | null
-  /** What the new draft is called (the server names it after the package's view otherwise). */
-  draftName?: string | null
-}
+/** Where a package's data goes: into a new draft of a data source here (and the view the package
+ *  will update, if any: the draft is then that view's), or into a brand-new data source of its
+ *  own, an independent full copy on the connection chosen, under the label and graph name given. */
+export type PackageDataTarget =
+  | {
+    kind: 'existing'
+    workspaceId: string
+    dataSourceId: string
+    viewId?: string | null
+    /** What the new draft is called (the server names it after the package's view otherwise). */
+    draftName?: string | null
+  }
+  | {
+    kind: 'new'
+    workspaceId: string
+    providerId: string
+    label: string
+    graphName: string
+    /** Its semantic layer (a draft one too); null for none. */
+    ontologyId: string | null
+  }
+
+export type ExistingDataTarget = Extract<PackageDataTarget, { kind: 'existing' }>
+export type NewDataTarget = Extract<PackageDataTarget, { kind: 'new' }>
 
 /** A package's data on its way into a draft of the target. */
 export interface PackageData {
@@ -60,13 +76,23 @@ const NO_DATA: PackageData = {
 }
 
 export function sameDataTarget(a: PackageDataTarget | null, b: PackageDataTarget | null): boolean {
-  return !!a && !!b && a.workspaceId === b.workspaceId && a.dataSourceId === b.dataSourceId
-    && (a.viewId ?? null) === (b.viewId ?? null)
+  if (!a || !b || a.workspaceId !== b.workspaceId) return false
+  if (a.kind === 'existing' && b.kind === 'existing') {
+    return a.dataSourceId === b.dataSourceId && (a.viewId ?? null) === (b.viewId ?? null)
+  }
+  if (a.kind === 'new' && b.kind === 'new') {
+    return a.providerId === b.providerId && a.label === b.label && a.graphName === b.graphName
+      && a.ontologyId === b.ontologyId
+  }
+  return false
 }
 
 export interface ImportSession {
   fileName: string | null
   fileSize: number
+  /** The file as this browser knows it (name, size, modification time), or the upload it was read
+   *  from: what is remembered for it, across a reload, is kept under this. */
+  fileKey: string | null
   inspect: InspectResult | null
   inspecting: boolean
   /** While a package is read: how much of it is up, then how far its check has got. */
@@ -117,8 +143,9 @@ export interface ImportSession {
   setWithData: (withData: boolean) => void
   data: PackageData
   /** Bring the package's data into a new draft of `target`. Each target gets a draft of its own
-   *  (asking again for one answers with its job), until the upload expires. */
-  startData: (target: PackageDataTarget) => Promise<void>
+   *  (asking again for one answers with its job), until the upload expires. (A new data source is
+   *  created and followed by the Data step itself: NewSourceSeedStep.) */
+  startData: (target: ExistingDataTarget) => Promise<void>
 }
 
 const ImportSessionContext = createContext<ImportSession | null>(null)
@@ -151,13 +178,22 @@ function defaultChoice(
   return editable ? { action: 'update', target: targetFromMatch(editable) } : { action: 'create', target: null }
 }
 
-export function useImportSessionState(opts: { file?: File | null; intoViewId?: string | null }): ImportSession {
+const fileKeyOf = (file: File) => `${file.name}:${file.size}:${file.lastModified}`
+
+export function useImportSessionState(opts: {
+  file?: File | null
+  intoViewId?: string | null
+  /** A package already uploaded, read again from there (no file): "Finish importing views". */
+  uploadId?: string | null
+}): ImportSession {
   const intoViewId = opts.intoViewId ?? null
   // A file handed in by the opener (dropped on the Explorer) is being read from the first render.
   const [fileName, setFileName] = useState<string | null>(() => opts.file?.name ?? null)
   const [fileSize, setFileSize] = useState(() => opts.file?.size ?? 0)
+  const [fileKey, setFileKey] = useState<string | null>(() => (opts.file ? fileKeyOf(opts.file)
+    : opts.uploadId ? `upload:${opts.uploadId}` : null))
   const [inspect, setInspect] = useState<InspectResult | null>(null)
-  const [inspecting, setInspecting] = useState(() => !!opts.file)
+  const [inspecting, setInspecting] = useState(() => !!opts.file || !!opts.uploadId)
   const [inspectProgress, setInspectProgress] = useState<PackageProgress | null>(null)
   const [inspectError, setInspectError] = useState<ImportSession['inspectError']>(null)
   const [viewIndex, setViewIndexState] = useState(0)
@@ -181,6 +217,8 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
   const inspectRun = useRef<AbortController | null>(null)
   // The opener's file (dropped on the Explorer), until another is chosen.
   const initialFile = useRef(opts.file ?? null)
+  // Or the opener's upload, read again from the server.
+  const initialUpload = useRef(opts.file ? null : opts.uploadId ?? null)
   // The data import being followed, stopped when the file changes or the journey closes.
   const dataRun = useRef<AbortController | null>(null)
   const withData = pkg !== null && dataChoice
@@ -216,6 +254,18 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     setDraft({})
   }, [intoViewId])
 
+  /** What the server read in a file becomes the session's. */
+  const adopt = useCallback(async (result: InspectResult, packaged: boolean) => {
+    setInspect(result)
+    setPkg(packaged ? { uploadId: (result as PackageInspectResult).uploadId, info: (result as PackageInspectResult).package } : null)
+    setDataChoice(true)
+    setViewIndexState(0)
+    // Several views, and not opened to update one of them: importing them all is the likely aim.
+    // A package's data goes into one draft with one view, so it brings one of its views.
+    setBatch(!packaged && result.views.length > 1 && !intoViewId)
+    await applyDefaults(result, 0)
+  }, [applyDefaults, intoViewId])
+
   /** Ask the server what's in the file. State changes only once it answers, and only if no later
    *  file was loaded meanwhile. */
   const inspectFile = useCallback(async (file: File, seq: number) => {
@@ -232,14 +282,7 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
         })
         : await inspectViewFile(file)
       if (seq !== inspectSeq.current) return
-      setInspect(result)
-      setPkg(packaged ? { uploadId: (result as PackageInspectResult).uploadId, info: (result as PackageInspectResult).package } : null)
-      setDataChoice(true)
-      setViewIndexState(0)
-      // Several views, and not opened to update one of them: importing them all is the likely aim.
-      // A package's data goes into one draft with one view, so it brings one of its views.
-      setBatch(!packaged && result.views.length > 1 && !intoViewId)
-      await applyDefaults(result, 0)
+      await adopt(result, packaged)
     } catch (err) {
       if (seq !== inspectSeq.current) return
       setInspectError({
@@ -252,7 +295,26 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
         setInspectProgress(null)
       }
     }
-  }, [applyDefaults, intoViewId])
+  }, [adopt])
+
+  /** A package already uploaded and checked, read again from its upload: nothing is sent. */
+  const inspectUpload = useCallback(async (uploadId: string, seq: number) => {
+    try {
+      const [upload, result] = await Promise.all([getPackageUpload(uploadId), getViewPackage(uploadId)])
+      if (seq !== inspectSeq.current) return
+      setFileName(upload.fileName)
+      setFileSize(upload.size)
+      await adopt(result, true)
+    } catch (err) {
+      if (seq !== inspectSeq.current) return
+      setInspectError({
+        message: err instanceof Error ? err.message : "The package couldn't be read.",
+        code: err instanceof ViewTransferError ? err.code : undefined,
+      })
+    } finally {
+      if (seq === inspectSeq.current) setInspecting(false)
+    }
+  }, [adopt])
 
   const forgetData = useCallback(() => {
     dataRun.current?.abort()
@@ -263,9 +325,11 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
 
   const loadFile = useCallback(async (file: File) => {
     initialFile.current = null
+    initialUpload.current = null
     const seq = ++inspectSeq.current
     setFileName(file.name)
     setFileSize(file.size)
+    setFileKey(fileKeyOf(file))
     setInspecting(true)
     setInspectProgress(null)
     setInspectError(null)
@@ -277,10 +341,12 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
 
   const clearFile = useCallback(() => {
     initialFile.current = null
+    initialUpload.current = null
     inspectSeq.current += 1
     inspectRun.current?.abort()
     setFileName(null)
     setFileSize(0)
+    setFileKey(null)
     setInspect(null)
     setInspectError(null)
     setInspecting(false)
@@ -299,14 +365,15 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     invalidateReconcile()
   }, [inspect, intoViewId, invalidateReconcile])
 
-  const startData = useCallback(async (target: PackageDataTarget) => {
+  const startData = useCallback(async (target: ExistingDataTarget) => {
     if (!pkg) return
     dataRun.current?.abort()
     const run = new AbortController()
     dataRun.current = run
     setData({ ...NO_DATA, target, running: true })
     try {
-      const started = await importPackageData(pkg.uploadId, target)
+      const { workspaceId, dataSourceId, viewId, draftName } = target
+      const started = await importPackageData(pkg.uploadId, { workspaceId, dataSourceId, viewId, draftName })
       if (run.signal.aborted) return
       setData(d => ({ ...d, started }))
       const job = await pollJob(() => getImport(started.workspaceId, started.graphId, started.jobId), {
@@ -387,14 +454,15 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
   useEffect(() => {
     const file = initialFile.current
     if (file) void inspectFile(file, ++inspectSeq.current)
+    else if (initialUpload.current) void inspectUpload(initialUpload.current, ++inspectSeq.current)
     return () => inspectRun.current?.abort()
-  }, [inspectFile])
+  }, [inspectFile, inspectUpload])
 
   // Closing the journey stops following a data import (the import itself carries on).
   useEffect(() => () => dataRun.current?.abort(), [])
 
   return useMemo<ImportSession>(() => ({
-    fileName, fileSize, inspect, inspecting, inspectProgress, inspectError, loadFile, clearFile,
+    fileName, fileSize, fileKey, inspect, inspecting, inspectProgress, inspectError, loadFile, clearFile,
     batch, setBatch, viewIndex, setViewIndex, view, matches, suggestions,
     action, targetView, choose, strategy, setStrategy, resolutions, draft, setDraft,
     reconcile, reconciling, reconcileError, runReconcile, invalidateReconcile,
@@ -402,7 +470,7 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     pkg, withData, setWithData, data, startData,
   }), [
     batch,
-    fileName, fileSize, inspect, inspecting, inspectProgress, inspectError, loadFile, clearFile,
+    fileName, fileSize, fileKey, inspect, inspecting, inspectProgress, inspectError, loadFile, clearFile,
     viewIndex, setViewIndex, view, matches, suggestions,
     action, targetView, choose, strategy, setStrategy, resolutions, draft,
     reconcile, reconciling, reconcileError, runReconcile, invalidateReconcile,

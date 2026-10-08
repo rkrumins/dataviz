@@ -33,6 +33,7 @@ import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
+import { FinishImportingViewsBanner } from '@/features/view-transfer/FinishImportingViewsBanner'
 import { DataSourceActionMenu } from './DataSourceActionMenu'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
@@ -388,6 +389,7 @@ export function DataSourceDetailPanel({
                         {/* Per-source vocabulary-alignment drift (Task E) — own component,
                             no overlap with the header chips. */}
                         {!editing && <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />}
+                        {!editing && <FinishImportingViewsBanner wsId={wsId} dataSourceId={ds.id} viewCount={views.length} />}
 
                         {/* ── Tab Bar ────────────────────────────────────── */}
                         {!editing && (

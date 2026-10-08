@@ -62,12 +62,19 @@ to the copy that was kept, and the discarded copy is deleted.
 is simply un-versioned, and abandoning the job leaves it as it was — with one exception the
 decision states up front: copies a collapse has already deleted from the source graph are not
 restored.
+
+**A new data source seeded from a view package** is this same job with ``summary.origin =
+'package'`` (``package_seed``): the source is the package's data instead of a FalkorDB graph, and
+its target is a brand-new, empty key, so the copy is projected into it (``index``, ``project``)
+rather than backfilled. ``reset``, ``heads``, ``merkle`` and ``finalize`` are shared.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import csv
+import functools
 import inspect
 import io
 import json
@@ -80,7 +87,6 @@ from hashlib import blake2b
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import func, select, text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from . import config, db, job_lease
@@ -94,7 +100,6 @@ from .models import (
     BootstrapNodeORM,
     BranchORM,
     CommitORM,
-    EdgeVersionORM,
     GraphORM,
     JobORM,
     NodeVersionORM,
@@ -107,7 +112,6 @@ from .service import (
     ConcurrencyError,
     GraphVersioningService,
     _chunks,
-    _rows_per_insert,
     _sanitize_node_properties,
 )
 
@@ -135,11 +139,18 @@ BOOTSTRAP_JOB_TYPE = "bootstrap"
 # starts at `counting`, with nothing to throw away.
 PHASES = ("reset", "counting", "nodes", "edges", "validate", "heads", "merkle", "backfill",
           "finalize")
+# A package seed (``package_seed``) writes a brand-new key instead of backfilling a source graph:
+# its urn indexes are made (and waited for) first, then the copy is projected into it — all before
+# `finalize` flips the head, so the source goes live with its graph in place.
+PACKAGE_PHASES = ("reset", "counting", "nodes", "edges", "validate", "heads", "merkle", "index",
+                  "project", "finalize")
+_PHASES_BY_ORIGIN = {"graph": PHASES, "package": PACKAGE_PHASES}
 
 # Percent shown to the user. Scanning dominates the wall clock, so it owns the bulk
 # of the bar; the tail phases are bounded work with honest, distinct labels.
 _PHASE_FLOOR = {"reset": 0, "counting": 0, "nodes": 2, "edges": 2, "validate": 72,
-                "heads": 76, "merkle": 88, "backfill": 92, "finalize": 98}
+                "heads": 76, "merkle": 88, "backfill": 92, "index": 89, "project": 90,
+                "finalize": 98}
 _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
 
 # What a restart throws away before re-reading the source: the import commit's version rows
@@ -351,6 +362,65 @@ def _vid(prefix: str, commit_id: str, entity_id: str) -> str:
     return prefix + blake2b(f"{commit_id}:{entity_id}".encode(), digest_size=12).hexdigest()
 
 
+# One INSERT per window — a graph's copy and a package seed's alike: the rows as typed columns,
+# unnested server-side. A multi-row VALUES of the same rows is ~2,000 rows per statement (the
+# bind-parameter cap) and SQLAlchemy compiles each on the event loop — measured at 5.7 s of loop
+# per 20,000-row window, every other job on the worker waiting it out. Here the statement is one
+# constant string and the columns are built off the loop.
+_VERSION_COLUMNS = {
+    "nodes": (("id", "text"), ("entity_id", "text"), ("content_hash", "text"),
+              ("payload", "text"), ("urn", "text"), ("entity_type", "text"),
+              ("display_name", "text"), ("qualified_name", "text")),
+    "edges": (("id", "text"), ("entity_id", "text"), ("content_hash", "text"),
+              ("payload", "text"), ("source_entity_id", "text"), ("target_entity_id", "text"),
+              ("edge_type", "text"), ("confidence", "float8"), ("discriminator", "text")),
+}
+
+
+def _versions_insert_sql(kind: str):
+    cols = _VERSION_COLUMNS[kind]
+    names = [c for c, _type in cols]
+    picked = ", ".join(f"CAST(v.{c} AS jsonb)" if c == "payload" else f"v.{c}" for c in names)
+    arrays = ", ".join(f"CAST(:{c} AS {t}[])" for c, t in cols)
+    table = "node_versions" if kind == "nodes" else "edge_versions"
+    return text(
+        f'INSERT INTO {_t(table)} (graph_id, commit_id, commit_seq, branch_id, op, '
+        f"prev_content_hash, actor, created_at, {', '.join(names)}) "
+        f"SELECT :graph_id, :commit_id, :commit_seq, :branch_id, 'create', NULL, :actor, "
+        f":created_at, {picked} FROM unnest({arrays}) AS v({', '.join(names)}) "
+        "ON CONFLICT (graph_id, id) DO NOTHING RETURNING entity_id")
+
+
+def _version_columns(kind: str, dicts: List[dict]) -> Dict[str, list]:
+    """The rows as one list per column, payloads as JSON text (cast to jsonb by the statement)."""
+    return {c: [json.dumps(d[c]) if c == "payload" else d[c] for d in dicts]
+            for c, _type in _VERSION_COLUMNS[kind]}
+
+
+async def _insert_versions(s, kind: str, ctx, graph_id: str, dicts: List[dict]) -> Set[str]:
+    """Insert a window's version rows (``kind`` ``nodes``|``edges``; every row of the import
+    commit, made in one window), skipping any whose id is stored already; the entity ids that
+    landed."""
+    if not dicts:
+        return set()
+    columns = await asyncio.to_thread(_version_columns, kind, dicts)
+    res = await s.execute(_versions_insert_sql(kind), {
+        "graph_id": graph_id, "commit_id": ctx.commit_id, "commit_seq": ctx.commit_seq,
+        "branch_id": ctx.main_id, "actor": ctx.actor, "created_at": dicts[0]["created_at"],
+        **columns})
+    return set(res.scalars().all())
+
+
+def _readable(props: dict) -> dict:
+    """A source node's properties as the node model takes them: a ``lastSyncedAt`` some loader
+    stored as a bare epoch number, as its text. The model takes a string and the reader drops a
+    node it cannot build, but the pre-flight ranked that copy by its time — and may keep it."""
+    synced = props.get("lastSyncedAt")
+    if synced is not None and not isinstance(synced, str):
+        props["lastSyncedAt"] = str(synced)
+    return props
+
+
 def _label_of(labels) -> Optional[str]:
     for lab in labels or []:
         if lab != "_GVRollupMeta":
@@ -389,6 +459,9 @@ class _RunContext:
     rules: Any = None
     rules_loaded: bool = False
     dupe_indexes_ready: bool = False
+    # A package seed's open data stream and the projection's level map (``package_seed``).
+    stream: Any = None
+    level_map: Optional[Dict[str, int]] = None
 
 
 @dataclass
@@ -408,7 +481,7 @@ class BootstrapRunner:
     bootstrap lane, on the job lease (``job_lease``)."""
 
     def __init__(self, graph_factory, *, session_factory=None, consumer: str = "boot-1",
-                 on_rollups_stale=None):
+                 on_rollups_stale=None, projector=None, store=None):
         self._factory = graph_factory
         self._session = session_factory or db.graphver_session
         self._consumer = consumer
@@ -419,6 +492,16 @@ class BootstrapRunner:
         # deleted nodes they were computed over.
         self._on_rollups_stale = on_rollups_stale
         self._contexts: Dict[Tuple[str, int], _RunContext] = {}
+        # A package seed projects its copy into its new key (``FalkorProjector._apply``) and reads
+        # the package from the object store (the configured one unless given).
+        self._projector = projector
+        self._store = store
+
+    def _object_store(self):
+        if self._store is None:
+            from backend.app.services.storage.object_store import get_object_store
+            self._store = get_object_store()
+        return self._store
 
     # ---------------------------------------------------------------- infra --
     async def _client(self, ctx):
@@ -485,7 +568,8 @@ class BootstrapRunner:
                         raise Superseded("the job was abandoned or taken over")
                     phase, cursor = job.current_phase or "counting", job.last_cursor
                     graph_id = job.graph_id
-                runner = getattr(self, f"_phase_{phase}")
+                    origin = (job.summary or {}).get("origin") or "graph"
+                runner = self._phase_runner(phase, origin)
                 done = await self._run_phase(lease, runner, graph_id, phase)
                 if done == _PAUSED:
                     # The pre-flight already put the job back to pending, waiting for a person —
@@ -495,7 +579,7 @@ class BootstrapRunner:
                     return {"job_id": job_id, "status": "paused"}
                 if not done:
                     continue                                   # same phase, next window
-                nxt = _next_phase(phase)
+                nxt = _next_phase(phase, origin)
                 if nxt is None:
                     if not await lease.finish("completed", current_phase=None, progress=100):
                         raise Superseded("the job was abandoned or taken over")
@@ -521,14 +605,27 @@ class BootstrapRunner:
                 raise
             return {"job_id": job_id, "status": "released"}
         except BootstrapFailure as exc:
-            await self._fail(lease, exc.reason, exc.code)
+            await self._fail(lease, exc.reason, exc.code, exc.action)
             return {"job_id": job_id, "status": "failed", "error": exc.reason}
         except Exception as exc:                                   # pragma: no cover - infra
             logger.exception("bootstrap %s crashed", job_id)
             await self._fail(lease, _friendly_infra_error(exc), "infrastructure")
             return {"job_id": job_id, "status": "failed"}
         finally:
-            self._contexts.pop((job_id, lease.epoch), None)
+            ctx = self._contexts.pop((job_id, lease.epoch), None)
+            if getattr(ctx, "stream", None) is not None:
+                # A package seed's stream holds a spooled copy of the upload until it is closed.
+                with contextlib.suppress(Exception):
+                    await ctx.stream.aclose()
+
+    def _phase_runner(self, phase: str, origin: str):
+        """``phase``'s runner for a job of ``origin``: a package seed's own phases are
+        ``package_seed``'s, the shared ones (reset, heads, merkle, finalize) this runner's."""
+        if origin == "package":
+            from . import package_seed
+            if phase in package_seed.OWN_PHASES:
+                return functools.partial(getattr(package_seed, f"phase_{phase}"), self)
+        return getattr(self, f"_phase_{phase}")
 
     async def _run_phase(self, lease: Lease, runner, graph_id: str, phase: str) -> bool:
         """Run one unit of a phase, waiting out transient infrastructure faults.
@@ -575,11 +672,12 @@ class BootstrapRunner:
         except Exception:                                    # pragma: no cover - infra
             logger.debug("bootstrap %s: could not record the interruption", lease.job_id)
 
-    async def _fail(self, lease: Lease, reason: str, code: str) -> None:
+    async def _fail(self, lease: Lease, reason: str, code: str,
+                    action: Optional[str] = None) -> None:
         """Fail the job, fenced, recording ``summary.failure = {code, action, phase, reason}``:
-        the action is what the UI offers (``_FAILURE_ACTIONS``). A job that is no longer ours is
-        its owner's to record."""
-        if not await lease.fail(reason, code, _FAILURE_ACTIONS.get(code)):
+        the action is what the UI offers (``action``, else ``_FAILURE_ACTIONS`` by code). A job
+        that is no longer ours is its owner's to record."""
+        if not await lease.fail(reason, code, action or _FAILURE_ACTIONS.get(code)):
             logger.info("bootstrap %s: not failed — it is no longer this worker's", lease.job_id)
             return
         async with self._session() as s:
@@ -656,14 +754,14 @@ class BootstrapRunner:
         rows, width = await self._scan(client, "preflight", lo, width)
         hi = lo + width
         edges, hidden_edges = await self._preflight_edges(client, lo, hi)
-        records, nodes, hidden_nodes = await asyncio.to_thread(_preflight_rows, rows, graph_id)
+        records, nodes, hidden_nodes = await asyncio.to_thread(_preflight_columns, rows, graph_id)
         async with self._session() as s:
             await s.execute(text(
                 f'DELETE FROM {_t("bootstrap_nodes")} '
                 "WHERE graph_id = :g AND falkor_id >= :lo AND falkor_id < :hi"
             ).bindparams(g=graph_id, lo=lo, hi=hi))
-            for batch in _chunks(records, _rows_per_insert(records)):
-                await s.execute(pg_insert(BootstrapNodeORM).values(batch))
+            if records:
+                await s.execute(_bootstrap_nodes_insert_sql(), {"g": graph_id, **records})
             job = await s.get(JobORM, lease.job_id)
             summary = dict(job.summary or {})
             src = dict(summary.get("source") or {})
@@ -689,6 +787,7 @@ class BootstrapRunner:
         THIS fingerprint, the job pauses (``awaiting_decision``, pending, no cursor) and holds no
         slot until someone decides; with a matching decision — a re-check that found the same
         list — it carries on."""
+        await self._analyze_bootstrap_nodes(lease)
         async with self._session() as s:
             # A source that shrank since an earlier read of it leaves rows past its new end.
             await s.execute(text(
@@ -713,6 +812,18 @@ class BootstrapRunner:
                     f"cop(ies) — {'waiting for a decision' if pause else 'collapsing, as decided'}"
                     if dup else "")
         return _PAUSED if pause else True
+
+    async def _analyze_bootstrap_nodes(self, lease: Lease) -> None:
+        """Refresh the planner's statistics of ``bootstrap_nodes`` once the pre-flight has filled
+        it: until autovacuum gets there they describe the table without this graph's rows, and
+        every query of them — the ranking, the summary, the losers each window skips — is planned
+        for a handful. Best effort (it needs the table's owner)."""
+        try:
+            async with self._session() as s:
+                await s.execute(text(f'ANALYZE {_t("bootstrap_nodes")}'))
+                await s.commit()
+        except Exception as exc:                                 # noqa: BLE001 — best effort
+            logger.warning("bootstrap %s: could not refresh statistics: %s", lease.job_id, exc)
 
     async def _preflight_edges(self, client, lo: int, hi: int) -> Tuple[int, int]:
         """The window's edges: (visible — both ends carry a urn, hidden)."""
@@ -780,7 +891,6 @@ class BootstrapRunner:
             live = await self._known_nodes(graph_id, ctx.commit_id, endpoint_urns)
             win = await asyncio.to_thread(self._edges_to_rows, rows, ctx, graph_id, rules, live)
 
-        model = NodeVersionORM if kind == "nodes" else EdgeVersionORM
         async with self._session() as s:
             rekeyed = await self._rekey_edge_collisions(s, graph_id, ctx, win.dicts) \
                 if kind == "edges" else 0
@@ -791,12 +901,7 @@ class BootstrapRunner:
             # duplicate. (Rows and cursor commit together, and only from the cursor this window
             # started at, so a resume never re-scans a window that landed — a conflict here really
             # is a duplicate.)
-            landed: Set[str] = set()
-            for batch in _chunks(win.dicts, _rows_per_insert(win.dicts)):
-                res = await s.execute(
-                    pg_insert(model).values(batch).on_conflict_do_nothing(
-                        index_elements=["graph_id", "id"]).returning(model.entity_id))
-                landed.update(res.scalars().all())
+            landed = await _insert_versions(s, kind, ctx, graph_id, win.dicts)
             job = await s.get(JobORM, lease.job_id)
             summary = dict(job.summary or {})
             written: Dict[str, int] = {}
@@ -1079,6 +1184,11 @@ class BootstrapRunner:
         A duplicate collapse, though, deleted nodes from that graph, and the rollups were
         computed over them: their rebuild is queued once the head has flipped (again on a
         replay of this phase — queueing a rebuild twice is harmless, missing it is not).
+
+        A package seed's key holds the copy too — its ``project`` phase wrote it and proved the
+        counts — so it is fast-forwarded the same way; then what a publish runs after a full
+        projection runs for it (the rollups are built for the first time, the readers' caches
+        and ontology alias map refreshed: ``FalkorProjector.run_publish_hooks``), best effort.
         """
         async with self._session() as s:
             job = await s.get(JobORM, lease.job_id)
@@ -1111,6 +1221,12 @@ class BootstrapRunner:
                 await self._on_rollups_stale(graph_id)
             except Exception:                                  # pragma: no cover - best effort
                 logger.exception("bootstrap %s: queueing the rollup rebuild failed", lease.job_id)
+        if summary.get("origin") == "package" and self._projector is not None:
+            try:
+                await self._projector.run_publish_hooks(graph_id, full_seed=True,
+                                                        rollups_stale=True)
+            except Exception:                                  # pragma: no cover - best effort
+                logger.exception("bootstrap %s: the publish hooks failed", lease.job_id)
         return True
 
     async def _phase_backfill(self, lease: Lease, graph_id: str) -> bool:
@@ -1417,7 +1533,7 @@ class BootstrapRunner:
                       rejects={"duplicateUrns": 0, "byLabel": {}, "samples": []})
         seen: set = set()
         for fid, labels, props in rows:
-            props = dict(props or {})
+            props = _readable(dict(props or {}))
             label = _label_of(labels)
             node = _node_from_props(props, label)
             if node is None or not node.urn:
@@ -1558,7 +1674,7 @@ class BootstrapRunner:
         by_id: Dict[int, Tuple[str, str]] = {}
         by_urn: Dict[str, str] = {}
         for nid, labels, props in rows:
-            node = _node_from_props(dict(props or {}), _label_of(labels))
+            node = _node_from_props(_readable(dict(props or {})), _label_of(labels))
             if node is None or not node.urn:
                 continue
             row = {"kind": "node", **node.model_dump(by_alias=True, exclude_none=True)}
@@ -1611,7 +1727,10 @@ class BootstrapRunner:
 async def create_bootstrap_job(
     *, data_source_id: str, workspace_id: str, actor: str,
     falkor_graph_name: Optional[str] = None, falkor_provider: Optional[str] = None,
-    kind: str = "manual",
+    kind: str = "manual", base_ontology_id: Optional[str] = None,
+    ontology_enforcement: Optional[str] = None, origin: str = "graph",
+    payload_uri: Optional[str] = None, upload_id: Optional[str] = None,
+    package: Optional[Dict[str, Any]] = None, coverage: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, object]:
     """Enqueue "enable version control" for a data source. Idempotent.
 
@@ -1630,9 +1749,21 @@ async def create_bootstrap_job(
     graph and one job — the loser of the ``uq_graphs_data_source`` race returns the winner's.
     While an abandoned attempt's graph is still being purged there is nothing to enable yet:
     :class:`BootstrapConflict` ``cleanup_in_progress``.
+
+    ``origin='package'`` seeds a NEW data source from the view package upload ``upload_id``
+    instead (``package_seed``): its data is read from ``payload_uri`` (the upload's record) into
+    a graph bound to ``base_ontology_id`` with ``ontology_enforcement``, projected into the new
+    key ``falkor_graph_name`` — which the job claims only once it has found it empty, so the graph
+    starts as not ours. ``package`` describes the package (``summary.package``, with
+    ``uploadId``) and ``coverage`` how much of its types the ontology declares. Asking again for
+    the same upload returns its job; a data source with any other job is
+    :class:`BootstrapConflict` ``ds_has_other_job``.
     """
     args = dict(data_source_id=data_source_id, workspace_id=workspace_id, actor=actor,
-                falkor_graph_name=falkor_graph_name, falkor_provider=falkor_provider, kind=kind)
+                falkor_graph_name=falkor_graph_name, falkor_provider=falkor_provider, kind=kind,
+                base_ontology_id=base_ontology_id, ontology_enforcement=ontology_enforcement,
+                origin=origin, payload_uri=payload_uri, upload_id=upload_id, package=package,
+                coverage=coverage)
     try:
         return await _enqueue_bootstrap(**args)
     except IntegrityError:
@@ -1643,7 +1774,12 @@ async def create_bootstrap_job(
 
 async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: str,
                              falkor_graph_name: Optional[str], falkor_provider: Optional[str],
-                             kind: str) -> Dict[str, object]:
+                             kind: str, base_ontology_id: Optional[str],
+                             ontology_enforcement: Optional[str], origin: str,
+                             payload_uri: Optional[str], upload_id: Optional[str],
+                             package: Optional[Dict[str, Any]],
+                             coverage: Optional[Dict[str, Any]]) -> Dict[str, object]:
+    seed = origin == "package"
     async with db.graphver_session() as s:
         graph = (await s.execute(select(GraphORM).where(
             GraphORM.data_source_id == data_source_id))).scalars().first()
@@ -1653,6 +1789,19 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
                 raise BootstrapConflict(
                     "cleanup_in_progress",
                     "The previous attempt is still being cleaned up. Try again in a few minutes.")
+            if seed:
+                # Only this package's own seed may be found here — asked for again.
+                job = (await s.execute(select(JobORM).where(
+                    JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.graph_id == graph.id,
+                ).order_by(JobORM.created_at.desc()))).scalars().first()
+                summary = (job.summary or {}) if job is not None else {}
+                if summary.get("origin") != "package" or \
+                        (summary.get("package") or {}).get("uploadId") != upload_id:
+                    raise BootstrapConflict(
+                        "ds_has_other_job",
+                        "This data source already has a version history of its own.")
+                return {"graph_id": graph.id, "job_id": job.id, "status": _api_status(job),
+                        "failure": summary.get("failure") if job.status == "failed" else None}
             if graph.kind == "blank":
                 raise ValueError("blank models start empty by design; there is nothing to import")
             if graph.main_head_commit_seq > 1:
@@ -1670,7 +1819,8 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
             res = await GraphVersioningService().create_graph(
                 data_source_id=data_source_id, workspace_id=workspace_id, kind=kind,
                 actor=actor, falkor_graph_name=falkor_graph_name,
-                falkor_provider=falkor_provider, session=s)
+                falkor_provider=falkor_provider, base_ontology_id=base_ontology_id,
+                ontology_enforcement=ontology_enforcement, session=s)
             gid, main_id = res["graph_id"], res["main_branch_id"]
 
         await s.flush()                                   # create_graph's rows are still pending
@@ -1678,7 +1828,14 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
         if ps is not None:
             ps.projected_commit_seq = 1                   # see docstring — never project mid-bootstrap
             ps.target_commit_seq = 1
-        commit = await _ensure_import_commit(s, gid, main_id, actor)
+        commit = await _ensure_import_commit(
+            s, gid, main_id, actor,
+            message="seed from view package" if seed else "enable version control")
+        summary: Dict[str, Any] = {"actor": actor}
+        if seed:
+            summary.update(origin="package", package={**(package or {}), "uploadId": upload_id},
+                           ontology={"id": base_ontology_id, "enforcement": ontology_enforcement,
+                                     "coverage": coverage})
         job = JobORM(
             job_type=BOOTSTRAP_JOB_TYPE, graph_id=gid, workspace_id=workspace_id,
             data_source_id=data_source_id, branch_id=main_id, status="pending",
@@ -1686,7 +1843,7 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
             provider_id=falkor_provider,
             current_phase="counting", idempotency_key=f"bootstrap:{gid}",
             batch_size=config.BOOTSTRAP_SCAN_WIDTH, target_commit_id=commit.id,
-            summary={"actor": actor},
+            payload_uri=payload_uri, summary=summary,
         )
         s.add(job)
         await s.flush()
@@ -1936,7 +2093,10 @@ async def abandon_bootstrap(
     returns the purge already queued — or, if it failed, queues it again.
 
     ``workspace_id`` scopes the job for tenant isolation — this call DELETES a graph, so it
-    must never act on another tenant's data source id."""
+    must never act on another tenant's data source id.
+
+    A package seed's answer carries ``origin: 'package'``: its data source was made for the seed
+    and goes with it (the API removes it)."""
     async with db.graphver_session() as s:
         conds = [JobORM.job_type == BOOTSTRAP_JOB_TYPE,
                  JobORM.data_source_id == data_source_id]
@@ -1957,10 +2117,14 @@ async def abandon_bootstrap(
             data_source_id=job.data_source_id, session=s)
         logger.info("bootstrap %s abandoned; graph %s queued for purge (%s)",
                     job.id, job.graph_id, purge_id)
-        return {"jobId": job.id, "status": "cancelled", "purgeJobId": purge_id}
+        out = {"jobId": job.id, "status": "cancelled", "purgeJobId": purge_id}
+        if (job.summary or {}).get("origin") == "package":
+            out["origin"] = "package"           # the data source was made for it: the API drops it
+        return out
 
 
-async def _ensure_import_commit(s, graph_id: str, main_id: str, actor: str) -> CommitORM:
+async def _ensure_import_commit(s, graph_id: str, main_id: str, actor: str,
+                                message: str = "enable version control") -> CommitORM:
     """The seq-2 ``import`` commit the windows write into. Created up front (head stays
     at genesis) so every version row has its commit, and idempotent on re-enqueue."""
     commit = (await s.execute(select(CommitORM).where(
@@ -1973,7 +2137,7 @@ async def _ensure_import_commit(s, graph_id: str, main_id: str, actor: str) -> C
     commit = CommitORM(
         graph_id=graph_id, branch_id=main_id, commit_seq=2,
         parent_commit_id=branch.head_commit_id, kind="import",
-        message="enable version control", actor=actor,
+        message=message, actor=actor,
         idempotency_key=f"bootstrap:{graph_id}",
     )
     s.add(commit)
@@ -1990,11 +2154,12 @@ async def _main_branch(s, graph_id: str) -> str:
 # Errors + helpers                                                             #
 # --------------------------------------------------------------------------- #
 class BootstrapFailure(Exception):
-    """A job failed for a reason we can explain to the user in plain language."""
+    """A job failed for a reason we can explain to the user in plain language. ``action`` is what
+    the user can do about it, when its code alone doesn't say (``_FAILURE_ACTIONS``)."""
 
-    def __init__(self, reason: str, code: str = "integrity"):
+    def __init__(self, reason: str, code: str = "integrity", action: Optional[str] = None):
         super().__init__(reason)
-        self.reason, self.code = reason, code
+        self.reason, self.code, self.action = reason, code, action
 
 
 class BootstrapConflict(Exception):
@@ -2251,6 +2416,24 @@ def _fresh_tallies(max_id: Optional[int]) -> dict:
     }
 
 
+def _bootstrap_nodes_insert_sql():
+    """A pre-flight window's ``bootstrap_nodes`` rows (:func:`_preflight_columns`), unnested."""
+    return text(
+        f'INSERT INTO {_t("bootstrap_nodes")} (graph_id, falkor_id, urn, label, last_synced_at) '
+        "SELECT :g, v.falkor_id, v.urn, v.label, v.last_synced_at FROM unnest("
+        "CAST(:falkor_id AS bigint[]), CAST(:urn AS text[]), CAST(:label AS text[]), "
+        "CAST(:last_synced_at AS timestamptz[])) AS v(falkor_id, urn, label, last_synced_at)")
+
+
+def _preflight_columns(rows, graph_id: str) -> Tuple[Dict[str, list], int, int]:
+    """:func:`_preflight_rows` as the columns of one typed ``unnest`` INSERT (its rows' keys, one
+    list each; empty when the window holds no visible node) — the pre-flight's one statement per
+    window, compiled once instead of a multi-row VALUES per few thousand rows on the loop."""
+    records, visible, invisible = _preflight_rows(rows, graph_id)
+    columns = {c: [r[c] for r in records] for c in ("falkor_id", "urn", "label", "last_synced_at")}
+    return (columns if records else {}), visible, invisible
+
+
 def _preflight_rows(rows, graph_id: str) -> Tuple[List[dict], int, int]:
     """A pre-flight window's ``bootstrap_nodes`` rows, and its (visible, invisible) node counts.
     Derived bookkeeping nodes are neither."""
@@ -2300,13 +2483,20 @@ def _normalize_synced_at(value) -> Optional[datetime]:
 
 
 def _rank_duplicates_sql():
-    """Rank the copies of every urn the source holds more than once — and only those."""
+    """Rank the copies of every urn the source holds more than once — and only those.
+
+    One scan of the graph's rows with two windows over it, computed ONCE (``MATERIALIZED``), then
+    the ranked copies updated by primary key. Not a join of the rows to their own duplicated urns:
+    planned on statistics that had not seen the rows the pre-flight just wrote (an estimate of
+    one row), that join became a nested loop re-running the ranking once per row — at 100k nodes it
+    did not finish in five minutes, where this takes milliseconds."""
     t = _t("bootstrap_nodes")
     return text(
-        f"WITH d AS (SELECT urn FROM {t} WHERE graph_id = :g GROUP BY urn HAVING count(*) > 1), "
-        "r AS (SELECT b.falkor_id, row_number() OVER (PARTITION BY b.urn "
-        "      ORDER BY b.last_synced_at DESC NULLS LAST, b.falkor_id) AS rank "
-        f"     FROM {t} b JOIN d ON d.urn = b.urn WHERE b.graph_id = :g) "
+        "WITH r AS MATERIALIZED (SELECT falkor_id, rank FROM ("
+        "  SELECT falkor_id, count(*) OVER (PARTITION BY urn) AS copies, "
+        "         row_number() OVER (PARTITION BY urn "
+        "                            ORDER BY last_synced_at DESC NULLS LAST, falkor_id) AS rank "
+        f"  FROM {t} WHERE graph_id = :g) k WHERE copies > 1) "
         f"UPDATE {t} x SET copy_rank = r.rank FROM r "
         "WHERE x.graph_id = :g AND x.falkor_id = r.falkor_id")
 
@@ -2434,9 +2624,10 @@ def _percent(kind: str, processed: int, total: Optional[int]) -> int:
     return int(_PHASE_FLOOR["nodes"] + frac * _SCAN_SPAN)
 
 
-def _next_phase(phase: str) -> Optional[str]:
-    i = PHASES.index(phase)
-    return PHASES[i + 1] if i + 1 < len(PHASES) else None
+def _next_phase(phase: str, origin: str = "graph") -> Optional[str]:
+    phases = _PHASES_BY_ORIGIN.get(origin, PHASES)
+    i = phases.index(phase)
+    return phases[i + 1] if i + 1 < len(phases) else None
 
 
 def _t(table: str) -> str:

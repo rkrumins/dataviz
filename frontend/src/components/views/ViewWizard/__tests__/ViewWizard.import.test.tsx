@@ -28,12 +28,17 @@
  *     opens there; a target that can't take the data is refused (the view alone still can be
  *     imported); another target takes the same upload into a draft of its own, with no file to
  *     choose again; an upload that expired asks for the file again; a data import that failed can
- *     be tried again, into the same draft.
+ *     be tried again, into the same draft;
+ *   - or its data goes into a brand-new data source of its own: described on the Target step (its
+ *     label and graph name from the package, a connection, the semantic layer matched for it, or
+ *     one created from the package), created by one request that a reopened wizard follows again
+ *     rather than repeating, and copied in full; then its view comes in live, or every view of
+ *     the package through the batch flow, preset to it; an expired upload asks for the file again.
  */
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   ImportViewResult, InspectResult, PackageInspectResult, PackageProgress, ReconcileResult,
 } from '@/services/viewTransferApiService'
@@ -48,6 +53,13 @@ const packageDataMock = vi.fn()
 const getImportMock = vi.fn()
 const importPreviewMock = vi.fn()
 const openReviewMock = vi.fn()
+const newSourceMock = vi.fn()
+const bootstrapStatusMock = vi.fn()
+const nameCheckMock = vi.fn()
+const suggestMock = vi.fn()
+const createLayerMock = vi.fn()
+const getPackageMock = vi.fn()
+const getUploadMock = vi.fn()
 let requestIds = 0
 const NOT_VERSIONED = { versioned: false, allowed: false, checking: false }
 let staging: typeof NOT_VERSIONED & { graphId?: string | null } = NOT_VERSIONED
@@ -61,6 +73,9 @@ vi.mock('@/services/viewTransferApiService', async (importOriginal) => {
     importPackageData: (...args: unknown[]) => packageDataMock(...args),
     reconcileViews: (...args: unknown[]) => reconcileMock(...args),
     importView: (...args: unknown[]) => importMock(...args),
+    createNewSourceFromPackage: (...args: unknown[]) => newSourceMock(...args),
+    getViewPackage: (...args: unknown[]) => getPackageMock(...args),
+    getPackageUpload: (...args: unknown[]) => getUploadMock(...args),
     newRequestId: () => `req-test-${String(++requestIds).padStart(4, '0')}`,
   }
 })
@@ -82,8 +97,39 @@ vi.mock('@/services/importExportApiService', async (importOriginal) => {
 })
 vi.mock('@/services/versioningApiService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/versioningApiService')>()
-  return { ...actual, openMergeRequest: (...args: unknown[]) => openReviewMock(...args) }
+  return {
+    ...actual,
+    openMergeRequest: (...args: unknown[]) => openReviewMock(...args),
+    getBootstrapStatus: (...args: unknown[]) => bootstrapStatusMock(...args),
+    checkBlankGraphName: (...args: unknown[]) => nameCheckMock(...args),
+  }
 })
+vi.mock('@/services/ontologyDefinitionService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/ontologyDefinitionService')>()
+  return {
+    ...actual,
+    ontologyDefinitionService: { ...actual.ontologyDefinitionService, suggest: (...a: unknown[]) => suggestMock(...a) },
+  }
+})
+vi.mock('@/features/ontology/hooks/useOntologies', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/features/ontology/hooks/useOntologies')>()),
+  useOntologies: () => ({
+    data: [
+      { id: 'onto_fin', name: 'Finance (shared)', version: 2, isPublished: true, entityTypeDefinitions: {}, relationshipTypeDefinitions: {} },
+      { id: 'onto_ops', name: 'Operations', version: 1, isPublished: true, entityTypeDefinitions: {}, relationshipTypeDefinitions: {} },
+    ],
+  }),
+}))
+vi.mock('@/features/ontology/hooks/useOntologyMutations', () => ({
+  useOntologyMutations: () => ({ create: { mutateAsync: (...a: unknown[]) => createLayerMock(...a), isPending: false } }),
+}))
+// The graph connections a new data source can go on (the blank-model picker's own).
+vi.mock('../useBlankScopeOptions', () => ({
+  useBlankScopeOptions: () => ({
+    providers: [{ provider: { id: 'p1', name: 'Falkor prod', providerType: 'falkordb' }, graphCount: 1, inUseCount: 0, blankSupported: true }],
+    ontologies: [], isLoading: false, isError: false,
+  }),
+}))
 // The publish dialog is the canvas's own (tested there): stood in for at its boundary.
 vi.mock('@/features/versioning/components/PublishDraftDialog', () => ({
   PublishDraftDialog: (p: { wsId: string; graphId: string; branchId: string; onClose: () => void; onPublished?: () => void }) => (
@@ -143,13 +189,29 @@ vi.mock('../steps/ScopeStep', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../steps/ScopeStep')>()
   return {
     ...actual,
-    ScopeStep: ({ aboveSlot }: { aboveSlot?: React.ReactNode }) => <div data-testid="scope-step">{aboveSlot}</div>,
+    ScopeStep: ({ aboveSlot, scopeMode, providers, onSelectProvider, blankOntologySlot }: {
+      aboveSlot?: React.ReactNode
+      scopeMode: string
+      providers: Array<{ provider: { id: string; name: string } }>
+      onSelectProvider: (id: string) => void
+      blankOntologySlot?: React.ReactNode
+    }) => (
+      <div data-testid="scope-step">
+        {aboveSlot}
+        {scopeMode === 'blank' && providers.map(o => (
+          <button key={o.provider.id} type="button" onClick={() => onSelectProvider(o.provider.id)}>{o.provider.name}</button>
+        ))}
+        {blankOntologySlot}
+      </div>
+    ),
   }
 })
 
 import { ViewTransferError } from '@/services/viewTransferApiService'
-import { PullRequestExistsError } from '@/services/versioningApiService'
+import { PullRequestExistsError, type BootstrapJob } from '@/services/versioningApiService'
 import { useSchemaStore } from '@/store/schema'
+import { useWorkspacesStore } from '@/store/workspaces'
+import { useAuthStore } from '@/store/auth'
 import { recordEvent } from '@/services/telemetryService'
 import { ViewWizard } from '../ViewWizard'
 
@@ -1006,5 +1068,271 @@ describe('ViewWizard — a view with its data', () => {
 
     expect(await screen.findByText("Workspace 'ws1' not found")).toBeInTheDocument()
     expect(screen.queryByText('The package’s upload has expired')).not.toBeInTheDocument()
+  })
+})
+
+// ── A package's data in a new data source of its own ──────────────────────────────────────────
+
+const TYPE_STATS = { nodeCount: 120, edgeCount: 80, entityTypeCounts: { dataset: 100, job: 20 }, edgeTypeCounts: { PRODUCES: 80 } }
+const SUGGESTED = { name: 'Suggested', entityTypeDefinitions: { dataset: {}, job: {} }, relationshipTypeDefinitions: { PRODUCES: {} } }
+
+function score(ontologyId: string, jaccardScore: number) {
+  return {
+    ontologyId, ontologyName: ontologyId, version: 1, jaccardScore,
+    coveredEntityTypes: ['dataset'], uncoveredEntityTypes: ['job'], coveredRelationshipTypes: ['PRODUCES'],
+    uncoveredRelationshipTypes: [], totalEntityTypes: 2, totalRelationshipTypes: 1,
+  }
+}
+
+/** The package, as the server describes it with what its data holds by type. */
+function packageWithStats(over: Partial<PackageInspectResult> = {}): PackageInspectResult {
+  const p = inspectedPackage()
+  return { ...p, package: { ...p.package, data: { ...p.package.data!, typeStats: TYPE_STATS } }, ...over }
+}
+
+const STARTED = {
+  dataSourceId: 'ds_new', graphId: 'g_new', jobId: 'vjob_9', status: 'pending', label: 'Lineage',
+  graphName: 'lineage_copy', ontologyId: 'onto_fin', enforcement: 'permissive', requestId: 'nsr_x',
+}
+const SEED_RUNNING: BootstrapJob = {
+  jobId: 'vjob_9', graphId: 'g_new', status: 'running', phase: 'nodes', processed: 40, total: 200, percent: 20,
+  origin: 'package',
+}
+const SEED_DONE: BootstrapJob = {
+  ...SEED_RUNNING, status: 'completed', phase: null, processed: 200, percent: 100,
+  report: {
+    checks: [{ key: 'parsed_matches_manifest', ok: true, detail: '200 of 200 rows copied', blocking: true }],
+    source: { nodes: 120, edges: 80 }, stored: { nodes: 120, edges: 80 }, labels: {}, edgeTypes: {},
+    sampleChecked: 10, sampleMismatched: [], mergedDuplicateConnections: 0, merkle: 'inline',
+  },
+}
+
+/** The package file: the same file chosen again is known again (name, size, modification time). */
+function renderNewSource() {
+  const file = new File(['PK'], 'finance.v7.view-package.zip', { type: 'application/zip', lastModified: 1_700_000_000_000 })
+  return renderImport({ importFile: file })
+}
+
+/** File → Target, its data into a new data source on the one connection there is. */
+async function toNewSourceTarget() {
+  await screen.findByText('Import a view with its data')
+  await next()                                            // → Target
+  fireEvent.click(await screen.findByRole('radio', { name: 'Into a new data source' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Falkor prod' }))
+}
+
+const CREATE = /Create the data source and copy the data/
+
+describe('ViewWizard — a package’s data in a new data source', () => {
+  const claims = useAuthStore.getState().permissions
+  // The mocked store's workspace, as the mock holds it.
+  const ws = useWorkspacesStore.getState().workspaces[0] as unknown as { dataSources: Array<Record<string, unknown>> }
+
+  beforeEach(() => {
+    localStorage.clear()
+    staging = VERSIONED
+    // Creating a data source takes the right to manage this workspace's data sources.
+    useAuthStore.setState({ permissions: { global: [], ws: { ws1: ['workspace:datasource:manage'] } } } as never)
+    inspectPackageMock.mockResolvedValue(packageWithStats())
+    reconcileMock.mockResolvedValue(reconciled())
+    nameCheckMock.mockImplementation(async (_ws: string, _p: string, name: string) => ({ available: true, normalized: name }))
+    suggestMock.mockResolvedValue({ suggested: SUGGESTED, matchingOntologies: [], mergedVariants: {} })
+    newSourceMock.mockResolvedValue(STARTED)
+    bootstrapStatusMock.mockResolvedValue(SEED_RUNNING)
+  })
+  afterEach(() => {
+    useAuthStore.setState({ permissions: claims } as never)
+    ws.dataSources = ws.dataSources.filter(d => d.id !== 'ds_new')
+  })
+
+  it('offers a new data source for the data, ready to go on once it is described', async () => {
+    renderNewSource()
+    await screen.findByText('Import a view with its data')
+    await next()                                          // → Target
+    expect(await screen.findByText('Suggested for this file')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('radio', { name: 'Into a new data source' }))
+
+    expect(screen.queryByText('Suggested for this file')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Label of the new data source')).toHaveValue('Lineage')
+    expect(screen.getByLabelText('Graph name of the new data source')).toHaveValue('lineage_copy')
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()          // no connection yet
+
+    fireEvent.click(screen.getByRole('button', { name: 'Falkor prod' }))
+    await waitFor(() => expect(nameCheckMock).toHaveBeenCalledWith('ws1', 'p1', 'lineage_copy'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+    fireEvent.change(screen.getByLabelText('Label of the new data source'), { target: { value: '  ' } })
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Into a data source here' }))
+    expect(screen.getByText('Suggested for this file')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+  })
+
+  it('goes no further without the right to create a data source here', async () => {
+    useAuthStore.setState({ permissions: { global: [], ws: {} } } as never)
+    renderNewSource()
+    await toNewSourceTarget()
+    expect(screen.getByText(/needs permission to manage its data sources/)).toBeInTheDocument()
+    await waitFor(() => expect(nameCheckMock).toHaveBeenCalled())
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+  })
+
+  it('creates the data source once, follows its copy across a reopen, then brings the view in live', async () => {
+    suggestMock.mockResolvedValue({ suggested: SUGGESTED, matchingOntologies: [score('onto_ops', 0.2), score('onto_fin', 0.6)], mergedVariants: {} })
+    let copied = false
+    bootstrapStatusMock.mockImplementation(async () => (copied ? SEED_DONE : SEED_RUNNING))
+    importMock.mockResolvedValue(imported('view_new'))
+    const first = renderNewSource()
+    await toNewSourceTarget()
+    expect(await screen.findByText('BEST FIT')).toBeInTheDocument()             // the best fit, chosen for it
+    await next()                                          // → Data
+    expect(await screen.findByText('Copy the data into a new data source')).toBeInTheDocument()
+    expect(screen.getByText(/lineage_copy/)).toBeInTheDocument()
+    expect(screen.getByText(/on Falkor prod · Finance \(shared\)/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: CREATE }))
+
+    expect(await screen.findByText('Copying the package')).toBeInTheDocument()
+    expect(screen.getByText(/40 of 200 items copied/)).toBeInTheDocument()
+    expect(newSourceMock).toHaveBeenCalledTimes(1)
+    expect(newSourceMock.mock.calls[0]).toEqual(['up_1', {
+      requestId: expect.stringMatching(/^nsr_[0-9a-f]{32}$/), workspaceId: 'ws1', providerId: 'p1',
+      label: 'Lineage', graphName: 'lineage_copy', ontologyId: 'onto_fin',
+    }])
+    expect(bootstrapStatusMock).toHaveBeenCalledWith('ws1', 'ds_new')
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+
+    // Closed while it copies, and opened again on the same file: back to following the copy, with
+    // no second data source asked for.
+    first.unmount()
+    renderNewSource()
+    await screen.findByText('Import a view with its data')
+    await next()
+    expect(await screen.findByText('Copying the package')).toBeInTheDocument()
+    expect(newSourceMock).toHaveBeenCalledTimes(1)
+
+    copied = true
+    expect(await screen.findByText('Everything checked out')).toBeInTheDocument()
+    expect(screen.getByText('Next, its view goes into it, live.')).toBeInTheDocument()
+    await next()                                          // → Match, in the new data source
+    expect(await screen.findByText('How it fits here')).toBeInTheDocument()
+    expect(reconcileMock).toHaveBeenCalledWith([expect.objectContaining({
+      action: 'create', target: { workspaceId: 'ws1', dataSourceId: 'ds_new' },
+    })])
+    for (const step of ['basics-step', 'layout-step', 'assignment-step', 'entities-step', 'preview-step']) {
+      await next()
+      await screen.findByTestId(step)
+    }
+    expect(screen.getByRole('radio', { name: /Now/ })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /Import View/ }))
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(1))
+    expect(importMock.mock.calls[0][0]).toMatchObject({ action: 'create', target: { workspaceId: 'ws1', dataSourceId: 'ds_new' } })
+    expect(importMock.mock.calls[0][0].stage).toBeUndefined()
+  })
+
+  it('binds the package’s own semantic layer when it comes from this environment', async () => {
+    inspectPackageMock.mockResolvedValue(packageWithStats({
+      ontologyMatch: { s1: { exact: { ontologyId: 'onto_own', name: 'Lineage ontology', version: 4 }, drift: true, sameEnvironment: true } },
+    }))
+    renderNewSource()
+    await toNewSourceTarget()
+    expect(await screen.findByText('Chosen')).toBeInTheDocument()
+    expect(screen.getByText(/It has changed since the package was exported/)).toBeInTheDocument()
+    await next()                                          // → Data
+    fireEvent.click(await screen.findByRole('button', { name: CREATE }))
+    await waitFor(() => expect(newSourceMock).toHaveBeenCalledTimes(1))
+    expect(newSourceMock.mock.calls[0][1]).toMatchObject({ ontologyId: 'onto_own' })
+    expect(suggestMock).not.toHaveBeenCalled()
+  })
+
+  it('creates a semantic layer from the package and binds the new data source to it', async () => {
+    createLayerMock.mockResolvedValue({
+      id: 'onto_draft', name: 'Lineage Schema', version: 1, isPublished: false, entityTypeDefinitions: {}, relationshipTypeDefinitions: {},
+    })
+    renderNewSource()
+    await toNewSourceTarget()
+    fireEvent.click(await screen.findByRole('button', { name: /Create from this package/ }))
+    expect(await screen.findByText(/“Lineage Schema” was created as a draft/)).toBeInTheDocument()
+    expect(createLayerMock).toHaveBeenCalledWith({ ...SUGGESTED, name: 'Lineage Schema' })
+    await next()                                          // → Data
+    fireEvent.click(await screen.findByRole('button', { name: CREATE }))
+    await waitFor(() => expect(newSourceMock).toHaveBeenCalledTimes(1))
+    expect(newSourceMock.mock.calls[0][1]).toMatchObject({ ontologyId: 'onto_draft' })
+  })
+
+  it('brings every view of the package into it through the batch flow, live', async () => {
+    const pair = inspectedPair()
+    inspectPackageMock.mockResolvedValue(packageWithStats({ views: pair.views, identityMatches: pair.identityMatches }))
+    reconcileEach()
+    importMock.mockImplementation(async () => imported('view_new'))
+    bootstrapStatusMock.mockResolvedValue(SEED_DONE)
+    // What loading the workspaces brings once the copy is done: the new data source.
+    ws.dataSources.push({ id: 'ds_new', label: 'Lineage', isPrimary: false })
+    renderNewSource()
+    await toNewSourceTarget()
+    await next()                                          // → Data
+    fireEvent.click(await screen.findByRole('button', { name: CREATE }))
+    expect(await screen.findByText('Everything checked out')).toBeInTheDocument()
+    expect(screen.getByText('Next, its 2 views go into it, live.')).toBeInTheDocument()
+
+    await next()                                          // → the batch's Targets, decided
+    expect(await screen.findByText('Where should these views go?')).toBeInTheDocument()
+    expect(screen.getByLabelText('Where views from Lineage go')).toHaveValue('ws1|ds_new')
+    await next()                                          // → Match: every view new there
+    expect(await screen.findByText('How they fit here')).toBeInTheDocument()
+    expect(reconcileMock).toHaveBeenCalledWith([
+      expect.objectContaining({ key: '0', action: 'create', target: { workspaceId: 'ws1', dataSourceId: 'ds_new' } }),
+      expect.objectContaining({ key: '1', action: 'create', target: { workspaceId: 'ws1', dataSourceId: 'ds_new' } }),
+    ])
+    await next()                                          // → Review
+    fireEvent.click(await screen.findByRole('button', { name: /Import 2 views/ }))
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(2))
+    for (const [request] of importMock.mock.calls) expect(request.stage).toBeUndefined()
+  })
+
+  it('takes the free graph name offered when its own was taken meanwhile, under the same request id', async () => {
+    newSourceMock
+      .mockRejectedValueOnce(new ViewTransferError('That graph name is already taken on this connection.', 422,
+        'graph_name_unavailable', undefined, { type: 'graph_name_unavailable', suggestion: 'lineage_copy_2' }))
+      .mockResolvedValueOnce({ ...STARTED, graphName: 'lineage_copy_2' })
+    renderNewSource()
+    await toNewSourceTarget()
+    await next()                                          // → Data
+    fireEvent.click(await screen.findByRole('button', { name: CREATE }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Use lineage_copy_2' }))
+    fireEvent.click(await screen.findByRole('button', { name: CREATE }))
+    await waitFor(() => expect(newSourceMock).toHaveBeenCalledTimes(2))
+    const [[, first], [, second]] = newSourceMock.mock.calls
+    expect(second).toMatchObject({ graphName: 'lineage_copy_2', requestId: first.requestId })
+    expect(await screen.findByText('Copying the package')).toBeInTheDocument()
+  })
+
+  it('finishes importing the views of a data source a package made, read again from its upload', async () => {
+    getPackageMock.mockResolvedValue(packageWithStats())
+    getUploadMock.mockResolvedValue({ uploadId: 'up_1', fileName: 'finance.v7.view-package.zip', size: 2, status: 'ready' })
+    bootstrapStatusMock.mockResolvedValue(SEED_DONE)
+    renderImport({ importFile: null, importUploadId: 'up_1', initialDataSourceId: 'ds_new' })
+
+    expect(await screen.findByText('Everything checked out')).toBeInTheDocument()
+    expect(getPackageMock).toHaveBeenCalledWith('up_1')
+    expect(bootstrapStatusMock).toHaveBeenCalledWith('ws1', 'ds_new')
+    expect(inspectPackageMock).not.toHaveBeenCalled()
+    await next()                                          // → Match, in that data source
+    expect(await screen.findByText('How it fits here')).toBeInTheDocument()
+    expect(reconcileMock).toHaveBeenCalledWith([expect.objectContaining({
+      action: 'create', target: { workspaceId: 'ws1', dataSourceId: 'ds_new' },
+    })])
+    expect(newSourceMock).not.toHaveBeenCalled()
+  })
+
+  it('asks for the file again once the package’s upload has expired', async () => {
+    newSourceMock.mockRejectedValue(new ViewTransferError(
+      'This package upload is about to expire. Choose the file again to import it.', 410, 'upload_expired'))
+    renderNewSource()
+    await toNewSourceTarget()
+    await next()                                          // → Data
+    fireEvent.click(await screen.findByRole('button', { name: CREATE }))
+    expect(await screen.findByText('The package’s upload has expired')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Choose the file again/ }))
+    expect(await screen.findByText('Drop a view file here')).toBeInTheDocument()
   })
 })

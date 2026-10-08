@@ -502,12 +502,107 @@ mount supports. A write that fails, or whose upload fails when the file closes, 
 wrote, so a reader never takes half a file for the whole one. A path-escape guard rejects keys that
 resolve outside the root, and the same sweep deletes files by age.
 
-> **Limitation — no native cloud client yet.** A bucket is used through its mount (above).
-> `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
-> (`get_object_store`, `object_store.py:333-348`). Cloud backends implement the same `ObjectStore`
-> Protocol and differ only in `upload_target` (a presigned PUT vs the backend-streamed blob), so
-> callers don't change — but the presigned path is modeled, not yet backed (`UploadTarget`,
-> `:52-64`).
+**Which store.** The database is right for artifacts of up to about 1 GB each. Above that (a large
+export, or a view package with a big graph), use `local` on a shared mount or `s3` (below), which
+keep multi-GB blobs out of Postgres.
+
+### Optional S3/GCS object store
+
+`OBJECT_STORE_BACKEND=s3` keeps the artifacts in an S3-compatible bucket (`S3ObjectStore`,
+`storage/s3_store.py`): Amazon S3, MinIO, or Google Cloud Storage through its XML API. It is **off by
+default and nothing depends on it**. The default image doesn't carry its client: install
+`backend/requirements-s3.txt` (boto3) in the image of every tier that reads the store, which means
+viz-service and every versioning lane (§2a). `get_object_store` refuses a configuration without a
+bucket or without boto3, and says which is missing — on first use, not at startup: a misconfigured
+pod starts healthy, and every import, export and package route answers 500 until it is fixed.
+Unknown backends (`gcs` included: GCS goes through `s3`) still raise `NotImplementedError`. On Helm,
+the chart renders only `OBJECT_STORE_BACKEND` and `OBJECT_STORE_TTL_HOURS`, and no shipped image
+carries boto3: an `s3` deployment needs images built with `requirements-s3.txt` and the
+`OBJECT_STORE_S3_*` variables added by a post-renderer (or a chart of your own).
+
+| Variable | Default | |
+|---|---|---|
+| `OBJECT_STORE_S3_BUCKET` | none (required) | |
+| `OBJECT_STORE_S3_PREFIX` | `synodic-import-store` | Every key goes under it. The daily sweep deletes whatever under it is older than `OBJECT_STORE_TTL_HOURS`, so nothing else may write there. Empty (or `/`) means the default: never the bucket's root. |
+| `OBJECT_STORE_S3_ENDPOINT_URL` | Amazon S3 | e.g. `http://minio:9000`, `https://storage.googleapis.com` |
+| `OBJECT_STORE_S3_REGION` | boto3's | `auto` for GCS. With `PRESIGN=1` on Amazon S3, the bucket's own region: browsers can't follow S3's region redirect as boto3 does, so a URL signed for another region fails (`AuthorizationQueryParametersError`). |
+| `OBJECT_STORE_S3_ADDRESSING` | `auto` | `path` for MinIO, or `virtual` |
+| `OBJECT_STORE_S3_PRESIGN` | off | `1`: presigned URLs for browsers (below) |
+
+Credentials come from boto3's own chain: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or an IAM role
+(IRSA, an instance profile). It keeps the same `ObjectStore` contract as the other stores
+(`tests/test_object_store.py` runs one contract against all three):
+
+- Every bucket call runs in a worker thread, and so does signing a URL in a request (signing may
+  first refresh temporary credentials), so the event loop doesn't wait on the bucket. The client is
+  built once per process and configuration; with role credentials that first build resolves them
+  (an STS or instance-metadata call). Requests use s3v4 signing, 5 standard retries, and checksums
+  only where an operation requires one (botocore's default CRC32 checksums are refused by GCS).
+- A put of up to 16 MiB is one PutObject (a package part sent through the API is exactly that). A
+  larger one is a multipart upload in parts of just over 16 MiB, visible only once complete. The
+  chunks are held as they arrive and joined once per part, so a put holds about two parts' worth for
+  an instant, then one while the part is sent. A put that fails, or is cancelled, aborts its
+  multipart upload, also when cancelled while the upload was being created. One cancelled during its
+  last call (the PutObject, or completing the multipart upload) may still land, because that call
+  carries on in its thread; an export writes a key per attempt, so a late landing never replaces a
+  newer attempt's file. Give the bucket an `AbortIncompleteMultipartUpload` lifecycle rule (1 day)
+  for the uploads of a process that was killed before it could abort them.
+- A read is one ranged GET (`open_stream(start=…)`), stat is a HeadObject, and a delete is one
+  DeleteObject per object (GCS has no multi-object delete). Listings use ListObjects (v1), which both
+  APIs serve.
+- The sweep and the package-upload prune (`prune_older_than`) list the prefix and delete by
+  `LastModified`. Like the other stores, they keep the inputs of jobs that may still read them
+  (`jobs_input_prefixes`).
+
+**GCS.** Create an HMAC key for a service account with Storage Object Admin on the bucket (Cloud
+Storage → Settings → Interoperability) and set it as `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`,
+with `OBJECT_STORE_S3_ENDPOINT_URL=https://storage.googleapis.com` and `OBJECT_STORE_S3_REGION=auto`.
+
+**Presigned URLs** (`OBJECT_STORE_S3_PRESIGN=1`): the bytes move between the browser and the bucket
+without passing through an API worker.
+
+- **Package uploads.** While a package upload is `uploading`, `POST /packages/uploads` and
+  `GET /packages/uploads/{id}` carry `partUrls`: one presigned PUT per part, signed for that part's
+  exact length. The wizard sends each part there as a bare request (no cookies, no CSRF header). A
+  part that lands counts in `received` (a HeadObject per part) like one sent through
+  `PUT …/parts/{n}`, and completing the upload works as before. A completed upload hands out no
+  URLs. A part changed later through an old URL fails its import's checksum; it is never imported
+  as something else.
+- **How long a URL works.** A part URL is signed for a day and a download for an hour, but no URL
+  outlives the credentials that signed it. A role's temporary credentials (IRSA, an instance
+  profile, STS) last an hour by default and are renewed shortly before they run out, so a URL may
+  stop working about 15 minutes after it was signed. When the bucket refuses a part (403), the
+  wizard reads the upload again for freshly signed URLs and sends the part again.
+- **Downloads.** A finished export's or package's download (`…/exports/{id}/download`) answers
+  `307` with a presigned GET, which carries the file's name. Ranges and resumes go to the bucket.
+- The endpoint must be one browsers can reach, not an in-cluster name such as `http://minio:9000`.
+  The bucket's CORS must allow this site's origin to `PUT`; no custom header is sent, so no
+  `AllowedHeaders` is needed. The redirected download is a navigation and needs no CORS. For S3,
+  `aws s3api put-bucket-cors --bucket B --cors-configuration file://cors.json` with:
+
+  ```json
+  {"CORSRules": [{"AllowedOrigins": ["https://synodic.example.com"], "AllowedMethods": ["PUT"], "MaxAgeSeconds": 3600}]}
+  ```
+
+  For GCS, `gcloud storage buckets update gs://B --cors-file=cors.json` with
+  `[{"origin": ["https://synodic.example.com"], "method": ["PUT"], "maxAgeSeconds": 3600}]`. MinIO
+  allows every origin by default.
+- This site's Content-Security-Policy (`connect-src`) must let the browser reach the bucket too: add
+  the bucket's exact origin as the URLs name it to `CSP_CONNECT_SRC` (compose) or
+  `frontend.cspConnectSrc` (Helm). That is `https://B.s3.REGION.amazonaws.com` with virtual-host
+  addressing, or the endpoint itself with path addressing (`https://storage.googleapis.com`). Only
+  `https://` origins are accepted there, so presigning needs an HTTPS endpoint.
+- A part the browser can't send to its URL at all (no CSP entry or CORS rule for it) goes through
+  `PUT …/parts/{n}` instead, and so does every part after it: a misconfigured bucket slows an upload
+  down rather than breaking it.
+
+**Locally.** `docker compose --profile s3 up -d minio minio-init` starts MinIO on `localhost:9000`
+with the bucket `synodic`. The compose images don't carry boto3, so run the backend outside them to
+use it: `pip install -r backend/requirements-s3.txt`, then set `OBJECT_STORE_BACKEND=s3`,
+`OBJECT_STORE_S3_BUCKET=synodic`, `OBJECT_STORE_S3_ENDPOINT_URL=http://localhost:9000`,
+`OBJECT_STORE_S3_ADDRESSING=path` and `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY=minioadmin`. The opt-in
+tests run against it: `OBJECT_STORE_S3_TEST_ENDPOINT=http://localhost:9000 python -m pytest -q
+tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 
 ---
 
@@ -552,9 +647,9 @@ resolve outside the root, and the same sweep deletes files by age.
   or cancels one being prepared; its file is swept a day after it is written.
 - **Exports download uncompressed**, so that their size is known and a download resumes: a 50 GB
   CSV is 50 GB on the wire.
-- **No native cloud client yet**: artifacts live in the management database, or on a mount, which
-  can be a bucket's FUSE mount (§9); S3/GCS clients and the presigned-upload path are stubbed
-  (`get_object_store`).
+- **The S3/GCS store is optional and off by default** (§9): boto3 isn't in the default image.
+  Presigned URLs serve package uploads and stored downloads, but not yet a data source's own import
+  uploads (`…/imports/uploads`), whose parts still go through the API.
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
 - **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
   (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow

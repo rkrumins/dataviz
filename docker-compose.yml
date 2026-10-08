@@ -21,6 +21,9 @@
 # With demo data seeding:
 #   docker compose --profile seed up --build
 #
+# Optional S3-compatible object store (MinIO, off by default):
+#   docker compose --profile s3 up -d minio minio-init
+#
 # Tear down (keep data):
 #   docker compose down
 #
@@ -745,7 +748,50 @@ services:
         condition: service_started
     restart: "no"
 
+  # ── MinIO (optional S3-compatible object store) ───────────────────
+  # Only with the profile:
+  #   docker compose --profile s3 up -d minio minio-init
+  # For OBJECT_STORE_BACKEND=s3 in a local run, and for the opt-in S3
+  # tests (OBJECT_STORE_S3_TEST_ENDPOINT=http://localhost:9000). No
+  # default service uses it, and their images don't carry boto3
+  # (backend/requirements-s3.txt); see docs/versioning/08-import-export.md
+  # §9. MinIO no longer publishes free images: pgsty/minio and pgsty/mc
+  # are community-maintained rebuilds of the same server and client, NOT
+  # MinIO's own, so both are pinned by digest (a tag can be pushed again):
+  # bump tag and digest together after checking the new build.
+  minio:
+    profiles: ["s3"]
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Creates the bucket once MinIO is up, then exits; running it again is
+  # harmless (--ignore-existing).
+  minio-init:
+    profiles: ["s3"]
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z@sha256:cfc83108c3abb371f8fb84d99c1fdc88f8c237e022409b0081fb7c0a3be634dd
+    environment:
+      MC_HOST_local: http://${MINIO_ROOT_USER:-minioadmin}:${MINIO_ROOT_PASSWORD:-minioadmin}@minio:9000
+    command: ["mb", "--ignore-existing", "local/${MINIO_BUCKET:-synodic}"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   falkordb_data:
   redis_data:
   postgres_data:
+  minio_data:

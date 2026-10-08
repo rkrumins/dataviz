@@ -270,6 +270,29 @@ def import_store_root() -> str:
     return os.getenv("IMPORT_STORE_ROOT", "/tmp/synodic-import-store")
 
 
+def object_store_s3() -> dict:
+    """The S3-compatible object store (``OBJECT_STORE_BACKEND=s3``; optional, it needs
+    ``requirements-s3.txt``): Amazon S3, MinIO, or GCS through its XML API. Credentials come from
+    boto3's own chain: ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY`` (for GCS, an HMAC key), or a
+    role.
+
+    ``PREFIX`` is what every key goes under: the daily sweep deletes whatever under it is old, so by
+    default it never reaches anything else the bucket holds. ``ENDPOINT_URL`` for anything but Amazon
+    S3 (``https://storage.googleapis.com`` for GCS); ``ADDRESSING`` ``auto`` | ``path`` (MinIO) |
+    ``virtual``. ``PRESIGN=1`` hands browsers presigned URLs, so package parts go up to the bucket
+    and exports come down from it without passing through the API: the endpoint must be one browsers
+    reach, and the bucket's CORS must allow this site's PUTs."""
+    return {
+        "bucket": os.getenv("OBJECT_STORE_S3_BUCKET", ""),
+        # Never the bucket's root, even when set empty: the sweep would delete everything old in it.
+        "prefix": os.getenv("OBJECT_STORE_S3_PREFIX", "").strip("/") or "synodic-import-store",
+        "endpoint_url": os.getenv("OBJECT_STORE_S3_ENDPOINT_URL") or None,
+        "region": os.getenv("OBJECT_STORE_S3_REGION") or None,
+        "addressing": os.getenv("OBJECT_STORE_S3_ADDRESSING", "auto").lower(),
+        "presign": os.getenv("OBJECT_STORE_S3_PRESIGN", "").lower() in ("1", "true", "yes"),
+    }
+
+
 # Staged rows per import window: one commit onto the draft, together with the job's checkpoint. A
 # window is also what a resumed import redoes at most, and what the job's lease waits out before a
 # stopping worker hands the job back — so a few seconds of work, not minutes.
@@ -331,6 +354,11 @@ BOOTSTRAP_BACKFILL_PAUSE_MS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_BACKFILL_PA
 # the root is left NULL (the column is expressly "async-filled for bulk") and the
 # report says so, rather than OOM-ing on a 10M-entity in-memory tree.
 BOOTSTRAP_MERKLE_INLINE_MAX: int = int(os.getenv("GRAPHVER_BOOTSTRAP_MERKLE_MAX", "1000000"))
+# A new data source seeded from a view package (``package_seed``): data lines parsed, converted and
+# written per window — one worker-thread hop and one fenced transaction each — and version rows
+# projected into the new FalkorDB key per window. Peak memory is O(window), whatever the package.
+PACKAGE_SEED_WINDOW: int = int(os.getenv("GRAPHVER_PACKAGE_SEED_WINDOW", "20000"))
+PACKAGE_PROJECT_WINDOW: int = int(os.getenv("GRAPHVER_PACKAGE_PROJECT_WINDOW", "20000"))
 # Worker pickup cadence + the heartbeat age after which a `running` job is presumed
 # dead and taken over by another worker (JobORM is the durable queue; no stream).
 INGEST_POLL_SECS: int = int(os.getenv("GRAPHVER_INGEST_POLL_SECS", "5"))

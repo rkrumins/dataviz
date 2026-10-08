@@ -17,7 +17,7 @@ import {
 import { cn } from '@/lib/utils'
 import { queuePosition, resumeNote, type ImportPreviewRow, type Job } from '@/services/importExportApiService'
 import { pluralize } from '@/features/view-transfer/format'
-import { sameDataTarget, useImportSession, type PackageDataTarget } from './importSession'
+import { sameDataTarget, useImportSession, type ExistingDataTarget } from './importSession'
 import { useDraftStaging } from './useDraftStaging'
 
 /** "Read 12,000 rows · applied 4,000 of 12,000" for the data's import job, as far as it has got. */
@@ -30,7 +30,7 @@ function dataProgress(job: Job | null | undefined): string | null {
 }
 
 export function PackageDataStep({ target, targetLabel, onChooseFileAgain }: {
-  target: PackageDataTarget
+  target: ExistingDataTarget
   targetLabel: string
   /** Back to the File step, the file set aside: its upload expired, and a fresh one is needed. */
   onChooseFileAgain: () => void

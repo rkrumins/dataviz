@@ -32,12 +32,17 @@ class _Client:
         self.deletes += 1
 
 
-def _runner(*, ps, shared_with, client):
+async def _no_readers(*_a):
+    return []
+
+
+def _runner(*, ps, shared_with, client, key_in_use=_no_readers):
     """A ``PurgeRunner`` whose session is faked — no DB, no schema.
 
     ``ps`` is the ProjectionState row (or None); ``shared_with`` is the count of other LIVE graphs
     still projecting into the same FalkorDB name; ``client`` is the stub graph client (or None to
-    model "no graph client configured").
+    model "no graph client configured"); ``key_in_use`` answers who else reads the key (the
+    management DB's bindings: none, by default — asking the real one needs that database).
     """
     job = SimpleNamespace(id="job1", status="running", retry_count=0, summary={}, updated_at=None)
 
@@ -57,7 +62,7 @@ def _runner(*, ps, shared_with, client):
         yield _Session()
 
     factory = (lambda name, provider: client) if client is not None else None
-    return PurgeRunner(graph_factory=factory, session_factory=_session), job
+    return PurgeRunner(graph_factory=factory, session_factory=_session, key_in_use=key_in_use), job
 
 
 def _landing(job):
@@ -111,3 +116,29 @@ def test_no_projection_state_is_a_noop():
     _run(runner._phase_falkor(_landing(job), "g1"))
     assert client.deletes == 0
     assert job.summary["falkor"]["verdict"] == "no projected graph"
+
+
+def test_owned_graph_still_read_elsewhere_is_protected():
+    """A key we minted that another data source (or a catalog entry) still reads is kept."""
+    async def readers(*_a):
+        return [{"kind": "dataSource", "id": "ds_other"}]
+
+    client = _Client()
+    runner, job = _runner(ps=_ps(owned=True, name="blank_ds1"), shared_with=0, client=client,
+                          key_in_use=readers)
+    _run(runner._phase_falkor(_landing(job), "g1"))
+    assert client.deletes == 0
+    assert "still read by" in job.summary["falkor"]["verdict"]
+
+
+def test_owned_graph_whose_readers_cannot_be_asked_is_protected():
+    """No answer to "who else reads it?" keeps the key: the purge fails closed."""
+    async def unreachable(*_a):
+        raise ConnectionRefusedError("management DB down")
+
+    client = _Client()
+    runner, job = _runner(ps=_ps(owned=True, name="blank_ds1"), shared_with=0, client=client,
+                          key_in_use=unreachable)
+    _run(runner._phase_falkor(_landing(job), "g1"))
+    assert client.deletes == 0
+    assert job.summary["falkor"]["verdict"].startswith("PROTECTED: could not check")

@@ -359,3 +359,100 @@ describe('when the source has duplicate identifiers', () => {
     expect(screen.getByRole('link', { name: /Download full list/ })).toBeInTheDocument()
   })
 })
+
+describe('copying a view package into a new data source', () => {
+  const seed: Partial<BootstrapJob> = { origin: 'package' }
+
+  it('tells the package’s own steps, building the new graph after history is written', () => {
+    render_({ ...seed, phase: 'project' as BootstrapJob['phase'], processed: 50, total: 100, percent: 82 })
+    for (const step of ['Copying the package', 'Checking every item', 'Writing history', 'Building the graph', 'Finishing up']) {
+      expect(screen.getByText(step)).toBeInTheDocument()
+    }
+    expect(screen.queryByText('Reading the graph')).not.toBeInTheDocument()
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '82')
+    // Earlier steps are done, the build is under way.
+    expect(screen.getByText('Building the graph').querySelector('svg')).toHaveClass('animate-spin')
+  })
+
+  it('reads the package before it counts anything', () => {
+    render_({ ...seed, status: 'pending', phase: 'reset', processed: 0, total: 0, percent: 0 })
+    expect(screen.getByText(/Checking the package…/)).toBeInTheDocument()
+    expect(screen.getByText('Copying the package').querySelector('svg')).toHaveClass('animate-spin')
+  })
+
+  it('offers only Give up when the target already holds data, and says why', () => {
+    render_({
+      ...seed, status: 'failed', phase: 'counting', error: 'target_not_empty',
+      failure: { code: 'target_not_empty' as never, action: null, phase: 'counting' },
+    })
+    expect(screen.getByText(/already holds data on that connection, so nothing was copied into it/)).toBeInTheDocument()
+    expect(screen.getByText('Nothing outside the new data source was touched.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Resume/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Start over/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Give up/ })).toBeInTheDocument()
+  })
+
+  it('offers no Resume once the package’s upload is gone, even if the job says it could', () => {
+    render_({ ...seed, status: 'failed', failure: { code: 'payload_missing' as never, action: 'resume' } })
+    expect(screen.getByText(/upload is no longer kept/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Resume/ })).not.toBeInTheDocument()
+  })
+
+  it('says giving up removes the new data source, and tells whoever asked', () => {
+    const onAbandoned = vi.fn()
+    abandonMutate.mockImplementationOnce((_: unknown, opts: { onSuccess: () => void }) => opts.onSuccess())
+    render(
+      <BootstrapProgress job={{ ...base, ...seed, status: 'failed', error: 'Broken' } as BootstrapJob}
+        wsId="ws1" dataSourceId="ds1" onAbandoned={onAbandoned} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /Give up/ }))
+    expect(screen.getByText(/removes the new data source/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Yes, remove it/ }))
+    expect(notify).toHaveBeenCalledWith('success', 'Cancelled — the new data source was removed.')
+    expect(onAbandoned).toHaveBeenCalled()
+  })
+
+  // The report as a package seed writes it: its checks (the non-blocking ones may have failed), and
+  // what the copy holds and where the package was exported.
+  const seedReport = (checks: Array<{ key: string; ok: boolean; detail: string; blocking: boolean }>) => ({
+    checks, source: { nodes: 120, edges: 80 }, stored: { nodes: 118, edges: 80 }, labels: {}, edgeTypes: {},
+    merkle: 'inline',
+    package: { nodes: 118, edges: 80, sourceEnvironment: 'dev', lines: { nodes: 120, edges: 80 } },
+  }) as unknown as BootstrapJob['report']
+  const read = { key: 'lines_seen', ok: true, detail: 'read 120 items and 80 connections', blocking: true }
+
+  it('reports what the copy holds, and that nothing was lost', () => {
+    render_({ ...seed, status: 'completed', phase: null, percent: 100, report: seedReport([read]) })
+    expect(screen.getByText(/The new data source holds the package’s data/)).toBeInTheDocument()
+    expect(screen.getByText('read 120 items and 80 connections')).toBeInTheDocument()
+    expect(screen.getByText(/every item and connection in the package is in the new data source/)).toBeInTheDocument()
+    expect(screen.getByText('Copied from the package, exported from dev: 118 items and 80 connections.')).toBeInTheDocument()
+  })
+
+  it('shows the identifiers it shared, folded into one, as a warning — and claims no zero loss', () => {
+    render_({
+      ...seed, status: 'completed', phase: null, percent: 100,
+      collapsed: { nodes: 2, byLabel: { Dataset: 2 }, selfLoops: 0 },
+      report: seedReport([read, {
+        key: 'shared_identifiers_collapsed', ok: false, blocking: false,
+        detail: '2 item(s) shared a type and identifier with another and were merged into 1 (kept: lowest entityId (no copy carried lastSyncedAt))',
+      }, { key: 'unkeyed_items', ok: true, detail: '0 item(s) have no identifier', blocking: false }]),
+    })
+    expect(screen.getByText(/2 item\(s\) shared a type and identifier with another/)).toBeInTheDocument()
+    expect(screen.queryByText(/Zero data loss/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Not all of the package is in the new data source/)).toBeInTheDocument()
+    expect(screen.queryByText(/as decided/)).not.toBeInTheDocument()
+  })
+
+  it('still claims zero loss when only a warning that loses nothing failed', () => {
+    render_({
+      ...seed, status: 'completed', phase: null, percent: 100,
+      report: seedReport([read, {
+        key: 'ontology_coverage', ok: false, blocking: false,
+        detail: 'the semantic layer declares all but 3 of the package’s types',
+      }]),
+    })
+    expect(screen.getByText(/declares all but 3/)).toBeInTheDocument()
+    expect(screen.getByText(/every item and connection in the package is in the new data source/)).toBeInTheDocument()
+  })
+})

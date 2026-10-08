@@ -389,17 +389,24 @@ async def bootstrap_abandon_endpoint(
 ):
     """Give up on enablement: the job is cancelled and the data source reads exactly as it
     did before, at once; everything the job imported is removed by a queued purge
-    (``{status: 'cancelled', purgeJobId}``). Refused once version control is actually live."""
+    (``{status: 'cancelled', purgeJobId}``). Refused once version control is actually live.
+
+    A data source being seeded from a view package was made for that seed and never went live: it
+    goes too (``{origin: 'package', dataSourceRemoved: true}``)."""
+    from backend.app.services.managed_sources import drop_managed_data_source
     from backend.app.services.versioning.bootstrap_worker import abandon_bootstrap
     from backend.app.services.versioning.service import ConcurrencyError
     await _data_source_in_workspace(session, dataSourceId, ws_id)
     try:
-        return await abandon_bootstrap(data_source_id=dataSourceId, workspace_id=ws_id,
-                                       actor=user.id if user else "system")
+        res = await abandon_bootstrap(data_source_id=dataSourceId, workspace_id=ws_id,
+                                      actor=user.id if user else "system")
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    if res.get("origin") == "package":
+        res["dataSourceRemoved"] = await drop_managed_data_source(session, dataSourceId)
+    return res
 
 
 async def _data_source_in_workspace(session: AsyncSession, data_source_id: str, ws_id: str):

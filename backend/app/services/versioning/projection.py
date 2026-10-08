@@ -743,6 +743,44 @@ class FalkorProjector:
         return {"projected": to_seq if published else from_seq, "applied": applied,
                 "noop": False, "verify_error": verify_error}
 
+    async def run_publish_hooks(self, graph_id: str, *, full_seed: bool = False,
+                                rollups_stale: bool = False) -> None:
+        """What a projection runs once a graph's raw layer is published, for a graph whose raw
+        layer a job wrote itself (a new data source seeded from a view package writes its own key,
+        then flips the head): the rollup rebuild (``rollups_stale``), the read caches and the
+        ontology alias map (``full_seed``: the graph was written whole), and the insights nudge.
+        The same hooks, in the same order, as the publish tail of :meth:`project_graph`. Best
+        effort: a hook that fails is logged; the graph is already live."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            ps = await s.get(ProjectionStateORM, graph_id)
+        if graph is None:
+            return
+        name = (ps.falkor_graph_name if ps else None) or self.default_graph_name(graph_id)
+        if rollups_stale and self._on_rollups_stale is not None:
+            try:
+                await self._on_rollups_stale(graph_id)
+            except Exception as exc:                       # pragma: no cover - infra
+                logger.warning("rollup-rebuild hook failed for %s: %s", graph_id, exc)
+        if full_seed:
+            try:
+                from backend.app.providers.graph_generation import bump_graph_generation
+                await bump_graph_generation(name, reason="graph written whole")
+            except Exception as exc:                       # pragma: no cover - infra
+                logger.warning("graph-generation bump failed for %s: %s", graph_id, exc)
+        if self._on_projected is not None and graph.data_source_id:
+            try:
+                await self._on_projected(graph.data_source_id)
+            except Exception as exc:                       # pragma: no cover - infra
+                logger.warning("on_projected hook failed for %s: %s", graph_id, exc)
+        if full_seed and graph.workspace_id and graph.data_source_id:
+            try:
+                from backend.app.services.resolved_ontology_cache import bump_ontology_generation
+                await bump_ontology_generation(graph.workspace_id, graph.data_source_id)
+            except Exception as exc:                       # pragma: no cover - infra
+                logger.warning("ontology-generation bump after a full write failed for %s: %s",
+                               graph_id, exc)
+
     async def project_pending(
         self, limit: int = 100, concurrency: Optional[int] = None
     ) -> List[Dict[str, object]]:
@@ -2057,7 +2095,7 @@ class FalkorProjector:
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
                      progress=None, level_map: Optional[Dict[str, int]] = None,
-                     provider_id: Optional[str] = None) -> None:
+                     provider_id: Optional[str] = None, known_empty: bool = False) -> None:
         """Apply one pass: nodes in (grouped by label), edges in (grouped by
         type + endpoint labels — the per-label URN indexes drive every node
         match), edges out, nodes out.
@@ -2071,7 +2109,9 @@ class FalkorProjector:
         DROPs the graph and takes every registered name with it.
 
         An upsert's payload may be a :class:`_Pending`; it is read with the batch that writes it.
-        ``provider_id`` is the instance ``client`` writes to (None: the default one)."""
+        ``provider_id`` is the instance ``client`` writes to (None: the default one).
+        ``known_empty``: no node being written exists yet (a package seed's own fresh key), so no
+        node can carry a property its payload lost — the read for them is skipped."""
         await self._ensure_urn_indexes(client, provider_id, [
             *(p.get("entityType") or "Entity" for _e, _u, p in node_upserts),
             *(lbl for *_rest, slb, tlb in edge_upserts for lbl in (slb, tlb)),
@@ -2117,7 +2157,11 @@ class FalkorProjector:
                     item["gvHash"] = _node_fingerprint(
                         label, content_hash(p), (level_map or {}).get(p.get("entityType")))
                     chunk.append(item)
-                await self._mark_removed_properties(client, label, chunk, keep)
+                if known_empty:
+                    for item in chunk:
+                        item["gone"] = {}
+                else:
+                    await self._mark_removed_properties(client, label, chunk, keep)
                 await _q(client, _node_merge_cypher(label), params={"batch": chunk})
                 if progress:
                     await progress(len(chunk))

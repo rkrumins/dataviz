@@ -17,6 +17,11 @@
  *  • failed         — a plain-language reason, the recovery the failure allows (Resume or
  *                     Start over), Give up, the report to download, and technical details
  *                     for whoever needs them.
+ *
+ * A new data source copied from a view package (`origin: 'package'`) runs the same job over the
+ * package instead of a graph: its steps read the package, check, write history, then build the
+ * new graph; giving up removes the new data source; and a failure no retry can fix (the target
+ * graph already holds data, or the package's upload is gone) offers only Give up.
  */
 import { useState } from 'react'
 import {
@@ -28,22 +33,58 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import {
-  BootstrapDecisionError, bootstrapDuplicatesCsvUrl, type BootstrapJob, type BootstrapPhase,
+  BootstrapDecisionError, bootstrapDuplicatesCsvUrl, type BootstrapJob, type BootstrapPhase, type BootstrapReport,
 } from '@/services/versioningApiService'
 import { useAbandonBootstrap, useDecideBootstrapDuplicates, useRetryBootstrap } from '../hooks/useVersioning'
 
+/** A package seed's phases beyond a graph's: it builds its own graph from the copy. */
+type JobPhase = BootstrapPhase | 'index' | 'project'
+type Step = { id: string; label: string; phases: JobPhase[] }
+
 /** The job's eight phases, told as the four things a person actually cares about. */
-const STEPS: Array<{ id: string; label: string; phases: BootstrapPhase[] }> = [
+const STEPS: Step[] = [
   { id: 'read', label: 'Reading the graph', phases: ['counting', 'nodes', 'edges'] },
   { id: 'check', label: 'Checking every item', phases: ['validate'] },
   { id: 'write', label: 'Writing history', phases: ['heads', 'merkle'] },
   { id: 'finish', label: 'Finishing up', phases: ['finalize', 'backfill'] },
 ]
 
-function stepIndex(phase: BootstrapPhase | null): number {
+/** A package seed's ten phases: the package is read and copied, checked, written to history, and
+ *  then the new data source's own graph is built from it. */
+const PACKAGE_STEPS: Step[] = [
+  { id: 'read', label: 'Copying the package', phases: ['reset', 'counting', 'nodes', 'edges'] },
+  { id: 'check', label: 'Checking every item', phases: ['validate'] },
+  { id: 'write', label: 'Writing history', phases: ['heads', 'merkle'] },
+  { id: 'build', label: 'Building the graph', phases: ['index', 'project'] },
+  { id: 'finish', label: 'Finishing up', phases: ['finalize'] },
+]
+
+function stepIndex(steps: Step[], phase: JobPhase | null): number {
   if (!phase) return 0
-  const i = STEPS.findIndex((s) => s.phases.includes(phase))
+  const i = steps.findIndex((s) => s.phases.includes(phase))
   return i < 0 ? 0 : i
+}
+
+/** A package seed's failures no retry fixes: its graph name already holds data (nothing was
+ *  written into it), or its package's upload is gone. Only Give up is left. */
+const PACKAGE_FINAL_FAILURES: Record<string, string> = {
+  target_not_empty: 'Its graph name already holds data on that connection, so nothing was copied into it. '
+    + 'Give up to remove the new data source, then create it again under another name.',
+  payload_missing: 'The package’s upload is no longer kept, so there is nothing left to copy from. '
+    + 'Give up to remove the new data source, then import the package file again.',
+}
+
+/** A package seed's checks that, failed, mean part of the package is not in the copy: they never
+ *  block it (they are reported), but "zero data loss" is then not true. */
+const PACKAGE_LOSS_CHECKS = new Set([
+  'shared_identifiers_collapsed', 'invalid_lines', 'duplicate_ids', 'dangling_connections',
+])
+
+/** A package seed's own account in its report: what the package held, and where it came from. */
+interface PackageReport {
+  nodes?: number
+  edges?: number
+  sourceEnvironment?: string | null
 }
 
 const num = (n: unknown) => (typeof n === 'number' ? n.toLocaleString() : '—')
@@ -82,7 +123,7 @@ function timeLeft(job: BootstrapJob): string | null {
 }
 
 export function BootstrapProgress({
-  job, wsId, dataSourceId, variant = 'bar', canManage = true, onDismiss,
+  job, wsId, dataSourceId, variant = 'bar', canManage = true, onDismiss, onAbandoned,
 }: {
   job: BootstrapJob
   wsId: string
@@ -92,6 +133,8 @@ export function BootstrapProgress({
   canManage?: boolean
   /** Close the completed report and hand over to the normal versioning UI. */
   onDismiss?: () => void
+  /** Given up: the job is cancelled (and a package's new data source removed). */
+  onAbandoned?: () => void
 }) {
   const { notify } = useAppNotifications()
   const retry = useRetryBootstrap(wsId, dataSourceId)
@@ -108,7 +151,9 @@ export function BootstrapProgress({
   const failed = job.status === 'failed'
   const done = job.status === 'completed'
   const eta = timeLeft(job)
-  const active = stepIndex(job.phase)
+  const fromPackage = job.origin === 'package'
+  const steps = fromPackage ? PACKAGE_STEPS : STEPS
+  const active = stepIndex(steps, job.phase)
   const dup = job.duplicates ?? null
   // Who else reads the graph a collapse changes: named in this workspace, counted elsewhere.
   const otherWorkspaces = dup?.sharedWithOtherWorkspaces ?? 0
@@ -120,8 +165,13 @@ export function BootstrapProgress({
   // Offer only the recovery that can work: resuming an integrity failure fails the same way again,
   // and an internal one is a bug no button fixes. A job from before failures carried an action
   // offers both, as it always did.
-  const canResume = !job.failure || job.failure.action === 'resume'
-  const canRestart = !job.failure || job.failure.action !== null
+  const finalFailure = fromPackage ? PACKAGE_FINAL_FAILURES[job.failure?.code ?? ''] ?? null : null
+  const canResume = !finalFailure && (!job.failure || job.failure.action === 'resume')
+  const canRestart = !finalFailure && (!job.failure || job.failure.action !== null)
+  const packageReport = fromPackage
+    ? (job.report as (BootstrapReport & { package?: PackageReport | null }) | null | undefined)?.package ?? null
+    : null
+  const packageLoss = fromPackage && !!job.report?.checks.some((c) => !c.ok && PACKAGE_LOSS_CHECKS.has(c.key))
 
   const downloadReport = () => {
     const blob = new Blob([JSON.stringify(job.report ?? job, null, 2)], { type: 'application/json' })
@@ -142,9 +192,14 @@ export function BootstrapProgress({
 
   const runAbandon = () =>
     abandon.mutate(undefined, {
-      onSuccess: () => notify('success', decided
-        ? 'Cancelled — version control is off for this data source.'
-        : 'Cancelled — this data source is exactly as it was.'),
+      onSuccess: () => {
+        notify('success', fromPackage
+          ? 'Cancelled — the new data source was removed.'
+          : decided
+            ? 'Cancelled — version control is off for this data source.'
+            : 'Cancelled — this data source is exactly as it was.')
+        onAbandoned?.()
+      },
       onError: (e) => notify('error', e instanceof Error ? e.message : 'Could not cancel.'),
     })
 
@@ -188,6 +243,12 @@ export function BootstrapProgress({
             {shared > 0 && ' — for every data source that reads it'}. Rollups are rebuilt
             afterwards.{' '}
             <span className="font-semibold">Giving up later won't restore them.</span>
+          </>
+        ) : fromPackage ? (
+          <>
+            This stops the copy and{' '}
+            <span className="font-semibold">removes the new data source</span>, with everything it wrote.
+            The package, and where it was exported from, are not touched.
           </>
         ) : decided ? (
           <>
@@ -238,7 +299,7 @@ export function BootstrapProgress({
       {running && (
         <>
           <div className="flex items-center gap-2.5 flex-wrap">
-            {STEPS.map((s, i) => (
+            {steps.map((s, i) => (
               <span
                 key={s.id}
                 className={cn(
@@ -260,7 +321,7 @@ export function BootstrapProgress({
           </div>
           <ProgressBar
             value={job.percent}
-            label="Copying the graph into version history"
+            label={fromPackage ? 'Copying the package into the new data source' : 'Copying the graph into version history'}
             className={variant === 'bar' ? 'mt-2' : 'mt-3'}
           />
           {/* Politely announced, not asserted: a job this long would otherwise be entirely
@@ -268,7 +329,7 @@ export function BootstrapProgress({
           <p className="mt-1.5 text-[11px] text-ink-muted" aria-live="polite" aria-atomic="true">
             {job.total > 0
               ? <>{num(job.processed)} of {num(job.total)} items copied</>
-              : <>Working out how big this graph is…</>}
+              : fromPackage ? <>Checking the package…</> : <>Working out how big this graph is…</>}
             {job.status === 'pending' && ' · queued'}
             {eta && <> · <span className="text-ink-secondary">{eta}</span></>}
           </p>
@@ -399,29 +460,48 @@ export function BootstrapProgress({
             <div className="min-w-0">
               <p className="text-sm font-semibold text-ink leading-snug">Everything checked out</p>
               <p className="text-[12px] text-ink-muted leading-snug">
-                Your graph is now under version control — and we verified the copy against the source
-                before switching it on.
+                {fromPackage
+                  ? 'The new data source holds the package’s data, under version control — and we verified the copy against the package before switching it on.'
+                  : 'Your graph is now under version control — and we verified the copy against the source before switching it on.'}
               </p>
             </div>
           </div>
+          {/* A completed job failed no blocking check; the others are reported, never hidden. */}
           <ul className="mt-3 space-y-1.5">
-            {job.report.checks.filter((c) => c.ok).map((c) => (
+            {job.report.checks.map((c) => (
               <li key={c.key} className="flex items-start gap-2 text-[12px] text-ink-secondary">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 mt-0.5 shrink-0" />
+                {c.ok
+                  ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 mt-0.5 shrink-0" />
+                  : <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />}
                 <span className="min-w-0">{c.detail}</span>
               </li>
             ))}
           </ul>
-          <p className="mt-3 text-[12px] font-medium text-emerald-700 dark:text-emerald-400">
-            Zero data loss — every item and connection in the source is in your history.
-          </p>
+          {packageLoss ? (
+            <p className="mt-3 text-[12px] font-medium text-amber-700 dark:text-amber-400">
+              Not all of the package is in the new data source — see the warnings above, and the report for the details.
+            </p>
+          ) : (
+            <p className="mt-3 text-[12px] font-medium text-emerald-700 dark:text-emerald-400">
+              {fromPackage
+                ? 'Zero data loss — every item and connection in the package is in the new data source.'
+                : 'Zero data loss — every item and connection in the source is in your history.'}
+            </p>
+          )}
+          {packageReport && (packageReport.nodes != null || packageReport.edges != null) && (
+            <p className="mt-1 text-[11px] text-ink-muted">
+              Copied from the package{packageReport.sourceEnvironment ? `, exported from ${packageReport.sourceEnvironment}` : ''}:{' '}
+              {num(packageReport.nodes)} items and {num(packageReport.edges)} connections.
+            </p>
+          )}
           {job.report.mergedDuplicateConnections > 0 && (
             <p className="mt-1 text-[11px] text-ink-muted">
               {num(job.report.mergedDuplicateConnections)} duplicate connection(s) were merged (same type
               between the same two items — the graph reads identically).
             </p>
           )}
-          {(job.collapsed?.nodes ?? 0) > 0 && (
+          {/* A package's collapse is one of its warnings above, with the rule that decided it. */}
+          {!fromPackage && (job.collapsed?.nodes ?? 0) > 0 && (
             <p className="mt-1 text-[11px] text-ink-muted">
               {num(job.collapsed!.nodes)} duplicate item(s) were collapsed into the copy kept for their
               identifier, as decided — their connections moved to it.
@@ -470,15 +550,18 @@ export function BootstrapProgress({
             <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
             <div className="min-w-0">
               <p className="text-sm font-semibold text-ink leading-snug">
-                {decided ? 'We stopped before switching it on' : 'We stopped before changing anything'}
+                {fromPackage ? 'The copy stopped before the new data source was switched on'
+                  : decided ? 'We stopped before switching it on' : 'We stopped before changing anything'}
               </p>
               <p className="text-[12px] text-ink-muted leading-snug">
-                {job.error ?? 'The copy did not match the source graph.'}
+                {finalFailure ?? job.error ?? (fromPackage ? 'The copy did not match the package.' : 'The copy did not match the source graph.')}
               </p>
               <p className="text-[11px] text-ink-muted/80 mt-1">
-                {decided
-                  ? 'This data source still reads as it did — except that duplicate copies you chose to collapse may already have been removed.'
-                  : 'This data source is untouched and still reads exactly as it did.'}
+                {fromPackage
+                  ? 'Nothing outside the new data source was touched.'
+                  : decided
+                    ? 'This data source still reads as it did — except that duplicate copies you chose to collapse may already have been removed.'
+                    : 'This data source is untouched and still reads exactly as it did.'}
               </p>
             </div>
           </div>

@@ -16,6 +16,7 @@ fallback (cross-branch CoW is a later step); draft commits carry no root at all.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Dict, Iterable, Optional, Tuple
 
 from sqlalchemy import insert, literal, select
@@ -37,6 +38,67 @@ def _parse_path(s: str) -> Path:
     return tuple(int(c, 16) for c in s.split("/")) if s else ()
 
 
+def _touched(changes: Dict[str, Optional[str]], depth: int):
+    """A commit's changes by leaf, the internal paths above them, and every path whose stored
+    row the rebuild reads (each dirty node's children, and the touched leaves)."""
+    by_leaf: Dict[Path, Dict[str, Optional[str]]] = {}
+    for eid, ch in changes.items():
+        by_leaf.setdefault(_leaf_path(eid, depth), {})[eid] = ch
+
+    touched_leaves = set(by_leaf)
+    dirty_internal: set = set()
+    for lp in touched_leaves:
+        for lvl in range(depth):
+            dirty_internal.add(lp[:lvl])
+    need: set = set(touched_leaves)
+    for prefix in dirty_internal:
+        for idx in range(_FANOUT):
+            need.add(prefix + (idx,))
+    return by_leaf, dirty_internal, need
+
+
+def _rebuilt(by_leaf, dirty_internal, parent: Dict[Path, dict], depth: int, keys: dict):
+    """The changed paths' new rows (``keys`` the commit's columns) and the new root."""
+    new_hash: Dict[Path, str] = {}
+    new_bucket: Dict[Path, dict] = {}
+    for lp, ch in by_leaf.items():
+        prow = parent.get(lp)
+        bucket = dict((prow.get("bucket") if prow else None) or {})
+        for eid, h in ch.items():
+            if h is None:
+                bucket.pop(eid, None)
+            else:
+                bucket[eid] = h
+        new_bucket[lp] = bucket
+        new_hash[lp] = _leaf_hash(bucket) if bucket else _EMPTY
+
+    for lvl in range(depth - 1, -1, -1):
+        for prefix in [p for p in dirty_internal if len(p) == lvl]:
+            child_hashes = []
+            for idx in range(_FANOUT):
+                cp = prefix + (idx,)
+                if cp in new_hash:
+                    child_hashes.append(new_hash[cp])
+                else:
+                    row = parent.get(cp)
+                    child_hashes.append(row["hash"] if row else _EMPTY)
+            new_hash[prefix] = (
+                _EMPTY if all(h == _EMPTY for h in child_hashes)
+                else config.hash_parts(*(h.encode("ascii") for h in child_hashes))
+            )
+
+    rows = []
+    for path, h in new_hash.items():
+        prow = parent.get(path)
+        if prow is not None and prow["hash"] == h:
+            continue                       # unchanged subtree — inherit, write nothing
+        rows.append(dict(
+            **keys, path=_path_str(path), level=len(path), hash=h,
+            bucket=(new_bucket.get(path) if len(path) == depth else None),
+        ))
+    return rows, new_hash.get((), _EMPTY)
+
+
 class MerkleStore:
     def __init__(self, depth: Optional[int] = None):
         self._depth = config.MERKLE_DEPTH if depth is None else depth
@@ -54,64 +116,18 @@ class MerkleStore:
         if not changes:
             return await self.root_at(s, graph_id, branch_id, commit_seq - 1)
 
-        by_leaf: Dict[Path, Dict[str, Optional[str]]] = {}
-        for eid, ch in changes.items():
-            by_leaf.setdefault(_leaf_path(eid, depth), {})[eid] = ch
-
-        touched_leaves = set(by_leaf)
-        dirty_internal: set = set()
-        for lp in touched_leaves:
-            for lvl in range(depth):
-                dirty_internal.add(lp[:lvl])
-        need: set = set(touched_leaves)
-        for prefix in dirty_internal:
-            for idx in range(_FANOUT):
-                need.add(prefix + (idx,))
+        # The hashing either side of the one read is pure CPU — for a 200k-entity commit, over a
+        # second of it — and runs in a worker thread: the event loop carries every other job.
+        by_leaf, dirty_internal, need = await asyncio.to_thread(_touched, changes, depth)
         parent = await self._as_of_many(s, graph_id, branch_id, need, commit_seq - 1)
-
-        new_hash: Dict[Path, str] = {}
-        new_bucket: Dict[Path, dict] = {}
-        for lp, ch in by_leaf.items():
-            prow = parent.get(lp)
-            bucket = dict((prow.get("bucket") if prow else None) or {})
-            for eid, h in ch.items():
-                if h is None:
-                    bucket.pop(eid, None)
-                else:
-                    bucket[eid] = h
-            new_bucket[lp] = bucket
-            new_hash[lp] = _leaf_hash(bucket) if bucket else _EMPTY
-
-        for lvl in range(depth - 1, -1, -1):
-            for prefix in [p for p in dirty_internal if len(p) == lvl]:
-                child_hashes = []
-                for idx in range(_FANOUT):
-                    cp = prefix + (idx,)
-                    if cp in new_hash:
-                        child_hashes.append(new_hash[cp])
-                    else:
-                        row = parent.get(cp)
-                        child_hashes.append(row["hash"] if row else _EMPTY)
-                new_hash[prefix] = (
-                    _EMPTY if all(h == _EMPTY for h in child_hashes)
-                    else config.hash_parts(*(h.encode("ascii") for h in child_hashes))
-                )
-
-        rows = []
-        for path, h in new_hash.items():
-            prow = parent.get(path)
-            if prow is not None and prow["hash"] == h:
-                continue                       # unchanged subtree — inherit, write nothing
-            rows.append(dict(
-                graph_id=graph_id, branch_id=branch_id, commit_id=commit_id,
-                commit_seq=commit_seq, path=_path_str(path), level=len(path), hash=h,
-                bucket=(new_bucket.get(path) if len(path) == depth else None),
-            ))
+        rows, root = await asyncio.to_thread(
+            _rebuilt, by_leaf, dirty_internal, parent, depth,
+            dict(graph_id=graph_id, branch_id=branch_id, commit_id=commit_id, commit_seq=commit_seq))
         # Multi-row INSERTs, not an ORM object per row: a large commit changes tens of
         # thousands of paths. 2,000 rows × 8 columns stays under asyncpg's bind cap.
         for i in range(0, len(rows), _INSERT_ROWS):
             await s.execute(insert(MerkleNodeORM.__table__), rows[i:i + _INSERT_ROWS])
-        return new_hash.get((), _EMPTY)
+        return root
 
     async def root_at(self, s, graph_id: str, branch_id: str, seq: int) -> str:
         if seq < 1:

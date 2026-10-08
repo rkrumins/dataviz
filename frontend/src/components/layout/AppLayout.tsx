@@ -186,6 +186,7 @@ export function AppLayout() {
           journey={initialScope.journey}
           importFile={initialScope.importFile}
           importIntoViewId={initialScope.importIntoViewId}
+          importUploadId={initialScope.importUploadId}
         />
 
         <HelpPanel />

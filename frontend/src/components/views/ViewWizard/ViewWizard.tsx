@@ -24,7 +24,10 @@
  * step leads the body, whose Basics → Preview steps edit the imported design. The
  * submit writes it through the import endpoint instead of create/update. A view with
  * its data (a package) has a Data step before Match: the data goes into a draft of
- * the target, and the view is checked against that draft and goes into it too.
+ * the target, and the view is checked against that draft and goes into it too. Or the
+ * package's data makes a new data source of its own (the Target step's "Into a new data
+ * source"): its Data step creates it and copies the data in full, then the package's
+ * views come into it live — one through the steps, several through the batch flow.
  */
 
 import React, { useState, useCallback, useMemo, useEffect, useRef, startTransition } from 'react'
@@ -67,15 +70,16 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useFeatureList } from '@/store/features'
+import { useFeature, useFeatureList } from '@/store/features'
+import { usePermission } from '@/store/auth'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { viewService } from '@/services/viewService'
 import {
     viewToViewConfig, updateViewLayout, requestViewPublication, getView,
 } from '@/services/viewApiService'
 import {
-    importView, newRequestId, ViewTransferError,
-    type ImportViewRequest, type ImportViewResult,
+    importView, newRequestId, rememberedNewSource, ViewTransferError,
+    type ImportViewRequest, type ImportViewResult, type PackageInspectResult,
 } from '@/services/viewTransferApiService'
 import { recordEvent } from '@/services/telemetryService'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -103,10 +107,15 @@ import { PreviewStep } from './steps/PreviewStep'
 import { AssignmentStep } from './steps/AssignmentStep'
 import { ScopeStep, ScopeModeToggle } from './steps/ScopeStep'
 import { viewTypeLabel } from '@/lib/domainLabels'
-import { ImportSessionProvider, sameDataTarget, useImportSession, useImportSessionState } from './import/importSession'
+import {
+    ImportSessionProvider, sameDataTarget, useImportSession, useImportSessionState, type NewDataTarget,
+} from './import/importSession'
 import { BatchImport } from './import/BatchImport'
 import { StageChoice } from './import/StageChoice'
-import { useDraftStaging } from './import/useDraftStaging'
+import { DRAFT_PERMISSION, useDraftStaging } from './import/useDraftStaging'
+import { DataTargetToggle, NewSourceTargetPanel, type NewSourceDraft } from './import/NewSourceTargetPanel'
+import { PackageOntologyPicker } from './import/PackageOntologyPicker'
+import { NewSourceSeedStep } from './import/NewSourceSeedStep'
 import { PublishDraftDialog } from '@/features/versioning/components/PublishDraftDialog'
 import { ImportStep } from './import/ImportStep'
 import { PackageDataStep } from './import/PackageDataStep'
@@ -142,6 +151,9 @@ export interface ViewWizardProps {
     importFile?: File | null
     /** Import journey: update this view from the file ("Update from file…"). */
     importIntoViewId?: string
+    /** Import journey: a view package already uploaded, read from there with no file to choose:
+     *  "Finish importing views" on the data source it was copied into (`initialDataSourceId`). */
+    importUploadId?: string
 }
 
 export interface ScopeContext {
@@ -237,6 +249,9 @@ interface ViewWizardBodyProps extends Omit<ViewWizardProps, 'initialWorkspaceId'
     blankOntologyId?: string | null
     /** Import journey: back to the File step. */
     onBackToFile?: () => void
+    /** Import journey: the view goes live by default, not into a draft (its data was just copied
+     *  into a new data source of its own). */
+    importLive?: boolean
 }
 
 const LAYOUT_TYPES = [
@@ -477,6 +492,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     workspaces: ReturnType<typeof useWorkspacesStore.getState>['workspaces']
 }) {
     const { activeWorkspaceId, activeDataSourceId, workspaces, ...wizardProps } = props
+    const loadWorkspaces = useWorkspacesStore(s => s.loadWorkspaces)
     const lastScope = useMemo(() => readLastScope(), [])
     const startMode: ScopeMode = props.journey === 'import' ? 'import' : 'existing'
 
@@ -496,12 +512,42 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
 
     // Import journey: its first steps (the file, then where a new view goes) come before any
     // schema is loaded, so they live here, above both phases, with the session they build.
-    const [importStep, setImportStep] = useState<'file' | 'target' | 'batch'>('file')
-    const importSession = useImportSessionState({ file: props.importFile, intoViewId: props.importIntoViewId })
+    // "Finish importing views" opens on a package's upload at its Data step, following the copy
+    // already made into the data source it opened from.
+    const attachTo = useMemo(
+        () => (props.importUploadId && props.initialWorkspaceId && props.initialDataSourceId
+            ? { workspaceId: props.initialWorkspaceId, dataSourceId: props.initialDataSourceId }
+            : null),
+        [props.importUploadId, props.initialWorkspaceId, props.initialDataSourceId],
+    )
+    const firstImportStep = attachTo ? 'seed' : 'file'
+    const [importStep, setImportStep] = useState<'file' | 'target' | 'batch' | 'seed'>(firstImportStep)
+    const importSession = useImportSessionState({
+        file: props.importFile, intoViewId: props.importIntoViewId, uploadId: props.importUploadId,
+    })
     const isImport = scopeMode === 'import'
     const importAction = importSession.action
     const importNeedsTarget = importAction === 'create' || importAction === 'copy'
     const importViewType = importSession.view?.metadata.viewType ?? null
+    // A package's data can go into a brand-new data source of its own instead (an independent full
+    // copy, on a graph connection and under a name the person picks): for a new view, where version
+    // control is on (the copy is a versioned graph from the start).
+    const versioningOn = useFeature('versioningEnabled')
+    const newSourceOffered = isImport && importSession.withData && importNeedsTarget && versioningOn
+    const [dataTargetMode, setDataTargetMode] = useState<'existing' | 'new'>('existing')
+    const toNewSource = newSourceOffered && dataTargetMode === 'new'
+    const [newSource, setNewSource] = useState<NewSourceDraft>({})
+    const updateNewSource = useCallback(
+        (patch: Partial<NewSourceDraft>) => setNewSource(prev => ({ ...prev, ...patch })), [])
+    const chooseNewSourceOntology = useCallback(
+        (ontologyId: string | null) => updateNewSource({ ontologyId }), [updateNewSource])
+    // While the semantic layers are still being scored, nothing is chosen: going on then would
+    // send "no semantic layer" and skip the recommendation.
+    const [newSourceOntologyPending, setNewSourceOntologyPending] = useState(false)
+    // Creating a data source takes the same right as opening drafts on one.
+    const mayCreateSource = usePermission(DRAFT_PERMISSION, selectedWsId)
+    /** The new data source the package's data was copied into: its views go there next, live. */
+    const [seeded, setSeeded] = useState<{ workspaceId: string; dataSourceId: string } | null>(null)
     // A view with its data can only go where its data can: a data source under version control, in
     // a draft the person may open.
     const packageTarget = useDraftStaging(
@@ -536,10 +582,13 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
             setSelectedWsId(initialWs)
             setSelectedDsId(initialDs)
             setScopeMode(startMode)
-            setImportStep('file')
+            setImportStep(firstImportStep)
             setSelectedProviderId(null)
             setSelectedOntologyId(null)
             setScopeConfirmed(false)
+            setDataTargetMode('existing')
+            setNewSource({})
+            setSeeded(null)
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [props.isOpen])
@@ -608,6 +657,13 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 suggestedFor.current = key
                 if (top && (top.sampleHitRate ?? 0) >= 0.5) selectScope(top.workspaceId, top.dataSourceId)
             }
+            // This file already made a new data source here (the wizard closed, or the page
+            // reloaded, while its data was copied): back to following that copy.
+            if (newSourceOffered && importSession.fileKey && rememberedNewSource(importSession.fileKey)?.started) {
+                setDataTargetMode('new')
+                setImportStep('seed')
+                return
+            }
             setImportStep('target')
             return
         }
@@ -616,7 +672,48 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         setSelectedWsId(target.workspaceId)
         setSelectedDsId(target.dataSourceId ?? null)
         setScopeConfirmed(true)
-    }, [importSession.batch, importSession.fileName, importSession.view, importSession.suggestions, importNeedsTarget, importSession.targetView, selectScope])
+    }, [importSession.batch, importSession.fileName, importSession.fileKey, importSession.view, importSession.suggestions,
+        importNeedsTarget, importSession.targetView, selectScope, newSourceOffered])
+
+    // The new data source as the Target step describes it: the package's own label, and its graph
+    // name marked as its copy (`lineage` → `lineage_copy`); both the person's to change.
+    const packageSource = importSession.view ? importSession.inspect?.bundle.sources[importSession.view.source] ?? null : null
+    const newSourceDefaults = useMemo(() => {
+        const label = packageSource?.dataSource.label || packageSource?.dataSource.graphName
+            || importSession.view?.metadata.name || 'Package data'
+        return { label, graphName: slugifyGraphName(`${packageSource?.dataSource.graphName || label} copy`) }
+    }, [packageSource, importSession.view])
+    const newSourceTarget = useMemo<NewDataTarget | null>(() => {
+        const label = (newSource.label ?? newSourceDefaults.label).trim()
+        const graphName = newSource.graphName ?? newSourceDefaults.graphName
+        if (!selectedWsId || !selectedProviderId || !label || !GRAPH_NAME_RE.test(graphName)) return null
+        return {
+            kind: 'new', workspaceId: selectedWsId, providerId: selectedProviderId, label, graphName,
+            ontologyId: newSource.ontologyId ?? null,
+        }
+    }, [newSource, newSourceDefaults, selectedWsId, selectedProviderId])
+    // No data source id yet: what's needed is a complete description, a free name, and the right.
+    const newSourceReady = !!newSourceTarget && mayCreateSource && newSource.graphNameAvailable !== false
+        && !newSourceOntologyPending
+
+    /** The package's data is in its new data source: its views follow, live. Several go through the
+     *  batch flow, preset to it; one goes through the steps, as a view without its data does. */
+    const handleSeeded = useCallback(async (into: { workspaceId: string; dataSourceId: string }) => {
+        await loadWorkspaces()          // the new data source joins the store: its scope and schema resolve
+        if (importSession.action !== 'create' && importSession.action !== 'copy') {
+            importSession.choose(importSession.matches.length ? 'copy' : 'create')
+        }
+        importSession.setWithData(false)
+        setSeeded(into)
+        setSelectedWsId(into.workspaceId)
+        setSelectedDsId(into.dataSourceId)
+        if ((importSession.inspect?.views.length ?? 0) > 1 && !props.importIntoViewId) {
+            setImportStep('batch')
+            return
+        }
+        reconciledScope.current = `${into.workspaceId}/${into.dataSourceId}`
+        setScopeConfirmed(true)
+    }, [loadWorkspaces, importSession, props.importIntoViewId])
 
     const handleBackToScope = useCallback(() => {
         setScopeConfirmed(false)
@@ -681,7 +778,25 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         return (
             <ImportSessionProvider value={importSession}>
                 {importStep === 'batch' ? (
-                    <BatchImport steps={BATCH_IMPORT_STEPS} onBackToFile={() => setImportStep('file')} onClose={props.onClose} />
+                    <BatchImport steps={BATCH_IMPORT_STEPS} onBackToFile={() => setImportStep('file')} onClose={props.onClose}
+                        preset={seeded ? { target: seeded, stage: false } : null} />
+                ) : importStep === 'seed' ? (
+                    <NewSourceSeedStep
+                        steps={allSteps}
+                        target={attachTo ? null : newSourceTarget}
+                        providerName={chosenProvider?.name}
+                        attached={attachTo}
+                        onBack={() => setImportStep(attachTo ? 'file' : 'target')}
+                        onClose={props.onClose}
+                        onSeeded={(into) => void handleSeeded(into)}
+                        onChooseFileAgain={() => {
+                            importSession.clearFile()
+                            setImportStep('file')
+                        }}
+                        onUseGraphName={(graphName) => updateNewSource({
+                            graphName, graphNameIsAuto: false, graphNameAvailable: undefined,
+                        })}
+                    />
                 ) : importStep === 'file' ? (
                     <WizardShell
                         title={title}
@@ -714,24 +829,40 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                         currentStepIndex={1}
                         onStepClick={(id) => { if (id === 'file') setImportStep('file') }}
                         onBack={() => setImportStep('file')}
-                        onNext={handleScopeConfirm}
+                        onNext={toNewSource ? () => setImportStep('seed') : handleScopeConfirm}
                         onClose={props.onClose}
-                        canProceed={!!(selectedWsId && selectedDsId) && packageTargetReady}
+                        canProceed={toNewSource ? newSourceReady : !!(selectedWsId && selectedDsId) && packageTargetReady}
                         isLastStep={false}
                         isSubmitting={false}
                         onSubmit={() => {}}
                         wide
                     >
                         <ScopeStep
-                            scopeMode="existing"
+                            scopeMode={toNewSource ? 'blank' : 'existing'}
                             onScopeModeChange={() => {}}
                             showModeToggle={false}
-                            title="Where should this view be imported?"
-                            subtitle={importSession.withData
+                            title={toNewSource ? 'Where should the new data source live?' : 'Where should this view be imported?'}
+                            subtitle={toNewSource
+                                ? 'Choose its workspace and graph connection, name it, and choose its semantic layer: the package’s data is copied into it in full'
+                                : importSession.withData
                                 ? 'Choose the data source here, under version control, that holds the same graph: its data goes into a draft of it'
                                 : 'Choose the data source here that holds the same graph the view was built on'}
-                            aboveSlot={(
+                            aboveSlot={toNewSource ? (
                                 <>
+                                    <DataTargetToggle mode={dataTargetMode} onChange={setDataTargetMode} />
+                                    <NewSourceTargetPanel
+                                        value={newSource}
+                                        onChange={updateNewSource}
+                                        workspaceId={selectedWsId}
+                                        providerId={selectedProviderId}
+                                        providerName={chosenProvider?.name}
+                                        defaults={newSourceDefaults}
+                                        allowed={mayCreateSource}
+                                    />
+                                </>
+                            ) : (
+                                <>
+                                    {newSourceOffered && <DataTargetToggle mode={dataTargetMode} onChange={setDataTargetMode} />}
                                     <TargetSuggestions
                                         suggestions={importSession.suggestions}
                                         selectedDataSourceId={selectedDsId}
@@ -761,6 +892,16 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                             selectedOntologyId={selectedOntologyId}
                             onSelectProvider={setSelectedProviderId}
                             onSelectOntology={setSelectedOntologyId}
+                            blankOntologySlot={toNewSource ? (
+                                <PackageOntologyPicker
+                                    match={(importSession.inspect as PackageInspectResult | null)?.ontologyMatch?.[importSession.view?.source ?? ''] ?? null}
+                                    typeStats={importSession.pkg?.info.data?.typeStats ?? null}
+                                    value={newSource.ontologyId}
+                                    onChange={chooseNewSourceOntology}
+                                    draftName={`${(newSource.label ?? newSourceDefaults.label).trim() || 'Package'} Schema`}
+                                    onPending={setNewSourceOntologyPending}
+                                />
+                            ) : undefined}
                         />
                     </WizardShell>
                 )}
@@ -850,6 +991,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                     onBackToScope={handleBackToScope}
                     onBackToFile={handleBackToFile}
                     scopeMode={isImport ? 'import' : 'existing'}
+                    importLive={isImport && seeded?.dataSourceId === selectedDsId}
                 />
             </SchemaScope>
         </ImportSessionProvider>
@@ -875,6 +1017,7 @@ function ViewWizardBody({
     blankProviderId,
     blankOntologyId,
     onBackToFile,
+    importLive = false,
 }: ViewWizardBodyProps) {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
@@ -900,6 +1043,7 @@ function ViewWizardBody({
     const importWithData = isImport && importSession.withData
     const importFirstStep: WizardStep = importWithData ? 'data' : 'reconcile'
     const importDataTarget = useMemo(() => ({
+        kind: 'existing' as const,
         workspaceId: resolvedWorkspaceId,
         dataSourceId: resolvedDataSourceId ?? '',
         viewId: importTargetViewId,
@@ -1248,7 +1392,7 @@ function ViewWizardBody({
     // An import into a version-controlled data source can wait in a draft, to go live with it:
     // offered there, and the default.
     const importStaging = useDraftStaging(isImport ? resolvedWorkspaceId : null, isImport ? resolvedDataSourceId : null)
-    const [stageChoice, setStageChoice] = useState<boolean | null>(null)
+    const [stageChoice, setStageChoice] = useState<boolean | null>(importLive ? false : null)
     // A view with its data always joins its data's draft: they go live together.
     const importStaged = importWithData
         || (isImport && importStaging.versioned && importStaging.allowed && (stageChoice ?? true))

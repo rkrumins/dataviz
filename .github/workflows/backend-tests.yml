@@ -40,9 +40,11 @@ jobs:
             backend/requirements.txt
             backend/requirements-test.txt
       - name: Install dependencies
+        # requirements-s3.txt is the OPTIONAL object-store backend: the image does not ship it,
+        # but the required list holds its store tests, which skip without boto3.
         run: |
           python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt -r backend/requirements-test.txt
+          pip install -r backend/requirements.txt -r backend/requirements-test.txt -r backend/requirements-s3.txt
       - name: Run the connectivity + provider domain suite
         working-directory: backend
         run: >-

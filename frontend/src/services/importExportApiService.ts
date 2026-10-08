@@ -209,22 +209,56 @@ function createImportUpload(wsId: string, graphId: string, file: File, format: I
   })
 }
 
+/** A part a presigned URL couldn't take: the browser couldn't send it there at all (`status` null —
+ *  this site's Content-Security-Policy or the bucket's CORS block it before it leaves, as a bare
+ *  TypeError every time; or the connection dropped), or the bucket refused it (403: the URL's
+ *  signature expired, with the temporary credentials that made it). */
+class DirectPartError extends Error {
+  constructor(message: string, readonly status: number | null) {
+    super(message)
+  }
+}
+
+/** What a refusal says. An object store answers in XML (`<Error><Code>…</Code><Message>…`). */
+function refusalText(text: string, fallback: string): string {
+  const stored = /<Message>([^<]*)<\/Message>/.exec(text)?.[1]
+  return stored ? `The file store refused part of the file: ${stored}` : extractErrorMessageFromText(text, fallback)
+}
+
 /** Send one part, retrying a dropped connection or a server error with backoff; a refusal (4xx,
- *  but for a timeout or a busy server) is final. `direct`: the URL is the object store's own,
- *  which must not be sent this site's session cookies. */
+ *  but for a timeout or a busy server) is final. `direct`: the URL is the object store's own
+ *  (presigned), so it gets a bare request: no session cookies or CSRF token leave this site, and
+ *  with no custom header the bucket's CORS needs to allow only the PUT itself. One that can't be
+ *  sent there, or is refused for its signature, is a `DirectPartError`: it goes another way. */
 async function putPart(url: string, blob: Blob, signal?: AbortSignal, direct = false): Promise<void> {
   for (let attempt = 1; ; attempt++) {
+    // Cancelled between two parts: a request made now would never hear of it.
+    if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError')
     let res: Response | null = null
     try {
-      res = await fetchWithTimeout(url, {
-        method: 'PUT', body: blob, signal, timeoutMs: 120_000, ...(direct ? { credentials: 'omit' as const } : {}),
-      })
+      if (direct) {
+        const timeout = new AbortController()
+        const abort = () => timeout.abort()
+        const timer = setTimeout(abort, 120_000)
+        signal?.addEventListener('abort', abort)
+        try {
+          res = await fetch(url, { method: 'PUT', body: blob, credentials: 'omit', signal: timeout.signal })
+        } finally {
+          clearTimeout(timer)
+          signal?.removeEventListener('abort', abort)
+        }
+      } else {
+        res = await fetchWithTimeout(url, { method: 'PUT', body: blob, signal, timeoutMs: 120_000 })
+      }
     } catch (err) {
-      if (signal?.aborted || attempt >= PART_ATTEMPTS) throw err
+      if (signal?.aborted) throw err
+      if (direct) throw new DirectPartError(err instanceof Error ? err.message : String(err), null)
+      if (attempt >= PART_ATTEMPTS) throw err
     }
     if (res?.ok) return
+    if (direct && res?.status === 403) throw new DirectPartError(refusalText(await res.text(), res.statusText), 403)
     if (res && res.status < 500 && res.status !== 408 && res.status !== 429) {
-      throw new Error(extractErrorMessageFromText(await res.text(), res.statusText))
+      throw new Error(refusalText(await res.text(), res.statusText))
     }
     if (attempt >= PART_ATTEMPTS) throw new Error("Part of the file couldn't be sent. Try again: it resumes where it stopped.")
     await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)))
@@ -254,6 +288,13 @@ export function remember(key: string, value: string | null): void {
  * server, unless the upload names its own ``partUrls``. ``onProgress`` hears the bytes the server
  * holds so far. Returns the upload with every part sent; it stays remembered until the caller
  * forgets it (``remember(key, null)``), once done with it.
+ *
+ * The upload's own ``partUrls`` are used while they work. A URL the bucket refuses (403) was
+ * signed with credentials that have since expired: the upload is read again (``find``) for fresh
+ * ones, and the part sent again, once. A part that can't be sent to its URL at all (this site's
+ * security policy or the bucket's CORS don't allow it) — or still is refused — goes through the
+ * server instead, and so does every part after it: a misconfigured bucket slows an upload down,
+ * never breaks it.
  */
 export async function sendInParts<U extends PartsUpload>(file: File, opts: {
   key: string
@@ -273,12 +314,36 @@ export async function sendInParts<U extends PartsUpload>(file: File, opts: {
   let sent = [...arrived].reduce((sum, n) => sum + bytesOf(n), 0)
   opts.onProgress?.(sent, upload.size)
   const todo = Array.from({ length: upload.parts }, (_, n) => n).filter((n) => !arrived.has(n))
-  const direct = !!upload.partUrls?.length
+  let urls = upload.partUrls?.length ? upload.partUrls : null
+  let renewing: Promise<void> | null = null
+  /** Freshly signed URLs for the upload, read once however many parts asked (null: none). */
+  const renew = (stale: string[]) => {
+    if (urls !== stale) return Promise.resolve()             // renewed already, by another part
+    renewing ??= opts.find(upload.uploadId)
+      .then((u) => { urls = u?.partUrls?.length ? u.partUrls : null }, () => { urls = null })
+      .finally(() => { renewing = null })
+    return renewing
+  }
+  const sendPart = async (n: number, blob: Blob) => {
+    for (let renewed = false; urls; renewed = true) {
+      const using = urls
+      try {
+        return await putPart(using[n], blob, opts.signal, true)
+      } catch (err) {
+        if (!(err instanceof DirectPartError)) throw err
+        if (err.status !== 403 || renewed) {
+          urls = null
+          break
+        }
+        await renew(using)
+      }
+    }
+    await putPart(opts.partUrl(upload.uploadId, n), blob, opts.signal)
+  }
   const sender = async () => {
     for (let n = todo.shift(); n !== undefined; n = todo.shift()) {
       const start = n * upload.partBytes
-      const url = direct ? upload.partUrls![n] : opts.partUrl(upload.uploadId, n)
-      await putPart(url, file.slice(start, start + bytesOf(n)), opts.signal, direct)
+      await sendPart(n, file.slice(start, start + bytesOf(n)))
       sent += bytesOf(n)
       opts.onProgress?.(sent, upload.size)
     }

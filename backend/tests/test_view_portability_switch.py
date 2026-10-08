@@ -26,9 +26,9 @@ ROUTES = sorted(set(_routes()))
 
 
 def test_every_route_is_counted():
-    # Thirteen transfer routes and six version routes; a router that lost its routes would make the
+    # Fourteen transfer routes and six version routes; a router that lost its routes would make the
     # tests below pass by testing nothing.
-    assert len(ROUTES) == 19
+    assert len(ROUTES) == 20
 
 
 def _refused(resp) -> bool:

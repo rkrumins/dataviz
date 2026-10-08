@@ -83,6 +83,9 @@ export interface ScopeStepProps {
     showModeToggle?: boolean
     /** Rendered between the heading and the picker (e.g. suggestions for an imported file). */
     aboveSlot?: ReactNode
+    /** Blank mode: rendered in place of the published-semantic-layer picker (a new data source
+     *  copied from a view package is matched to a layer of its own). */
+    blankOntologySlot?: ReactNode
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -982,6 +985,7 @@ function BlankScopePickers({
     selectedOntologyId,
     onSelectProvider,
     onSelectOntology,
+    ontologySlot,
 }: {
     providers: ProviderScopeOption[]
     ontologies: OntologyDefinitionResponse[]
@@ -990,6 +994,7 @@ function BlankScopePickers({
     selectedOntologyId: string | null
     onSelectProvider: (id: string) => void
     onSelectOntology: (id: string) => void
+    ontologySlot?: ReactNode
 }) {
     const [typeFilter, setTypeFilter] = useState<'all' | string>('all')
 
@@ -1070,7 +1075,7 @@ function BlankScopePickers({
             </section>
 
             {/* Ontology picker */}
-            <section className="space-y-3">
+            {ontologySlot ?? <section className="space-y-3">
                 <div className="flex items-center gap-2">
                     <Sparkles className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                     <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Published semantic layer</span>
@@ -1098,7 +1103,7 @@ function BlankScopePickers({
                         ))}
                     </div>
                 )}
-            </section>
+            </section>}
         </div>
     )
 }
@@ -1134,6 +1139,7 @@ export function ScopeStep({
     subtitle,
     showModeToggle = true,
     aboveSlot,
+    blankOntologySlot,
 }: ScopeStepProps) {
     const isBlank = scopeMode === 'blank'
     const importModeAvailable = useViewPortability().canImport
@@ -1509,6 +1515,7 @@ export function ScopeStep({
                             selectedOntologyId={selectedOntologyId}
                             onSelectProvider={onSelectProvider}
                             onSelectOntology={onSelectOntology}
+                            ontologySlot={blankOntologySlot}
                         />
                     ) : selectedWorkspace ? (
                         <>

@@ -370,13 +370,16 @@ export class ViewTransferError extends Error {
   readonly status: number
   readonly type?: string
   readonly code?: string
+  /** The refusal's own fields beside its type (e.g. a free graph name's `suggestion`). */
+  readonly detail?: Record<string, unknown>
 
-  constructor(message: string, status: number, type?: string, code?: string) {
+  constructor(message: string, status: number, type?: string, code?: string, detail?: Record<string, unknown>) {
     super(message)
     this.name = 'ViewTransferError'
     this.status = status
     this.type = type
     this.code = code
+    this.detail = detail
   }
 }
 
@@ -396,7 +399,7 @@ async function errorFrom(res: Response): Promise<ViewTransferError> {
   }
   if (detail && typeof detail === 'object') {
     const d = detail as { message?: string; type?: string; code?: string }
-    return new ViewTransferError(d.message || res.statusText, res.status, d.type, d.code)
+    return new ViewTransferError(d.message || res.statusText, res.status, d.type, d.code, detail as Record<string, unknown>)
   }
   return new ViewTransferError(text || res.statusText, res.status)
 }
@@ -696,6 +699,17 @@ export async function inspectViewPackage(
   return getJson<PackageInspectResult>(`/packages/${upload.uploadId}`)
 }
 
+/** A package upload as the server holds it now: 404 once it is gone, or isn't the caller's. */
+export function getPackageUpload(uploadId: string): Promise<PackageUpload> {
+  return getJson<PackageUpload>(`${UPLOADS}/${uploadId}`)
+}
+
+/** A package already uploaded and checked, read again from its upload (no file to send): 410
+ *  `upload_expired` once it is gone. */
+export function getViewPackage(uploadId: string): Promise<PackageInspectResult> {
+  return getJson<PackageInspectResult>(`/packages/${uploadId}`)
+}
+
 export interface PackageDataStarted {
   jobId: string
   branchId: string
@@ -716,6 +730,76 @@ export function importPackageData(
   body: { workspaceId: string; dataSourceId: string; viewId?: string | null; draftName?: string | null },
 ): Promise<PackageDataStarted> {
   return postJson<PackageDataStarted>(`/packages/${uploadId}/data`, body)
+}
+
+/** A brand-new data source for a package's data, as the person named it: on a graph connection
+ *  (FalkorDB) of their choice, under a graph name of its own, with a semantic layer (a draft one
+ *  too) or none. */
+export interface NewSourceRequest {
+  /** `nsr_` and 32 hex digits ({@link newSourceRequestId}): the same id sent again answers with
+   *  the data source it created. */
+  requestId: string
+  workspaceId: string
+  providerId: string
+  label: string
+  graphName: string
+  ontologyId: string | null
+}
+
+/** The new data source, and the job copying the package's data into it. The copy is followed on
+ *  the data source's own bootstrap status (`job.origin` is `package`). */
+export interface NewSourceStarted {
+  dataSourceId: string
+  graphId: string
+  jobId: string
+  status: string
+  label: string
+  graphName: string
+  ontologyId: string | null
+  /** What the semantic layer does with types it doesn't declare: keeps them. */
+  enforcement: 'permissive'
+  requestId: string
+}
+
+/** A request id for `createNewSourceFromPackage`: `nsr_` and 32 hex digits. */
+export function newSourceRequestId(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return `nsr_${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`
+}
+
+/**
+ * Create a new data source from an inspected package: an independent full copy of its data, on
+ * the chosen connection under the chosen graph name. Answers 202 at once (the copy runs as a job);
+ * the same `requestId` sent again, or the same target asked again, answers 200 with what the first
+ * request created. Refusals are `ViewTransferError`s by type: `upload_consumed` (this upload
+ * already made another data source: `detail.dataSourceId`), `ds_has_other_job`, `upload_expired`
+ * (410), `not_inspected`, `graph_name_unavailable` (`detail.suggestion`), `provider_unsupported`,
+ * `provider_unreachable`, `ontology_unknown`, `provisioning_failed` (502).
+ */
+export function createNewSourceFromPackage(uploadId: string, body: NewSourceRequest): Promise<NewSourceStarted> {
+  return postJson<NewSourceStarted>(`/packages/${uploadId}/new-source`, body)
+}
+
+/** The new data source a package file was asked for in this browser: one request id per file, kept
+ *  with what was asked and, once answered, what it created. `sending` marks a request whose answer
+ *  was never heard (the page went away first): asked again under the same id, it is the same. */
+export interface RememberedNewSource {
+  requestId: string
+  request?: NewSourceRequest
+  sending?: boolean
+  started?: NewSourceStarted | null
+}
+
+const newSourceKey = (fileKey: string) => `view-package-new-source:${fileKey}`
+
+export function rememberedNewSource(fileKey: string): RememberedNewSource | null {
+  try { return JSON.parse(remembered(newSourceKey(fileKey)) ?? 'null') } catch { return null }
+}
+
+/** Remember (or, with null, forget) the new data source asked of the file known as `fileKey`. */
+export function rememberNewSource(fileKey: string, value: RememberedNewSource | null): void {
+  remember(newSourceKey(fileKey), value && JSON.stringify(value))
 }
 
 /** A view package, by its name or its first bytes (a zip). */

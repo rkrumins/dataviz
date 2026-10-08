@@ -420,10 +420,12 @@ def build_worker(projector: FalkorProjector, graph_factory, *, lanes: Iterable[s
         # "Enable version control" jobs: a 10M-entity source is copied here, off the web tier, in
         # resumable windows (see bootstrap_worker). With the projector's rollup-rebuild hook: a
         # duplicate collapse deletes copies from the source graph, and the :AGGREGATED rollups
-        # computed over them must be rebuilt as a publish's would be.
+        # computed over them must be rebuilt as a publish's would be. With the projector itself:
+        # a new data source seeded from a view package is projected into its new key by the job.
         bootstrap=BootstrapRunner(
             graph_factory, consumer=consumer or "boot-1",
             on_rollups_stale=getattr(projector, "_on_rollups_stale", None),
+            projector=projector,
         ) if bootstrap else None,
         purge=PurgeRunner(graph_factory, consumer=consumer or "purge-1") if bootstrap else None,
         reaper=Reaper() if bootstrap else None,

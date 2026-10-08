@@ -36,7 +36,9 @@ Three properties, and the third is the one that matters most:
      graph (`nexus_lineage`, `perf-load-test-solidatus`), which predates us and may be shared.
      Deleting our version history must never mean deleting their data. On this database that is
      248 graphs protected against 19 owned — the guardrail is doing almost all of the work.
-     We additionally refuse if any surviving graph still points at the same FalkorDB name.
+     We additionally refuse if any surviving graph still points at the same FalkorDB name, or if
+     any other live data source or catalog entry reads the key — and when that cannot be asked
+     (the management database is unreachable), the key is kept too.
 
 The job row itself is deliberately NOT deleted: it is the receipt.
 """
@@ -46,7 +48,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import func, select, text
 
@@ -126,14 +128,29 @@ async def delete_window(s, table: str, pk: str, graph_id: str, *, where: str = "
     return res.rowcount or 0
 
 
+async def graph_key_readers(provider_id: Optional[str], graph_name: str,
+                            exclude_ds: Optional[str]) -> List[dict]:
+    """Every live data source and catalog entry, besides ``exclude_ds``, that reads the FalkorDB
+    key ``(provider_id, graph_name)`` (``managed_sources.graph_key_bindings``, in the management
+    database). Raises when it cannot be asked."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.services.managed_sources import graph_key_bindings
+
+    async with get_async_session() as s:
+        return await graph_key_bindings(s, provider_id, graph_name, exclude_ds=exclude_ds)
+
+
 class PurgeRunner:
     """Executes `job_type='purge'` jobs. Hosted by the versioning worker's bootstrap lane, on the
     job lease (``job_lease``) like every other job."""
 
-    def __init__(self, graph_factory=None, *, session_factory=None, consumer: str = "purge-1"):
+    def __init__(self, graph_factory=None, *, session_factory=None, consumer: str = "purge-1",
+                 key_in_use: Optional[Callable[..., Awaitable[List[dict]]]] = None):
         self._factory = graph_factory          # None => FalkorDB drop is skipped and disclosed
         self._session = session_factory or db.graphver_session
         self._consumer = consumer
+        # Who else reads a key we are about to drop: ``(provider, name, exclude_ds) -> bindings``.
+        self._key_in_use = key_in_use or graph_key_readers
 
     # ---------------------------------------------------------------- infra --
     async def claim_one(self) -> Optional[Lease]:
@@ -268,12 +285,14 @@ class PurgeRunner:
         return deleted == 0
 
     async def _phase_falkor(self, lease: Lease, graph_id: str) -> bool:
-        """Drop the projected FalkorDB graph — if, and only if, it is ours to drop."""
+        """Drop the projected FalkorDB graph — if, and only if, it is ours to drop and nothing else
+        reads it."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             name = ps.falkor_graph_name if ps else None
             owned = bool(ps.owns_falkor_graph) if ps else False
             provider = ps.falkor_provider if ps else None
+            ds_id = getattr(await s.get(JobORM, lease.job_id), "data_source_id", None)
 
             shared_with = 0
             if name:
@@ -287,6 +306,18 @@ class PurgeRunner:
                     f'  AND g.deleted_at IS NULL'
                 ), {"n": name, "g": graph_id}) or 0)
 
+        # Ownership says we made the key; it does not say nobody else reads it now — another data
+        # source bound to the same name, or a catalog entry publishing it. Asked last (only of a key
+        # we would otherwise drop), and an answer we cannot get keeps the key: fail closed.
+        readers: Optional[List[dict]] = []
+        if name and owned and not shared_with:
+            try:
+                readers = await self._key_in_use(provider, name, ds_id)
+            except Exception:                                   # noqa: BLE001 — fail closed
+                logger.warning("purge %s: could not ask who reads '%s'", lease.job_id, name,
+                               exc_info=True)
+                readers = None
+
         verdict: str
         if not name:
             verdict = "no projected graph"
@@ -294,6 +325,11 @@ class PurgeRunner:
             verdict = f"PROTECTED: '{name}' is not ours (we did not create it) — left untouched"
         elif shared_with:
             verdict = f"PROTECTED: '{name}' is still projected by {shared_with} live graph(s)"
+        elif readers is None:
+            verdict = f"PROTECTED: could not check what else reads '{name}' — left untouched"
+        elif readers:
+            verdict = (f"PROTECTED: '{name}' is still read by {len(readers)} data source(s) or "
+                       "catalog entr(ies) — left untouched")
         elif self._factory is None:
             verdict = f"skipped: no graph client configured — '{name}' left in place"
         else:
@@ -503,6 +539,11 @@ async def purge_pending_for_data_source(*, data_source_id: str) -> bool:
                    JobORM.status.in_(("pending", "running")))))
 
 
+#: How long a data source made from a view package may stand without its versioned graph before the
+#: reaper tombstones it: the request that made it died before queueing the seed, and nobody retried.
+ORPHAN_PACKAGE_SOURCE_SECS = 3600
+
+
 class Reaper:
     """Turns expired tombstones into purges, and then into nothing.
 
@@ -514,6 +555,10 @@ class Reaper:
       1. tombstone expired, no purge queued  -> queue one
       2. purge queued, not finished          -> leave it alone
       3. purge finished (or never needed)    -> hard-delete the data-source row; it is now gone
+
+    It also tombstones a data source made from a view package that has stood without a graph for
+    ``ORPHAN_PACKAGE_SOURCE_SECS`` (:meth:`_orphaned_package_sources`); the stages above take it
+    from there.
     """
 
     def __init__(self, *, app_session_factory=None, graphver_session_factory=None):
@@ -577,6 +622,47 @@ class Reaper:
                     reaped += 1
                     logger.info("reaper: %s is past its grace period and is now gone", ds_id)
 
-        if queued or reaped:
-            logger.info("reaper: %s purge(s) queued, %s data source(s) removed", queued, reaped)
-        return {"queued": queued, "reaped": reaped}
+        orphans = await self._orphaned_package_sources()
+        if queued or reaped or orphans:
+            logger.info("reaper: %s purge(s) queued, %s data source(s) removed, %s orphaned "
+                        "package source(s) tombstoned", queued, reaped, orphans)
+        return {"queued": queued, "reaped": reaped, "orphans": orphans}
+
+    async def _orphaned_package_sources(self) -> int:
+        """Tombstone each live data source made from a view package (``extra_config.origin.kind =
+        'viewPackage'``) that has had no live versioned graph for ``ORPHAN_PACKAGE_SOURCE_SECS``.
+
+        "New source from a package" creates the data source, then its graph and seed job, in two
+        databases with no transaction across them. A request that died in between left a source
+        with nothing behind it — retrying it reuses that source (within the hour), and this
+        clears what nobody came back for. A tombstone, not a delete: it takes the usual grace
+        period, and a restore within it brings the source back."""
+        from backend.app.db.models import WorkspaceDataSourceORM as DS
+        from backend.app.db.repositories import data_source_repo
+        from backend.app.services.managed_sources import origin_of
+
+        cutoff = _now_minus(ORPHAN_PACKAGE_SOURCE_SECS)
+        Session = self._app_sessions()
+        async with Session() as s:
+            rows = (await s.execute(select(DS.id, DS.extra_config).where(
+                DS.deleted_at.is_(None), DS.created_at < cutoff,
+                DS.extra_config.contains("viewPackage")))).all()
+        candidates = [ds_id for ds_id, extra in rows
+                      if (origin_of(extra) or {}).get("kind") == "viewPackage"]
+        if not candidates:
+            return 0
+        async with self._gv() as gs:
+            standing = set((await gs.execute(select(GraphORM.data_source_id).where(
+                GraphORM.data_source_id.in_(candidates),
+                GraphORM.deleted_at.is_(None)))).scalars().all())
+        tombstoned = 0
+        for ds_id in candidates:
+            if ds_id in standing:
+                continue
+            async with Session() as s:
+                if await data_source_repo.soft_delete_data_source(s, ds_id, actor="reaper"):
+                    await s.commit()                   # the app session doesn't commit on exit
+                    tombstoned += 1
+                    logger.info("reaper: %s was made from a view package and never got its "
+                                "graph — tombstoned", ds_id)
+        return tombstoned
