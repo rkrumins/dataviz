@@ -59,9 +59,10 @@ import { WizardAssignmentTree } from '../WizardAssignmentTree'
 import type { ViewLayerConfig } from '@/types/schema'
 
 const layers: ViewLayerConfig[] = [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }]
-const renderTree = (onAssignmentChange = vi.fn()) => render(
-  <WizardAssignmentTree layers={layers} assignments={{}} onAssignmentChange={onAssignmentChange} onBulkAssign={vi.fn()} />,
+const tree = (onAssignmentChange = vi.fn()) => (
+  <WizardAssignmentTree layers={layers} assignments={{}} onAssignmentChange={onAssignmentChange} onBulkAssign={vi.fn()} />
 )
+const renderTree = (onAssignmentChange = vi.fn()) => render(tree(onAssignmentChange))
 const orphansMode = (over: Partial<ReturnType<typeof base>> = {}) => {
   Object.assign(fakeBrowser, { orphansOnly: true, listedOrphans: true, ...over })
 }
@@ -95,6 +96,18 @@ describe('WizardAssignmentTree — orphans only', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
+  it('closes the menu on Escape without clearing the selection', () => {
+    renderTree()
+    fireEvent.click(screen.getByText('Orders'))
+    expect(document.body.textContent).toContain('entities • 1 selected')
+
+    const button = screen.getByRole('button', { name: 'More filters' })
+    fireEvent.click(button)
+    fireEvent.keyDown(button, { key: 'Escape' })
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(document.body.textContent).toContain('entities • 1 selected')
   })
 
   it('reads "many" when the server could not count them', async () => {
@@ -147,6 +160,20 @@ describe('WizardAssignmentTree — orphans only', () => {
     const row = screen.getByText('Orders').closest('div.group') as HTMLElement
     fireEvent.change(within(row).getByRole('combobox'), { target: { value: 'l1' } })
     expect(onAssignmentChange).toHaveBeenCalledWith('urn:t1', 'l1')
+  })
+
+  it('re-arms scroll-driven load more when the orphans list replaces the default one', () => {
+    Object.assign(fakeBrowser, {
+      topLevelIds: ['urn:t1'], nodes: new Map([['urn:t1', entry('urn:t1', 'Orders')]]),
+      topLevelHasMore: true, topLevelTotalCount: 500,
+    })
+    const { rerender } = render(tree())
+    expect(fakeBrowser.loadMoreTopLevel).toHaveBeenCalledTimes(1)
+
+    // Its first page is as long as the list it replaced.
+    orphansMode({ topLevelIds: ['urn:t2'], nodes: new Map([['urn:t2', entry('urn:t2', 'Users')]]) })
+    rerender(tree())
+    expect(fakeBrowser.loadMoreTopLevel).toHaveBeenCalledTimes(2)
   })
 
   it('offers "Load all" with no number for an uncounted orphans list, and not for an uncounted default list', () => {

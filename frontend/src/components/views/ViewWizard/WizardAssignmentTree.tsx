@@ -553,7 +553,10 @@ export function WizardAssignmentTree({
             if (!advancedRef.current?.contains(e.target as Node)) setAdvancedOpen(false)
         }
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') setAdvancedOpen(false)
+            if (e.key !== 'Escape') return
+            // Escape closes the menu only; the tree's own Escape (on window) would clear the selection.
+            e.stopPropagation()
+            setAdvancedOpen(false)
         }
         document.addEventListener('mousedown', onMouseDown)
         document.addEventListener('keydown', onKeyDown)
@@ -838,6 +841,8 @@ export function WizardAssignmentTree({
     const browserRef = useRef(browser)
     browserRef.current = browser
     const autoLoadedRef = useRef<Set<string>>(new Set())
+    // A list of the other mode re-arms it: the list it replaced used up its lengths.
+    useEffect(() => { autoLoadedRef.current.clear() }, [browser.listedOrphans])
     const virtualItems = rowVirtualizer.getVirtualItems()
 
     useEffect(() => {

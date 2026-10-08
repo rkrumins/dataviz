@@ -201,4 +201,50 @@ describe('useEntityBrowser — orphans only', () => {
     expect(bulk).toHaveLength(1)                                  // no second default page
     expect(result.current.topLevelIds.every(isOrphanId)).toBe(true)
   })
+
+  it('keeps the default list when the orphans page lands after the mode is turned back off', async () => {
+    const p = makeProvider()
+    const { result } = mount(p)
+    await act(async () => { await result.current.loadTopLevel() })
+
+    const release = holdNext(p, q => !!q.orphansOnly)
+    await act(async () => { result.current.setOrphansOnly(true); await settle() })
+    await act(async () => { result.current.setOrphansOnly(false); await settle() })
+    await act(async () => { release(); await settle() })
+    expect(result.current.listedOrphans).toBe(false)
+    expect(result.current.topLevelIds.some(isOrphanId)).toBe(false)
+
+    await act(async () => { await result.current.loadAllTopLevel() })
+    expect(result.current.topLevelIds).toHaveLength(ROOTS.length)
+  })
+
+  it('lets Load all page the list on screen after a failed switch', async () => {
+    const p = makeProvider()
+    const { result } = mount(p)
+    await act(async () => { await result.current.loadTopLevel() })
+    p.getTopLevelNodes.mockRejectedValueOnce(new Error('503'))
+    await act(async () => { result.current.setOrphansOnly(true); await settle() })
+    expect(result.current.listedOrphans).toBe(false)
+
+    await act(async () => { await result.current.loadAllTopLevel() })
+    expect(lastQuery(p).orphansOnly).toBeUndefined()
+    expect(result.current.topLevelIds).toHaveLength(ROOTS.length)
+  })
+
+  it('drops a load-more page asked for before an on-then-off switch', async () => {
+    const p = makeProvider()
+    const { result } = mount(p)
+    await act(async () => { await result.current.loadTopLevel() })
+    await act(async () => { await result.current.loadMoreTopLevel() })
+
+    const release = holdNext(p, q => q.cursor === '100' && !q.orphansOnly)
+    let more: Promise<void> = Promise.resolve()
+    await act(async () => { more = result.current.loadMoreTopLevel() })
+    await act(async () => { result.current.setOrphansOnly(true); await settle() })
+    await act(async () => { result.current.setOrphansOnly(false); await settle() })
+    await act(async () => { release(); await more })
+
+    // Rows 100-149 after the new page 1 would skip 50-99 for good.
+    expect(result.current.topLevelIds).toEqual(ROOTS.slice(0, 50).map(r => r.urn))
+  })
 })

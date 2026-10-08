@@ -241,6 +241,9 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     // loader or a landing page reads them at once.
     const orphansOnlyRef = useRef(false)
     const listedOrphansRef = useRef(false)
+    // Bumped each time the list on screen changes mode, so a later page asked for
+    // before is dropped, even after on→off, where the mode alone looks the same.
+    const listEpochRef = useRef(0)
     // Guards so concurrent "load all" loops never run twice for the same target.
     const bulkInFlightRef = useRef<Set<string>>(new Set())
 
@@ -268,6 +271,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             setTopLevelCursor(null)
             setTopLevelTotalCount(0)
             setTopLevelTotalExact(false)
+            if (listedOrphansRef.current) listEpochRef.current++
             listedOrphansRef.current = false
             setListedOrphans(false)
             setParentMap(new Map())
@@ -342,9 +346,13 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             mode: 'replace' | 'append',
             /** Whether the page was requested in orphans mode. */
             orphans: boolean,
+            /** For an append: listEpochRef when the page was requested. */
+            epoch?: number,
         ) => {
-            // A page requested before a mode switch belongs to a list no longer on screen.
-            if (mode === 'append' && orphans !== listedOrphansRef.current) return
+            // A first page whose mode was switched away before it landed.
+            if (mode === 'replace' && orphans !== orphansOnlyRef.current) return
+            // A later page of a list the other mode's has since replaced.
+            if (mode === 'append' && epoch !== listEpochRef.current) return
             if (mode === 'replace') {
                 const newNodes = new Map<string, BrowserNode>()
                 const newIds: string[] = []
@@ -358,6 +366,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 setNodes(newNodes)
                 setTopLevelIds(newIds)
                 setParentMap(new Map())
+                if (orphans !== listedOrphansRef.current) listEpochRef.current++
                 listedOrphansRef.current = orphans
                 setListedOrphans(orphans)
             } else {
@@ -487,6 +496,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             const activeFilter = typeFilterRef.current
             // Continue the list on screen, whose cursor this is.
             const orphans = listedOrphansRef.current
+            const epoch = listEpochRef.current
             const result = await provider.getTopLevelNodes({
                 entityTypes: activeFilter ? [activeFilter] : undefined,
                 orphansOnly: orphans || undefined,
@@ -494,7 +504,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 cursor: topLevelCursor,
                 includeChildCount: true,
             } as TopLevelQuery)
-            mergeTopLevelResult(result, 'append', orphans)
+            mergeTopLevelResult(result, 'append', orphans, epoch)
         } catch (err) {
             console.error('[useEntityBrowser] Failed to load more top-level nodes:', err)
             markFailed('__top-level')
@@ -633,10 +643,13 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
 
         try {
             let cursor = topLevelCursorRef.current
+            // Page the list on screen, even after a failed switch left it up.
             const orphans = listedOrphansRef.current
+            const asked = orphansOnlyRef.current
+            const epoch = listEpochRef.current
             for (let page = 0; page < BULK_MAX_PAGES; page++) {
-                // A mode switch is on its way: this cursor belongs to the list it replaces.
-                if (orphansOnlyRef.current !== orphans) break
+                // A switch is on its way, or its list replaced the one this cursor pages.
+                if (orphansOnlyRef.current !== asked || listEpochRef.current !== epoch) break
                 const activeFilter = typeFilterRef.current
                 const result = await provider.getTopLevelNodes({
                     entityTypes: activeFilter ? [activeFilter] : undefined,
@@ -645,7 +658,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                     cursor,
                     includeChildCount: true,
                 } as TopLevelQuery)
-                mergeTopLevelResult(result, 'append', orphans)
+                mergeTopLevelResult(result, 'append', orphans, epoch)
 
                 if (!result.hasMore) break
                 cursor = result.nextCursor ?? null
