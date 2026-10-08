@@ -427,6 +427,14 @@ class DraftOverlayProvider:
         added = [d.with_child_count(d.node_upsert[e.target_urn]) for e in d.cont_added
                  if e.source_urn == parent_urn and e.target_urn in d.node_upsert
                  and e.target_urn not in d.node_remove]
+        # A main node the draft moved here has only its edge in the draft, so read it from
+        # main. Else a fixed orphan, dropped from the top-level page, showed nowhere.
+        moved = list(dict.fromkeys(e.target_urn for e in d.cont_added if e.source_urn == parent_urn
+                                   and e.target_urn not in d.node_upsert
+                                   and e.target_urn not in d.node_remove))
+        if moved:
+            added += [d.with_child_count(n) for n in await self._base.get_nodes(
+                NodeQuery(urns=moved, limit=len(moved)))]
         if search_query:
             q = search_query.lower()
             added = [n for n in added

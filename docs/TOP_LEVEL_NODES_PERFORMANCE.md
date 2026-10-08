@@ -75,8 +75,9 @@ declares as containable (a non-root type), e.g. a Table with no Schema.
 - **Totals** are exact, or `null` when the count timed out. A complete
   payload gives an exact filtered total; a truncated one goes live. Version
   history gives a total only when its scan finished. In a draft the total is
-  main's plus what the draft added minus what it removed; an orphan the draft
-  gives a parent drops off the page but is still counted.
+  main's plus what the draft added minus what it removed. A top-level entity
+  the draft gives a parent (an orphan being fixed, say) leaves the page for
+  its new parent's children but is still counted, on the default list too.
 - **Payload paging.** The stored payload pages by `(displayName, urn)` with
   the same cursor as the live query, so same-named rows at a page boundary
   are not skipped and a listing can move between the payload and live either

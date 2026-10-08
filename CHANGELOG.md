@@ -51,6 +51,9 @@ Orphans work the same with `placementContractEnabled` on or off.
   loaded. It now shows the true total ("N total").
 - **Paging the stored top-level list.** On large data sources, paging skipped same-named entities at
   a page boundary. It now pages by name and URN like the live query, and old cursors still work.
+- **Moves in a draft.** An existing entity given a new parent in a draft was not listed under that
+  parent until the draft was published, and a top-level one stayed at the top level. It is now
+  listed under its new parent.
 - **Totals from version history.** Reads served from version history (just after a merge, or as-of)
   reported a too-low top-level total when they had not scanned everything. They now report none, so
   there the browser may show no total and its coverage bar counts only loaded rows until the count
@@ -76,8 +79,11 @@ Orphans work the same with `placementContractEnabled` on or off.
   entity.
 - In a draft that deletes top-level entities that are not orphans, the orphan total is low by that
   number.
-- An orphan given a parent in a draft drops off the list, but the total still counts it until the
-  draft is published.
+- A top-level entity given a parent in a draft (an orphan being fixed, for example) moves under that
+  parent, but top-level totals, the default list's included, still count it until the draft is
+  published.
+- An entity moved from one parent to another in a draft is still listed under its old parent too
+  until the draft is published.
 - An entity orphaned only inside a draft (its parent link removed there) is not listed until the
   draft is published.
 

@@ -43,6 +43,9 @@ class PagingMain:
                                    hasMore=more, nextCursor=page[-1] if more else None,
                                    rootTypeCount=len(page), orphanCount=0)
 
+    async def get_nodes(self, query):
+        return [_n(u) for u in query.urns if u in self.roots or u in self.children]
+
 
 
 class FakeSvc:
@@ -126,13 +129,18 @@ def test_a_draft_root_appears_once_across_cursor_pages_with_the_right_total():
     assert first.total_count == 4 and second.total_count == 4
 
 
-def test_a_main_orphan_given_a_parent_in_the_draft_leaves_the_top_level_page():
-    """Fixing an orphan in a draft (a new containment edge to it) takes it off the page."""
+def test_a_main_orphan_given_a_parent_in_the_draft_moves_under_that_parent():
+    """Fixing an orphan in a draft (a move writes only the new containment edge) takes it
+    off the top-level page and lists it under its new parent."""
     delta = {"nodesUpsert": [], "nodesNew": [], "nodesRemove": [],
              "edgesUpsert": [_edge("e-B", "S", "B")], "edgesRemove": []}
     p = DraftOverlayProvider(PagingMain([], ["A", "B", "C"]), svc=FakeSvc(delta), graph_id="g", branch_id="d")
     p.set_containment_edge_types(["CONTAINS"])
 
-    page = asyncio.run(p.get_top_level_or_orphan_nodes(limit=10))
+    async def run():
+        return (await p.get_top_level_or_orphan_nodes(limit=10),
+                await p.get_children_with_edges("S", limit=10))
+    page, kids = asyncio.run(run())
     assert [n.urn for n in page.nodes] == ["A", "C"]
     assert page.total_count == 3  # documented limitation: the total still counts it
+    assert [n.urn for n in kids.children] == ["B"] and kids.total_children == 1
