@@ -89,6 +89,9 @@ export interface ComprehensionToolsProps {
    *  Trace: a single non-logical entity). Optional — hosts that don't
    *  wire the lens show no button. */
   onOpenLens?: () => void
+  /** Open the orphaned-entities panel (the Display menu's Advanced section).
+   *  Optional — hosts that don't wire it show no such section. */
+  onOpenOrphans?: () => void
 
   // Property Manager — optional so canvases that don't wire it omit the button.
   onTogglePropertyManager?: () => void
@@ -148,6 +151,7 @@ export function ComprehensionTools({
   onClearTraceHistory,
   onCopyTraceHistoryLink,
   onOpenLens,
+  onOpenOrphans,
 }: ComprehensionToolsProps) {
   const { notify } = useAppNotifications()
   const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
@@ -228,6 +232,7 @@ export function ComprehensionTools({
         showEdgeDirection={showEdgeDirection}
         onToggleEdgeDirection={onToggleEdgeDirection}
         lineageEnabled={showLineageFlow}
+        onOpenOrphans={onOpenOrphans}
       />
 
       {/* Trace toggle — three visual states:

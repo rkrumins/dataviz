@@ -60,7 +60,13 @@ import {
     type RootTypeCandidate,
     type TopLevelEntity,
 } from '../views/ViewWizard/autoLayers'
-import { buildWizardPlacement, resolveWizardEntityScope } from '../views/ViewWizard/effectivePlacement'
+import {
+    buildWizardPlacement,
+    placedByOf,
+    resolveWizardEntityScope,
+    type PlaceableEntity,
+    type PlacedBy,
+} from '../views/ViewWizard/effectivePlacement'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 import { LAYER_COLORS } from '../views/ViewWizard/steps/LayoutStep'
 import { useLogicalNodes } from '@/hooks/useLogicalNodes'
@@ -80,11 +86,19 @@ import {
 import { rootComparators, effectiveSortMode } from '@/hooks/lib/rootSort'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { ViewLayerConfig, LayerNodeSortMode, LayerNodeSortAlgo, ViewContentConfig } from '@/types/schema'
+import type { AncestorRef } from '@/types/search'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
+import { useFeature } from '@/store/features'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
+import {
+    compilePlacementSpec,
+    isMember,
+    placeAll,
+    type PlacementFacts,
+} from '@/lib/placement/placement'
 import { PlacementPathsContext } from './placementPathsContext'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -944,6 +958,7 @@ export function LayerStudio({
 }: LayerStudioProps) {
     const storeParentMap = useReferenceModelStore(s => s.parentMap)
     const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
+    const placementContractOn = useFeature('placementContractEnabled')
 
     // Build containment parent map from canvas edges (ground truth).
     // The referenceModelStore.parentMap may be empty in the wizard context
@@ -982,8 +997,9 @@ export function LayerStudio({
     // its in-session suggestions still render as assigned.
     const layerAssignmentMap = useMemo(() => {
         const map = new Map<string, string>() // entityId -> layerId
-        // Start with store assignments (lowest priority)
-        storeEffectiveAssignments.forEach((a, entityId) => {
+        // Start with store assignments (lowest priority). Not under the contract:
+        // nothing computes them then, and a stale result may be another view's.
+        if (!placementContractOn) storeEffectiveAssignments.forEach((a, entityId) => {
             map.set(entityId, a.layerId)
         })
         // Legacy per-layer entityAssignments (e.g. Auto-Organize suggestions)
@@ -997,7 +1013,7 @@ export function LayerStudio({
             map.set(urn, entry.layerId)
         })
         return map
-    }, [storeEffectiveAssignments, formData.layers, formData.assignments])
+    }, [storeEffectiveAssignments, formData.layers, formData.assignments, placementContractOn])
 
     /** Build reverse child map from parentMap */
     const childMap = useMemo(() => {
@@ -1594,6 +1610,90 @@ export function LayerStudio({
     // ── Preview pane toggle ─────────────────────────────────────────────────────
     const [showPreview, setShowPreview] = useState(false)
 
+    // One Placement Contract (placementContractEnabled): the draft compiled once.
+    const placementSpec = useMemo(
+        () => placementContractOn
+            ? compilePlacementSpec({ layout: { referenceLayout: layout }, content: { entityScope: effectiveScope } })
+            : null,
+        [placementContractOn, layout, effectiveScope],
+    )
+
+    /**
+     * Contract only: the loaded children whose own entry, stamp or rule puts them
+     * in another layer than their parent's. The canvas draws such a child in that
+     * layer, so the rail lists it there and not under its parent, with its path in
+     * the data. Places what the rail has loaded below the column roots, nothing more.
+     * `placed` is each node's placement: the rail nests a child, or promotes an
+     * anchor's child, only in its layer, as the canvas does.
+     */
+    const splitChildren = useMemo(() => {
+        if (!placementSpec) return null
+        const factsOf = (urn: string): PlacementFacts | null => {
+            const facts = snapshot?.directory.get(urn)?.facts ?? entityIndex.factsOf?.(urn)
+            if (facts) return facts
+            // Known by its identity alone: just its type — as buildWizardPlacement
+            // assumes for a row without facts.
+            const identity = entityIndex.resolve(urn)
+            return identity ? { urn, entityType: identity.type, tags: [], properties: {} } : null
+        }
+        const roots = new Set([
+            ...scannedTopLevel.map(e => e.urn),
+            ...[...placementSpec.explicit].filter(([, e]) => placementSpec.layerIds.has(e.layerId)).map(([urn]) => urn),
+        ])
+        // Every loaded node below the roots with all its loaded parents, so a
+        // child under two parents is placed from both, as the canvas places it.
+        const parentsOf = new Map<string, string[]>([...roots].map(urn => [urn, []]))
+        const collect = (urn: string) => {
+            for (const child of entityIndex.childrenOf(urn)) {
+                const parents = parentsOf.get(child)
+                if (parents) {
+                    parents.push(urn)
+                    continue
+                }
+                parentsOf.set(child, [urn])
+                collect(child)
+            }
+        }
+        roots.forEach(collect)
+        const placed = placeAll(placementSpec, parentsOf.keys(), factsOf, urn => parentsOf.get(urn)!)
+
+        const rows: { layerId: string; urn: string; placedBy?: PlacedBy }[] = []
+        const paths = new Map<string, AncestorRef[]>()
+        const walked = new Set<string>()
+        // `above`: the urn's ancestors, root first — undefined while unknown.
+        const walk = (urn: string, above: AncestorRef[] | undefined) => {
+            if (walked.has(urn)) return
+            walked.add(urn)
+            const parent = placed.get(urn)!
+            const parentLayerId = isMember(parent) ? parent.layerId : null
+            const identity = entityIndex.resolve(urn)
+            const here = above && [...above, { urn, displayName: identity?.name ?? urn, entityType: identity?.type ?? 'unknown' }]
+            for (const child of entityIndex.childrenOf(urn)) {
+                const result = placed.get(child)!
+                // Only its own entry, stamp or rule takes a child out; an
+                // inherited one stays under the parent it inherits from.
+                if (isMember(result) && result.source !== 'inherited' && result.layerId !== parentLayerId) {
+                    // An entry is listed as a row already.
+                    if (result.source !== 'explicit') {
+                        rows.push({ layerId: result.layerId!, urn: child, placedBy: placedByOf(placementSpec, result) })
+                        if (here) paths.set(child, here)
+                    }
+                }
+                walk(child, here)
+            }
+        }
+        const topLevel = new Set(scannedTopLevel.map(e => e.urn))
+        roots.forEach(urn => {
+            if (isMember(placed.get(urn)!)) walk(urn, topLevel.has(urn) ? [] : placementPaths.get(urn)?.slice())
+        })
+        return { rows, paths, placed }
+    }, [placementSpec, scannedTopLevel, snapshot, entityIndex, placementPaths])
+    // An entry's path comes from its lookup; a split-out row's from the walk.
+    const railPaths = useMemo(
+        () => splitChildren?.paths.size ? new Map([...placementPaths, ...splitChildren.paths]) : placementPaths,
+        [placementPaths, splitChildren],
+    )
+
 
     /**
      * Every root each column holds — explicit placements AND the ones a type rule
@@ -1602,11 +1702,11 @@ export function LayerStudio({
      * express a single arrangement and did not match the column it previews.
      */
     const rootsByLayer = useMemo(() => {
-        const place = buildWizardPlacement(layers, assignments, effectiveScope)
+        const place = buildWizardPlacement(layers, assignments, effectiveScope, placementContractOn)
         const byLayer = new Map<string, LayerRootRow[]>()
         const seen = new Set<string>()
 
-        const add = (layerId: string, urn: string, rulePlaced: boolean) => {
+        const add = (layerId: string, urn: string, rulePlaced: boolean, placedBy?: PlacedBy) => {
             if (seen.has(urn)) return
             seen.add(urn)
             const identity = entityIndex.resolve(urn)
@@ -1617,6 +1717,7 @@ export function LayerStudio({
                 typeId: identity?.type ?? '',
                 childCount: identity?.childCount ?? 0,
                 rulePlaced,
+                ...(placedBy ? { placedBy } : {}),
             }])
         }
 
@@ -1624,13 +1725,20 @@ export function LayerStudio({
         // group, not as a column root).
         for (const [urn, entry] of Object.entries(assignments)) {
             if (!entry?.layerId || entry.logicalNodeId) continue
+            // The contract skips a stale entry (its layer is gone); a rule or the
+            // entity's stamp may still place it below.
+            if (placementContractOn && !layers.some(l => l.id === entry.layerId)) continue
             add(entry.layerId, urn, false)
         }
-        // Then whatever the type rules place.
+        // Then whatever the type rules place (and, under the contract, stamps).
+        // Snapshot facts exist only under the contract; the legacy resolver ignores them.
         for (const entity of scannedTopLevel) {
-            const { layerId, source } = place(entity)
-            if (layerId && source === 'rule') add(layerId, entity.urn, true)
+            const { layerId, source, placedBy } = place({ ...entity, facts: snapshot?.directory.get(entity.urn)?.facts })
+            if (layerId && (source === 'rule' || source === 'stamped')) add(layerId, entity.urn, true, placedBy)
         }
+        // Under the contract, a loaded child placed apart from its parent is a
+        // root of its own layer.
+        splitChildren?.rows.forEach(r => add(r.layerId, r.urn, true, r.placedBy))
 
         // An ANCHORED column is that entity, so its rows are the entity's
         // children — not the entity itself, which the header already names.
@@ -1647,7 +1755,11 @@ export function LayerStudio({
             // placed here (an unrelated root dragged in) is still a root of this
             // layer on the canvas and has to stay listed here too.
             const others = (byLayer.get(layer.id) ?? []).filter(r => r.urn !== layer.anchorUrn)
-            byLayer.set(layer.id, [...others, ...children.map(childUrn => {
+            // Under the contract, only the children it places in this layer — the
+            // canvas promotes no other, and one placed elsewhere is listed there.
+            const placed = splitChildren?.placed
+            const promoted = placed ? children.filter(c => !placed.has(c) || placed.get(c)!.layerId === layer.id) : children
+            byLayer.set(layer.id, [...others, ...promoted.map(childUrn => {
                 const identity = entityIndex.resolve(childUrn)
                 return {
                     id: childUrn,
@@ -1667,7 +1779,7 @@ export function LayerStudio({
             rows.sort(cmps[mode] ?? cmps['alpha-asc'])
         })
         return byLayer
-    }, [layers, assignments, defaultNodeSortMode, scannedTopLevel, entityIndex, effectiveScope])
+    }, [layers, assignments, defaultNodeSortMode, scannedTopLevel, entityIndex, effectiveScope, placementContractOn, snapshot, splitChildren])
 
     /** What each column actually holds — derived from the very rows the rail
      *  lists, so an ANCHORED column reports its children rather than the single
@@ -1680,10 +1792,11 @@ export function LayerStudio({
 
     /** The draft's CURRENT placement for an entity — what the Auto-layer sheet
      *  consults before calling anything stranded. */
-    const placeCurrent = useMemo(
-        () => buildWizardPlacement(layers, assignments, effectiveScope),
-        [layers, assignments, effectiveScope],
-    )
+    const placeCurrent = useMemo(() => {
+        const place = buildWizardPlacement(layers, assignments, effectiveScope, placementContractOn)
+        // The sheet's rows carry no facts; under the contract the snapshot has them.
+        return (entity: PlaceableEntity) => place({ ...entity, facts: snapshot?.directory.get(entity.urn)?.facts })
+    }, [layers, assignments, effectiveScope, placementContractOn, snapshot])
 
     /** Mirrors the canvas: how much of each anchored column is still unloaded.
      *  The SERVER's hasMore decides whether more exists; the looked-up count only
@@ -1928,11 +2041,12 @@ export function LayerStudio({
                     }}
                 >
                     {/* Left: Layer hierarchy */}
-<PlacementPathsContext.Provider value={placementPaths}>
+<PlacementPathsContext.Provider value={railPaths}>
                                         <LayerHierarchyPanel
                         layers={layers}
                         assignments={assignments}
                         rootsByLayer={rootsByLayer}
+                        contractPlacement={splitChildren?.placed}
                         defaultNodeSortMode={defaultNodeSortMode}
                         onSetLayerSortMode={handleSetLayerSortMode}
                         onApplySortToView={handleApplySortToView}

@@ -97,13 +97,6 @@ function resolveChildTotal(
     return { totalChildren: floor, totalIsExact: !hasMore && loadedCount > 0 }
 }
 
-export interface TopLevelMetadata {
-    /** How many top-level nodes are ontology-root instances. */
-    rootTypeCount: number
-    /** How many are orphans of non-root types (missing containment in-edge). */
-    orphanCount: number
-}
-
 export interface UseEntityBrowserOptions {
     provider: GraphDataProvider
     /** Containment edge types from the ontology (is_containment=true).
@@ -125,7 +118,8 @@ export interface UseEntityBrowserResult {
     topLevelIds: string[]
     topLevelHasMore: boolean
     topLevelTotalCount: number
-    topLevelMetadata: TopLevelMetadata
+    /** False when the server could not count the list in time (topLevelTotalCount is then 0). */
+    topLevelTotalExact: boolean
     parentMap: Map<string, string>
     /** Fresh read of a node entry (ref-backed) — safe to call after an awaited
      *  action inside the same callback, where the `nodes` state would be stale. */
@@ -140,6 +134,10 @@ export interface UseEntityBrowserResult {
     loadingNodes: Set<string>
     searchQuery: string
     typeFilter: string | null
+    /** "Orphans only" as requested (the menu checkbox). */
+    orphansOnly: boolean
+    /** Whether the rows on screen are the orphans list. Lags `orphansOnly` until its first page lands. */
+    listedOrphans: boolean
     error: string | null
     /** Ids whose last page request FAILED (a parent URN, or '__top-level').
      *  Cleared when the next attempt starts. Lets the tree say "couldn't load"
@@ -162,6 +160,10 @@ export interface UseEntityBrowserResult {
     loadAllTopLevel: () => Promise<void>
     setSearch: (query: string) => void
     setTypeFilter: (typeId: string | null) => void
+    /** List only orphans: top-level entities of a type the ontology says sits inside another. */
+    setOrphansOnly: (on: boolean) => void
+    /** Orphans in the whole data source, ignoring the type pill and search. Null when the server could not count them. */
+    countOrphans: () => Promise<number | null>
     refresh: () => Promise<void>
 }
 
@@ -176,10 +178,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     const [topLevelHasMore, setTopLevelHasMore] = useState(false)
     const [topLevelCursor, setTopLevelCursor] = useState<string | null>(null)
     const [topLevelTotalCount, setTopLevelTotalCount] = useState(0)
-    const [topLevelMetadata, setTopLevelMetadata] = useState<TopLevelMetadata>({
-        rootTypeCount: 0,
-        orphanCount: 0,
-    })
+    const [topLevelTotalExact, setTopLevelTotalExact] = useState(false)
     const [parentMap, setParentMap] = useState<Map<string, string>>(new Map())
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
     const [isLoading, setIsLoading] = useState(false)
@@ -199,6 +198,8 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     }, [])
     const [searchQuery, setSearchQueryState] = useState('')
     const [typeFilter, setTypeFilterState] = useState<string | null>(null)
+    const [orphansOnly, setOrphansOnlyState] = useState(false)
+    const [listedOrphans, setListedOrphans] = useState(false)
 
     // Refs — mutable, no re-render, no stale closure issues
     const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -232,6 +233,13 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     // ref at call-time instead.
     const typeFilterRef = useRef(typeFilter)
     typeFilterRef.current = typeFilter
+    // Both written beside their state (setOrphansOnly, mergeTopLevelResult), so a
+    // loader or a landing page reads them at once.
+    const orphansOnlyRef = useRef(false)
+    const listedOrphansRef = useRef(false)
+    // Bumped each time the list on screen changes mode, so a later page asked for
+    // before is dropped, even after on→off, where the mode alone looks the same.
+    const listEpochRef = useRef(0)
     // Guards so concurrent "load all" loops never run twice for the same target.
     const bulkInFlightRef = useRef<Set<string>>(new Set())
 
@@ -258,7 +266,10 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             setTopLevelHasMore(false)
             setTopLevelCursor(null)
             setTopLevelTotalCount(0)
-            setTopLevelMetadata({ rootTypeCount: 0, orphanCount: 0 })
+            setTopLevelTotalExact(false)
+            if (listedOrphansRef.current) listEpochRef.current++
+            listedOrphansRef.current = false
+            setListedOrphans(false)
             setParentMap(new Map())
             setFailedIds(new Set())
             setError(null)
@@ -329,7 +340,15 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         (
             result: Awaited<ReturnType<GraphDataProvider['getTopLevelNodes']>>,
             mode: 'replace' | 'append',
+            /** Whether the page was requested in orphans mode. */
+            orphans: boolean,
+            /** For an append: listEpochRef when the page was requested. */
+            epoch?: number,
         ) => {
+            // A first page whose mode was switched away before it landed.
+            if (mode === 'replace' && orphans !== orphansOnlyRef.current) return
+            // A later page of a list the other mode's has since replaced.
+            if (mode === 'append' && epoch !== listEpochRef.current) return
             if (mode === 'replace') {
                 const newNodes = new Map<string, BrowserNode>()
                 const newIds: string[] = []
@@ -343,6 +362,9 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
                 setNodes(newNodes)
                 setTopLevelIds(newIds)
                 setParentMap(new Map())
+                if (orphans !== listedOrphansRef.current) listEpochRef.current++
+                listedOrphansRef.current = orphans
+                setListedOrphans(orphans)
             } else {
                 commitNodes(prev => {
                     const next = new Map(prev)
@@ -364,10 +386,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             setTopLevelHasMore(Boolean(result.hasMore))
             setTopLevelCursor(result.nextCursor ?? null)
             setTopLevelTotalCount(result.totalCount ?? 0)
-            setTopLevelMetadata({
-                rootTypeCount: result.rootTypeCount ?? 0,
-                orphanCount: result.orphanCount ?? 0,
-            })
+            setTopLevelTotalExact(result.totalCount != null)
             clearFailed('__top-level')
         },
         [commitNodes, freshEntry, clearFailed],
@@ -444,13 +463,15 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
 
         try {
             const activeFilter = typeFilterRef.current
+            const orphans = orphansOnlyRef.current
             const result = await provider.getTopLevelNodes({
                 entityTypes: activeFilter ? [activeFilter] : undefined,
+                orphansOnly: orphans || undefined,
                 limit: PAGE_SIZE,
                 cursor: null,
                 includeChildCount: true,
             })
-            mergeTopLevelResult(result, 'replace')
+            mergeTopLevelResult(result, 'replace', orphans)
         } catch (err) {
             console.error('[useEntityBrowser] Failed to load top-level nodes:', err)
             setError(err instanceof Error ? err.message : 'Failed to load entities')
@@ -469,13 +490,17 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
 
         try {
             const activeFilter = typeFilterRef.current
+            // Continue the list on screen, whose cursor this is.
+            const orphans = listedOrphansRef.current
+            const epoch = listEpochRef.current
             const result = await provider.getTopLevelNodes({
                 entityTypes: activeFilter ? [activeFilter] : undefined,
+                orphansOnly: orphans || undefined,
                 limit: PAGE_SIZE,
                 cursor: topLevelCursor,
                 includeChildCount: true,
             })
-            mergeTopLevelResult(result, 'append')
+            mergeTopLevelResult(result, 'append', orphans, epoch)
         } catch (err) {
             console.error('[useEntityBrowser] Failed to load more top-level nodes:', err)
             markFailed('__top-level')
@@ -614,15 +639,22 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
 
         try {
             let cursor = topLevelCursorRef.current
+            // Page the list on screen, even after a failed switch left it up.
+            const orphans = listedOrphansRef.current
+            const asked = orphansOnlyRef.current
+            const epoch = listEpochRef.current
             for (let page = 0; page < BULK_MAX_PAGES; page++) {
+                // A switch is on its way, or its list replaced the one this cursor pages.
+                if (orphansOnlyRef.current !== asked || listEpochRef.current !== epoch) break
                 const activeFilter = typeFilterRef.current
                 const result = await provider.getTopLevelNodes({
                     entityTypes: activeFilter ? [activeFilter] : undefined,
+                    orphansOnly: orphans || undefined,
                     limit: BULK_TOP_LEVEL_PAGE_SIZE,
                     cursor,
                     includeChildCount: true,
                 })
-                mergeTopLevelResult(result, 'append')
+                mergeTopLevelResult(result, 'append', orphans, epoch)
 
                 if (!result.hasMore) break
                 cursor = result.nextCursor ?? null
@@ -666,14 +698,16 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
             setIsLoading(true)
             try {
                 const activeFilter = typeFilterRef.current
+                const orphans = orphansOnlyRef.current
                 const result = await provider.getTopLevelNodes({
                     entityTypes: activeFilter ? [activeFilter] : undefined,
+                    orphansOnly: orphans || undefined,
                     searchQuery: query,
                     limit: PAGE_SIZE,
                     cursor: null,
                     includeChildCount: true,
                 })
-                mergeTopLevelResult(result, 'replace')
+                mergeTopLevelResult(result, 'replace', orphans)
             } catch (err) {
                 console.error('[useEntityBrowser] Search failed:', err)
                 setError(err instanceof Error ? err.message : 'Search failed')
@@ -699,6 +733,31 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         }
     }, [searchQuery, setSearch, loadTopLevel])
 
+    // ─── setOrphansOnly: re-query exactly as setTypeFilter does ───
+
+    const setOrphansOnly = useCallback((on: boolean) => {
+        setOrphansOnlyState(on)
+        orphansOnlyRef.current = on
+        if (searchQuery.trim()) {
+            setSearch(searchQuery)
+        } else {
+            loadTopLevel()
+        }
+    }, [searchQuery, setSearch, loadTopLevel])
+
+    // ─── countOrphans ───
+    // Same parameters as the unfiltered orphans list's first page, so switching to it hits the cache.
+
+    const countOrphans = useCallback(async (): Promise<number | null> => {
+        const result = await provider.getTopLevelNodes({
+            orphansOnly: true,
+            limit: PAGE_SIZE,
+            cursor: null,
+            includeChildCount: true,
+        })
+        return result.totalCount ?? (result.hasMore ? null : result.nodes.length)
+    }, [provider])
+
     // ─── refresh ───
 
     const refresh = useCallback(async () => {
@@ -721,7 +780,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         topLevelIds,
         topLevelHasMore,
         topLevelTotalCount,
-        topLevelMetadata,
+        topLevelTotalExact,
         parentMap,
         peekNode,
         canTransitivelyContain,
@@ -730,6 +789,8 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         loadingNodes,
         searchQuery,
         typeFilter,
+        orphansOnly,
+        listedOrphans,
         error,
         failedIds,
         loadTopLevel,
@@ -740,6 +801,8 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         loadAllTopLevel,
         setSearch,
         setTypeFilter,
+        setOrphansOnly,
+        countOrphans,
         refresh,
     }
 }

@@ -16,6 +16,14 @@
  *     root of ``ancestorPath``, or the hit itself when it has no
  *     ancestors).
  */
+import {
+    factsFromGraphNode,
+    parentContextOf,
+    place,
+    type CompiledPlacementSpec,
+    type ParentContext,
+} from '@/lib/placement/placement'
+import type { GraphNode } from '@/providers/GraphDataProvider'
 import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 import type { AncestorRef } from '@/types/search'
 
@@ -49,4 +57,27 @@ export function resolveHitLayer(
     const topLevel = ancestorPath[0] ?? hit
     const fallback = layers.find((l) => l.entityTypes.includes(topLevel.entityType))
     return fallback ? fallback.id : null
+}
+
+
+/**
+ * Flag-on (One Placement Contract): the hit's column, as the canvas would
+ * place it. ``ancestorPath`` (root first) is its parent chain, so the
+ * NEAREST entry wins and the view's own scope decides. Ancestors carry only
+ * urn, type and name, so a tag or property rule or a stamp on an ANCESTOR
+ * is not seen; the hit's own facts are complete. A fallback counts: the hit
+ * is drawn in that column.
+ */
+export function placeHit(
+    hit: GraphNode,
+    ancestorPath: ReadonlyArray<AncestorRef>,
+    spec: CompiledPlacementSpec,
+): string | null {
+    let parents: ParentContext[] = []
+    for (const a of ancestorPath) {
+        const facts = factsFromGraphNode({ urn: a.urn, entityType: a.entityType, displayName: a.displayName, properties: {} })
+        const context = parentContextOf(a.urn, place(spec, a.urn, facts, parents))
+        parents = context ? [context] : []
+    }
+    return place(spec, hit.urn, factsFromGraphNode(hit), parents).layerId
 }

@@ -29,6 +29,7 @@
 import { buildLensSubgraph } from '@/components/canvas/context-view/lens/lens-subgraph'
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
 import { resolveLayerAssignment, type GraphNode } from '@/providers/GraphDataProvider'
+import { factsFromCanvasData, placeAll, type CompiledPlacementSpec } from '@/lib/placement/placement'
 import type { HierarchyNode } from '@/types/hierarchy'
 import type { ViewLayerConfig } from '@/types/schema'
 import { buildLayerRules, resolveRootLayer } from './resolveRootLayer'
@@ -104,6 +105,10 @@ export interface TraceViewInputs {
     /** URNs created in the active branch's draft — the only nodes a CURATED
      *  view lets a stamped `layerAssignment` place. */
     branchCreatedUrns?: ReadonlySet<string>
+    /** One Placement Contract (flag-on): the view's compiled spec. When set,
+     *  it alone places the walk — the backend answer and the fallback above
+     *  are not read. */
+    spec?: CompiledPlacementSpec
   }
 }
 
@@ -122,6 +127,7 @@ export interface TraceView {
 
 /** Depth at or beyond which a direction is unlimited. */
 const UNLIMITED_DEPTH = 25
+const NO_PARENTS: readonly string[] = []
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 
@@ -280,7 +286,41 @@ export function buildTraceView(i: TraceViewInputs): TraceView {
   // the unplaceable chain, and counted BEFORE scoping — what the view cannot
   // show does not depend on which direction toggle is currently on.
   const anchorlessChains = new Set<string>()
-  for (const p of participants) {
+  if (i.placement?.spec) {
+    // ONE PLACEMENT CONTRACT (flag-on): every walk node placed by lib/placement
+    // over the walk's own containment (the closure ships each participant's
+    // ancestors), and a participant anchors at the TOP of its run of
+    // same-layer ancestors — the canvas's visual-root rule. So a child placed
+    // in another column heads its own lane there, and a participant the view
+    // does not place is outside it.
+    const parentOf = (urn: string): string | null => sg.nodes.get(urn)?.parent ?? null
+    const placed = placeAll(
+      i.placement.spec,
+      sg.nodes.keys(),
+      urn => factsFromCanvasData(dataOf(urn), urn),
+      urn => { const parent = parentOf(urn); return parent ? [parent] : NO_PARENTS },
+      i.placement.branchCreatedUrns,
+    )
+    for (const p of participants) {
+      const layer = placed.get(p)?.layerId ?? null
+      let anchor = p
+      let top = p
+      let contiguous = true
+      const guard = new Set([p])
+      for (let up = parentOf(p); up && !guard.has(up); up = parentOf(up)) {
+        guard.add(up)
+        top = up
+        if (contiguous && layer !== null && placed.get(up)?.layerId === layer) anchor = up
+        else contiguous = false
+      }
+      if (layer === null) {
+        anchorlessChains.add(top)
+        continue
+      }
+      anchorOf.set(p, anchor)
+      laneOfAnchor.set(anchor, layer)
+    }
+  } else for (const p of participants) {
     let anchor: string | null = null
     let anchorLayer: string | undefined
     let top = p

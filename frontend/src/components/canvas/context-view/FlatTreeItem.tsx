@@ -9,6 +9,7 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import type { HierarchyNode } from './types'
 import type { ViewLayerConfig } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
+import { useViewEntityType } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
@@ -28,6 +29,11 @@ import { useReparentNode } from './useReparentNode'
 import { LineEndTag } from './LineEndTag'
 import type { LineEnd } from './lineEnd'
 
+/** Why a row is placed apart from its parent (One Placement Contract, flag-on): by hand (an
+ *  explicit entry or a drag), by a stamp (the entity's own layerAssignment), by a layer rule
+ *  matching it, inherited from another parent, or caught by the view's fallback layer. */
+export type PlacedReason = 'hand' | 'rule' | 'stamp' | 'inherited' | 'fallback'
+
 /** Which modifier keys were held when a row was clicked. */
 export interface RowSelectModifiers {
   /** Cmd/Ctrl — add or remove this row without disturbing the rest. */
@@ -37,8 +43,9 @@ export interface RowSelectModifiers {
 }
 
 interface FlatTreeItemProps {
-  /** Set when this row is PLACED in this column apart from its parent: its path in the data. */
-  placement?: PlacementInfo
+  /** Set when this row is PLACED in this column apart from its parent: its path in the data, and
+   *  (flag-on) why. */
+  placement?: PlacementInfo & { reason?: PlacedReason }
   /** Set on a parent whose children are placed in other columns (the other end of a placement). */
   placedOut?: PlacedOut
   onRevealPlacement?: (placement: PlacementInfo) => void
@@ -214,7 +221,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const stagedRowClass = directDeco
     ? FLAT_ROW_STYLE[`${directDeco.state}-${directDeco.status}`]
     : (hasDescendantChange ? 'border-l-[3px] border-l-amber-400/50' : '')
-  const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
+  const entityType = useViewEntityType(node.typeId)
   const visual = entityType?.visual
   const nodeColor = visual?.color ?? layer.color
   // Logical nodes use a folder/group icon instead of entity type icon
@@ -837,7 +844,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             placement={placement}
             entityName={node.name}
             onReveal={onRevealPlacement}
-            onReturn={onReturnPlacement ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
+            // Only a hand placement is an entry a return could remove (no reason: the flag is off, as before).
+            onReturn={onReturnPlacement && (placement.reason === undefined || placement.reason === 'hand') ? () => onReturnPlacement(node.id, placement.path.at(-1)?.displayName) : undefined}
           />
         )}
         {placedOut && <PlacedOutNote placedOut={placedOut} parentName={node.name} />}
@@ -1062,7 +1070,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
  * there. A long path keeps its start and its last two steps; the tooltip carries all of it.
  */
 function PlacementPath({ placement, entityName, onReveal, onReturn }: {
-  placement: PlacementInfo
+  placement: PlacementInfo & { reason?: PlacedReason }
   entityName: string
   onReveal?: (placement: PlacementInfo) => void
   onReturn?: () => void
@@ -1072,7 +1080,12 @@ function PlacementPath({ placement, entityName, onReveal, onReturn }: {
   const lead = placement.complete ? '' : '… › '
   const full = `${lead}${names.join(' › ')}`
   const parentName = names[names.length - 1] ?? 'its parent'
-  const explain = `Placed in ${placement.placedLayerName} for this view only — the data source is unchanged. `
+  const by = placement.reason === 'rule' ? ' by a layer rule' : placement.reason === 'hand' ? ' by hand' : ''
+  // A stamp lives on the entity, not only in this view.
+  const how = placement.reason === 'stamp'
+    ? `Placed in ${placement.placedLayerName} by the entity's own layer setting. `
+    : `Placed in ${placement.placedLayerName}${by} for this view only — the data source is unchanged. `
+  const explain = how
     + `In the data, ${entityName} is part of ${full} (shown in ${placement.parentLayerName}). `
     + 'Click to go to its parent.'
   return (

@@ -1,0 +1,335 @@
+{
+  "cases": [
+    {
+      "name": "legacy-entity-assignments-upconverted",
+      "summary": "COMPILE normalization: layer.entityAssignments become explicit entries in the CONTAINING layer (the entry's own layerId is ignored), keep inheritsChildren false, and make the derived scope curated.",
+      "view": {
+        "content": {},
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "entityAssignments": [{ "entityId": "x", "layerId": "b", "inheritsChildren": false, "priority": 100 }]
+              },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "x", "entityType": "domain" }, { "urn": "c", "entityType": "dataset" }],
+      "edges": [{ "source": "x", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": { "x": { "layerId": "a", "source": "explicit" }, "c": { "source": "none" } }
+    },
+    {
+      "name": "legacy-entity-assignment-key-is-urn-else-entity-id",
+      "summary": "COMPILE normalization: a legacy entry is keyed by urn when non-empty, else by entityId (urn '' falls back, as Python's `urn or entityId`); a missing inheritsChildren defaults to true.",
+      "view": {
+        "content": {},
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "entityAssignments": [{ "urn": "", "entityId": "x" }, { "urn": "y", "entityId": "ignored" }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "x", "entityType": "domain" },
+        { "urn": "y", "entityType": "domain" },
+        { "urn": "ignored", "entityType": "domain" },
+        { "urn": "xc", "entityType": "dataset" }
+      ],
+      "edges": [{ "source": "x", "target": "xc", "edgeType": "CONTAINS" }],
+      "expect": {
+        "x": { "layerId": "a", "source": "explicit" },
+        "y": { "layerId": "a", "source": "explicit" },
+        "ignored": { "source": "none" },
+        "xc": { "layerId": "a", "source": "inherited", "inheritedFrom": "x" }
+      }
+    },
+    {
+      "name": "normalization-precedence-top-level-then-layers-in-array-order",
+      "summary": "COMPILE normalization (earlier wins): top-level assignments first, then each layer in ARRAY order (not sorted order), its entityAssignments then its exact-URN rules.",
+      "view": {
+        "content": {},
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [{ "id": "rz", "priority": 1, "urnPattern": "z" }],
+                "entityAssignments": [{ "entityId": "y" }]
+              },
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "entityAssignments": [{ "entityId": "x" }, { "entityId": "y" }, { "entityId": "z" }, { "entityId": "w" }]
+              }
+            ],
+            "assignments": { "x": { "layerId": "b", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x" }, { "urn": "y" }, { "urn": "z" }, { "urn": "w" }],
+      "expect": {
+        "x": { "layerId": "b", "source": "explicit" },
+        "y": { "layerId": "b", "source": "explicit" },
+        "z": { "layerId": "b", "source": "explicit" },
+        "w": { "layerId": "a", "source": "explicit" }
+      }
+    },
+    {
+      "name": "exact-urn-rule-promoted-to-assignment",
+      "summary": "COMPILE normalization: a rule whose urnPattern has no * or ? becomes an explicit entry (inheritsChildren true) whatever its other criteria, and that entry makes the derived scope curated.",
+      "view": {
+        "content": {},
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "r", "priority": 1, "urnPattern": "urn:x:1", "entityTypes": ["table"] }]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "urn:x:1", "entityType": "dataset" },
+        { "urn": "urn:x:10", "entityType": "table" },
+        { "urn": "urn:x:1:col", "entityType": "column" }
+      ],
+      "edges": [{ "source": "urn:x:1", "target": "urn:x:1:col", "edgeType": "CONTAINS" }],
+      "expect": {
+        "urn:x:1": { "layerId": "a", "source": "explicit" },
+        "urn:x:10": { "source": "none" },
+        "urn:x:1:col": { "layerId": "a", "source": "inherited", "inheritedFrom": "urn:x:1" }
+      }
+    },
+    {
+      "name": "logical-node-exact-urn-rules-promoted",
+      "summary": "COMPILE normalization: exact-URN rules anywhere in a layer's logicalNodes tree (children included) become explicit entries; logicalNodes glob rules are never evaluated (deferred).",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "logicalNodes": [
+                  {
+                    "id": "ln1",
+                    "name": "Group",
+                    "type": "group",
+                    "rules": [{ "id": "l1", "priority": 1, "urnPattern": "urn:ln:1" }],
+                    "children": [
+                      {
+                        "id": "ln2",
+                        "name": "Sub",
+                        "type": "group",
+                        "rules": [
+                          { "id": "l2", "priority": 1, "urnPattern": "urn:ln:2" },
+                          { "id": "l3", "priority": 1, "urnPattern": "urn:ln:*" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "urn:ln:1" }, { "urn": "urn:ln:2" }, { "urn": "urn:ln:3" }],
+      "expect": {
+        "urn:ln:1": { "layerId": "a", "source": "explicit" },
+        "urn:ln:2": { "layerId": "a", "source": "explicit" },
+        "urn:ln:3": { "source": "none" }
+      }
+    },
+    {
+      "name": "legacy-top-level-reference-layout",
+      "summary": "COMPILE: with no layout.referenceLayout the legacy top-level referenceLayout is the layout (parse_reference_layout; the TS twin reads the same spelling).",
+      "view": {
+        "content": {},
+        "referenceLayout": {
+          "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+          "assignments": { "x": { "layerId": "a", "inheritsChildren": true } }
+        }
+      },
+      "nodes": [{ "urn": "x" }, { "urn": "y" }],
+      "expect": { "x": { "layerId": "a", "source": "explicit" }, "y": { "source": "none" } }
+    },
+    {
+      "name": "nested-reference-layout-wins-over-legacy-top-level",
+      "summary": "COMPILE: layout.referenceLayout, when it is an object, is read and the legacy top-level referenceLayout is ignored.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "b", "name": "B", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": {}
+          }
+        },
+        "referenceLayout": {
+          "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+          "assignments": { "x": { "layerId": "a", "inheritsChildren": true } }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }],
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" } }
+    },
+    {
+      "name": "scope-explicit-all-with-entries",
+      "summary": "COMPILE derive_entity_scope: an explicit entityScope 'all' wins over existing entries, so rules still place unpinned nodes.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": { "y": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "dataset" }],
+      "expect": {
+        "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" },
+        "y": { "layerId": "a", "source": "explicit" }
+      }
+    },
+    {
+      "name": "scope-explicit-curated-without-entries",
+      "summary": "COMPILE derive_entity_scope: an explicit entityScope 'curated' with no entries still stops rules (PLACE tier 4).",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }],
+      "expect": { "x": { "source": "none" } }
+    },
+    {
+      "name": "scope-derived-curated-from-any-entry",
+      "summary": "COMPILE derive_entity_scope: with no explicit scope, any assignment entry derives curated, so rules stop placing.",
+      "view": {
+        "content": {},
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": { "y": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "dataset" }],
+      "expect": { "x": { "source": "none" }, "y": { "layerId": "a", "source": "explicit" } }
+    },
+    {
+      "name": "scope-invalid-value-derives",
+      "summary": "COMPILE derive_entity_scope: only the exact values 'all' and 'curated' are explicit; 'Curated' derives, and with no entries derives 'all'.",
+      "view": {
+        "content": { "entityScope": "Curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }],
+      "expect": { "x": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" } }
+    },
+    {
+      "name": "scope-derived-curated-from-an-entry-with-no-layer",
+      "summary": "COMPILE derive_entity_scope counts every object entry, even one whose layerId '' makes it absent for placement: the scope derives curated and nothing is placed.",
+      "view": {
+        "content": {},
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": { "y": { "layerId": "", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "dataset" }],
+      "expect": { "x": { "source": "none" }, "y": { "source": "none" } }
+    },
+    {
+      "name": "non-object-assignment-entries-are-dropped",
+      "summary": "COMPILE normalization: assignment values that are not objects ('a', null) are dropped, so they neither place nor make the derived scope curated.",
+      "view": {
+        "content": {},
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": { "x": "a", "y": null }
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "dataset" }],
+      "expect": {
+        "x": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "y": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" }
+      }
+    },
+    {
+      "name": "layers-without-a-string-id-are-ignored",
+      "summary": "COMPILE layers: only records with a non-empty string id are layers; id-less, '' and numeric ids, strings and nulls give no rules and no fallback.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "name": "NoId", "order": 0, "entityTypes": ["dataset"], "showUnassigned": true },
+              { "id": "", "name": "Blank", "order": 0, "entityTypes": ["dataset"] },
+              { "id": 7, "name": "Seven", "order": 0, "entityTypes": ["dataset"] },
+              "junk",
+              null,
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "folder" }],
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" }, "y": { "source": "none" } }
+    }
+  ]
+}

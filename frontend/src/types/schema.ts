@@ -213,8 +213,9 @@ export interface ViewContentConfig {
   // Max hierarchy depth allowed
   maxDepth: number;
 
-  // Root entity types (entry points for navigation)
-  rootEntityTypes: string[];
+  // Legacy, no longer written. Root types come from the data source's
+  // ontology (useViewRootEntityTypes); older views may still carry it.
+  rootEntityTypes?: string[];
 
   // Membership scope — decoupled from placement. Absent on legacy views
   // (derived by deriveEntityScope from whether any layer assignments exist).
@@ -487,7 +488,7 @@ export interface LayerAssignmentRuleConfig {
   name?: string;
   description?: string;
 
-  // Match criteria (OR logic between different fields, AND logic within same field if array)
+  // Match criteria: AND across fields, any-of within a list (entityTypes, tags)
   entityTypes?: string[];
   tags?: string[];
   urnPattern?: string;

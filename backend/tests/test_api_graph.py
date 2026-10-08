@@ -1418,3 +1418,84 @@ async def test_top_level_degraded_count_not_cached(top_level_client, monkeypatch
     assert resp.json()["totalCount"] is None
     cache = graph_module.get_graph_cache()
     assert cache.count_sets == []
+
+
+# ── GET /nodes/top-level?orphansOnly=true ─────────────────────────────
+
+def _record_page_cache_params(cache) -> list:
+    """Wraps the passthrough's get_or_compute to record the page-cache params."""
+    seen: list = []
+    inner = cache.get_or_compute
+
+    async def _recording(**kw):
+        seen.append(kw["params"])
+        return await inner(**kw)
+    cache.get_or_compute = _recording
+    return seen
+
+
+async def test_top_level_orphans_only_keys_every_layer_on_the_orphan_types(top_level_client, monkeypatch):
+    """The orphan types are resolved before every cache layer: the payload
+    filter, the count side-cache, the page cache and the live query all get them."""
+    client, engine = top_level_client
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    monkeypatch.setattr(engine, "orphan_entity_types", AsyncMock(return_value=["Schema", "Table"]))
+    serve_spy = AsyncMock(return_value=(None, None))
+    monkeypatch.setattr(graph_module, "try_serve_top_level", serve_spy)
+    live_spy = AsyncMock(return_value=_stub_top_level_result(total=3))
+    monkeypatch.setattr(engine, "get_top_level_or_orphan_nodes", live_spy)
+    cache = graph_module.get_graph_cache()
+    page_params = _record_page_cache_params(cache)
+
+    resp = await client.get("/api/v1/test-ws/graph/nodes/top-level", params={"orphansOnly": "true"})
+    assert resp.status_code == 200
+    engine.orphan_entity_types.assert_awaited_once_with(None)
+    assert serve_spy.await_args.kwargs["entity_types"] == ["Schema", "Table"]
+    assert live_spy.await_args.kwargs["entity_types"] == ["Schema", "Table"]
+    assert cache.count_gets[0][1] == {"entityTypes": ["Schema", "Table"], "searchQuery": None}
+    assert page_params[0]["entityTypes"] == ["Schema", "Table"]
+
+
+async def test_top_level_orphans_only_without_orphan_types_is_empty_and_reads_nothing(
+    top_level_client, monkeypatch,
+):
+    """A root-type filter (or an ontology with no containable type) gives an
+    empty page with total 0, and neither the payload nor the graph is read."""
+    client, engine = top_level_client
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    monkeypatch.setattr(engine, "orphan_entity_types", AsyncMock(return_value=[]))
+    serve_spy = AsyncMock(side_effect=AssertionError("payload must not be read"))
+    monkeypatch.setattr(graph_module, "try_serve_top_level", serve_spy)
+    live_spy = AsyncMock(side_effect=AssertionError("graph must not be read"))
+    monkeypatch.setattr(engine, "get_top_level_or_orphan_nodes", live_spy)
+
+    resp = await client.get(
+        "/api/v1/test-ws/graph/nodes/top-level",
+        params={"orphansOnly": "true", "entityTypes": "Domain"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["nodes"], body["totalCount"], body["hasMore"]) == ([], 0, False)
+    engine.orphan_entity_types.assert_awaited_once_with(["Domain"])
+    serve_spy.assert_not_called()
+    live_spy.assert_not_called()
+
+
+@pytest.mark.parametrize("params", [{}, {"orphansOnly": "false"}])
+async def test_top_level_default_request_never_resolves_orphan_types(top_level_client, monkeypatch, params):
+    """Without orphansOnly nothing changes: no orphan lookup, no type filter."""
+    client, engine = top_level_client
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    orphan_spy = AsyncMock(side_effect=AssertionError("default must not resolve orphan types"))
+    monkeypatch.setattr(engine, "orphan_entity_types", orphan_spy)
+    monkeypatch.setattr(graph_module, "try_serve_top_level", AsyncMock(return_value=(None, None)))
+    live_spy = AsyncMock(return_value=_stub_top_level_result())
+    monkeypatch.setattr(engine, "get_top_level_or_orphan_nodes", live_spy)
+
+    resp = await client.get("/api/v1/test-ws/graph/nodes/top-level", params=params)
+    assert resp.status_code == 200
+    orphan_spy.assert_not_called()
+    assert live_spy.await_args.kwargs["entity_types"] is None

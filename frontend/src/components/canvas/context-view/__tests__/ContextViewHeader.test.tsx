@@ -307,6 +307,19 @@ describe('ContextViewHeader — Focus Lens launcher', () => {
   })
 })
 
+describe('ContextViewHeader — Orphaned entities (Display → Advanced)', () => {
+  it('a viewer and an editor both reach it from the Display menu', () => {
+    for (const mode of [{ isDraft: false, canManage: false }, { isDraft: true, canManage: true }]) {
+      const onOpenOrphans = vi.fn()
+      const { unmount } = renderHeader(baseProps({ ...mode, onOpenOrphans }))
+      fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Orphaned entities…' }))
+      expect(onOpenOrphans).toHaveBeenCalledTimes(1)
+      unmount()
+    }
+  })
+})
+
 describe('ContextViewHeader — Select teaches the gestures this platform uses', () => {
   afterEach(() => { vi.restoreAllMocks() })
 

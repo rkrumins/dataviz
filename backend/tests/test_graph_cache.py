@@ -3590,6 +3590,23 @@ def test_the_assignment_key_drops_the_wall_clock_and_sorts_the_urns():
     assert early["assignments"]["a"]["assignedBy"] == "rule"
 
 
+def test_the_assignment_key_separates_the_placement_contract():
+    """With placementContractEnabled the same request gets a different answer,
+    so it must never share an entry with the legacy engine's. Off, the key
+    carries no marker at all."""
+    from backend.app.api.v1.endpoints.assignments import _cache_params
+    from backend.app.services.view_placement import CONTRACT_VERSION
+    from backend.common.models.assignment import LayerAssignmentRequest
+
+    request = LayerAssignmentRequest.model_validate({"layers": [], "urns": ["b", "a"]})
+
+    off = _cache_params(request)
+    on = _cache_params(request, contract=True)
+    assert "placementContract" not in off
+    assert off == _cache_params(request, contract=False)
+    assert on == {**off, "placementContract": CONTRACT_VERSION}
+
+
 def test_the_node_query_key_is_order_insensitive():
     """The query is a SET; the canvas builds it by expansion order. Two
     users at the identical view by different routes got two entries."""

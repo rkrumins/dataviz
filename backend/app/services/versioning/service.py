@@ -2915,7 +2915,9 @@ class GraphVersioningService:
                 orphan_count += 1
         return {
             "nodes": out_nodes,
-            "totalCount": total,
+            # A window that stopped early saw only part of the set: no total
+            # rather than a too-low one.
+            "totalCount": total if exhausted else None,
             "hasMore": has_more,
             "nextCursor": (out_nodes[-1]["displayName"] if (out_nodes and has_more) else None),
             "rootTypeCount": root_count,

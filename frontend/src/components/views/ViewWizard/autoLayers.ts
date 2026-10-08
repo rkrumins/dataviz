@@ -117,8 +117,8 @@ export interface DeriveRootTypeCandidatesArgs {
 
 /**
  * The columns worth offering, declared ontology roots first (in the hierarchy
- * preview's own order), then types that only appear as orphan roots in the graph
- * — sorted by how many were seen, then by name.
+ * preview's own order), then ontology types that only appear as orphan roots in
+ * the graph — sorted by how many were seen, then by name.
  *
  * An orphan-root type is offered because "top-level" in the graph is structural
  * (no incoming containment edge), so a Platform ingested without its Domain IS a
@@ -167,7 +167,10 @@ export function deriveRootTypeCandidates({
   const declared = declaredRootIds.map(id => candidateFor(id, caseFold(id), true))
 
   const orphans = [...observed.entries()]
-    .filter(([fold]) => !declaredFolds.has(fold))
+    // A genuine orphan is a type the ontology declares, just not as a root. A type
+    // it does not declare at all is never offered: its column could only hold
+    // entities the data source's ontology says cannot exist.
+    .filter(([fold]) => !declaredFolds.has(fold) && byFold.has(fold))
     .map(([fold]) => candidateFor(undefined, fold, false))
     .sort((a, b) => (b.observedCount ?? 0) - (a.observedCount ?? 0) || a.label.localeCompare(b.label))
 

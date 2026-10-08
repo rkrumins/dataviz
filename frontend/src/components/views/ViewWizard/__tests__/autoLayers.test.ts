@@ -127,13 +127,26 @@ describe('deriveRootTypeCandidates', () => {
         expect(deriveRootTypeCandidates({ entityTypes: [] })).toEqual([])
     })
 
-    it('still offers observed types when the ontology has no spine at all', () => {
+    it('offers no observed type the ontology does not declare, even with no ontology', () => {
         const candidates = deriveRootTypeCandidates({
             entityTypes: [],
             observedTopLevel: [{ type: 'Mystery' }],
         })
-        expect(candidates).toEqual([
-            { typeId: 'Mystery', label: 'Mystery', observedCount: 1, declaredByOntology: false },
+        expect(candidates).toEqual([])
+    })
+
+    it('never offers an observed type the ontology does not declare', () => {
+        // 'schemaField' is a label the graph reported at the top level, but this
+        // data source's ontology has no such type: a column for it could only hold
+        // entities that should not exist here.
+        const candidates = deriveRootTypeCandidates({
+            entityTypes: ONTOLOGY,
+            rootEntityTypes: ['Domain'],
+            observedTopLevel: [{ type: 'Domain' }, { type: 'schemaField' }, { type: 'Platform' }],
+        })
+        expect(candidates.map(c => [c.typeId, c.declaredByOntology])).toEqual([
+            ['Domain', true],
+            ['Platform', false],
         ])
     })
 })

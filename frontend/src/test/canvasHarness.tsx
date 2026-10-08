@@ -649,6 +649,9 @@ export async function renderCanvasWithTrace(
     /** A test's own turn on the stub provider: wrap a read to fail it, or
      *  hold it. */
     wrapProvider?: (provider: GraphDataProvider) => GraphDataProvider
+    /** Mount with the One Placement Contract on (`placementContractEnabled`).
+     *  Off by default, as it ships. */
+    placementContract?: boolean
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -675,7 +678,11 @@ export async function renderCanvasWithTrace(
     currentBranchId: opts.draft ? 'harness-branch' : null,
   } as never)
   useFeaturesStore.setState({
-    values: { ...useFeaturesStore.getState().values, editModeEnabled: !!opts.draft },
+    values: {
+      ...useFeaturesStore.getState().values,
+      editModeEnabled: !!opts.draft,
+      placementContractEnabled: !!opts.placementContract,
+    },
   } as never)
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)

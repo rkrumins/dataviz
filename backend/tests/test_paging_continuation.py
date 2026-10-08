@@ -85,6 +85,11 @@ def test_default_node_page_knows_exactly_whether_more_follow():
     assert (last.has_more, last.next_offset) == (False, 10)
 
 
+def test_default_node_page_does_not_guess_a_total():
+    p = _MemoryProvider([_node(f"n{i:02d}") for i in range(10)], [])
+    assert _run(p.get_nodes_page(NodeQuery(limit=5))).total_count is None
+
+
 def _family():
     kids = [f"P.c{i}" for i in range(6)]
     edges = [_edge(f"k{i}", "P", k, "CONTAINS") for i, k in enumerate(kids)]
@@ -184,7 +189,8 @@ class _MainChildren:
     async def get_nodes_page(self, query: NodeQuery):
         o = query.offset or 0
         rows = [_node(f"P.c{i:03d}" if i != 150 else "P.c150") for i in range(o, min(o + 100, 250))]
-        return NodePage(nodes=rows, hasMore=o + 100 < 250, nextOffset=o + len(rows))
+        return NodePage(nodes=rows, hasMore=o + 100 < 250, nextOffset=o + len(rows),
+                        totalCount=250 if not o else None)
 
 
 def _overlay():
@@ -231,6 +237,15 @@ def test_overlay_type_page_keeps_mains_position():
     assert (second.has_more, second.next_offset) == (True, 200)
 
 
+def test_overlay_type_page_keeps_mains_total_only_while_the_draft_changes_nothing():
+    clean = DraftOverlayProvider(_MainChildren(), svc=_FakeSvc({}), graph_id="g", branch_id="d")
+    clean.set_containment_edge_types(["CONTAINS"])
+    q = NodeQuery(entityTypes=["system"], limit=100)
+    assert _run(clean.get_nodes_page(q)).total_count == 250
+    # Main's count is not this draft's: it adds a row and deletes another.
+    assert _run(_overlay().get_nodes_page(q)).total_count is None
+
+
 # ── branch / as-of provider ──────────────────────────────────────────────
 
 class _StateSvc:
@@ -249,6 +264,7 @@ def test_branch_type_page_probes_one_row_past_the_page():
     page = _run(p.get_nodes_page(NodeQuery(entityTypes=["system"], limit=100, offset=200)))
     assert svc.asked == (101, 200)
     assert (len(page.nodes), page.has_more, page.next_offset) == (100, False, 300)
+    assert page.total_count is None
 
 
 # ── endpoint ─────────────────────────────────────────────────────────────
@@ -260,7 +276,8 @@ class _PageEngine:
 
     async def get_nodes_page(self, query):
         self.queries.append(query)
-        return NodePage(nodes=[_node("a")], hasMore=True, nextOffset=query.offset + 1)
+        return NodePage(nodes=[_node("a")], hasMore=True, nextOffset=query.offset + 1,
+                        totalCount=450 if not query.offset else None)
 
 
 @pytest.fixture
@@ -283,8 +300,17 @@ async def test_nodes_page_endpoint_returns_the_position(page_client):
     resp = await client.post("/api/v1/test-ws/graph/nodes/page",
                              json={"query": {"entityTypes": ["system"], "limit": 1, "offset": 7}})
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"nodes": [resp.json()["nodes"][0]], "hasMore": True, "nextOffset": 8}
+    assert resp.json() == {"nodes": [resp.json()["nodes"][0]], "hasMore": True, "nextOffset": 8,
+                           "totalCount": None}
     assert engine.queries[-1].entity_types == ["system"]
+
+
+async def test_nodes_page_endpoint_sends_the_first_pages_total(page_client):
+    client, _ = page_client
+    resp = await client.post("/api/v1/test-ws/graph/nodes/page",
+                             json={"query": {"entityTypes": ["system"], "limit": 1}})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["totalCount"] == 450
 
 
 @pytest.mark.parametrize("query", [

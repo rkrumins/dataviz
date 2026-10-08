@@ -1,0 +1,630 @@
+{
+  "belongs-to-parent-to-child-is-honoured": {
+    "why": "Containment direction comes from the ontology; the server treated only BELONGS_TO as pointing child to parent.",
+    "legacy": {
+      "d": null
+    }
+  },
+  "blank-condition-field-counts-as-absent": {
+    "why": "Rejected: the request the canvas builds fails validation today (a condition with no field), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "blank-display-name-is-absent": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "n2": null,
+      "n3": null
+    }
+  },
+  "blank-list-entries-are-dropped": {
+    "why": "Decision 3: a rule is the AND of its criteria; the server matched a rule when any one criterion matched.",
+    "legacy": {
+      "y": {
+        "layerId": "a",
+        "source": "rule"
+      },
+      "z": {
+        "layerId": "a",
+        "source": "rule"
+      }
+    }
+  },
+  "conditions-starts-and-ends-with": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "f": null,
+      "h": null
+    }
+  },
+  "containment-cycle-edges-ignored": {
+    "why": "Edges inside a containment cycle are ignored; the server let the cycle's members inherit from each other.",
+    "legacy": {
+      "b1": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "created-in-branch-is-ignored-in-open-scope": {
+    "why": "Decision 2: an entity's own rule or stamp beats the layer of a rule-placed or stamped parent; the server let every child inherit.",
+    "legacy": {
+      "c": {
+        "layerId": "b",
+        "source": "inherited"
+      }
+    }
+  },
+  "criteria-and-lists-any-of": {
+    "why": "Decision 3: a rule is the AND of its criteria; the server matched a rule when any one criterion matched.",
+    "legacy": {
+      "x": {
+        "layerId": "a",
+        "source": "rule"
+      },
+      "z": {
+        "layerId": "a",
+        "source": "rule"
+      }
+    }
+  },
+  "curated-created-in-branch-stamp-cascades-by-hand": {
+    "why": "Curated scope: an entity created in this draft is placed by its stamp and passes it to its children by hand; the server knows nothing of createdInBranch.",
+    "legacy": {
+      "p": null,
+      "c": null,
+      "g": null,
+      "q": null,
+      "x": null
+    }
+  },
+  "curated-stale-entry-falls-through-to-created-in-branch-stamp": {
+    "why": "An explicit entry naming no existing layer is skipped and flagged staleExplicit; the server put the entity, and the children inheriting from it, in the missing layer. Curated scope: an entity created in this draft is placed by its stamp and passes it to its children by hand; the server knows nothing of createdInBranch.",
+    "legacy": {
+      "s": {
+        "layerId": "gone",
+        "source": "explicit"
+      },
+      "t": {
+        "layerId": "gone",
+        "source": "inherited"
+      }
+    }
+  },
+  "duplicate-type-first-layer-by-order": {
+    "why": "Decision 1: at equal priority the lower layer order wins; the server went by array position and listed type matches before tag matches.",
+    "legacy": {
+      "x": {
+        "layerId": "b",
+        "source": "rule"
+      },
+      "y": {
+        "layerId": "b",
+        "source": "rule"
+      }
+    }
+  },
+  "empty-list-or-object-operator-means-equals": {
+    "why": "Rejected: the request the canvas builds fails validation today (an operator that is a list or an object), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "empty-or-non-string-layer-id-is-absent-not-stale": {
+    "why": "Rejected: the request the canvas builds fails validation today (an entry whose layerId is null or a number), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "equal-priority-lower-layer-wins-whatever-the-criterion": {
+    "why": "Decision 1: at equal priority the lower layer order wins; the server went by array position and listed type matches before tag matches.",
+    "legacy": {
+      "x": {
+        "layerId": "b",
+        "source": "rule"
+      }
+    }
+  },
+  "equals-empty-text-is-a-valid-value": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "e1": null
+    }
+  },
+  "every-criterion-must-hold": {
+    "why": "Decision 3: a rule is the AND of its criteria; the server matched a rule when any one criterion matched.",
+    "legacy": {
+      "urn:w": {
+        "layerId": "a",
+        "source": "rule"
+      },
+      "urn:y": {
+        "layerId": "a",
+        "source": "rule"
+      },
+      "urn:z": {
+        "layerId": "a",
+        "source": "rule"
+      },
+      "v": {
+        "layerId": "a",
+        "source": "rule"
+      }
+    }
+  },
+  "explicit-layer-id-must-be-an-exact-layer-id": {
+    "why": "An explicit entry naming no existing layer is skipped and flagged staleExplicit; the server put the entity, and the children inheriting from it, in the missing layer.",
+    "legacy": {
+      "x": {
+        "layerId": "Silver",
+        "source": "explicit"
+      },
+      "y": {
+        "layerId": "B",
+        "source": "explicit"
+      }
+    }
+  },
+  "fallback-after-inherits-from-parent-false": {
+    "why": "A rule's inheritsFromParent false is honoured, so its children do not inherit; the server ignored it. The child lands on the display-only fallback.",
+    "legacy": {
+      "c": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "glob-and-type-criteria-combine": {
+    "why": "Decision 3: a rule is the AND of its criteria; the server matched a rule when any one criterion matched.",
+    "legacy": {
+      "urn:li:chart:c": {
+        "layerId": "a",
+        "source": "rule"
+      },
+      "urn:li:dataset:b": {
+        "layerId": "a",
+        "source": "rule"
+      }
+    }
+  },
+  "glob-backslash-and-braces-are-literal": {
+    "why": "urnPattern is an anchored, case-sensitive glob with only * and ? special; the server escaped only '.', ignored case, did not match newlines and dropped a pattern that was not a valid regex.",
+    "legacy": {
+      "urn:a\\b{2}x": null
+    }
+  },
+  "glob-is-case-sensitive": {
+    "why": "urnPattern is an anchored, case-sensitive glob with only * and ? special; the server escaped only '.', ignored case, did not match newlines and dropped a pattern that was not a valid regex.",
+    "legacy": {
+      "urn:li:x": {
+        "layerId": "a",
+        "source": "rule"
+      }
+    }
+  },
+  "glob-regex-characters-are-literal": {
+    "why": "urnPattern is an anchored, case-sensitive glob with only * and ? special; the server escaped only '.', ignored case, did not match newlines and dropped a pattern that was not a valid regex.",
+    "legacy": {
+      "urn:a.b+(c)[d]|e$^": null,
+      "urn:a.b+(c)[d]|e$^tail": null
+    }
+  },
+  "glob-star-matches-newlines": {
+    "why": "urnPattern is an anchored, case-sensitive glob with only * and ? special; the server escaped only '.', ignored case, did not match newlines and dropped a pattern that was not a valid regex.",
+    "legacy": {
+      "urn:x:a\nb:end": null,
+      "urn:x:a:end\n": {
+        "layerId": "a",
+        "source": "rule"
+      }
+    }
+  },
+  "glob-unbalanced-parenthesis-is-a-valid-pattern": {
+    "why": "urnPattern is an anchored, case-sensitive glob with only * and ? special; the server escaped only '.', ignored case, did not match newlines and dropped a pattern that was not a valid regex.",
+    "legacy": {
+      "urn:li:dataset:(urn:li:dataPlatform:hive,db.t,PROD)": null
+    }
+  },
+  "layer-order-sorts-numerically-then-by-position": {
+    "why": "Rejected: the request the canvas builds fails validation today (a layer whose order is fractional or missing), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "layers-without-a-string-id-are-ignored": {
+    "why": "Rejected: the request the canvas builds fails validation today (a layer whose id is missing or a number), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "missing-operator-means-equals": {
+    "why": "Rejected: the request the canvas builds fails validation today (a condition whose operator is null or ''), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "missing-priority-is-zero-negative-is-below-default": {
+    "why": "Rejected: the request the canvas builds fails validation today (a rule with no priority), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "multi-parent-ambiguity-counts-distinct-layers": {
+    "why": "Several parents: a hand-placed parent wins before a rule-placed one, then the smallest URN; the server took the parent of whichever edge came last.",
+    "legacy": {
+      "x": {
+        "layerId": "b",
+        "source": "inherited"
+      }
+    }
+  },
+  "multi-parent-ambiguity-counts-only-the-deciding-tier": {
+    "why": "Several parents: a hand-placed parent wins before a rule-placed one, then the smallest URN; the server took the parent of whichever edge came last.",
+    "legacy": {
+      "x": {
+        "layerId": "b",
+        "source": "inherited"
+      }
+    }
+  },
+  "multi-parent-hand-beats-soft-whatever-the-urn": {
+    "why": "Several parents: a hand-placed parent wins before a rule-placed one, then the smallest URN; the server took the parent of whichever edge came last.",
+    "legacy": {
+      "x": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "multi-parent-skips-unplaced-and-gated": {
+    "why": "Several parents: a hand-placed parent wins before a rule-placed one, then the smallest URN; the server took the parent of whichever edge came last.",
+    "legacy": {
+      "x": null
+    }
+  },
+  "multi-parent-soft-parents-by-urn": {
+    "why": "Several parents: a hand-placed parent wins before a rule-placed one, then the smallest URN; the server took the parent of whichever edge came last. Decision 2: an entity's own rule or stamp beats the layer of a rule-placed or stamped parent; the server let every child inherit.",
+    "legacy": {
+      "x": {
+        "layerId": "a",
+        "source": "inherited"
+      },
+      "y": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "non-numeric-priority-is-zero": {
+    "why": "Rejected: the request the canvas builds fails validation today (a fractional priority), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "null-property-is-missing-and-uses-the-field-fallback": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "v": null,
+      "x": null,
+      "z": null
+    }
+  },
+  "one-element-list-value-is-a-single-value": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "x": null
+    }
+  },
+  "ontology-direction-flips-parentage": {
+    "why": "Containment direction comes from the ontology; the server treated only BELONGS_TO as pointing child to parent.",
+    "legacy": {
+      "c1": null,
+      "c2": null
+    }
+  },
+  "own-rule-beats-rule-placed-parent": {
+    "why": "Decision 2: an entity's own rule or stamp beats the layer of a rule-placed or stamped parent; the server let every child inherit.",
+    "legacy": {
+      "c": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "own-rule-beats-stamped-parent": {
+    "why": "Decision 2: an entity's own rule or stamp beats the layer of a rule-placed or stamped parent; the server let every child inherit.",
+    "legacy": {
+      "c": {
+        "layerId": "b",
+        "source": "inherited"
+      }
+    }
+  },
+  "own-stamp-beats-rule-placed-parent": {
+    "why": "Decision 2: an entity's own rule or stamp beats the layer of a rule-placed or stamped parent; the server let every child inherit.",
+    "legacy": {
+      "c": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "property-equals-boolean": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "b1": null,
+      "b2": null
+    }
+  },
+  "property-equals-boolean-text-value": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "c1": null,
+      "c2": null
+    }
+  },
+  "property-equals-decimal-value": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "s1": null,
+      "s2": null,
+      "s3": null
+    }
+  },
+  "property-equals-is-case-insensitive-whole-value": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "x": null,
+      "z": null
+    }
+  },
+  "property-equals-number-reads-numeric-text": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "n1": null,
+      "n2": null,
+      "n4": null,
+      "n5": null,
+      "n7": null
+    }
+  },
+  "property-equals-text-keeps-text": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "t1": null,
+      "t3": null
+    }
+  },
+  "property-exists-means-set": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "f": null,
+      "l": null,
+      "s": null,
+      "z": null
+    }
+  },
+  "property-field-fallbacks": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "n1": null,
+      "n3": null,
+      "n5": null,
+      "n6": null,
+      "urn:q:1": null
+    }
+  },
+  "property-field-names-are-exact": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "d2": null,
+      "o2": null
+    }
+  },
+  "property-list-matches-any-element": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "w": null,
+      "x": null
+    }
+  },
+  "property-not-equals-leaves-out-missing": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "d": null,
+      "l2": null,
+      "l3": null
+    }
+  },
+  "property-values-fold-case-per-character": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "c1": null,
+      "c2": null,
+      "c4": null
+    }
+  },
+  "rule-ids-default-to-layer-and-index": {
+    "why": "Rejected: the request the canvas builds fails validation today (a rule with no id), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "rule-inherits-from-parent-false": {
+    "why": "A rule's inheritsFromParent false is honoured, so its children do not inherit; the server ignored it. Decision 2: an entity's own rule or stamp beats the layer of a rule-placed or stamped parent; the server let every child inherit.",
+    "legacy": {
+      "c": {
+        "layerId": "a",
+        "source": "inherited"
+      },
+      "g": {
+        "layerId": "a",
+        "source": "inherited"
+      },
+      "t": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "same-pair-two-directions-forms-a-cycle": {
+    "why": "Edges inside a containment cycle are ignored; the server let the cycle's members inherit from each other.",
+    "legacy": {
+      "c": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "scope-derived-curated-from-an-entry-with-no-layer": {
+    "why": "An entry whose layerId is '' is absent; the server placed the entity in a layer with id ''.",
+    "legacy": {
+      "y": {
+        "layerId": "",
+        "source": "explicit"
+      }
+    }
+  },
+  "soft-chain-resumes-from-the-nearest-rule": {
+    "why": "Decision 2: an entity's own rule or stamp beats the layer of a rule-placed or stamped parent; the server let every child inherit.",
+    "legacy": {
+      "c": {
+        "layerId": "a",
+        "source": "inherited"
+      },
+      "g": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "stale-explicit-falls-through-to-fallback": {
+    "why": "An explicit entry naming no existing layer is skipped and flagged staleExplicit; the server put the entity, and the children inheriting from it, in the missing layer.",
+    "legacy": {
+      "x": {
+        "layerId": "gone",
+        "source": "explicit"
+      }
+    }
+  },
+  "stale-explicit-falls-through-to-rule": {
+    "why": "An explicit entry naming no existing layer is skipped and flagged staleExplicit; the server put the entity, and the children inheriting from it, in the missing layer.",
+    "legacy": {
+      "x": {
+        "layerId": "gone",
+        "source": "explicit"
+      },
+      "y": {
+        "layerId": "__UNASSIGNED__",
+        "source": "explicit"
+      }
+    }
+  },
+  "stale-explicit-falls-through-to-stamp": {
+    "why": "An explicit entry naming no existing layer is skipped and flagged staleExplicit; the server put the entity, and the children inheriting from it, in the missing layer.",
+    "legacy": {
+      "x": {
+        "layerId": "gone",
+        "source": "explicit"
+      }
+    }
+  },
+  "stale-explicit-in-curated-scope": {
+    "why": "An explicit entry naming no existing layer is skipped and flagged staleExplicit; the server put the entity, and the children inheriting from it, in the missing layer.",
+    "legacy": {
+      "c": {
+        "layerId": "gone",
+        "source": "explicit"
+      },
+      "x": {
+        "layerId": "gone",
+        "source": "explicit"
+      }
+    }
+  },
+  "stale-node-placed-by-rule-cascades-soft": {
+    "why": "An explicit entry naming no existing layer is skipped and flagged staleExplicit; the server put the entity, and the children inheriting from it, in the missing layer.",
+    "legacy": {
+      "p": {
+        "layerId": "gone",
+        "source": "explicit"
+      },
+      "c": {
+        "layerId": "gone",
+        "source": "inherited"
+      }
+    }
+  },
+  "stale-parent-entry-gate-ignored": {
+    "why": "An explicit entry naming no existing layer is skipped and flagged staleExplicit; the server put the entity, and the children inheriting from it, in the missing layer. Its inheritsChildren false goes with it.",
+    "legacy": {
+      "p": {
+        "layerId": "gone",
+        "source": "explicit"
+      },
+      "c": null
+    }
+  },
+  "suggest-property-rule-placement": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "x": null
+    }
+  },
+  "suggest-stamp-and-explicit-count-as-placed": {
+    "why": "An explicit entry naming no existing layer is skipped and flagged staleExplicit; the server put the entity, and the children inheriting from it, in the missing layer.",
+    "legacy": {
+      "z": {
+        "layerId": "gone",
+        "source": "explicit"
+      }
+    }
+  },
+  "text-operators-read-numbers-and-booleans-as-text": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "f1": null,
+      "k1": null,
+      "k3": null,
+      "k4": null
+    }
+  },
+  "text-reads-exact-integers-past-2-53-and-negative-zero": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "i1": null,
+      "i2": null,
+      "z1": null
+    }
+  },
+  "three-node-cycle-with-an-outside-parent": {
+    "why": "Edges inside a containment cycle are ignored; the server let the cycle's members inherit from each other.",
+    "legacy": {
+      "z": {
+        "layerId": "a",
+        "source": "inherited"
+      }
+    }
+  },
+  "type-match-folds-case": {
+    "why": "Entity types match whatever their case; the server compared them exactly.",
+    "legacy": {
+      "v": null,
+      "y": null,
+      "z": null
+    }
+  },
+  "uncomparable-value-makes-the-rule-inert": {
+    "why": "A rule whose condition cannot be compared is inert and claims nothing, so the next rule places the entity; the server ignored the condition and matched the rule's type.",
+    "legacy": {
+      "x": {
+        "layerId": "a",
+        "source": "rule"
+      },
+      "y": {
+        "layerId": "a",
+        "source": "rule"
+      },
+      "z": {
+        "layerId": "a",
+        "source": "rule"
+      }
+    }
+  },
+  "unknown-operator-makes-the-rule-inert": {
+    "why": "Rejected: the request the canvas builds fails validation today (a condition operator outside the six rule operators), so the server places nothing; the contract reads the stored config.",
+    "legacy": "rejected"
+  },
+  "whole-float-past-int64-compares-as-a-number": {
+    "why": "Decision 3: propertyMatch and conditions are evaluated through search_semantics; the server dropped propertyMatch and never evaluated conditions.",
+    "legacy": {
+      "x": {
+        "layerId": "b",
+        "source": "rule"
+      }
+    }
+  }
+}

@@ -77,6 +77,7 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     inviteLinksEnabled: true,
     toursEnabled: false,                  // experimental preview — ships OFF
     canvasLayerFoldEnabled: false,        // experimental preview — ships OFF
+    placementContractEnabled: false,      // experimental preview — ships OFF
 }
 
 /** Last served values, cached so a returning visitor's first paint reflects the

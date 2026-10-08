@@ -49,6 +49,7 @@ import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { useSearchStore } from '@/store/searchStore'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 import type { AncestorRef, Predicate, SearchHit } from '@/types/search'
+import type { CompiledPlacementSpec } from '@/lib/placement/placement'
 import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 
 import { buildRunnablePredicate } from '../panel/runnablePredicate'
@@ -61,7 +62,7 @@ import {
     type QuickQuery,
     type QuickScope,
 } from './quickPredicate'
-import { resolveHitLayer } from './resolveHitLayer'
+import { placeHit, resolveHitLayer } from './resolveHitLayer'
 
 
 /** Long enough that a typed word is one request, short enough that the
@@ -154,6 +155,10 @@ export interface ViewSearchSessionOptions {
     viewId: string
     layers: ViewLayerConfig[]
     assignments: Record<string, LayerAssignmentEntry>
+    /** One Placement Contract (flag-on): the canvas's compiled spec. When
+     *  set, a hit's column is placed by it rather than by ``layers`` and
+     *  ``assignments``. */
+    placementSpec?: CompiledPlacementSpec | null
     /**
      * Walk a hit onto the canvas: prime its spine, expand each level and
      * select it. Passed IN rather than built here because it needs the
@@ -263,7 +268,7 @@ export interface ViewSearchSession {
 
 
 export function useViewSearchSessionController(
-    { viewId, layers, assignments, revealHit, prefetchHit }: ViewSearchSessionOptions,
+    { viewId, layers, assignments, placementSpec, revealHit, prefetchHit }: ViewSearchSessionOptions,
 ): ViewSearchSession {
     const advanced = useAdvancedSearch(viewId, { clearOnUnmount: false })
     const [quick, setQuickState] = useState<QuickQuery>(DEFAULT_QUICK)
@@ -392,13 +397,17 @@ export function useViewSearchSessionController(
     // Hoisted: `resolveHitLayer`'s only O(assignments) step, paid once per
     // result page instead of once per hit.
     const hasAssignments = useMemo(() => Object.keys(assignments).length > 0, [assignments])
-    const resolveLayer = useCallback((hit: SearchHit) => resolveHitLayer(
+    const resolveLayer = useCallback((hit: SearchHit) => (placementSpec ? placeHit(
+        hit.node,
+        hit.ancestorPath ?? [],
+        placementSpec,
+    ) : resolveHitLayer(
         hit.node,
         hit.ancestorPath ?? [],
         assignments,
         layers,
         hasAssignments,
-    ), [assignments, layers, hasAssignments])
+    )), [assignments, layers, hasAssignments, placementSpec])
 
     // The columns' slice. Every scoped field collapses to a constant
     // while the search is view-wide, so this whole object keeps its

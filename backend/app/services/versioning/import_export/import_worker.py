@@ -25,6 +25,8 @@ from typing import Any, Callable, Dict, List, Optional
 from sqlalchemy import BigInteger, Text, bindparam, delete, exists, insert, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY
 
+from backend.app.services.view_placement import NodeFacts, suggest_placement
+
 from .. import config, db
 from ..ids import prefixed_id
 from ..models import BranchORM, ImportRowORM, JobORM
@@ -98,7 +100,7 @@ def _first_layer_id(layers: List[dict]) -> str:
     )[0]["id"]
 
 
-def _match_layer_signal(signal, layers: List[dict], fallback_id: str) -> str:
+def _match_layer_signal(signal, layers: List[dict], fallback_id: Optional[str]) -> Optional[str]:
     """Resolve a row's ``layerAssignment`` signal to a layer id: an exact layer-id match wins, then
     a case-insensitive layer-NAME match; otherwise the ``fallback_id`` (the view's first layer)."""
     if signal:
@@ -161,6 +163,67 @@ def compute_import_root_assignments(
             "assignedBy": "import",
             "assignedAt": stamp,
         }
+    return new_entries
+
+
+def contract_import_root_assignments(
+    created_nodes: List[Dict[str, Any]],
+    batch_edges: List[tuple],
+    spec,
+    containment: Dict[str, bool],
+    layers: List[dict],
+    existing_assignments: Dict[str, Any],
+    *,
+    now: str = None,
+) -> Dict[str, dict]:
+    """:func:`compute_import_root_assignments` under the placement contract
+    (``placementContractEnabled``).
+
+    ``spec`` is the view's ``view_placement.PlacementSpec``; ``containment`` is
+    ``{EDGE_TYPE: child is source}`` from the ontology, so a root is found with the containment
+    DIRECTION (a ``BELONGS_TO`` child is the edge's source, not its target). Each root goes through
+    ``suggest_placement``: the row's ``layerAssignment`` signal is the chosen layer when it names a
+    layer id or name, else the contract decides (a stamp or rule in an open view; in a curated one
+    the first layer by order when nothing else places it). An entry is written only when the view is
+    curated or the contract would not already put the root there. Keys and entries otherwise as
+    :func:`compute_import_root_assignments`.
+    """
+    valid_layers = [l for l in (layers or []) if isinstance(l, dict) and l.get("id")]
+    if not valid_layers:
+        return {}
+    child_eids = set()
+    for src, tgt, etype in batch_edges:
+        child_is_source = containment.get(str(etype).strip().upper())
+        if child_is_source is not None:
+            child_eids.add(src if child_is_source else tgt)
+    child_eids.discard(None)
+    stamp = now or _now()
+    new_entries: Dict[str, dict] = {}
+    for node in created_nodes:
+        eid = node.get("eid")
+        if eid in child_eids:                        # has a containment parent in the batch → inherits
+            continue
+        key = node.get("urn") or f"gv:{eid}"
+        if key in existing_assignments or key in new_entries:
+            continue                                 # never overwrite an existing / already-added entry
+        signal = node.get("layer_signal")
+        tags = node.get("tags")
+        facts = NodeFacts(
+            urn=key,
+            entity_type=node.get("entity_type") or "",
+            display_name=node.get("display_name"),
+            tags=frozenset(t for t in tags if isinstance(t, str)) if isinstance(tags, list) else frozenset(),
+            properties=node.get("properties") if isinstance(node.get("properties"), dict) else {},
+            stamp=signal if isinstance(signal, str) and signal else None,
+        )
+        layer_id, pin = suggest_placement(spec, facts, _match_layer_signal(signal, valid_layers, None))
+        if pin:
+            new_entries[key] = {
+                "layerId": layer_id,
+                "inheritsChildren": True,
+                "assignedBy": "import",
+                "assignedAt": stamp,
+            }
     return new_entries
 
 
@@ -346,8 +409,13 @@ class ImportWorker:
                 continue
             payload = op.get("payload") or {}
             if op.get("entity_kind") == "node":
+                # entity_type .. properties: the facts the placement contract reads.
                 self.created_node_facts.append({"eid": op["entity_id"], "urn": payload.get("urn"),
-                                                "layer_signal": payload.get("layerAssignment")})
+                                                "layer_signal": payload.get("layerAssignment"),
+                                                "entity_type": payload.get("entityType"),
+                                                "display_name": payload.get("displayName"),
+                                                "tags": payload.get("tags"),
+                                                "properties": payload.get("properties")})
             elif op.get("entity_kind") == "edge":
                 self.batch_edge_facts.append((payload.get("sourceEntityId"),
                                               payload.get("targetEntityId"), payload.get("edgeType")))

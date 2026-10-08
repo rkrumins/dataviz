@@ -576,6 +576,33 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         # The definition goes in a later release.
         stage="deprecated",
     ),
+    "placementContractEnabled": FeatureWiring(
+        key="placementContractEnabled",
+        posture="capability",
+        # Preview: ships OFF. It changes HOW a view's layers are filled, not whether a
+        # feature is offered, so every read passes default=False rather than
+        # fail_safe_default: a flag that cannot be found means today's placement, never
+        # the preview — the same answer the browser's seed gives.
+        stage="experimental",
+        server_gates=(
+            "POST /graph/assignments/compute — places with the shared placement contract",
+            "View-scoped import — a new top-level entity is pinned to a layer only where the "
+            "contract would place it elsewhere",
+            "POST /views and PUT /views/{id}/layout — a new or changed layer rule that can "
+            "never match is refused",
+        ),
+        ui_surfaces=(
+            "Context View columns, trace overlay lanes and search-hit layer badges",
+            "The View wizard's preview and assignment tree, and Layer Studio",
+            "Build Mode and rail create pin a layer only where the contract would place the "
+            "entity elsewhere",
+        ),
+        still_allowed=(
+            "Saved views are not rewritten — turning this off restores today's placement",
+            "Layer rules already saved keep loading, even ones that can never match",
+            "Search's Layer filter, view-scoped export and scoped replace keep today's rules",
+        ),
+    ),
 }
 
 

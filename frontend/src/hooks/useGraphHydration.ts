@@ -15,6 +15,8 @@ import {
     useViewSchemaIsReady,
 } from '@/hooks/useViewSchema'
 import type { GraphNode, GraphEdge, EntityTypeDefinition, NodeQuery, NodePage } from '@/providers/GraphDataProvider'
+import type { ViewLayerConfig } from '@/types/schema'
+import { caseFold } from '@/features/ontology/lib/caseFold'
 import { BoundedQueue, mapWithConcurrency } from '@/lib/concurrency'
 import { classifyGraphFailure, isFailoverFailure } from '@/services/graphRequestFailure'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
@@ -30,7 +32,7 @@ import { useProviderHealthStore } from '@/store/providerHealth'
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /** Page size for loading entities BY TYPE. An open ('all') view loads the
- *  first page of each visible type on arrival and the rest as that type's
+ *  first page of each type its layers claim on arrival and the rest as that type's
  *  column scrolls (`loadMoreFeeds`) — a page size, not a ceiling. */
 const PER_TYPE_LIMIT = 200
 
@@ -38,10 +40,11 @@ const PER_TYPE_LIMIT = 200
 const FEED_WALK_MAX_PAGES = 5
 
 /** Where a type feed stands after `page` — the SERVER's position: a client
- *  count of the rows returned is wrong under a draft overlay (see NodePage). */
-export function feedAfter(entityTypes: string[], page: NodePage, offset = 0): TypeFeedState {
+ *  count of the rows returned is wrong under a draft overlay (see NodePage).
+ *  The server counts a feed with its first page; later pages keep `total`. */
+export function feedAfter(entityTypes: string[], page: NodePage, offset = 0, total?: number | null): TypeFeedState {
     // "More" from a page that did not move the position can make no progress.
-    return { entityTypes, offset: page.nextOffset, hasMore: page.hasMore && page.nextOffset > offset }
+    return { entityTypes, offset: page.nextOffset, hasMore: page.hasMore && page.nextOffset > offset, total: page.totalCount ?? total }
 }
 
 /** Where a child pager stands after a page read at `offset` — the SERVER's next
@@ -381,32 +384,24 @@ export function closedScopeLoadUrns(
     return [...new Set([...assignedUrns, ...delta])]
 }
 
+/** The types ONE layer claims by rule, as written: `layer.entityTypes` and its
+ *  rules' `entityTypes`. Shared with the canvas's per-column paging so what a
+ *  view loads and what a column pages can never disagree. */
+export function layerClaimedTypes(layer: ViewLayerConfig): string[] {
+    return [...(layer.entityTypes ?? []), ...(layer.rules ?? []).flatMap(r => r.entityTypes ?? [])]
+}
+
 /**
- * Compute the "view-scoped root types" for a reference/context view.
- *
- * A type is a VIEW ROOT if none of its canBeContainedBy parents appear in
- * the view's visibleEntityTypes set.
+ * The entity types an OPEN reference view loads by type (Rules + assignments):
+ * every type a layer claims by rule (layerClaimedTypes), in the spelling the
+ * view's ontology declares (matched case-insensitively; the provider widens a
+ * declared type to the graph's observed spellings). A type the ontology does not
+ * declare is never loaded, nor is a type no layer claims. Empty means the view
+ * loads by its placements alone.
  */
-export function computeViewScopedRoots(
-    visibleTypes: string[],
-    schemaEntityTypes: EntityTypeDefinition[],
-    globalRoots: string[],
-): string[] {
-    if (visibleTypes.length === 0) return globalRoots
-
-    const visibleSet = new Set(visibleTypes)
-
-    const roots = visibleTypes.filter(typeId => {
-        const et = schemaEntityTypes.find(e => e.id === typeId)
-        if (!et) return true
-        const parents = et.hierarchy?.canBeContainedBy ?? []
-        return parents.every(parentType => !visibleSet.has(parentType))
-    })
-
-    if (roots.length > 0) return roots
-
-    const globalOverlap = globalRoots.filter(r => visibleSet.has(r))
-    return globalOverlap.length > 0 ? globalOverlap : [visibleTypes[0]]
+export function claimedFeedTypes(layers: ViewLayerConfig[], schemaEntityTypes: EntityTypeDefinition[]): string[] {
+    const declared = new Map(schemaEntityTypes.map(et => [caseFold(et.id), et.id]))
+    return [...new Set(layers.flatMap(layerClaimedTypes).flatMap(t => declared.get(caseFold(String(t))) ?? []))]
 }
 
 // ─── The Hook ───────────────────────────────────────────────────────────────
@@ -436,8 +431,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const isSchemaReady = useViewSchemaIsReady()
     const activeView = useActiveView()
     // Branch-created delta: URNs created in the active branch's draft (see
-    // useBranchCreatedDelta.ts). Unioned into the closed-scope by-URN load set
-    // below, ONLY in a draft, so freshly-created entities fetch even before
+    // useBranchCreatedDelta.ts). Unioned into the by-URN load set below (either
+    // scope), ONLY in a draft, so freshly-created entities fetch even before
     // they land in the view's persisted `entityAssignments`.
     const branchCreatedDelta = useBranchCreatedDelta()
     const isDraft = useIsDraftMode()
@@ -474,6 +469,16 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         () => schemaEntityTypes.map(et => et.id).sort().join('|'),
         [schemaEntityTypes],
     )
+    // The types an open reference view claims (claimedFeedTypes), keyed on content.
+    // Not a hydration dep: a type a rule edit newly claims is paged in place (see the
+    // effect after loadMoreFeeds), and a dropped claim loads nothing.
+    const activeLayout = activeView?.layout
+    const claimedTypesKey = useMemo(() => {
+        const layout = normalizeReferenceLayout(activeLayout?.referenceLayout)
+        // Curated never feeds by type.
+        if (activeLayout?.type !== 'reference' || deriveEntityScope(activeView?.content, layout) === 'curated') return ''
+        return claimedFeedTypes(layout.layers, schemaEntityTypes).join('|')
+    }, [activeLayout, activeView?.content, schemaEntityTypes])
 
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
     const [failedNodes, setFailedNodes] = useState<Set<string>>(new Set())
@@ -494,6 +499,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // NEW view starts fresh at 'loading' with a full retry budget, while a retry
     // of the SAME view keeps counting.
     const lastInitKeyRef = useRef<string | null>(null)
+    // The (provider, view) key of the last load that settled 'ready' — so work keyed
+    // on "this view is loaded" never acts on a status left over from the previous view.
+    const readyKeyRef = useRef<string | null>(null)
 
     // Prevent infinite retries when API returns [] for roots
     const rootsAttemptedForRef = useRef<string | null>(null)
@@ -554,6 +562,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
         if (initializedKeyRef.current === initKey) return
         initializedKeyRef.current = initKey
+        // Not ready until this run settles: a 'ready' left from the run before must
+        // not let the claimed-feed effect seed feeds this run is about to write.
+        readyKeyRef.current = null
 
         // A genuinely NEW view (new initKey) resets the retry budget.
         const isFreshView = lastInitKeyRef.current !== initKey
@@ -594,6 +605,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         // which the canvas may show "Start building". Called from every
         // successful path so no success can leave a stale error/overlay up.
         const markReady = () => {
+            readyKeyRef.current = initKey
             setHydrationError(null)
             setHydrationStatus('ready')
             setHydrationPhase('complete')
@@ -649,16 +661,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             try {
                 if (isReferenceView) {
                     // ── Reference / Context View ────────────────────────
-                    // Strategy: load ONLY the entities that are relevant to this view.
-                    //
-                    // If the view has canonical layer assignments, load those specific
-                    // entities by URN. This matches exactly what the user configured in
-                    // the wizard/canvas (both now write referenceLayout.assignments).
-                    //
-                    // If no assignments exist (new/empty view), fall back to loading
-                    // by entity type so the user has something to work with.
-
-                    const viewTypes = activeView?.content?.visibleEntityTypes ?? []
+                    // Rules + assignments: load every entity PLACED in this view (by URN)
+                    // and, in an OPEN view, every entity of the types its layers claim by
+                    // rule. A type no layer claims never loads.
 
                     // Collect all assigned root URNs from the canonical assignment map.
                     const normLayout = normalizeReferenceLayout(activeView?.layout?.referenceLayout)
@@ -667,14 +672,18 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         if (entry?.layerId) assignedUrns.add(urn)
                     }
 
-                    // Respect the view's entityScope (curated is the default once assignments exist).
-                    // A CURATED view loads strictly by its assigned URNs (∪ this branch's created
-                    // delta); an OPEN ('all') view loads type-based, so assignments only PLACE
-                    // entities into layers, never hide them. Gating on the SCOPE — not merely "has
-                    // any assignment" — is what stops an open view that happens to carry a few
-                    // assignments from collapsing to just those (the entities-vanish bug). Aligns
-                    // hydration with useLayerAssignment's deriveEntityScope gate.
-                    const loadByUrn = deriveEntityScope(activeView?.content, normLayout) === 'curated'
+                    // A CURATED view loads strictly by its placements (∪ this branch's created
+                    // roots). An OPEN ('all') view also loads, by type, the types its layers
+                    // claim by rule — resolved against the view's ontology (claimedFeedTypes) —
+                    // so assignments only PLACE entities into layers, never hide them. An open
+                    // view whose layers claim no type loads by placement, exactly as curated.
+                    // Gating on the SCOPE — not merely "has any assignment" — is what stops an
+                    // open view that happens to carry a few assignments from collapsing to just
+                    // those (the entities-vanish bug). Aligns hydration with useLayerAssignment's
+                    // deriveEntityScope gate.
+                    const feedTypes = claimedFeedTypes(normLayout.layers, schemaEntityTypes)
+                    const loadByUrn = feedTypes.length === 0
+                        || deriveEntityScope(activeView?.content, normLayout) === 'curated'
 
                     setHydrationPhase('roots')
 
@@ -682,6 +691,15 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // Count of branch-created URNs unioned into the assigned set below
                     // (0 outside a draft / with an empty delta) — logging only.
                     let deltaLoadedCount = 0
+                    // Every placement loads by URN, in EITHER scope — UNIONED (in a draft) with
+                    // the entities this branch created, which have no persisted assignment yet.
+                    // Children the branch created are reached through their parents (see
+                    // committedCreatedChildUrns); only its new ROOTS load flat. Empty delta /
+                    // non-draft ⇒ assigned-only.
+                    const createdChildren = committedCreatedChildUrns(activeChangeSet, containmentEdgeTypes)
+                    const createdRoots = new Set([...branchCreatedDelta].filter((u) => !createdChildren.has(u)))
+                    const urnArray = closedScopeLoadUrns(assignedUrns, createdRoots, isDraft)
+                    deltaLoadedCount = urnArray.length - assignedUrns.size
 
                     // Track every node fetch that FAILED (vs legitimately returned
                     // []). A failed batch is tolerated when others succeeded, but
@@ -721,19 +739,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     let nextCarry: HydrationCarry | null = null
 
                     if (loadByUrn) {
-                        // ── Assignment-driven loading (curated scope) ──
-                        // Load the specific entities assigned to layers by URN,
-                        // UNIONED (in a draft) with entities created in this
-                        // branch — they have no persisted entityAssignment yet
-                        // and would otherwise never be fetched. Empty delta /
-                        // non-draft ⇒ assigned-only, identical to before.
+                        // ── Assignment-driven loading (by placement) ──
+                        // Load the specific entities assigned to layers by URN
+                        // (∪ the branch's created roots, see urnArray above).
                         const urnBatches: string[][] = []
-                        // Children the branch created are reached through their parents (see
-                        // committedCreatedChildUrns); only the branch's new ROOTS load flat here.
-                        const createdChildren = committedCreatedChildUrns(activeChangeSet, containmentEdgeTypes)
-                        const createdRoots = new Set([...branchCreatedDelta].filter((u) => !createdChildren.has(u)))
-                        const urnArray = closedScopeLoadUrns(assignedUrns, createdRoots, isDraft)
-                        deltaLoadedCount = urnArray.length - assignedUrns.size
                         // A retry of a partial load asks only for what has not answered.
                         const toAsk = carry ? urnArray.filter(u => !carry.answered.has(u)) : urnArray
                         // Batch URNs to avoid overly large queries
@@ -760,19 +769,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // (loadChildren below) for its first CHILDREN_PAGE_SIZE page,
                         // and the LoadMoreItem row pages through the rest on click.
                     } else {
-                        // ── Type-based loading (empty/new views) ──
-                        // No assignments yet — load by entity type so the view has data
-                        // for the user to start assigning in the wizard.
-                        // An EMPTY result is a terminal state, not a stall: mark hydration
-                        // complete so the canvas leaves its ghost-loading UI and renders
-                        // its real empty states (blank models legitimately start at zero).
-                        const rootTypes = computeViewScopedRoots(viewTypes, schemaEntityTypes, rootEntityTypes)
-                        if (rootTypes.length === 0 && assignedUrns.size === 0) {
-                            markReady()
-                            return
-                        }
-
-                        // Each type is its own lossless feed: its first page lands
+                        // ── Type-based loading (open scope) ──
+                        // Each claimed type is its own lossless feed: its first page lands
                         // here and the rest as its column scrolls (loadMoreFeeds).
                         // PER_TYPE_LIMIT is a page size, not a ceiling.
                         const loadTypePages = async (types: string[]): Promise<GraphNode[]> => {
@@ -792,28 +790,15 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             return out
                         }
 
-                        allNodes = await loadTypePages(rootTypes)
+                        allNodes = await loadTypePages(feedTypes)
                         if (controller.signal.aborted) return
-
-                        // Also load remaining visible types (non-root layers) — as
-                        // before, only when the view's roots produced something.
-                        if (allNodes.length > 0) {
-                            setHydrationPhase('children')
-                            const loadedRootTypes = new Set(allNodes.map(n => n.entityType))
-                            const remainingTypes = viewTypes.filter(t => !loadedRootTypes.has(t))
-                            if (remainingTypes.length > 0) {
-                                const childNodes = await loadTypePages(remainingTypes)
-                                if (controller.signal.aborted) return
-                                allNodes = [...allNodes, ...childNodes]
-                            }
-                        }
 
                         // Explicit placements load by URN in EVERY scope. Type pages
                         // are ordered by name, so an entity placed by hand — or a
                         // column's anchor — can sort far past the first page and would
                         // otherwise never be fetched: its column would come up empty.
                         const loadedUrns = new Set(allNodes.map(n => n.urn))
-                        const unplaced = [...assignedUrns].filter(u => !loadedUrns.has(u))
+                        const unplaced = urnArray.filter(u => !loadedUrns.has(u))
                         if (unplaced.length > 0) {
                             const batches: string[][] = []
                             for (let i = 0; i < unplaced.length; i += 100) batches.push(unplaced.slice(i, i + 100))
@@ -914,6 +899,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // — a Published view with no assignments still must not lie
                         // "empty" when the provider is down.)
                         if (batchErrors.length > 0) throw totalFailure()
+                        // Empty claimed types are still fed (and exhausted): the
+                        // claimed-feed effect must find them answered.
+                        useCanvasStore.getState().seedPositions({}, Object.fromEntries(typeFeedSeeds))
                         markReady()   // empty view — terminal, not a stall
                         return
                     }
@@ -1424,6 +1412,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // rows are all held already would otherwise look like a click
                     // that did nothing. Bounded, as a feed can be long.
                     let readAt = feed.offset
+                    let total = feed.total
                     for (let walk = 0; walk < FEED_WALK_MAX_PAGES; walk++) {
                         const result = await provider.getNodesPage({
                             entityTypes: feed.entityTypes,
@@ -1481,7 +1470,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // ONE store update: nodes, edges and the feed's position —
                         // unless another instance of this hook moved the feed on
                         // meanwhile: then the rows land and its position stands.
-                        const next = feedAfter(feed.entityTypes, result, readAt)
+                        const next = feedAfter(feed.entityTypes, result, readAt, total)
+                        total = next.total
                         const store = useCanvasStore.getState()
                         if ((store.typeFeeds[feedKey]?.offset ?? readAt) !== readAt) {
                             store.addGraph(fresh.map(n => toCanvasNode(n)), edges.map(e => toCanvasEdge(e)))
@@ -1500,6 +1490,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             })
         }))
     }, [provider, containmentEdgeTypes, lineageEdgeTypes, schemaEntityTypes])
+
+    // A type a rule edit claims on a loaded open view gets a feed of its own, at
+    // its start: the column's feed row then pages it in through the column's own
+    // instance (its loading / Retry state, its queue) rather than a re-run of the
+    // whole view. Only the hydrating instance seeds.
+    useEffect(() => {
+        if (!enableHydration || hydrationStatus !== 'ready' || !claimedTypesKey) return
+        if (readyKeyRef.current !== `${providerVersion}:${activeView?.id ?? 'default'}:reference`) return
+        const feeds = useCanvasStore.getState().typeFeeds
+        const unfed = claimedTypesKey.split('|').filter(t => !feeds[t])
+        if (unfed.length === 0) return
+        useCanvasStore.getState().seedPositions({}, Object.fromEntries(
+            unfed.map(t => [t, { entityTypes: [t], offset: 0, hasMore: true }])))
+    }, [enableHydration, hydrationStatus, claimedTypesKey, providerVersion, activeView?.id])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 

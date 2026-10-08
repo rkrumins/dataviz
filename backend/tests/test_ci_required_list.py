@@ -104,6 +104,29 @@ def test_the_graph_read_path_is_gated() -> None:
         assert must in entries, f"{must} is not gated by the required job"
 
 
+def test_the_placement_contract_is_gated() -> None:
+    """Which layer of a view an entity is in. The shared corpus holds the
+    Python reference and the TypeScript twin together, and the legacy engine,
+    layout, import and export tests are what pin "flag off = today's
+    placement" — a user feels any of them as entities in the wrong column.
+    """
+    entries = set(_entries())
+    for must in (
+        "tests/test_placement_conformance.py",
+        "tests/test_view_placement.py",
+        "tests/test_assignment_engine.py",
+        "tests/test_layout_config.py",
+        "tests/test_import_view_assignments.py",
+        "tests/test_export_view_scope.py",
+        "tests/test_assignment_engine_contract.py",
+        "tests/test_import_view_assignments_contract.py",
+        "tests/test_view_layer_rule_validation.py",
+        "tests/test_placement_legacy_parity.py",
+        "tests/test_placement_dry_run.py",
+    ):
+        assert must in entries, f"{must} is not gated by the required job"
+
+
 @pytest.mark.parametrize("entry", _entries())
 def test_each_entry_is_a_file_pytest_collects(entry: str) -> None:
     """A directory or a helper module in the list is not a no-op — pytest

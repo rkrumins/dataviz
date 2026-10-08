@@ -40,8 +40,9 @@ Placement follows a fixed **precedence**:
    explicit create/move actions (open scope only).
 4. **Generic rules** — type / tag / URN-pattern rules, highest priority wins
    (open scope only).
-5. **Default** — `layers[0]` (open scope only).
 
+In **open scope**, an entity that matches none of tiers 1–4 is left unassigned;
+the canvas shows it only in a layer that opts in with `showUnassigned`.
 In **curated scope**, only tiers 1–2 apply; anything that falls through is left
 unassigned. Containment direction comes from the resolved ontology's
 **containment edge types** (not hardcoded), which is why the engine resolves the
@@ -54,7 +55,6 @@ flowchart TD
     T2{"2. Containment<br/>inheritance?"}
     T3{"3. Persisted<br/>layerAssignment?<br/>(open scope)"}
     T4{"4. Generic rule?<br/>type / tag / URN<br/>(open scope)"}
-    T5["5. Default → layers[0]<br/>(open scope)"]
     U["Unassigned"]
     A["Assigned to layer"]
 
@@ -67,7 +67,7 @@ flowchart TD
     T3 -->|yes| A
     T3 -->|no| T4
     T4 -->|yes| A
-    T4 -->|no| T5 --> A
+    T4 -->|no| U
 
 ```
 
@@ -133,6 +133,87 @@ canvas. When a user opens a view, changes its layer configuration in Layer Studi
 or moves an entity between layers, the computed assignments drive the placement.
 Explicit moves are persisted onto the entity's `layerAssignment` so they survive
 reload (tier 3 above) rather than snapping back to a type-rule layer.
+
+## The placement contract (preview, behind `placementContractEnabled`)
+
+Everything above describes placement with the flag **off**, which is the default. With the admin
+flag `placementContractEnabled` on (Admin → Features → Experimental → *One placement rule for every
+view surface*), these surfaces answer "which layer of this view is this entity in, and why" with
+one contract instead of their own rules: the server compute, view-scoped import and the layer-rule
+save check (`backend/app/services/view_placement.py`), and the canvas columns, trace lanes, search
+badges, wizard preview and assignment tree, Layer Studio, Build Mode and rail create
+(`frontend/src/lib/placement/`). The two are twins held together by one shared corpus
+(`backend/tests/fixtures/placement/*.json`), run by `tests/test_placement_conformance.py` and by
+`frontend/src/lib/placement/__tests__/conformance.test.ts` in required CI.
+
+**Tiers**, first match wins:
+
+1. The entity's own explicit entry (a stale entry naming a deleted layer is skipped, flagged `staleExplicit`).
+2. Inherited from a parent placed **by hand** (an explicit entry, or a draft-created entity's stamp in a curated view), unless that parent's entry sets `inheritsChildren: false`.
+3. *(Curated views stop here, except an entity created in this draft: its own valid `layerAssignment` stamp places it (source `stamped`) and passes to its children like a hand placement.)*
+4. Stamped: the entity's own `layerAssignment` (legacy, open views only).
+5. The entity's **own rule**.
+6. Inherited from a parent placed by a stamp or a rule, unless that rule sets `inheritsFromParent: false`.
+7. Fallback: the first `showUnassigned` layer — display only, never a member, never inherited.
+8. None.
+
+**Rules.** A rule is the AND of everything it sets: entity types (any of, case-insensitive), tags
+(any of, exact), a URN glob (anchored; only `*` and `?` are special; case-sensitive), `propertyMatch`
+and `conditions` (the shared operator table in `backend/common/search_semantics`, the same one display
+rules use). When several rules match, the higher `priority` wins (missing = 0; a layer's
+`entityTypes` act as priority-0 rules after its authored rules); ties go to the **first** layer by
+order. A rule that can never match (no criteria, `contains ''`, an unknown operator) matches nothing,
+and saving a new or changed one through `POST /views` or `PUT /views/{id}/layout` is refused with a
+422 that names the layer, the rule and why. (`PUT /views/{id}` is not checked: the wizard sends back
+the layout it read there, and its layer edits go through `PUT /layout`.)
+
+**Split by type.** A child whose own type a layer claims is shown in that layer even when its
+parent sits in another one. Like a hand placement, it carries the violet *Placed* tag with its path
+in the data ("placed by a layer rule"), and the parent counts it as in another column. Hand
+placements still carry their subtree with them.
+
+**Outside the contract in this phase** (unchanged, pinned by their tests): export and scoped
+replace, advanced-search view scope, the search Layer filter and layer aggregation,
+`get_nodes_by_layer`, open-view type feeds and column totals, the anchored-column check
+(`anchorIssueByLayer`) and the drag conflict warnings, which look only at explicit entries.
+
+### Turning it on (runbook)
+
+1. Check required CI is green and the flag is off (it is seeded off; no migration).
+2. Dry run (read-only): `python -m backend.scripts.placement_dry_run --json /tmp/placement.json`
+   (`--view <id>` or `--workspace <id>` to narrow). Per view it reports what it sampled (and whether
+   the sample was capped), `changed` with `byTransition` counts and examples, `inertRules`,
+   `staleExplicit`, `rejected` and `canvasOnly` constructs.
+3. Review the transitions (`<old source>-><new source>`, plus ` +stale`): `inherited->rule` means a
+   typed child now leaves its parent's column; `rule->rule` first-layer-wins, priority or AND;
+   `rule->none` AND, or the URN glob now being case-sensitive with only `*` and `?` special;
+   `none->rule` case-insensitive types, property rules now working, or a URN glob holding regex
+   characters such as `(` `)` (DataHub dataset URNs) now matching them literally; `*->* +stale`
+   an entry naming a deleted layer. `canvasOnly` flags (`duplicate-types`, `authored-rules`,
+   `empty-rule`, `glob-pattern`, `property-rule`, `fallback-layer`) change the canvas even when the
+   server counts do not. Fix stale entries, priorities and inert rules first.
+4. Enable the flag. Servers pick it up within 30 s, open tabs within about a minute or on focus.
+5. Check the listed views: canvas, Layer Studio, search badges and trace lanes agree, and the
+   canvas sends no `/assignments/compute` request.
+6. Roll back by turning the flag off. No view is rewritten.
+
+### Known limitations of the preview
+
+- The canvas, trace and search read containment as source = parent, so `BELONGS_TO` (child → parent)
+  children can be placed differently on the canvas than on the server.
+- An ancestor the canvas has not loaded passes down only a hand placement (from its URN chain).
+- Placement still covers the loaded/rendered set; exact per-layer membership and totals come with
+  server-side membership (next phase).
+- The browser cannot tell a whole-number float from an integer: a whole-number float from 1e15 up
+  to 2^53 in magnitude, as a property or a text rule's value, reads as its digits there where the
+  server reads `1e+15`, so a text rule (`equals`, `startsWith`, `contains`) on it can place
+  differently on the canvas than on the server. Integers of 2^53 or more arrive exactly, as their
+  digits in text, so a rule value stored as such an integer compares as text on the canvas. The
+  server compares it as a number while it fits in 64 bits, so a float property or a number spelled
+  another way (`1e+16`, `010000000000000000`) can match `equals` there and not on the canvas, and
+  `notEquals` the other way round; past 64 bits the server finds the rule inert, and the dry run's
+  `inertRules` lists it. The editors store rule values as text, so only a value written as a number
+  through the API or an import is affected.
 
 ## Limitations
 
