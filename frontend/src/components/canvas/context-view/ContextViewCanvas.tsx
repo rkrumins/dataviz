@@ -51,7 +51,7 @@ import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
-import type { AggregatedEdgeInfo, TraceV2Result } from '@/providers/GraphDataProvider'
+import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
 import { layerClaimedTypes, useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
@@ -75,8 +75,11 @@ import { useContainerRollups } from '@/hooks/useContainerRollups'
 import { usePlacementAncestry } from '@/hooks/usePlacementAncestry'
 import { usePlacementChains } from '@/hooks/usePlacementChains'
 import {
-  compilePlacementSpec, factsFromCanvasData, suggestPlacement, type CompiledPlacementSpec, type PlacementFacts,
+  compilePlacementSpec, factsFromCanvasData, factsFromGraphNode, isMember, place, suggestPlacement,
+  type CompiledPlacementSpec, type PlacementFacts,
 } from '@/lib/placement/placement'
+import { buildWizardPlacement } from '@/components/views/ViewWizard/effectivePlacement'
+import { primeRevealSpine } from '@/lib/primeRevealSpine'
 import { buildPlacements, type PlacementInfo } from './placement'
 import type { PlacedReason } from './FlatTreeItem'
 import {
@@ -303,6 +306,7 @@ import {
   type ViewSearchSession,
 } from '../search/session/useViewSearchSessionController'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
+import { OrphansDrawer } from './OrphansDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useLoadingNotification, useAppNotifications, useNotificationStore } from '@/components/ui/notifications'
@@ -1287,7 +1291,9 @@ export function ContextViewCanvas({
     // Live containment map (from useContainmentHierarchy, exposed via the forward-ref set during render).
     const parentMap = duplicateWiringRef.current?.parentMap ?? new Map<string, string>()
 
-    const entity = nodesRef.current.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
+    const isEntity = (n: LineageNode) => n.id === entityId || (n.data?.urn as string) === entityId
+    // The store too: a node loaded a moment ago (Place in layer) is not in the render-time ref yet.
+    const entity = nodesRef.current.find(isEntity) ?? useCanvasStore.getState().nodes.find(isEntity)
     const entityName = (entity?.data?.label as string) ?? entityId
     const prevLayerId = before.assignments[entityId]?.layerId
     const prevLayer = before.layers.find(l => l.id === prevLayerId)
@@ -1371,6 +1377,8 @@ export function ContextViewCanvas({
   // display-rule tags. The engine recomputes which nodes each enabled
   // rule matches and publishes them so FlatTreeItem can render chips.
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
+  // Orphaned entities (Display menu → Advanced): a power-user panel, closed by default.
+  const [orphansOpen, setOrphansOpen] = useState(false)
   useDisplayRuleEngine(activeView?.id ?? null)
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   useViewLibrary(activeView?.id ?? null, effectiveBranchId)
@@ -1966,6 +1974,22 @@ export function ContextViewCanvas({
     placementChains,
   })
   useEffect(() => { renderedLayerRef.current = nodeLayerMap }, [nodeLayerMap])
+
+  // The orphans panel's "where": the column an entity is drawn in, else where this view would put
+  // it — flag on, by the canvas's own spec; off, by the wizard's resolver (its explicit entry, then
+  // an open view's rules).
+  const orphanPlacer = useMemo(() => (placementSpec ? null
+    : buildWizardPlacement(sortedLayers, activeReferenceLayout.assignments, activeEntityScope)),
+  [placementSpec, sortedLayers, activeReferenceLayout.assignments, activeEntityScope])
+  const orphanLayerOf = useCallback((node: GraphNode) => {
+    const drawn = nodeLayerMap.get(urnToIdMap.get(node.urn) ?? node.urn)
+    if (drawn) return { layerId: drawn, drawn: true }
+    if (placementSpec) {
+      const placed = place(placementSpec, node.urn, factsFromGraphNode(node), [])
+      return { layerId: isMember(placed) ? placed.layerId ?? undefined : undefined, drawn: false }
+    }
+    return { layerId: orphanPlacer?.({ urn: node.urn, type: node.entityType }).layerId, drawn: false }
+  }, [nodeLayerMap, urnToIdMap, placementSpec, orphanPlacer])
 
   // An entity PLACED in one column while its parent sits in another (view arrangement only — the
   // data is unchanged): it carries its full path in the data, so it reads as a deliberate placement
@@ -3955,6 +3979,14 @@ export function ContextViewCanvas({
     }
     return revealSearchHitBrowse(urn, ancestorPath)
   }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse, traceWriteLocked])
+
+  // Place in layer, from the orphans panel. Load the entity first so the staged change can name
+  // it (assigning does not load anything), then pin it, then show it where it now sits.
+  const placeOrphan = useCallback(async (urn: string, layerId: string) => {
+    await primeRevealSpine(provider, [urn], [])
+    handleAssignToLayer(urn, layerId)
+    await revealSearchHit(urn, [])
+  }, [provider, handleAssignToLayer, revealSearchHit])
 
   const { returnToParent } = useReparentNode()
   // A placed entity's path → its parent in the data, opened and scrolled to (the reveal walk expands
@@ -5973,6 +6005,7 @@ export function ContextViewCanvas({
         canvasZoom={canvasZoom}
         onSetCanvasZoom={setCanvasZoom}
         onFitToWidth={handleFitToWidth}
+        onOpenOrphans={() => setOrphansOpen(true)}
         canvasDensity={canvasDensity}
         onSetCanvasDensity={setCanvasDensity}
         showCanvasTypeBadge={showCanvasTypeBadge}
@@ -7131,6 +7164,18 @@ export function ContextViewCanvas({
           useSearchStore.getState().requestSearchRun(p)
           search.openPanel()
         }}
+      />
+      {/* Orphaned entities — independent like the Property Manager; fetches nothing while closed. */}
+      <OrphansDrawer
+        open={orphansOpen}
+        onClose={() => setOrphansOpen(false)}
+        provider={provider}
+        layers={sortedLayers}
+        layerOf={orphanLayerOf}
+        onReveal={(urn) => { void revealSearchHit(urn, []) }}
+        // A layer pin is a view-layout write: draft-only like the canvas's other layout writes,
+        // and never during a trace.
+        onPlace={isDraft && !traceActive ? (urn, layerId) => { void placeOrphan(urn, layerId) } : undefined}
       />
       </div>{/* end flex-row wrapper */}
 

@@ -15,6 +15,7 @@ This page covers how to:
 - **Load more** roots, children, and connection detail as you go — always
   additively.
 - **Reach off-screen partners** of a focused entity with the Anchor Rail.
+- **Find orphaned entities** (advanced) and put them in a layer.
 
 ## The layered canvas
 
@@ -90,6 +91,33 @@ replaced or lost.
 > **Note:** These chips live in the bottom-right cluster and each explains itself
 > on hover. They only appear when there's genuinely more to load — a quiet,
 > honest signal that the picture isn't yet complete.
+
+## Orphaned entities (advanced)
+
+An **orphan** is an entity whose type normally sits inside another (a Table
+inside a Schema, say) but which has no parent in the data. Most readers never
+need them, so they don't change the board, the default lists or the status
+chips. When you do want them:
+
+1. Open **Display** in the toolbar.
+2. In its **Advanced** section, choose **Orphaned entities…**
+
+A side panel lists every orphan in the data source, a page at a time, with how
+many there are ("Many" when the server can't count them quickly). **Load more**
+pages through the rest. Each row shows:
+
+- the entity's **name** and **type**;
+- **where it is in this view**: the layer it's drawn in; *Layer* **· not
+  loaded** when the view puts it in that layer but the canvas hasn't loaded it
+  yet; or **Not in this view**;
+- **Reveal**, which loads the entity if needed and scrolls to it. It's off for
+  entities this view doesn't place;
+- **Place in layer…**, on a draft and not during a trace. It pins the entity to
+  the layer you pick, just like dragging it into that column, and shows up in
+  **Review & Save** as a layout change you can undo.
+
+Opening the panel changes nothing on the canvas. Only Reveal and Place in layer
+do.
 
 ## The Anchor Rail
 

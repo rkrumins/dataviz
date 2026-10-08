@@ -155,4 +155,23 @@ describe('DisplayMenu', () => {
     fireEvent.click(byLines)
     expect(usePreferencesStore.getState().lineagePortSides).toBe('direction')
   })
+
+  it('has no Advanced section when the host does not wire the orphans panel', () => {
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.queryByText('Advanced')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /orphaned entities/i })).not.toBeInTheDocument()
+  })
+
+  it('Advanced → Orphaned entities… closes the menu and opens the panel', () => {
+    const onOpenOrphans = vi.fn()
+    render(<DisplayMenu {...baseProps()} onOpenOrphans={onOpenOrphans} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByText('Advanced')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Orphaned entities…' }))
+    expect(onOpenOrphans).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('dialog', { name: 'Display' })).not.toBeInTheDocument()
+  })
 })
