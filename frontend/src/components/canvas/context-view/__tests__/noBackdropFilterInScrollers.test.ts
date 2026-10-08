@@ -144,6 +144,11 @@ const KNOWN = new Map<string, { count: number; why: string }>([
     'components/panels/LineageNeighbors.tsx',
     { count: 1, why: 'A sticky header inside the neighbours list.' },
   ],
+  [
+    'pages/OntologySchemaPage.tsx',
+    { count: 1, why: 'The editor panel\'s saving overlay. The detail pane around it scrolls only '
+      + 'when its header stack (eval picker, alerts) outgrows the window.' },
+  ],
 ])
 
 function appFiles(dir: string): Array<{ rel: string; src: string }> {

@@ -130,15 +130,41 @@ function useIsDocsOrGuide() {
   return path.startsWith('/docs') || path.startsWith('/guide')
 }
 
+/**
+ * Pages outside AppLayout (sign-in, sign-up, the password pages) scroll in the
+ * shell's route box, and that box outlives navigation: without this, "Sign up"
+ * clicked at the foot of a scrolled sign-in card opens the next page part-way
+ * down. A new page is a new child of the box, so reset when one mounts. That
+ * lands after React commits the page and before the browser paints it, which
+ * a router subscription cannot: the location changes first, and a lazy page
+ * may still be downloading.
+ */
+function resetScrollOnPageSwap(box: HTMLDivElement | null) {
+  if (!box) return
+  const observer = new MutationObserver(() => { box.scrollTop = 0 })
+  observer.observe(box, { childList: true })
+  return () => observer.disconnect()
+}
+
 export function App() {
   const hideProviderBanner = useIsDocsOrGuide()
   return (
     <QueryClientProvider client={queryClient}>
       <MotionRoot>
         <AuthBootstrap>
-          <div className="h-screen w-screen flex flex-col overflow-hidden">
+          {/* dvh where supported: on a phone 100vh is the height with the
+              browser toolbar hidden, which puts the bottom of every page
+              under the toolbar. A variant because plain `h-dvh` is emitted
+              before `h-screen` and would lose to it. */}
+          <div className="h-screen supports-[height:100dvh]:h-dvh w-screen flex flex-col overflow-hidden">
             <BackendHealthBanner hideProviderBanner={hideProviderBanner} />
-            <div className="flex-1 overflow-hidden">
+            {/* Scrolls every page outside AppLayout: they fill it with
+                `min-h-full` and grow past it. AppLayout fits it exactly and
+                scrolls its own pages. This puts the sign-in cards' backdrop
+                blur inside a scroller, which noBackdropFilterInScrollers
+                cannot see across files: accepted, because it only scrolls
+                when a card does not fit the window. */}
+            <div ref={resetScrollOnPageSwap} className="flex-1 overflow-x-hidden overflow-y-auto custom-scrollbar">
               <GraphProvider>
                 <RouterProvider router={router} />
               </GraphProvider>

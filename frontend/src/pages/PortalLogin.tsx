@@ -102,7 +102,7 @@ export function PortalLogin() {
     }, [slug, attempt])
 
     return (
-        <div className="min-h-screen w-full flex items-center justify-center bg-canvas font-sans px-6">
+        <div className="min-h-full w-full flex items-center justify-center bg-canvas font-sans px-6 py-8">
             <div className="w-full max-w-[420px] glass-panel p-8 rounded-[2rem] border-white/20 dark:border-white/5 shadow-2xl">
                 <div className="flex flex-col items-center text-center">
                     <div className="w-14 h-14 mb-5 rounded-2xl bg-gradient-to-br from-accent-lineage to-accent-lineage/80 flex items-center justify-center shadow-lg shadow-accent-lineage/30">
