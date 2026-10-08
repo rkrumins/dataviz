@@ -84,6 +84,17 @@ class FakeGraph:
                 )
             return _Result([[sum(1 for e in self.edges.values()
                                  if e.get("type") not in excluded)]])
+        # The same count for a graph the projector does not own (``owned=False``): DISTINCT
+        # (source urn, type, target urn) triples between urn-bearing endpoints. Every node here
+        # carries a urn (it is keyed by one), so only the type exclusions are evaluated.
+        m = re.fullmatch(
+            r"MATCH \(a\)-\[r\]->\(b\) WHERE (.+?) RETURN count\(DISTINCT \[a\.urn, type\(r\), "
+            r"b\.urn\]\) AS c", cypher.strip()
+        )
+        if m:
+            excluded = set(re.findall(r"type\(r\) <> '([^']+)'", m.group(1)))
+            return _Result([[len({(e["src"], e["type"], e["tgt"]) for e in self.edges.values()
+                                  if e.get("type") not in excluded})]])
         # Content-verify scans (reconciler primitives the full-seed verify now runs): the sorted
         # id-set streams + the deep urn fetch, over the same in-memory graph. entityId IS NOT NULL
         # / rollup exclusion mirror the real scan's guards.

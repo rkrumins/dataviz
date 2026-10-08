@@ -30,6 +30,7 @@ whose transaction — the window's work with it — then rolls back.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -42,12 +43,13 @@ from .. import config, db
 from ..ids import prefixed_id
 from ..job_lease import QUEUED, Lease, Superseded
 from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM
+from ..service import OntologyViolation
 from .formats import get_adapter
 from .resolve import resolve_rows
 from .rowmodel import normalize
 from .snapshot import open_snapshot
 from .stream import view_entities
-from .uploads import WHOLE_FILE_FORMATS, open_source, source_size, too_large
+from .uploads import WHOLE_FILE_FORMATS, is_archive_source, open_source, source_size, too_large
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,9 @@ _RESOLVE_ROWS = text(
 # What an import's summary tallies, per row by its resolution (``deleted`` also counts what a
 # replace deleted because no row named it).
 _TALLIES = ("new", "updated", "unchanged", "deleted", "invalid")
+# Times a window's other rows are applied again after the write gate refused some of them
+# (``ImportWorker._apply_window``).
+_QUARANTINE_ROUNDS = 4
 
 
 def _now() -> str:
@@ -269,15 +274,16 @@ class ImportWorker:
         workbook (.xlsx/.xls) instead of CSV is a common mistake that would otherwise parse into
         meaningless rows. Raised in the normal flow (not inside a generator) so the message
         surfaces on the job. Returns the first chunk for the format sniff."""
-        async for chunk in open_source(self._store, source_uri):
-            if chunk[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
-                raise ValueError(
-                    "This looks like an Excel workbook (.xlsx). Please open it and 'Save As' "
-                    "CSV (UTF-8), then import that file — spreadsheet workbooks aren't supported yet.")
-            if chunk[:4] == b"\xd0\xcf\x11\xe0":
-                raise ValueError(
-                    "This looks like a legacy Excel file (.xls). Please save it as CSV and import that.")
-            return chunk  # only the first chunk is needed to sniff the file type
+        async with contextlib.aclosing(open_source(self._store, source_uri)) as chunks:
+            async for chunk in chunks:
+                if chunk[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
+                    raise ValueError(
+                        "This looks like an Excel workbook (.xlsx). Please open it and 'Save As' "
+                        "CSV (UTF-8), then import that file — spreadsheet workbooks aren't supported yet.")
+                if chunk[:4] == b"\xd0\xcf\x11\xe0":
+                    raise ValueError(
+                        "This looks like a legacy Excel file (.xls). Please save it as CSV and import that.")
+                return chunk  # only the first chunk is needed to sniff the file type
         return b""
 
     async def _stage(self, job_id: str, source_uri: str, fmt: str) -> None:
@@ -295,8 +301,10 @@ class ImportWorker:
         self._cursor = "node:-1"
 
     async def _parse(self, job_id: str, source_uri: str, fmt: str) -> int:
-        if (fmt or "").lower() != "xlsx":
-            head = await self._reject_binary(source_uri)   # xlsx IS a zip (PK); its adapter reads it natively
+        # xlsx IS a zip (PK); its adapter reads it natively. A view package's data is NDJSON read out
+        # of its archive (uploads.open_source): nothing to sniff, and no second spool to sniff it.
+        if (fmt or "").lower() != "xlsx" and not is_archive_source(source_uri):
+            head = await self._reject_binary(source_uri)
             sniffed = _sniff_format(fmt, head)
             if sniffed:
                 logger.info("import job %s: declared format %r overridden to %r by the content sniff",
@@ -307,17 +315,20 @@ class ImportWorker:
             if reason:
                 raise ValueError(reason)
         adapter = get_adapter(fmt)
+        native = is_archive_source(source_uri)            # a package: its lines may be format 2
         batch: List[Dict[str, Any]] = []
         idx = 0
-        async for page in _record_pages(adapter, open_source(self._store, source_uri)):
-            # Normalizing is per-row Python work: a page at a time, off the event loop.
-            for kind, row in await asyncio.to_thread(_normalize_page, page):
-                if idx >= self._skip:              # below it: staged by an earlier run of the job
-                    batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": row})
-                idx += 1
-            if len(batch) >= _PARSE_BATCH:
-                await self._flush(batch)
-                batch = []
+        # Closed however the parse ends, so a package's spool goes with it.
+        async with contextlib.aclosing(open_source(self._store, source_uri)) as chunks:
+            async for page in _record_pages(adapter, chunks):
+                # Normalizing is per-row Python work: a page at a time, off the event loop.
+                for kind, row in await asyncio.to_thread(_normalize_page, page, native):
+                    if idx >= self._skip:              # below it: staged by an earlier run of the job
+                        batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": row})
+                    idx += 1
+                if len(batch) >= _PARSE_BATCH:
+                    await self._flush(batch)
+                    batch = []
         if batch:
             await self._flush(batch)
         return idx
@@ -371,25 +382,48 @@ class ImportWorker:
         ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
             resolve_rows, rows, lookups, mint_id=lambda: prefixed_id("ent"),
             ontology=self._ontology)
-        summary = {**dict.fromkeys(_TALLIES, 0), **pos.summary}
-        for res in resolutions:
-            summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
         processed = pos.processed + len(rows)
 
         async def on_commit(s) -> None:
+            # Tallied at the commit, so a row quarantined on the way counts as what it ended as.
+            summary = {**dict.fromkeys(_TALLIES, 0), **pos.summary}
+            for res in resolutions:
+                summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
             await self._persist_resolutions(s, job_id, resolutions)
             await self._lease.checkpoint(
                 s, expect_cursor=pos.cursor, last_cursor=f"{kind}:{rows[-1]['_row_index']}",
                 processed=processed, summary=summary, current_phase=f"{kind}s",
                 progress=min(99, processed * 100 // pos.total) if pos.total else 0)
 
-        if ops:
-            await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
-                                      branch_id=branch_id, message="import", on_commit=on_commit)
-        else:
-            async with db.graphver_session() as s:
-                await on_commit(s)
+        await self._apply_window(graph_id, branch_id, actor, ops, resolutions, on_commit)
         return True
+
+    async def _apply_window(self, graph_id, branch_id, actor, ops, resolutions, on_commit) -> None:
+        """Apply a window's ``ops`` with its ``on_commit`` (which commits alone when there are none).
+
+        A row the write gate refuses (:class:`OntologyViolation` — a type a strict ontology does
+        not declare, an edge a case variant duplicates) is quarantined like any other bad row:
+        its resolution turns ``invalid`` with the gate's reasons (recorded by ``on_commit`` with
+        the rest of the window) and the window's other ops are applied again. The gate stops at
+        its first failing check, so this takes up to ``_QUARANTINE_ROUNDS`` rounds; past them, or
+        when a violation names an entity no op of the window writes, the window fails as before
+        (resumable from its cursor)."""
+        for attempt in range(_QUARANTINE_ROUNDS + 1):
+            if not ops:
+                async with db.graphver_session() as s:
+                    await on_commit(s)
+                return
+            try:
+                await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
+                                          branch_id=branch_id, message="import", on_commit=on_commit)
+                return
+            except OntologyViolation as exc:
+                rest = _quarantine(ops, resolutions, exc.violations) if attempt < _QUARANTINE_ROUNDS else None
+                if rest is None:
+                    raise
+                logger.info("import window: %d op(s) quarantined by the write gate, the other %d "
+                            "applied again", len(ops) - len(rest), len(rest))
+                ops = rest
 
     async def _window(self, job_id: str, kind: str, after: int) -> List[Dict[str, Any]]:
         """The next ``IMPORT_COMMIT_WINDOW`` staged rows of ``kind`` after ``after``, in file order."""
@@ -403,28 +437,30 @@ class ImportWorker:
 
     async def _node_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs to match these node rows: the live nodes they name by
-        entity_id, urn or qualifiedName, and each one's current payload."""
+        entity_id, urn or — a row without a urn — qualifiedName, and each one's current payload."""
         by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
         urn_to_eid = await snap.nodes_by_urn(r.get("urn") for r in rows)
-        qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows)
-        named = set(by_id) | set(urn_to_eid.values()) | set(qname_to_eid.values())
+        qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows if not r.get("urn"))
+        named = set(by_id) | set(urn_to_eid.values()) | {e for e in qname_to_eid.values() if e}
         return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid, "node_eids": named,
                 "current": await _payloads(snap, "node", named)}
 
     async def _edge_lookups(self, snap, rows) -> Dict[str, Any]:
-        """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name,
-        the live edges between those nodes, and each such edge's current payload."""
+        """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name (by
+        entity_id, urn, or — an end without a urn — qualifiedName), the live edges between those
+        nodes, and each such edge's current payload."""
         ends = {}
         for end in ("source", "target"):
             by_id = await snap.lookup_live("node", {r[f"{end}_entity_id"] for r in rows
                                                     if r.get(f"{end}_entity_id")})
-            by_qname = await snap.nodes_by_qname(r.get(f"{end}QualifiedName") for r in rows)
+            by_qname = await snap.nodes_by_qname(r.get(f"{end}QualifiedName") for r in rows
+                                                 if not r.get(f"{end}Urn"))
             by_urn = await snap.nodes_by_urn(r.get(f"{end}Urn") for r in rows)
             ends[end] = (by_id, by_qname, by_urn)
         (src_ids, src_qnames, src_urns), (tgt_ids, tgt_qnames, tgt_urns) = ends["source"], ends["target"]
         edge_to_eid = await snap.edges_between(
-            set(src_ids) | set(src_qnames.values()) | set(src_urns.values()),
-            set(tgt_ids) | set(tgt_qnames.values()) | set(tgt_urns.values()))
+            set(src_ids) | {e for e in src_qnames.values() if e} | set(src_urns.values()),
+            set(tgt_ids) | {e for e in tgt_qnames.values() if e} | set(tgt_urns.values()))
         return {"urn_to_eid": {**src_urns, **tgt_urns}, "qname_to_eid": {**src_qnames, **tgt_qnames},
                 "node_eids": set(src_ids) | set(tgt_ids), "edge_to_eid": edge_to_eid,
                 "current": await _payloads(snap, "edge", edge_to_eid.values())}
@@ -551,14 +587,33 @@ async def _record_pages(adapter, chunks):
         yield page
 
 
-def _normalize_page(page: List[Dict[str, Any]]) -> List[tuple]:
+def _quarantine(ops: List[dict], resolutions: List[dict], violations) -> Optional[List[dict]]:
+    """``ops`` without the entities ``violations`` name, and the rows that wrote them turned
+    ``invalid`` with the gate's reasons (in ``resolutions``, in place) — or ``None`` when a
+    violation names an entity no op writes: then the window itself is not what is wrong."""
+    reasons: Dict[str, List[str]] = {}
+    for v in violations or []:
+        reasons.setdefault(v.get("entity_id"), []).append(
+            str(v.get("reason") or v.get("rule") or "refused by the write gate"))
+    if not reasons or not set(reasons) <= {op["entity_id"] for op in ops}:
+        return None
+    for res in resolutions:
+        eid = res["matched_entity_id"]
+        if eid in reasons and res["resolved_op"] in ("create", "update", "delete"):
+            created = res["resolved_op"] == "create"       # a minted id names nothing now
+            res.update(resolved_op="invalid", status="invalid", reasons=reasons[eid],
+                       matched_entity_id=None if created else eid)
+    return [op for op in ops if op["entity_id"] not in reasons]
+
+
+def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> List[tuple]:
     """``(kind, normalized row)`` for each node or edge record; anything else is skipped (tallied
-    as skipped — a malformed record never aborts the parse)."""
+    as skipped — a malformed record never aborts the parse). ``native``: a view package's lines."""
     out = []
     for raw in page:
         kind = raw.get("kind") if isinstance(raw, dict) else None
         if kind in ("node", "edge"):
-            out.append((kind, normalize(raw, kind)))
+            out.append((kind, normalize(raw, kind, native=native)))
     return out
 
 

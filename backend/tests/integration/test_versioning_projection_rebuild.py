@@ -353,8 +353,8 @@ async def _run_holdback_on_count_shortfall() -> None:
     # Force the cache count to under-report by one node so verify can never reconcile — the heal
     # reseed runs, still under-reports, and the pass must return a verify_error and hold back.
     real_counts = proj._falkor_counts
-    async def _short(client):
-        n, e = await real_counts(client)
+    async def _short(client, owned=True):
+        n, e = await real_counts(client, owned)
         return max(0, n - 1), e
     proj._falkor_counts = _short
 
@@ -574,8 +574,8 @@ async def _run_rebuild_bumps_ontology_cache() -> None:
         # A held-back (unfaithful) reseed must NOT bump — reads stay on Postgres, no cache churn.
         calls.clear()
         real_counts = proj._falkor_counts
-        async def _short(client):
-            n, e = await real_counts(client)
+        async def _short(client, owned=True):
+            n, e = await real_counts(client, owned)
             return max(0, n - 1), e
         proj._falkor_counts = _short
         assert await svc.request_projection_rebuild(gid) is True

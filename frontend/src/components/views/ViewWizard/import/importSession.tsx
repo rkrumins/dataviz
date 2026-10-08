@@ -11,8 +11,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import {
   importPackageData, inspectViewFile, inspectViewPackage, isViewPackage, reconcileViews, ViewTransferError,
   type IdentityMatch, type ImportAction, type InspectResult, type InspectedView, type PackageDataStarted,
-  type PackageInspectResult, type ReconciledView, type Resolutions, type TargetSuggestion, type TransferTarget,
-  type UpdateStrategy,
+  type PackageInspectResult, type PackageProgress, type ReconciledView, type Resolutions, type TargetSuggestion,
+  type TransferTarget, type UpdateStrategy,
 } from '@/services/viewTransferApiService'
 import { getImport, getImportPreview, pollJob, type ImportPreview, type Job } from '@/services/importExportApiService'
 import { getView } from '@/services/viewApiService'
@@ -50,9 +50,14 @@ export interface PackageData {
   preview: ImportPreview | null
   running: boolean
   error: string | null
+  /** The package's upload expired (or is about to): its data comes in only from the file chosen
+   *  again. */
+  expired: boolean
 }
 
-const NO_DATA: PackageData = { target: null, started: null, job: null, preview: null, running: false, error: null }
+const NO_DATA: PackageData = {
+  target: null, started: null, job: null, preview: null, running: false, error: null, expired: false,
+}
 
 export function sameDataTarget(a: PackageDataTarget | null, b: PackageDataTarget | null): boolean {
   return !!a && !!b && a.workspaceId === b.workspaceId && a.dataSourceId === b.dataSourceId
@@ -64,6 +69,8 @@ export interface ImportSession {
   fileSize: number
   inspect: InspectResult | null
   inspecting: boolean
+  /** While a package is read: how much of it is up, then how far its check has got. */
+  inspectProgress: PackageProgress | null
   inspectError: { message: string; code?: string } | null
   loadFile: (file: File) => Promise<void>
   clearFile: () => void
@@ -109,8 +116,8 @@ export interface ImportSession {
   withData: boolean
   setWithData: (withData: boolean) => void
   data: PackageData
-  /** Bring the package's data into a new draft of `target`. Once only: the data goes with that
-   *  job, so another target needs the file again. */
+  /** Bring the package's data into a new draft of `target`. Each target gets a draft of its own
+   *  (asking again for one answers with its job), until the upload expires. */
   startData: (target: PackageDataTarget) => Promise<void>
 }
 
@@ -151,6 +158,7 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
   const [fileSize, setFileSize] = useState(() => opts.file?.size ?? 0)
   const [inspect, setInspect] = useState<InspectResult | null>(null)
   const [inspecting, setInspecting] = useState(() => !!opts.file)
+  const [inspectProgress, setInspectProgress] = useState<PackageProgress | null>(null)
   const [inspectError, setInspectError] = useState<ImportSession['inspectError']>(null)
   const [viewIndex, setViewIndexState] = useState(0)
   const [batch, setBatch] = useState(false)
@@ -168,6 +176,11 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
   // A later file (or a later reconcile) wins over an earlier one still in flight.
   const inspectSeq = useRef(0)
   const reconcileSeq = useRef(0)
+  // A package's upload and check being followed, stopped when the file changes or the journey
+  // closes: choosing the same file again resumes the upload.
+  const inspectRun = useRef<AbortController | null>(null)
+  // The opener's file (dropped on the Explorer), until another is chosen.
+  const initialFile = useRef(opts.file ?? null)
   // The data import being followed, stopped when the file changes or the journey closes.
   const dataRun = useRef<AbortController | null>(null)
   const withData = pkg !== null && dataChoice
@@ -206,9 +219,18 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
   /** Ask the server what's in the file. State changes only once it answers, and only if no later
    *  file was loaded meanwhile. */
   const inspectFile = useCallback(async (file: File, seq: number) => {
+    inspectRun.current?.abort()
+    const run = new AbortController()
+    inspectRun.current = run
     try {
       const packaged = await isViewPackage(file)
-      const result: InspectResult = packaged ? await inspectViewPackage(file) : await inspectViewFile(file)
+      if (run.signal.aborted) return                // another file, or the journey closed
+      const result: InspectResult = packaged
+        ? await inspectViewPackage(file, {
+          signal: run.signal,
+          onProgress: (progress) => { if (seq === inspectSeq.current) setInspectProgress(progress) },
+        })
+        : await inspectViewFile(file)
       if (seq !== inspectSeq.current) return
       setInspect(result)
       setPkg(packaged ? { uploadId: (result as PackageInspectResult).uploadId, info: (result as PackageInspectResult).package } : null)
@@ -225,7 +247,10 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
         code: err instanceof ViewTransferError ? err.code : undefined,
       })
     } finally {
-      if (seq === inspectSeq.current) setInspecting(false)
+      if (seq === inspectSeq.current) {
+        setInspecting(false)
+        setInspectProgress(null)
+      }
     }
   }, [applyDefaults, intoViewId])
 
@@ -237,10 +262,12 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
   }, [])
 
   const loadFile = useCallback(async (file: File) => {
+    initialFile.current = null
     const seq = ++inspectSeq.current
     setFileName(file.name)
     setFileSize(file.size)
     setInspecting(true)
+    setInspectProgress(null)
     setInspectError(null)
     setInspect(null)
     forgetData()
@@ -249,12 +276,15 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
   }, [inspectFile, invalidateReconcile, forgetData])
 
   const clearFile = useCallback(() => {
+    initialFile.current = null
     inspectSeq.current += 1
+    inspectRun.current?.abort()
     setFileName(null)
     setFileSize(0)
     setInspect(null)
     setInspectError(null)
     setInspecting(false)
+    setInspectProgress(null)
     setAction(null)
     setTargetView(null)
     forgetData()
@@ -289,7 +319,12 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
       setData(d => ({ ...d, job, preview, running: false }))
     } catch (err) {
       if (run.signal.aborted) return
-      setData(d => ({ ...d, running: false, error: err instanceof Error ? err.message : "The data couldn't be imported." }))
+      // 410 `upload_expired`: the upload is gone, or about to be. Not any 404 — that is also a
+      // missing workspace or view, which choosing the file again would not fix.
+      const expired = err instanceof ViewTransferError && (err.status === 410 || err.type === 'upload_expired')
+      setData(d => ({
+        ...d, running: false, expired, error: err instanceof Error ? err.message : "The data couldn't be imported.",
+      }))
     }
   }, [pkg])
 
@@ -346,20 +381,20 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     }
   }, [view, action, strategy, resolutions, draft])
 
-  // The opener's file is read as soon as the journey opens (once: the session lives as long as
-  // the open wizard).
-  const initialFile = useRef(opts.file ?? null)
+  // The opener's file is read as soon as the journey opens (the session lives as long as the
+  // open wizard). Closing the journey stops a package's upload: the same file chosen again resumes
+  // it. So does StrictMode's remount, whose read of the opener's file starts again.
   useEffect(() => {
     const file = initialFile.current
-    initialFile.current = null
     if (file) void inspectFile(file, ++inspectSeq.current)
+    return () => inspectRun.current?.abort()
   }, [inspectFile])
 
   // Closing the journey stops following a data import (the import itself carries on).
   useEffect(() => () => dataRun.current?.abort(), [])
 
   return useMemo<ImportSession>(() => ({
-    fileName, fileSize, inspect, inspecting, inspectError, loadFile, clearFile,
+    fileName, fileSize, inspect, inspecting, inspectProgress, inspectError, loadFile, clearFile,
     batch, setBatch, viewIndex, setViewIndex, view, matches, suggestions,
     action, targetView, choose, strategy, setStrategy, resolutions, draft, setDraft,
     reconcile, reconciling, reconcileError, runReconcile, invalidateReconcile,
@@ -367,7 +402,7 @@ export function useImportSessionState(opts: { file?: File | null; intoViewId?: s
     pkg, withData, setWithData, data, startData,
   }), [
     batch,
-    fileName, fileSize, inspect, inspecting, inspectError, loadFile, clearFile,
+    fileName, fileSize, inspect, inspecting, inspectProgress, inspectError, loadFile, clearFile,
     viewIndex, setViewIndex, view, matches, suggestions,
     action, targetView, choose, strategy, setStrategy, resolutions, draft,
     reconcile, reconciling, reconcileError, runReconcile, invalidateReconcile,

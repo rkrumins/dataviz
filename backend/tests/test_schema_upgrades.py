@@ -1,4 +1,6 @@
-"""``ck_jobs_type`` allows every job type the code writes, on every kind of graphver store.
+"""``ck_jobs_type`` allows every job type the code writes, on every kind of graphver store — and
+the graphver tables and indexes added since (``bootstrap_nodes``; the import_rows index swap) reach
+every store too.
 
 ``20260928_1000_jobs_publish`` rebuilt the check from a list that forgot ``purge``, dropping it on
 every database without a purge row; a store built from the models never had it either — so deleting
@@ -25,12 +27,12 @@ from sqlalchemy import text
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.models import JOB_TYPES, JobORM
 
-_MIGRATION = (Path(__file__).resolve().parents[1] / "alembic" / "versions"
-              / "20261008_1000_jobs_check_widen.py")
+_VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+_MIGRATION = _VERSIONS / "20261008_1000_jobs_check_widen.py"
 
 
-def _migration():
-    spec = importlib.util.spec_from_file_location("jobs_check_widen", _MIGRATION)
+def _migration(path=_MIGRATION):
+    spec = importlib.util.spec_from_file_location(path.stem, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -44,6 +46,22 @@ def test_the_models_and_the_migration_require_the_same_types():
     migration = _migration()
     assert set(migration._REQUIRED) == set(JOB_TYPES)
     assert migration.down_revision == "20260930_1000_outbox_type_time"
+
+
+def test_the_preflight_table_and_the_import_rows_indexes_follow_on():
+    """``bootstrap_nodes`` (20261008_1100) and the import_rows index swap (20261008_1200) follow the
+    widen, and the models declare what they create."""
+    nodes = _migration(_VERSIONS / "20261008_1100_bootstrap_nodes.py")
+    rows = _migration(_VERSIONS / "20261008_1200_import_rows_idx.py")
+    assert nodes.down_revision == "20261008_1000_jobs_check_widen"
+    assert rows.down_revision == nodes.revision == "20261008_1100_bootstrap_nodes"
+    table = models.BootstrapNodeORM.__table__
+    assert [c.name for c in table.primary_key.columns] == ["graph_id", "falkor_id"]
+    assert table.c.last_synced_at.type.timezone, "ranked chronologically, so TIMESTAMPTZ"
+    dupes = next(i for i in table.indexes if i.name == "ix_bootstrap_nodes_dupes")
+    assert "copy_rank IS NOT NULL" in str(dupes.dialect_options["postgresql"]["where"])
+    assert {i.name for i in models.ImportRowORM.__table__.indexes} == {
+        "ix_import_rows_kind_row", "ix_import_rows_matched"}
 
 
 e2e = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres")
@@ -151,3 +169,57 @@ async def test_lane_pods_starting_together_all_bring_the_schema_up(store):
     async with store.begin() as conn:
         _oid, definition = await _check(conn)
         assert "'purge'" in definition and "'package_inspect'" in definition
+
+
+async def _indexes(conn, table: str) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT indexname FROM pg_indexes WHERE schemaname = :s AND tablename = :t"),
+        {"s": models._SCHEMA, "t": table})).all()}
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_import_rows_indexes(store):
+    rows = f'"{models._SCHEMA}"."import_rows"'
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'DROP INDEX IF EXISTS "{models._SCHEMA}".ix_import_rows_kind_row'))
+            await conn.execute(text(f"CREATE INDEX ix_import_rows_match ON {rows} "
+                                    "(job_id, kind, match_key)"))
+            await conn.execute(text(f"CREATE INDEX ix_import_rows_status ON {rows} (job_id, status)"))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            got = await _indexes(conn, "import_rows")
+            assert "ix_import_rows_kind_row" in got
+            assert not {"ix_import_rows_match", "ix_import_rows_status"} & got
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_preflight_and_index_migrations_round_trip(store):
+    nodes = _migration(_VERSIONS / "20261008_1100_bootstrap_nodes.py")
+    rows = _migration(_VERSIONS / "20261008_1200_import_rows_idx.py")
+
+    def run(module, step):
+        def apply(sync_conn):
+            module.op = SimpleNamespace(get_bind=lambda: sync_conn)
+            getattr(module, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run(rows, "downgrade"))
+            await conn.run_sync(run(nodes, "downgrade"))
+            assert "ix_import_rows_status" in await _indexes(conn, "import_rows")
+            assert not await _indexes(conn, "bootstrap_nodes")
+            await conn.run_sync(run(nodes, "upgrade"))
+            await conn.run_sync(run(rows, "upgrade"))
+            assert await _indexes(conn, "bootstrap_nodes") == {
+                "pk_bootstrap_nodes", "ix_bootstrap_nodes_urn", "ix_bootstrap_nodes_dupes"}
+            assert "ix_import_rows_kind_row" in await _indexes(conn, "import_rows")
+            await conn.run_sync(run(nodes, "upgrade"))                  # idempotent
+            await conn.run_sync(run(rows, "upgrade"))
+        finally:
+            await trans.rollback()

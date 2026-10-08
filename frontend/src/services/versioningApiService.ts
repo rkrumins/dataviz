@@ -549,6 +549,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
       d.suggestion ?? null,
     )
   }
+  if (status === 409 && (d?.type === 'stale_decision' || d?.type === 'not_awaiting_decision')) {
+    return new BootstrapDecisionError(d.type, d.message)
+  }
   if (status === 401) return new Error('Session expired')
   const msg =
     typeof detail === 'string'
@@ -648,9 +651,12 @@ export interface BootstrapResult {
   alreadyEnabled?: boolean
 }
 
-export type BootstrapJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+/** `needs_decision`: paused before copying anything, because the source uses some identifiers
+ *  more than once (see {@link BootstrapDuplicates}); it waits for a manager to decide. */
+export type BootstrapJobStatus = 'pending' | 'running' | 'needs_decision' | 'completed' | 'failed' | 'cancelled'
 export type BootstrapPhase =
-  | 'reset' | 'counting' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle' | 'finalize' | 'backfill'
+  | 'reset' | 'counting' | 'awaiting_decision' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle'
+  | 'finalize' | 'backfill'
 
 /** One integrity check from the job's report — rendered verbatim in the report card. */
 export interface BootstrapCheck {
@@ -698,6 +704,19 @@ export interface BootstrapJob {
   stale?: boolean
   /** A failed job: why, and what can be done about it. */
   failure?: JobFailure | null
+  /** Identifiers the source uses more than once, found before anything is copied; null if none. */
+  duplicates?: BootstrapDuplicates | null
+  /** What the copy turned away: duplicates that appeared after the check, and connections whose
+   *  ends are missing. */
+  rejected?: { duplicateUrns: number; danglingEdges: number; samples: Array<Record<string, unknown>> } | null
+  /** What collapsing the duplicates removed: the extra copies (by type), and the connections that
+   *  only joined two copies of one item. */
+  collapsed?: { nodes: number; byLabel: Record<string, number>; selfLoops: number } | null
+  /** Connections whose id was already an item's, so they were given a new one. */
+  rekeyedEdges?: number
+  /** Set once duplicate copies may have been removed from the source graph — kept through a
+   *  restart, since nothing puts them back. */
+  sourceCollapse?: { moved: number; deleted: number } | null
 }
 
 /** Why a job failed, and what can be done: an `integrity` failure (the copy didn't match its source)
@@ -708,6 +727,61 @@ export interface JobFailure {
   action: 'restart' | 'resume' | null
   phase?: string | null
   reason?: string | null
+}
+
+/** One copy of a duplicated identifier. `internalId` is the source graph's own id for the item
+ *  (the tie-break); `kept` marks the copy that collapsing keeps. */
+export interface BootstrapDuplicateCopy {
+  urn: string
+  label: string | null
+  internalId: number
+  lastSyncedAt: string | null
+  kept: boolean
+}
+
+/** The duplicate identifiers the pre-flight found. Collapsing keeps one copy of each (`rule`: the
+ *  latest `lastSyncedAt`, then the lowest internal id). `fingerprint` names exactly this list: a
+ *  decision carries it, so it can only ever apply to the list the manager was shown. */
+export interface BootstrapDuplicates {
+  identifiers: number
+  extraCopies: number
+  /** Of `identifiers`: those whose copies all share one type, and those whose copies differ. */
+  sameType: number
+  crossType: number
+  rule: string
+  fingerprint: string
+  detectedAt: string
+  /** At most 20 copies; the whole list is {@link getBootstrapDuplicates}, or the CSV. */
+  sample: BootstrapDuplicateCopy[]
+  decision: { policy: 'collapse'; fingerprint: string; decidedBy: string; decidedAt: string } | null
+  /** Other data sources reading the same physical graph: collapsing changes it for them too.
+   *  Named only within this workspace; those in other workspaces are only counted. */
+  sharedWith: Array<{ dataSourceId: string; name: string }>
+  sharedWithOtherWorkspaces: number
+}
+
+/** A row of the whole duplicate list: `copy` is its rank among its identifier's copies (1 = kept). */
+export interface BootstrapDuplicateRow {
+  urn: string
+  copy: number
+  kept: boolean
+  label: string | null
+  internalId: number
+  lastSyncedAt: string | null
+}
+
+/** The server would not take a duplicates decision: the list changed since it was shown
+ *  (`stale_decision` — review it again), or the job is no longer waiting for one
+ *  (`not_awaiting_decision` — someone else decided, or it was restarted). */
+export class BootstrapDecisionError extends Error {
+  readonly type: 'stale_decision' | 'not_awaiting_decision'
+  constructor(type: 'stale_decision' | 'not_awaiting_decision', message?: string) {
+    super(message || (type === 'stale_decision'
+      ? 'The list of duplicates changed — review it again.'
+      : 'This copy is no longer waiting for a decision.'))
+    this.name = 'BootstrapDecisionError'
+    this.type = type
+  }
 }
 
 /**
@@ -747,6 +821,33 @@ export function abandonBootstrap(
   return vfetch(
     `/api/v1/${wsId}/graph/bootstrap/abandon?dataSourceId=${encodeURIComponent(dataSourceId)}`,
     { method: 'POST' },
+  )
+}
+
+/** A page (≤500 rows) of the whole duplicate list; pass `next` back as `after` (404 → none found). */
+export function getBootstrapDuplicates(
+  wsId: string, dataSourceId: string, opts: { after?: string | null; limit?: number } = {},
+): Promise<{ items: BootstrapDuplicateRow[]; next: string | null }> {
+  const q = new URLSearchParams({ dataSourceId })
+  if (opts.after) q.set('after', opts.after)
+  if (opts.limit) q.set('limit', String(opts.limit))
+  return vfetch(`/api/v1/${wsId}/graph/bootstrap/duplicates?${q}`)
+}
+
+/** The whole duplicate list as a CSV download (the browser sends the session cookie). */
+export function bootstrapDuplicatesCsvUrl(wsId: string, dataSourceId: string): string {
+  return `/api/v1/${wsId}/graph/bootstrap/duplicates?${new URLSearchParams({ dataSourceId, format: 'csv' })}`
+}
+
+/** Collapse the duplicates and let the copy carry on. `fingerprint` is the list's as it was shown:
+ *  if the source has changed since, the server refuses ({@link BootstrapDecisionError}) rather than
+ *  apply the decision to a list nobody reviewed. Repeating a recorded decision is harmless. */
+export function decideBootstrapDuplicates(
+  wsId: string, dataSourceId: string, { fingerprint }: { fingerprint: string },
+): Promise<BootstrapJob> {
+  return vfetch<BootstrapJob>(
+    `/api/v1/${wsId}/graph/bootstrap/decision?dataSourceId=${encodeURIComponent(dataSourceId)}`,
+    jsonBody({ action: 'collapse', fingerprint }),
   )
 }
 

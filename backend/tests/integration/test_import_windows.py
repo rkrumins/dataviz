@@ -14,6 +14,9 @@ files that span several windows:
   window's transaction — and run again by the next worker ends exactly as one that never stopped:
   the same entities, no duplicates, the same tallies and quarantine, and no Merkle rows on the
   draft; so does one that failed and a person retried, queued again with its cursor;
+* a row the write gate refuses (a strict ontology's undeclared type, a case variant of a declared
+  one) is quarantined like any other bad row — invalid, with the gate's reason — and the rest of
+  its window lands; a violation naming an entity the window does not write fails the window;
 * a window still running when its job is taken over rolls back whole at its checkpoint — what
   ``apply_ops(on_commit=...)`` gives it: the hook runs inside the batch's transaction, whether the
   batch commits a change or turns out to change nothing, and what it raises rolls the batch back.
@@ -346,6 +349,54 @@ async def _resume(svc, ie, store) -> None:
     assert await _state(svc, gid, job["branch_id"]) == want
 
 
+async def _gate_quarantine(svc, ie, store) -> None:
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="u",
+                               ontology_spec={"entity_types": ["Table"], "edge_types": ["LINEAGE"]},
+                               ontology_enforcement="strict")
+    gid = G["graph_id"]
+    await svc.apply_ops(graph_id=gid, actor="u", message="seed", ops=[_node("ent_A", "urn:A", "a", "A")])
+    lines = [
+        {"kind": "node", "urn": "urn:Q1", "entityType": "Table", "displayName": "q1"},
+        {"kind": "node", "urn": "urn:Q2", "entityType": "View", "displayName": "q2"},       # undeclared
+        {"kind": "node", "urn": "urn:Q3", "entityType": "table", "displayName": "q3"},      # case variant
+        {"kind": "node", "urn": "urn:Q4", "entityType": "Table", "displayName": "q4"},
+        {"kind": "node", "urn": "urn:A", "entityType": "Table", "displayName": "A renamed"},
+        {"kind": "edge", "edgeType": "LINEAGE", "sourceUrn": "urn:Q1", "targetUrn": "urn:Q4"},
+        {"kind": "edge", "edgeType": "Lineage", "sourceUrn": "urn:Q4", "targetUrn": "urn:Q1"},
+        {"kind": "edge", "edgeType": "LINEAGE", "sourceUrn": "urn:Q2", "targetUrn": "urn:Q1"},
+    ]
+    job = await _import_job(ie, store, gid, lines)
+    # windows of two: each holds a row the strict gate refuses next to one it takes
+    summary = await ImportWorker(svc, store).run(job["job_id"])
+    assert summary == {"new": 3, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 4}, summary
+    nodes, edges = await _state(svc, gid, job["branch_id"])
+    assert nodes == {"urn:A": "A renamed", "urn:Q1": "q1", "urn:Q4": "q4"}, nodes
+    assert edges == {("urn:Q1", "urn:Q4", "LINEAGE")}, edges
+    quarantined = {(r[0] or r[1].get("sourceUrn"), r[2]): r[3] for r in await _rows(job["job_id"], "invalid")}
+    assert set(quarantined) == {("urn:Q2", "node"), ("urn:Q3", "node"), ("urn:Q4", "edge"), ("urn:Q2", "edge")}
+    for key in (("urn:Q2", "node"), ("urn:Q3", "node"), ("urn:Q4", "edge")):
+        assert "not allowed by ontology" in quarantined[key][0], (key, quarantined[key])
+    assert quarantined[("urn:Q2", "edge")] == ["edge endpoint not found"], "its end was quarantined"
+    async with db.graphver_session() as s:
+        assert not (await s.execute(select(ImportRowORM.matched_entity_id).where(
+            ImportRowORM.job_id == job["job_id"], ImportRowORM.status == "invalid",
+            ImportRowORM.matched_entity_id.is_not(None)))).scalars().all(), "a refused create names nothing"
+
+    # A violation about an entity no op of the window writes is not the window's to quarantine.
+    ops = [_node("ent_X", "urn:X", "x")]
+    resolutions = [{"_row_index": 0, "matched_entity_id": "ent_X", "resolved_op": "create",
+                    "status": "new", "reasons": []}]
+    assert import_worker._quarantine(ops, resolutions, [{"entity_id": "ent_ELSEWHERE", "reason": "r"}]) is None
+    assert resolutions[0]["status"] == "new"
+
+
+async def _rows(job_id, status):
+    async with db.graphver_session() as s:
+        return [(r.raw.get("urn"), r.raw, r.kind, r.reasons) for r in (await s.execute(
+            select(ImportRowORM).where(ImportRowORM.job_id == job_id, ImportRowORM.status == status)
+            .order_by(ImportRowORM.row_index))).scalars()]
+
+
 async def _on_commit(svc, ie) -> None:
     gid = await _graph(svc, [_node("ent_A", "urn:A", "a")])
     draft = await svc.open_draft(graph_id=gid, owner="u")
@@ -415,6 +466,7 @@ async def _run() -> None:
         await _sweep(svc, ie, store)
         await _parts(svc, ie, store)
         await _on_commit(svc, ie)
+        await _gate_quarantine(svc, ie, store)
         await _resume(svc, ie, store)
         await _zombie(svc, ie, store)
     finally:

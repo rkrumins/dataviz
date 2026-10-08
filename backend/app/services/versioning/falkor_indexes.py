@@ -47,12 +47,11 @@ def urn_index_ddl(labels: Iterable[str]) -> List[str]:
 
 
 async def _query(client, cypher: str, *, read_only: bool = False):
-    run = getattr(client, "ro_query", None) if read_only else None
-    run = run or client.query
-    try:
-        return await run(cypher, {}, timeout=_DDL_TIMEOUT_MS)
-    except TypeError:                                   # a client (or fake) without the kwarg
-        return await run(cypher, {})
+    # Through the versioning layer's one seam to FalkorDB (``projection._q``), so the DDL gets its
+    # server budget, the cluster window's write clamp and the client-side hang net like every
+    # other statement. Imported here because ``projection`` imports this module.
+    from .projection import _q
+    return await _q(client, cypher, timeout_ms=_DDL_TIMEOUT_MS, read_only=read_only)
 
 
 def _building_labels(rows, labels: set) -> set:

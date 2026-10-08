@@ -1697,6 +1697,10 @@ async def probe_bootstrap_jobs() -> Optional[dict]:
     bootstrap): how many jobs a worker of it could claim now, and how long the oldest has
     waited. Web pods only queue jobs, so a lane whose pods are missing shows as a backlog that
     only ages — measured with `job_lease.claim`'s own predicate.
+
+    `needsDecision` is apart from `pending`: those jobs found duplicate identifiers in their
+    source and wait for a person, not a worker — no lane will ever pick them up, and counting them
+    as queued would read as a worker tier that is not keeping up.
     """
     from sqlalchemy import case, func, select
 
@@ -1717,6 +1721,11 @@ async def probe_bootstrap_jobs() -> Optional[dict]:
                     select(JobORM.status, func.count())
                     .where(JobORM.job_type == BOOTSTRAP_JOB_TYPE)
                     .group_by(JobORM.status))).all())
+                paused = (await s.scalar(
+                    select(func.count()).select_from(JobORM).where(
+                        JobORM.job_type == BOOTSTRAP_JOB_TYPE,
+                        JobORM.status == "pending",
+                        JobORM.current_phase == job_lease.AWAITING_DECISION))) or 0
                 stalled = (await s.scalar(
                     select(func.count()).select_from(JobORM).where(
                         JobORM.job_type == BOOTSTRAP_JOB_TYPE,
@@ -1740,13 +1749,16 @@ async def probe_bootstrap_jobs() -> Optional[dict]:
 
     return {
         "running": int(counts.get("running", 0)),
-        "pending": int(counts.get("pending", 0)),
+        "pending": int(counts.get("pending", 0)) - int(paused),
+        "needsDecision": int(paused),
         "failed": int(counts.get("failed", 0)),
         "completed": int(counts.get("completed", 0)),
         "stalled": int(stalled),
         "jobs": [{
             "jobId": r[0], "graphId": r[1], "dataSourceId": r[2], "workspaceId": r[3],
-            "status": r[4], "phase": r[5], "processed": int(r[6] or 0),
+            "status": ("needs_decision" if r[4] == "pending"
+                       and r[5] == job_lease.AWAITING_DECISION else r[4]),
+            "phase": r[5], "processed": int(r[6] or 0),
             "total": int(r[7] or 0), "error": r[8], "updatedAt": r[9],
         } for r in worst],
         # {lane: {claimable, oldestClaimableSecs}} — the job lanes' backlog.

@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -78,6 +79,18 @@ def test_each_lane_gets_its_runners_and_no_others():
     assert every._lanes == frozenset(config.LANES)
     assert None not in (every._transfers, every._inspections, every._job_reaper, every._bootstrap,
                         every._purge, every._reaper, every._versioning)
+
+
+def test_the_bootstrap_lane_gets_the_projectors_rollup_rebuild_hook():
+    """A duplicate collapse deletes copies from the source graph; the rollups computed over them
+    are rebuilt only if the bootstrap runner holds the hook the projector was built with."""
+    async def hook(graph_id):
+        return None
+
+    projector = SimpleNamespace(_on_rollups_stale=hook)
+    worker = build_worker(projector, lambda *a: None, lanes={"bootstrap"},
+                          import_export=lambda: None)
+    assert worker._bootstrap._on_rollups_stale is hook
 
 
 class _Idle:

@@ -33,7 +33,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 
 from . import config
 from .db import VersioningBase, get_engine
@@ -390,10 +390,39 @@ class ImportRowORM(VersioningBase):
 
     __table_args__ = _plain(
         PrimaryKeyConstraint("job_id", "row_index", name="pk_import_rows"),
-        Index("ix_import_rows_match", "job_id", "kind", "match_key"),
-        Index("ix_import_rows_status", "job_id", "status"),
+        # A window reads one kind's rows in parse order (``kind`` + ``row_index`` > cursor); the PK
+        # alone made it walk the other kind's rows too. (Migration 20261008_1200_import_rows_idx,
+        # which also drops the (job, kind, match_key) and (job, status) indexes nothing reads.)
+        Index("ix_import_rows_kind_row", "job_id", "kind", "row_index"),
         Index("ix_import_rows_matched", "job_id", "matched_entity_id"),   # a replace's absence check
         CheckConstraint("kind IN ('node','edge')", name="ck_import_rows_kind"),
+    )
+
+
+class BootstrapNodeORM(VersioningBase):
+    """One source node seen by an "enable version control" pre-flight (``bootstrap_worker``).
+
+    The pre-flight reads every node's internal id, label, ``urn`` and ``lastSyncedAt`` BEFORE
+    anything is copied, so duplicate identifiers are found — and decided — up front instead of
+    failing the job after the whole copy. ``copy_rank`` is NULL for a unique urn; for a duplicated
+    one it ranks the copies (latest ``last_synced_at``, then lowest ``falkor_id``): 1 is kept, >1 is
+    collapsed into it. ``TIMESTAMPTZ``, not text, so the ranking is chronological, not lexical.
+    Unique rows are deleted when the job finishes; the duplicate rows stay as its audit list."""
+
+    __tablename__ = "bootstrap_nodes"
+
+    graph_id = Column(Text, nullable=False)
+    falkor_id = Column(BigInteger, nullable=False)        # the source node's ID(n)
+    urn = Column(Text, nullable=False)
+    label = Column(Text, nullable=True)
+    last_synced_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    copy_rank = Column(Integer, nullable=True)            # a urn may have >32,767 copies
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "falkor_id", name="pk_bootstrap_nodes"),
+        Index("ix_bootstrap_nodes_urn", "graph_id", "urn"),
+        Index("ix_bootstrap_nodes_dupes", "graph_id", "urn", "copy_rank",
+              postgresql_where=text("copy_rank IS NOT NULL")),
     )
 
 
@@ -642,6 +671,13 @@ def _ensure_schema_upgrades(conn) -> None:
     indexes. Without this, such a store keeps the CHECK it was born with and rejects every job type
     added since. Each step is idempotent and a no-op once applied, so it runs on every start."""
     widen_job_type_check(conn, JOB_TYPES)
+    # 20261008_1200_import_rows_idx (``bootstrap_nodes`` is a new table: ``create_all`` makes it).
+    if sa_inspect(conn).has_table("import_rows", schema=_SCHEMA):
+        rows = f'"{_SCHEMA}"."import_rows"'
+        conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_import_rows_kind_row ON {rows} "
+                          "(job_id, kind, row_index)"))
+        conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_match"'))
+        conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_status"'))
 
 
 def widen_job_type_check(conn, required) -> None:

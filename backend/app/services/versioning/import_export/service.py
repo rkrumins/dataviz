@@ -16,21 +16,25 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
-from ..models import BranchORM, ImportRowORM, JobORM
+from ..models import ImportRowORM, JobORM
 from ..service import GraphVersioningService
-from .export_worker import ExportWorker, example_template_records, records_from_state
+from . import stream
+from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
 from .import_worker import ImportWorker, lease_job
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED
+from .snapshot import open_snapshot
+from .uploads import PACKAGE_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +136,34 @@ class ImportExportService:
     async def start_export(self, job_id: str) -> str:
         """Queue the export once its inputs are stored. Returns the status to report."""
         return await self._start(job_id)
+
+    async def start_inspect(self, job_id: str) -> str:
+        """Queue a package inspection (its own slot on the transfer lane). Returns the status."""
+        return await self._start(job_id)
+
+    async def find_job(self, *, graph_id: str, idempotency_key: str) -> Optional[Dict[str, Any]]:
+        """The job created for ``idempotency_key`` on ``graph_id`` (as :meth:`get_job` reads it),
+        or ``None``: what a retried or replayed request answers with instead of a second job."""
+        async with db.graphver_session() as s:
+            job_id = (await s.execute(select(JobORM.id).where(
+                JobORM.graph_id == graph_id, JobORM.idempotency_key == idempotency_key))).scalar_one_or_none()
+        return await self.get_job(job_id) if job_id else None
+
+    async def create_inspect_job(self, *, upload_id: str, source_uri: str) -> Tuple[str, bool]:
+        """The ``package_inspect`` job for a package upload (``source_uri``: its record) — one per
+        upload, however often its completion is asked for. Returns its id, and whether this call
+        created it."""
+        key = f"inspect:{upload_id}"
+        try:
+            async with db.graphver_session() as s:
+                job = JobORM(job_type="package_inspect", graph_id=PACKAGE_PREFIX, source_uri=source_uri,
+                             idempotency_key=key, status="pending")
+                s.add(job)
+                await s.flush()
+                job_id = job.id
+            return job_id, True
+        except IntegrityError:                      # a concurrent completion created it first
+            return (await self.find_job(graph_id=PACKAGE_PREFIX, idempotency_key=key))["jobId"], False
 
     async def _start(self, job_id: str) -> str:
         """Queue the job for the versioning worker's transfer lane (:mod:`.runner`). It never runs
@@ -292,8 +324,8 @@ class ImportExportService:
         defaulting to published main. Export options (``props``/``ids``/``types``) ride in
         ``field_scope``: ``extra_props`` = empty columns to add; ``select_ids``/``select_types`` =
         row-scope to just those entities / entity types. ``package`` makes the job a view package's
-        (view_transfer.package): the data is written, then packaged with the views. ``file_name``
-        names the download."""
+        (view_transfer.package): the views' file is built from the versions sealed for it, then the
+        data is written into the package as it streams. ``file_name`` names the download."""
         options: Dict[str, Any] = {}
         if package:
             options["package"] = package
@@ -322,29 +354,59 @@ class ImportExportService:
         return {"job_id": job_id, "result_uri": result_uri}
 
     async def run_export(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, int]:
+        lease = lease or await lease_job(job_id)
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             ws, ds, view_id, branch_id, options = (
                 (row.workspace_id, row.data_source_id, row.scope_view_id,
                  row.branch_id, row.field_scope)
                 if row else (None, None, None, None, None))
-        scope = None
-        if view_id and self._scope_resolver is not None:
+        scope, package = None, None
+        if (options or {}).get("package"):
+            # A view package: its views first, and a view's data scoped by the version it holds
+            # (view_transfer.package) — never by the view as it is now, and never, failing that,
+            # the whole data source.
+            from backend.app.services.view_transfer.package import PackageExport
+
+            package = PackageExport(options["package"], workspace_id=ws, data_source_id=ds)
+            scope = await package.prepare(self._phase(lease))
+        elif view_id and self._scope_resolver is not None:
             # Branch-effective: an export of a draft branch scopes to that
             # draft's own view assignments (base ⊕ overlay).
             scope = await self._scope_resolver(ws, ds, view_id, branch_id)
-        after_write = None
-        package = (options or {}).get("package")
-        if package:
-            from backend.app.services.view_transfer.package import finish_export
-
-            async def after_write(job_id, result_uri, summary):
-                return await finish_export(self._store, job_id, result_uri, summary, package=package)
         return await ExportWorker(self._svc, self._store, scope=scope, options=options or {},
-                                  after_write=after_write).run(job_id, lease=lease)
+                                  package=package).run(job_id, lease=lease)
 
     async def run_export_safe(self, job_id: str, lease: Lease) -> None:
         await self._run_safe(job_id, lease, self.run_export)
+
+    @staticmethod
+    def _phase(lease: Lease):
+        """``phase(name, **job columns)``: the job enters phase ``name`` — a fenced checkpoint,
+        and where a superseded or stopping worker stops."""
+        async def phase(name: str, **values) -> None:
+            lease.check()
+            async with db.graphver_session() as s:
+                await lease.checkpoint(s, current_phase=name, **values)
+        return phase
+
+    async def run_inspect(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, Any]:
+        """Check a package upload (view_transfer.package.inspect_upload) on ``lease`` — the
+        transfer lane's inspect slot — and finish the job with what was found. A file that is no
+        package it can take completes the job too: the answer is on the upload, for its dialog."""
+        from backend.app.services.view_transfer.package import inspect_upload
+
+        lease = lease or await lease_job(job_id)
+        async with db.graphver_session() as s:
+            source_uri = (await s.get(JobORM, job_id)).source_uri
+        summary = await inspect_upload(self._store, source_uri, self._phase(lease))
+        if not await lease.finish("completed", summary=summary, progress=100):
+            raise Superseded(f"inspect job {job_id} (epoch {lease.epoch}) was taken over before it "
+                             "could finish")
+        return summary
+
+    async def run_inspect_safe(self, job_id: str, lease: Lease) -> None:
+        await self._run_safe(job_id, lease, self.run_inspect)
 
     async def create_publish_job(
         self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, branch_id: str,
@@ -430,15 +492,10 @@ class ImportExportService:
     async def build_template(self, *, graph_id: str, export_format: str = "csv", limit: int = 5) -> bytes:
         """A small, prepopulated starter template so users learn the format instantly: the column
         schema + up to ``limit`` real rows from the graph (edit-in-place), or worked example rows
-        when the graph is empty. Synchronous (tiny) — returned inline for a direct download."""
-        async with db.graphver_session() as s:
-            main_id = (await s.execute(
-                select(BranchORM.id).where(
-                    BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalar_one()
-        state = await self._svc.materialize_state(graph_id=graph_id, branch_id=main_id)
-        nodes = dict(list(state["nodes"].items())[:limit])
-        edges = dict(list(state["edges"].items())[:limit])
-        records = records_from_state(nodes, edges) or example_template_records()
+        when the graph is empty. Reads one page of each kind from published main, never the whole
+        graph — returned inline for a direct download."""
+        snap = await open_snapshot(graph_id=graph_id, page_size=limit)
+        records = await stream.first_records(snap, limit) or example_template_records()
         columns = column_order(records)
         adapter = get_adapter(export_format)
 
@@ -490,4 +547,7 @@ class ImportExportService:
                 "fileName": (row.field_scope.get("fileName")
                              or (row.field_scope.get("package") or {}).get("fileName"))
                 if isinstance(row.field_scope, dict) else None,
+                # A view package's export: what it packages (its views, at the versions sealed for it).
+                "package": {k: v for k, v in row.field_scope["package"].items() if k != "actor"}
+                if isinstance(row.field_scope, dict) and row.field_scope.get("package") else None,
             }

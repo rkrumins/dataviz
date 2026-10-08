@@ -109,6 +109,15 @@ describe('nothing it remembers may leak to another data source', () => {
   })
 })
 
+describe('a copy paused for a decision', () => {
+  it('stays on screen, so the duplicates can be decided rather than the source offered for enabling again', () => {
+    statusByDs.dsA = job({ status: 'needs_decision', phase: 'awaiting_decision' })
+    const { result } = renderHook(() => useBootstrapWatch('ws1', 'dsA', { headSeq: 1 }))
+    expect(result.current.showProgress).toBe(true)
+    expect(result.current.showReport).toBe(false)
+  })
+})
+
 describe('only those shown the copy watch it', () => {
   it('polls nothing for someone it is not shown to (the canvas strip, for a non-manager)', () => {
     statusByDs.dsA = job({ status: 'running' })

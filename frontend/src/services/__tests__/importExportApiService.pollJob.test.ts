@@ -4,10 +4,17 @@
  *   - it asks often while the job may be a short one, then less (`jobPollDelayMs`);
  *   - it stops asking while the tab is hidden, and asks at once when it is shown;
  *   - a failed poll doesn't end it (the job runs on regardless): it asks again until the job has
- *     gone unanswered for `patienceMs`, but a refusal or an ended session is final at once;
- *   - aborting ends it at once, even mid-wait.
+ *     gone unanswered for `patienceMs`, but a refusal or an ended session is final at once — as
+ *     `authFetch` reports them too;
+ *   - aborting ends it at once, even mid-wait;
+ *   - what isn't a job (an upload being checked) is followed until `until` says it is done.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+vi.mock('../fetchWithTimeout', () => ({ fetchWithTimeout: vi.fn() }))
+
+import { authFetch } from '../apiClient'
+import { fetchWithTimeout } from '../fetchWithTimeout'
 import { pollJob, type Job } from '../importExportApiService'
 
 const job = (status: Job['status']): Job => ({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status })
@@ -119,6 +126,31 @@ describe('pollJob', () => {
       expect(await done).toEqual({ error: err })
       expect(fetcher).toHaveBeenCalledTimes(1)
     }
+  })
+
+  it('is final at once on a refusal authFetch reports, and asks again through a server error', async () => {
+    vi.mocked(fetchWithTimeout).mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'Not found' }), { status: 404 }))
+    const refusal = outcome(pollJob(() => authFetch<Job>('/jobs/j1')))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await refusal).toEqual({ error: expect.objectContaining({ message: 'Not found', status: 404 }) })
+    expect(fetchWithTimeout).toHaveBeenCalledTimes(1)
+
+    vi.mocked(fetchWithTimeout).mockReset()
+      .mockResolvedValueOnce(new Response('Bad Gateway', { status: 502 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(job('completed')), { status: 200 }))
+    const recovered = outcome(pollJob(() => authFetch<Job>('/jobs/j1')))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(await recovered).toEqual({ value: job('completed') })
+  })
+
+  it('follows what isn’t a job until it says it is done', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce({ status: 'inspecting' })
+      .mockResolvedValueOnce({ status: 'ready' })
+    const done = pollJob(fetcher, { until: (u) => u.status === 'ready' || u.status === 'invalid' })
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(await done).toEqual({ status: 'ready' })
   })
 
   it('ends at once when aborted, even mid-wait', async () => {

@@ -1,6 +1,7 @@
 /**
- * What a job dialog says about a job beyond its queue position: how far a running import has got,
- * and that a job whose server stopped carries on where it left off rather than starting over.
+ * What a job dialog says about a job beyond its queue position: how far a running import or view
+ * package export has got, and that a job whose server stopped carries on where it left off rather
+ * than starting over.
  */
 import { describe, expect, it } from 'vitest'
 import { jobProgressText, resumeNote, type Job } from '../importExportApiService'
@@ -13,6 +14,14 @@ describe('jobProgressText', () => {
     expect(jobProgressText(job({ phase: 'nodes', processed: 4000, total: 10000 }))).toBe('Applying the changes… 4,000 of 10,000 rows')
     expect(jobProgressText(job({ phase: 'edges', processed: 9000, total: 10000 }))).toBe('Applying the changes… 9,000 of 10,000 rows')
     expect(jobProgressText(job({ phase: 'replace', processed: 10000, total: 10000 }))).toBe('Removing what the file no longer holds…')
+  })
+
+  it('tells how far a view package’s export has got, from the records it wrote', () => {
+    const exporting = (extra: Partial<Job>) => job({ jobType: 'export', ...extra })
+    expect(jobProgressText(exporting({ phase: 'bundle' }))).toBe('Packing the views…')
+    expect(jobProgressText(exporting({ phase: 'data', summary: null }))).toBe('Writing the data…')
+    expect(jobProgressText(exporting({ phase: 'data', summary: { nodes: 1200, edges: 800, bytes: 4096 } })))
+      .toBe('Writing the data… 1,200 entities and 800 relationships so far')
   })
 
   it('says nothing when there is nothing to tell', () => {

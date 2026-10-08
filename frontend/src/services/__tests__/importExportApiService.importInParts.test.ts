@@ -2,7 +2,8 @@
  * importInParts pins: every part of the file goes up (the last holds the rest), then the import
  * starts from them; the same file chosen again after a failure resumes, sending only the parts the
  * server doesn't hold; a part the server failed on is sent again, one it refused is not; a finished
- * upload is forgotten, so the same file imports afresh next time.
+ * upload is forgotten, so the same file imports afresh next time; parts the server sends straight
+ * to its object store (`partUrls`) go there without this site's cookies.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -88,6 +89,25 @@ describe('importInParts', () => {
 
     await importInParts('ws1', 'g1', FILE, { format: 'ndjson' })
     expect(sentParts()).toEqual([['0', 4], ['1', 4], ['2', 2], ['2', 2]])
+  })
+
+  it('sends parts straight to the URLs the server hands out, without this site’s cookies', async () => {
+    const urls = ['https://store.example/p0?sig=a', 'https://store.example/p1?sig=b', 'https://store.example/p2?sig=c']
+    vi.mocked(authFetch).mockImplementation(async (url: string) =>
+      (url.includes('/complete') ? CREATED : upload({ partUrls: urls })))
+    vi.mocked(fetchWithTimeout).mockImplementation(async () => new Response(null, { status: 200 }))
+
+    await importInParts('ws1', 'g1', FILE, { format: 'ndjson' })
+    const puts = vi.mocked(fetchWithTimeout).mock.calls.map(([url, init]) => [String(url), init?.credentials])
+    expect(puts.sort()).toEqual(urls.map((url) => [url, 'omit']))
+  })
+
+  it('sends parts through the server with this site’s cookies', async () => {
+    server()
+    vi.mocked(fetchWithTimeout).mockImplementation(async () => new Response(null, { status: 200 }))
+
+    await importInParts('ws1', 'g1', FILE, { format: 'ndjson' })
+    expect(vi.mocked(fetchWithTimeout).mock.calls.every(([, init]) => init?.credentials === undefined)).toBe(true)
   })
 
   it('starts afresh when the remembered upload was already imported', async () => {

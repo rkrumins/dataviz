@@ -82,8 +82,9 @@ export function queuePosition(job: Job | null | undefined): string | null {
   return `${ahead} ${ahead === 1 ? 'job is' : 'jobs are'} ahead of it.`
 }
 
-/** "Applying the changes… 4,000 of 10,000 rows" for a running import; null when there is nothing
- *  to tell (not running, between steps, or a job that tells its progress in its `summary`). */
+/** "Applying the changes… 4,000 of 10,000 rows" for a running import, and a view package's export
+ *  by its steps (the records written so far come from its `summary`); null when there is nothing
+ *  to tell (not running, between steps, or another export: it tells its progress in its `summary`). */
 export function jobProgressText(job: Job | null | undefined): string | null {
   if (job?.status !== 'running') return null
   const processed = (job.processed ?? 0).toLocaleString()
@@ -93,6 +94,13 @@ export function jobProgressText(job: Job | null | undefined): string | null {
     case 'nodes':
     case 'edges': return total ? `Applying the changes… ${processed} of ${total.toLocaleString()} rows` : 'Applying the changes…'
     case 'replace': return 'Removing what the file no longer holds…'
+    case 'bundle': return 'Packing the views…'
+    case 'data': {
+      const written = job.summary as ExportSummary | null
+      return written?.nodes || written?.edges
+        ? `Writing the data… ${written.nodes.toLocaleString()} entities and ${written.edges.toLocaleString()} relationships so far`
+        : 'Writing the data…'
+    }
     default: return null
   }
 }
@@ -168,16 +176,23 @@ export function importLimit(format: ImportFormat): number {
   return format === 'json' || format === 'xlsx' ? MAX_WHOLE_FILE_IMPORT_BYTES : MAX_IMPORT_BYTES
 }
 
-/** An import's file on its way up in parts. */
-export interface ImportUpload {
+/** A file on its way up in parts, as the server describes it: how it is split, and what it has. */
+export interface PartsUpload {
   uploadId: string
-  fileName: string
   size: number
-  format: string
   partBytes: number
   parts: number
   /** The parts that arrived whole: what a resumed upload doesn't send again. */
   received: number[]
+  /** Where each part goes straight to the server's object store, when it hands such URLs out;
+   *  otherwise every part goes through the server. */
+  partUrls?: string[]
+}
+
+/** An import's file on its way up in parts. */
+export interface ImportUpload extends PartsUpload {
+  fileName: string
+  format: string
   jobId?: string | null
 }
 
@@ -195,12 +210,15 @@ function createImportUpload(wsId: string, graphId: string, file: File, format: I
 }
 
 /** Send one part, retrying a dropped connection or a server error with backoff; a refusal (4xx,
- *  but for a timeout or a busy server) is final. */
-async function putPart(url: string, blob: Blob, signal?: AbortSignal): Promise<void> {
+ *  but for a timeout or a busy server) is final. `direct`: the URL is the object store's own,
+ *  which must not be sent this site's session cookies. */
+async function putPart(url: string, blob: Blob, signal?: AbortSignal, direct = false): Promise<void> {
   for (let attempt = 1; ; attempt++) {
     let res: Response | null = null
     try {
-      res = await fetchWithTimeout(url, { method: 'PUT', body: blob, signal, timeoutMs: 120_000 })
+      res = await fetchWithTimeout(url, {
+        method: 'PUT', body: blob, signal, timeoutMs: 120_000, ...(direct ? { credentials: 'omit' as const } : {}),
+      })
     } catch (err) {
       if (signal?.aborted || attempt >= PART_ATTEMPTS) throw err
     }
@@ -213,11 +231,14 @@ async function putPart(url: string, blob: Blob, signal?: AbortSignal): Promise<v
   }
 }
 
-function remembered(key: string): string | null {
+/** A value this browser keeps for a later visit (localStorage); null when there is none, or no
+ *  storage to keep it in. */
+export function remembered(key: string): string | null {
   try { return localStorage.getItem(key) } catch { return null }
 }
 
-function remember(key: string, value: string | null): void {
+/** Keep `value` under `key` for a later visit; null forgets it. */
+export function remember(key: string, value: string | null): void {
   try {
     if (value) localStorage.setItem(key, value)
     else localStorage.removeItem(key)
@@ -225,10 +246,51 @@ function remember(key: string, value: string | null): void {
 }
 
 /**
- * Import ``file`` through a resumable upload: send it in parts (several at once, each retried),
- * then start the import from them. The same file (name, size and modification time) chosen again
- * after a failure or a reload resumes the upload where it stopped. ``onProgress`` hears the bytes
- * the server holds so far.
+ * Send ``file`` up in parts, several at once, each retried, resuming an upload of it where it
+ * stopped. ``key`` names the file as this browser remembers its upload (by name, size and
+ * modification time, so the same file chosen again after a failure or a reload is found again);
+ * ``find`` reads the remembered upload as the server holds it now (null, or a refusal, when it
+ * can't be resumed: ``create`` starts another). ``partUrl`` says where part n goes through the
+ * server, unless the upload names its own ``partUrls``. ``onProgress`` hears the bytes the server
+ * holds so far. Returns the upload with every part sent; it stays remembered until the caller
+ * forgets it (``remember(key, null)``), once done with it.
+ */
+export async function sendInParts<U extends PartsUpload>(file: File, opts: {
+  key: string
+  find: (uploadId: string) => Promise<U | null>
+  create: () => Promise<U>
+  partUrl: (uploadId: string, n: number) => string
+  onProgress?: (sent: number, total: number) => void
+  signal?: AbortSignal
+}): Promise<U> {
+  const earlier = remembered(opts.key)
+  const found = earlier ? await opts.find(earlier).catch(() => null) : null
+  const upload = found ?? await opts.create()
+  remember(opts.key, upload.uploadId)
+
+  const bytesOf = (n: number) => Math.min(upload.size, (n + 1) * upload.partBytes) - n * upload.partBytes
+  const arrived = new Set(upload.received)
+  let sent = [...arrived].reduce((sum, n) => sum + bytesOf(n), 0)
+  opts.onProgress?.(sent, upload.size)
+  const todo = Array.from({ length: upload.parts }, (_, n) => n).filter((n) => !arrived.has(n))
+  const direct = !!upload.partUrls?.length
+  const sender = async () => {
+    for (let n = todo.shift(); n !== undefined; n = todo.shift()) {
+      const start = n * upload.partBytes
+      const url = direct ? upload.partUrls![n] : opts.partUrl(upload.uploadId, n)
+      await putPart(url, file.slice(start, start + bytesOf(n)), opts.signal, direct)
+      sent += bytesOf(n)
+      opts.onProgress?.(sent, upload.size)
+    }
+  }
+  await Promise.all(Array.from({ length: PART_CONCURRENCY }, sender))
+  return upload
+}
+
+/**
+ * Import ``file`` through a resumable upload (``sendInParts``), then start the import from its
+ * parts. The same file chosen again after a failure or a reload resumes the upload where it
+ * stopped. ``onProgress`` hears the bytes the server holds so far.
  */
 export async function importInParts(
   wsId: string,
@@ -238,27 +300,18 @@ export async function importInParts(
 ): Promise<CreateImportResult> {
   const format = opts.format ?? 'ndjson'
   const key = `import-upload:${wsId}:${graphId}:${file.name}:${file.size}:${file.lastModified}:${format}`
-  const earlier = remembered(key)
-  let found = earlier ? await authFetch<ImportUpload>(`${uploadsUrl(wsId, graphId)}/${earlier}`).catch(() => null) : null
-  if (found?.jobId) found = null                      // already imported: this is a new import
-  const upload = found ?? await createImportUpload(wsId, graphId, file, format)
-  remember(key, upload.uploadId)
-
-  const bytesOf = (n: number) => Math.min(upload.size, (n + 1) * upload.partBytes) - n * upload.partBytes
-  const arrived = new Set(upload.received)
-  let sent = [...arrived].reduce((sum, n) => sum + bytesOf(n), 0)
-  opts.onProgress?.(sent, upload.size)
-  const todo = Array.from({ length: upload.parts }, (_, n) => n).filter((n) => !arrived.has(n))
-  const partUrl = (n: number) => `${uploadsUrl(wsId, graphId)}/${upload.uploadId}/parts/${n}`
-  const sender = async () => {
-    for (let n = todo.shift(); n !== undefined; n = todo.shift()) {
-      const start = n * upload.partBytes
-      await putPart(partUrl(n), file.slice(start, start + bytesOf(n)), opts.signal)
-      sent += bytesOf(n)
-      opts.onProgress?.(sent, upload.size)
-    }
-  }
-  await Promise.all(Array.from({ length: PART_CONCURRENCY }, sender))
+  const upload = await sendInParts(file, {
+    key,
+    // One already imported is done with: this is a new import.
+    find: async (id) => {
+      const found = await authFetch<ImportUpload>(`${uploadsUrl(wsId, graphId)}/${id}`)
+      return found.jobId ? null : found
+    },
+    create: () => createImportUpload(wsId, graphId, file, format),
+    partUrl: (id, n) => `${uploadsUrl(wsId, graphId)}/${id}/parts/${n}`,
+    onProgress: opts.onProgress,
+    signal: opts.signal,
+  })
 
   const params = new URLSearchParams({ reconcileMode: opts.reconcileMode ?? 'upsert' })
   if (opts.branchId) params.set('branchId', opts.branchId)
@@ -430,11 +483,11 @@ export function exportStreamUrl(
   })}`
 }
 
-/** A failed poll worth asking again: all but a refusal. The job GETs throw a plain Error for any
- *  answer but a 2xx (`authFetch`, `vfetch`), so a dropped connection, a client timeout and a web pod
- *  restarting (502/503) look alike there, and all are asked again. Final at once: a session that
- *  ended (the fetch layer already tried to renew it) and a refusal whose status the error carries
- *  (4xx, but for a timeout or a busy server). */
+/** A failed poll worth asking again: all but a refusal. A dropped connection, a client timeout and
+ *  a web pod restarting (502/503) are asked again, as is an error that carries no status at all.
+ *  Final at once: a session that ended (the fetch layer already tried to renew it) and a refusal
+ *  whose status the error carries (`authFetch`'s and the services' own errors do): a 4xx, but for
+ *  a timeout or a busy server. */
 function isTransientPollError(err: unknown): boolean {
   if (err instanceof Error && err.message === 'Session expired') return false
   const status = httpStatusOf(err)
@@ -477,18 +530,20 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
  * A failed poll doesn't stop the job, which runs on the server's workers whatever this sees: a
  * transient failure (see `isTransientPollError`) is asked again until the job has gone unanswered
  * for `patienceMs` (counted while the tab is shown), and only then is it this poll's error.
+ *
+ * `until` says when what is followed is done, for one that isn't a job (a package upload being
+ * checked); a job is done once it ended.
  */
-export async function pollJob<J extends { status: JobStatus }>(
+export async function pollJob<J extends { status: string }>(
   fetcher: () => Promise<J>,
   opts: {
     onTick?: (job: J) => void
     signal?: AbortSignal
     patienceMs?: number
-    /** @deprecated Ignored: the poll paces itself (`jobPollDelayMs`). */
-    intervalMs?: number
+    until?: (job: J) => boolean
   } = {},
 ): Promise<J> {
-  const { signal, patienceMs = 120_000 } = opts
+  const { signal, patienceMs = 120_000, until = (job: J) => TERMINAL.includes(job.status as JobStatus) } = opts
   const aborted = () => new DOMException('aborted', 'AbortError')
   let answeredAt = Date.now()
   for (let tick = 0; ; tick++) {
@@ -508,7 +563,7 @@ export async function pollJob<J extends { status: JobStatus }>(
     if (signal?.aborted) throw aborted()
     if (job) {
       opts.onTick?.(job)
-      if (TERMINAL.includes(job.status)) return job
+      if (until(job)) return job
     }
     await pause(jobPollDelayMs(tick), signal)
   }

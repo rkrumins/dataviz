@@ -67,9 +67,14 @@ export function EnableVersioningFlow({
     })
   }
 
-  const size = typeof itemCount === 'number' && itemCount > 0
-    ? `about ${itemCount.toLocaleString()} items`
-    : 'everything currently in this graph'
+  const known = typeof itemCount === 'number' && itemCount > 0
+  const size = known ? `about ${itemCount.toLocaleString()} items` : 'everything currently in this graph'
+  // A rough bucket, never a number: the copy runs at very different speeds on different
+  // providers, and the progress view times it properly from real throughput once it runs.
+  const duration = !known ? 'large models can take a few minutes'
+    : itemCount < 200_000 ? 'usually done in a couple of minutes'
+    : itemCount < 2_000_000 ? 'usually done within half an hour'
+    : 'a graph this size can take an hour or more'
 
   const dialogRef = useModalA11y(open, onClose)
 
@@ -123,12 +128,15 @@ export function EnableVersioningFlow({
                 We'll copy <span className="font-semibold text-ink">{size}</span> into version history and
                 check every item against the source before switching it on.
               </p>
+              <p className="text-[12px] text-ink-secondary mt-1.5 leading-relaxed">
+                We check for duplicate identifiers first; nothing is copied until you decide.
+              </p>
               <p className="text-[11px] text-ink-muted mt-1.5 leading-relaxed">
                 <span className="inline-flex items-center gap-1 font-medium text-ink-muted">
                   <Check className="w-3 h-3" /> You can keep using this graph while it runs
                 </span>
                 {' · '}
-                large models can take a few minutes · nothing changes until the check passes.
+                {duration} · nothing changes until the check passes.
               </p>
             </div>
 

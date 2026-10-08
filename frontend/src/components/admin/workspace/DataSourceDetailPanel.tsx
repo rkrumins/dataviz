@@ -134,6 +134,7 @@ export function DataSourceDetailPanel({
     ds,
     wsId,
     isOpen,
+    stats,
     providerInfo,
     ontologyName,
     ontologyId,
@@ -675,7 +676,12 @@ export function DataSourceDetailPanel({
 
                             {/* ─── Versioning Tab ───────────────────────── */}
                             {versioningEnabled && activeTab === 'versioning' && (
-                                <DataSourceVersioningTab wsId={wsId} dataSourceId={ds.id} />
+                                <DataSourceVersioningTab
+                                    wsId={wsId}
+                                    dataSourceId={ds.id}
+                                    // A cold stats cache reads 0 / stale: no size beats a wrong one.
+                                    itemCount={stats && !stats.computing ? stats.nodeCount + stats.edgeCount : null}
+                                />
                             )}
                             </>)}
                         </div>

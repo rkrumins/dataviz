@@ -3,10 +3,11 @@
  * of the target data source, before the view is checked against it.
  *
  * It starts when the person says so (it opens a draft and writes into it), then follows the
- * import job and shows what it did: new, updated, unchanged, and anything it couldn't apply. A
- * package's data only ever adds and updates; nothing here is deleted, and nothing is live until
- * the draft is published. The data goes with that one job, so taking it somewhere else afterwards
- * needs the file again.
+ * import job (the rows read, then those applied) and shows what it did: new, updated, unchanged,
+ * and anything it couldn't apply. A package's data only ever adds and updates; nothing here is
+ * deleted, and nothing is live until the draft is published. The job reads the package where it
+ * was uploaded, so another target takes it into a draft of its own, until the upload expires (a
+ * day after it was sent): then the file is chosen again.
  */
 import type { ReactNode } from 'react'
 import {
@@ -14,15 +15,24 @@ import {
   Pencil, Plus, RefreshCw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { queuePosition, type ImportPreviewRow } from '@/services/importExportApiService'
+import { queuePosition, resumeNote, type ImportPreviewRow, type Job } from '@/services/importExportApiService'
 import { pluralize } from '@/features/view-transfer/format'
 import { sameDataTarget, useImportSession, type PackageDataTarget } from './importSession'
 import { useDraftStaging } from './useDraftStaging'
 
+/** "Read 12,000 rows · applied 4,000 of 12,000" for the data's import job, as far as it has got. */
+function dataProgress(job: Job | null | undefined): string | null {
+  if (job?.status !== 'running' || !job.total) return null
+  const read = `Read ${job.total.toLocaleString()} rows`
+  return job.phase === 'nodes' || job.phase === 'edges'
+    ? `${read} · applied ${(job.processed ?? 0).toLocaleString()} of ${job.total.toLocaleString()}`
+    : read
+}
+
 export function PackageDataStep({ target, targetLabel, onChooseFileAgain }: {
   target: PackageDataTarget
   targetLabel: string
-  /** Back to the File step, the file set aside: a fresh upload of it can go anywhere. */
+  /** Back to the File step, the file set aside: its upload expired, and a fresh one is needed. */
   onChooseFileAgain: () => void
 }) {
   const session = useImportSession()!
@@ -36,6 +46,8 @@ export function PackageDataStep({ target, targetLabel, onChooseFileAgain }: {
   // another) doesn't count here.
   const mine = data.target && sameDataTarget(data.target, target) ? data : null
   const queued = queuePosition(mine?.job)
+  const progress = dataProgress(mine?.job)
+  const resumed = resumeNote(mine?.job)
   const start = () => void session.startData({ ...target, draftName })
 
   const heading = (
@@ -46,21 +58,6 @@ export function PackageDataStep({ target, targetLabel, onChooseFileAgain }: {
       </p>
     </div>
   )
-
-  if (data.started && !mine) {
-    return (
-      <div className="space-y-5">
-        {heading}
-        <Notice tone="amber" icon={<AlertTriangle className="w-5 h-5" />} title="The data already went into another draft">
-          <p>
-            It went into “{data.started.draftName}”, with the view it was brought in for. To bring it in here instead,
-            choose the file again. That draft is yours: abandon it from its data source if nothing in it is needed.
-          </p>
-          <ActionButton icon={<FileUp className="w-4 h-4" />} onClick={onChooseFileAgain}>Choose the file again</ActionButton>
-        </Notice>
-      </div>
-    )
-  }
 
   if (!mine && !staging.checking && (!staging.versioned || !staging.allowed)) {
     return (
@@ -123,35 +120,40 @@ export function PackageDataStep({ target, targetLabel, onChooseFileAgain }: {
             {!mine.started ? 'Opening the draft…' : mine.job?.status === 'running' ? 'Bringing in the data…' : 'Waiting to start…'}
           </p>
           {queued && <p className="text-[11px] text-ink-muted -mt-2">{queued}</p>}
+          {progress && <p className="text-[11px] font-medium text-ink-secondary tabular-nums -mt-2">{progress}</p>}
+          {resumed && <p className="text-[11px] text-ink-muted -mt-2">{resumed}</p>}
           <p className="text-[11px] text-ink-muted max-w-sm">
             Each entity is matched to what’s already here: new ones are added, changed ones updated. You can keep this open; it runs on the server.
           </p>
         </div>
+      ) : mine?.expired ? (
+        <Notice tone="amber" icon={<AlertTriangle className="w-5 h-5" />} title="The package’s upload has expired">
+          <p>
+            The server keeps an uploaded package for a day, and this one has run out of time. Choose the file again: it goes
+            up afresh, and its data comes in from there.
+            {mine.started ? ` What already arrived stays in “${mine.started.draftName}”.` : ''}
+          </p>
+          <ActionButton icon={<FileUp className="w-4 h-4" />} onClick={onChooseFileAgain}>Choose the file again</ActionButton>
+        </Notice>
       ) : mine?.error ? (
         <Notice tone="rose" icon={<AlertTriangle className="w-5 h-5" />} title="The data couldn’t be brought in">
           <p>{mine.error}</p>
-          {mine.started ? (
-            <>
-              <p>
-                It runs again into the same draft, “{mine.started.draftName}”: only adding and updating, so nothing that did arrive is
-                brought in twice. If the upload has expired, choose the file again. The draft is yours either way: abandon it from its
-                data source if nothing in it is needed.
-              </p>
-              <div className="flex flex-wrap items-center gap-2">
-                <ActionButton icon={<RefreshCw className="w-4 h-4" />} onClick={start}>Try again</ActionButton>
-                <ActionButton icon={<FileUp className="w-4 h-4" />} onClick={onChooseFileAgain}>Choose the file again</ActionButton>
-              </div>
-            </>
-          ) : (
-            <ActionButton icon={<RefreshCw className="w-4 h-4" />} onClick={start}>Try again</ActionButton>
+          {mine.started && (
+            <p>
+              It runs again into the same draft, “{mine.started.draftName}”: only adding and updating, so nothing that did arrive is
+              brought in twice. The draft is yours either way: abandon it from its data source if nothing in it is needed.
+            </p>
           )}
+          <ActionButton icon={<RefreshCw className="w-4 h-4" />} onClick={start}>Try again</ActionButton>
         </Notice>
       ) : (
         <div className="rounded-2xl border-2 border-dashed border-violet-200 dark:border-violet-900/60 px-6 py-8 flex flex-col items-center gap-3 text-center">
           <p className="text-sm font-semibold text-ink">Ready to bring the data into a draft</p>
           <p className="text-[11px] text-ink-muted max-w-md leading-relaxed">
             It only adds and updates: nothing here is deleted, and nothing is live until the draft is published.
-            The data goes with this draft; to bring it in anywhere else afterwards, you’d choose the file again.
+            {data.started && !mine
+              ? ` It already went into “${data.started.draftName}”, where you chose before: that draft is yours to abandon if nothing in it is needed.`
+              : ''}
           </p>
           <button type="button" onClick={start}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold bg-violet-500 text-white hover:bg-violet-600 shadow-sm shadow-violet-500/20">

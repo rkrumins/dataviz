@@ -1561,6 +1561,7 @@ async def resolve_graph_get(
     # capability callers — history/diff surfaces stay membership-only.
     user: User = Depends(require_ds_read_or_view),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Resolve (workspace, dataSource) → versioned graph + the caller's open draft, if
     any, scoped to ``viewId`` when given (branch-per-view). Read-only: never opens a
@@ -1571,19 +1572,30 @@ async def resolve_graph_get(
     )
     if res is None:
         raise HTTPException(status_code=404, detail="no versioned graph for data source")
-    return await _with_bootstrap(res, data_source_id, ws_id)
+    return await _with_bootstrap(res, data_source_id, ws_id, session)
 
 
-async def _with_bootstrap(res: dict, data_source_id: str, ws_id: str) -> dict:
+async def _with_bootstrap(res: dict, data_source_id: str, ws_id: str,
+                          session: AsyncSession) -> dict:
     """Attach the enablement job when the graph is still at genesis — the only window in
-    which one can exist, so the lookup costs nothing on a live graph."""
+    which one can exist, so the lookup costs nothing on a live graph.
+
+    Every state in which the graph is NOT live yet, ``needs_decision`` included: a pause can last
+    days, and without the job the UI reads the genesis-parked graph as versioned (exports its
+    empty main, edits into a 409). The job is the status poll's seed, so it carries what the
+    status route adds — who else reads the graph a collapse would change."""
     if int(res.get("main_head_commit_seq") or 0) > 1:
         return res
     from backend.app.services.versioning.bootstrap_worker import bootstrap_status
     job = await bootstrap_status(data_source_id=data_source_id, workspace_id=ws_id)
-    if job is not None and job.get("status") in ("pending", "running", "failed"):
-        return {**res, "bootstrap": job}
-    return res
+    if job is None or job.get("status") not in ("pending", "running", "needs_decision", "failed"):
+        return res
+    if job.get("duplicates"):
+        from backend.app.services.managed_sources import shared_with
+        ds = await data_source_repo.get_data_source_orm(session, data_source_id)
+        if ds is not None:
+            job["duplicates"].update(await shared_with(session, ds))
+    return {**res, "bootstrap": job}
 
 
 @router.post("/resolve", response_model=ResolveResponse)
@@ -2588,7 +2600,6 @@ async def _view_export_scope(workspace_id, data_source_id, view_id, branch_id=No
     from backend.app.db.engine import get_async_session
     from backend.app.db.models import ViewORM
     from backend.app.db.repositories.view_repo import effective_view_config
-    from backend.app.services.layout_config import parse_reference_layout
     async with get_async_session() as session:
         view = await session.get(ViewORM, view_id)
         if view is None:
@@ -2597,14 +2608,23 @@ async def _view_export_scope(workspace_id, data_source_id, view_id, branch_id=No
         # own layer assignments (base ⊕ overlay); no branch/overlay → base.
         config = await effective_view_config(session, view, branch_id)
         cont = await _live_containment_types(session, workspace_id, data_source_id)
+    return export_scope_of(config, cont)
+
+
+def export_scope_of(config, containment_types: List[str]) -> Optional[Dict[str, Any]]:
+    """The export scope a view's design gives — its stored ``config``, or a sealed version's
+    definition (a view package's data follows the version it holds): the placed URNs, those whose
+    containment descendants come too, and the containment types to follow. ``None`` when it places
+    nothing. Pure (walks the whole design: a caller on the event loop runs it in a thread)."""
+    from backend.app.services.layout_config import parse_reference_layout
     layout = parse_reference_layout(config)
     # An assignment with a ``layerId`` is a real placement; ``logicalNodeId``-only ones are UI
     # pseudo-nodes, not graph entities (harmlessly skipped — they won't match a node urn).
     assigned = [u for u, a in layout.assignments.items() if a.get("layerId")]
     inherit = [u for u, a in layout.assignments.items() if a.get("inheritsChildren", True)]
     if not assigned:
-        return None                                  # nothing explicitly scoped → export whole DS
-    return {"assigned_urns": assigned, "inherit_urns": inherit, "containment_types": cont}
+        return None             # nothing explicitly scoped → a view export takes the whole DS
+    return {"assigned_urns": assigned, "inherit_urns": inherit, "containment_types": containment_types}
 
 
 async def _resolve_ontology_types(workspace_id, data_source_id):

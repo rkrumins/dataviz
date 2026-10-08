@@ -6,10 +6,16 @@ client resumes from; the parts read back in order as one file, however they arri
 large for its format is refused before any of it is sent; an upload is its owner's only. Through
 the API: completing an upload before every part is in is a 409, then it starts the import from the
 upload, once (asking again answers with the same import).
+
+A view package is uploaded the same way, its own user's and no graph's. Once checked, its import
+reads the data part out of the uploaded parts as it streams — spooled once, never sniffed, the spool
+gone however the read ends — and fails at the end on data that isn't what was checked.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from datetime import datetime
 
 import pytest
 
@@ -183,3 +189,94 @@ async def test_the_api_refuses_what_an_upload_cant_take(test_client, api):
     wrong = await test_client.put(f"{BASE}/{up['uploadId']}/parts/0", content=b"too many bytes")
     assert wrong.status_code == 422 and "10 bytes" in wrong.json()["detail"]
     assert (await test_client.get(f"{BASE}/iu_{'0' * 32}")).status_code == 404
+
+
+# ── View packages ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def scratch(tmp_path, monkeypatch):
+    """Where temporary files go, to see none is left behind."""
+    path = tmp_path / "tmp"
+    path.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(path))
+    return path
+
+
+async def test_a_package_upload_is_its_owners_and_no_graphs(tmp_path):
+    store = LocalFsObjectStore(tmp_path)
+    record = await uploads.create_package(store, owner="u1", file_name="p.zip", size=len(DATA))
+    assert record["uploadId"].startswith("up_")
+    assert uploads.record_key(record) == f"transfer-uploads/{record['uploadId']}/upload.json"
+    assert uploads.is_archive_source(uploads.record_key(record))
+    assert not uploads.is_archive_source("ws1/ds1/g1/uploads/iu_1/upload.json")
+    assert (await uploads.load_package(store, record["uploadId"], "u1"))["size"] == len(DATA)
+    for upload_id, owner in ((record["uploadId"], "u2"), ("up_" + "0" * 32, "u1"), ("../x", "u1")):
+        with pytest.raises(UploadError) as gone:
+            await uploads.load_package(store, upload_id, owner)
+        assert gone.value.status == 404
+    with pytest.raises(UploadError) as big:
+        await uploads.create_package(store, owner="u1", file_name="p.zip", size=uploads.MAX_BYTES + 1)
+    assert big.value.status == 413 and "10 GB" in str(big.value)
+    assert (uploads.expires_at(record) - datetime.fromisoformat(record["createdAt"])).total_seconds() == 86_400
+
+
+async def _checked_package(tmp_path, monkeypatch):
+    """An uploaded package (in 4 KiB parts), checked by its inspect job: its record and its data."""
+    from backend.app.services.view_transfer import package
+    from backend.tests.test_view_transfer_package import NDJSON, _package, _uploaded
+
+    monkeypatch.setattr(uploads, "PART_BYTES", 4096)
+    store = LocalFsObjectStore(tmp_path / "store")
+    with open(await _package(tmp_path), "rb") as f:
+        record = await _uploaded(store, f.read())
+    await package.inspect_upload(store, uploads.record_key(record))
+    return store, await uploads.read_record(store, uploads.record_key(record)), NDJSON
+
+
+async def test_a_package_is_read_out_of_its_parts_and_checked_at_the_end(tmp_path, monkeypatch, scratch):
+    store, record, data = await _checked_package(tmp_path, monkeypatch)
+    source = uploads.record_key(record)
+    assert record["parts"] > 1
+    assert await uploads.source_size(store, source) == len(data), "the data part's size, not the archive's"
+
+    async with contextlib.aclosing(uploads.open_source(store, source)) as chunks:
+        async for _first in chunks:
+            break                                     # stopped early: closed, the spool goes now
+    assert list(scratch.iterdir()) == []
+
+    await uploads.save(store, {**record, "archive": {**record["archive"], "sha256": "sha256:" + "0" * 64}})
+    read = []
+    with pytest.raises(ValueError, match="isn't what was checked"):
+        async for chunk in uploads.open_source(store, source):
+            read.append(chunk)
+    assert b"".join(read) == data, "every byte read, then refused at the end"
+    assert list(scratch.iterdir()) == []
+
+
+async def test_a_package_import_spools_once_and_never_sniffs(tmp_path, monkeypatch, scratch):
+    from backend.app.services.versioning.import_export.import_worker import ImportWorker
+
+    store, record, data = await _checked_package(tmp_path, monkeypatch)
+    spooled = []
+    spool = uploads.spool
+
+    async def counted(*args, **kwargs):
+        spooled.append(args[1]["uploadId"])
+        return await spool(*args, **kwargs)
+
+    monkeypatch.setattr(uploads, "spool", counted)
+    worker = ImportWorker(None, store)
+    staged = []
+
+    async def sniff(_source):
+        raise AssertionError("a package's data is never sniffed")
+
+    async def flush(batch):
+        staged.extend(batch)
+
+    worker._reject_binary, worker._flush = sniff, flush
+    assert await worker._parse("vjob_1", uploads.record_key(record), "ndjson") == data.count(b"\n")
+    assert spooled == [record["uploadId"]], "one spool, for the one read"
+    assert staged[0]["raw"]["entity_id"] == "n0" and staged[-1]["row_index"] == data.count(b"\n") - 1
+    assert list(scratch.iterdir()) == []

@@ -108,8 +108,9 @@ class ProjectionWorker:
         """One pass of the idle-draft janitor (plan §17 #8); no-op without a service. What a swept
         draft held in views goes with it, as on abandon, and any draft whose views were left
         unsettled by its publish or abandon is settled (``draft_views``). Import/export artifacts
-        older than ``OBJECT_STORE_TTL_HOURS`` are swept from the object store, and the staged rows
-        of imports finished more than ``STAGING_GC_DAYS`` ago from ``import_rows``."""
+        older than ``OBJECT_STORE_TTL_HOURS`` are swept from the object store — but never the
+        inputs a job may still read — and the staged rows of imports finished more than
+        ``STAGING_GC_DAYS`` ago from ``import_rows``."""
         if self._versioning is None:
             return []
         swept = await self._versioning.sweep_idle_drafts()
@@ -122,21 +123,31 @@ class ProjectionWorker:
         except Exception:  # noqa: BLE001 — the drafts are swept; their views settle next pass
             logger.exception("settling the views of finished drafts failed")
         try:
-            from backend.app.services.view_transfer.package import prune_uploads
-
-            await prune_uploads()
-        except Exception:  # noqa: BLE001 — tried again next pass
-            logger.exception("pruning view package uploads failed")
-        try:
             from .import_export.import_worker import sweep_staged_rows
 
             await sweep_staged_rows(older_than_days=config.STAGING_GC_DAYS)
         except Exception:  # noqa: BLE001 — tried again next pass
             logger.exception("sweeping finished imports' staged rows failed")
         try:
+            # Read right before anything is deleted: an input of a queued, running or resumable job
+            # is kept however old. Unread, nothing is deleted this pass.
+            from .import_export.uploads import jobs_input_prefixes
+
+            keep = await jobs_input_prefixes()
+        except Exception:  # noqa: BLE001 — tried again next pass
+            logger.exception("reading the inputs jobs still need failed; nothing is swept this pass")
+            return swept
+        try:
+            from backend.app.services.view_transfer.package import prune_uploads
+
+            await prune_uploads(keep_prefixes=keep)
+        except Exception:  # noqa: BLE001 — tried again next pass
+            logger.exception("pruning view package uploads failed")
+        try:
             from backend.app.services.storage.object_store import get_object_store
 
-            await get_object_store().sweep(older_than_hours=config.OBJECT_STORE_TTL_HOURS)
+            await get_object_store().sweep(older_than_hours=config.OBJECT_STORE_TTL_HOURS,
+                                           keep_prefixes=keep)
         except Exception:  # noqa: BLE001 — tried again next pass
             logger.exception("sweeping expired import/export artifacts failed")
         return swept
@@ -407,8 +418,13 @@ def build_worker(projector: FalkorProjector, graph_factory, *, lanes: Iterable[s
         versioning=GraphVersioningService() if projection else None,
         evict_budget=evict_budget if projection else None,
         # "Enable version control" jobs: a 10M-entity source is copied here, off the web tier, in
-        # resumable windows (see bootstrap_worker).
-        bootstrap=BootstrapRunner(graph_factory, consumer=consumer or "boot-1") if bootstrap else None,
+        # resumable windows (see bootstrap_worker). With the projector's rollup-rebuild hook: a
+        # duplicate collapse deletes copies from the source graph, and the :AGGREGATED rollups
+        # computed over them must be rebuilt as a publish's would be.
+        bootstrap=BootstrapRunner(
+            graph_factory, consumer=consumer or "boot-1",
+            on_rollups_stale=getattr(projector, "_on_rollups_stale", None),
+        ) if bootstrap else None,
         purge=PurgeRunner(graph_factory, consumer=consumer or "purge-1") if bootstrap else None,
         reaper=Reaper() if bootstrap else None,
         transfers=TransferRunner(import_export) if transfer else None,

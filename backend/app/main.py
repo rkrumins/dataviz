@@ -2502,6 +2502,7 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
         "/api/v1/views/transfer/reconcile",
         "/api/v1/views/transfer/import",
         "/api/v1/views/transfer/packages/inspect",
+        "/api/v1/views/transfer/packages/uploads",
     )
 
     def __init__(self, app, *, default_bytes: int, large_bytes: int):

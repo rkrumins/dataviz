@@ -24,11 +24,13 @@ import json
 import logging
 import os
 import time
-from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from collections import Counter
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from sqlalchemy import func, literal, or_, select
+from sqlalchemy import func, literal, null, or_, select
 
 from . import config, db
+from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
 from .reconcile import (
     falkor_counts, pg_live_counts_projectable, reconcile_interrupted, rollup_health,
@@ -55,6 +57,8 @@ from backend.app.providers.falkordb_provider import (  # noqa: E402
     _RESERVED_NODE_KEYS,
     _admit_native_keys,
     _compute_searchable_text,
+    _index_ddl_deferred_reason,
+    _is_native_value,
     _text_properties,
     _native_property_budget,
     _sanitize_label,
@@ -69,6 +73,26 @@ NodeUpsert = Tuple[str, str, dict]                     # (entity_id, urn, payloa
 # labels resolved from committed entityTypes so every edge merge anchors on
 # the per-label URN indexes instead of scanning all nodes per UNWIND row.
 EdgeUpsert = Tuple[str, str, str, dict, str, str]
+
+
+class _Pending(dict):
+    """A committed version standing in for its payload in an upsert: what its version row says
+    (a node's urn and entityType; an edge's edgeType and ends) — all a window's planning reads —
+    and ``ref``, ``(kind, graph_id, version_id)``, for :meth:`FalkorProjector._apply` to read the
+    payload with the batch that writes it. So a window of any size holds one batch of payloads,
+    not all of them (``_compute_changes``)."""
+    __slots__ = ("ref",)
+
+    def __init__(self, ref: Tuple[str, str, str], fields: Iterable[Tuple[str, Optional[str]]]):
+        super().__init__((k, v) for k, v in fields if v)
+        self.ref = ref
+
+
+# (provider, graph name, label) this process has made the urn index of (``_ensure_urn_indexes``);
+# a graph's entries go with its key (``drop_graph``), as its indexes do.
+_URN_INDEXED: Set[Tuple[Optional[str], str, str]] = set()
+# Ids per endpoint urn/label lookup (``_prefetch_endpoints``).
+_ENDPOINT_CHUNK = 20000
 
 # Server-side query budgets (ms). FalkorDB now runs with TIMEOUT_DEFAULT /
 # TIMEOUT_MAX set, so an un-budgeted projector write inherits the 30s
@@ -411,6 +435,9 @@ class FalkorProjector:
         instance), freeing its RAM; the next projection re-creates it from Postgres
         (plan §16.5 #9-10)."""
         await (await self._graph_client(name, provider_id)).delete()
+        # GRAPH.DELETE took the key's indexes with it: the next seed into it must make them again.
+        _URN_INDEXED.difference_update(
+            {k for k in _URN_INDEXED if k[0] == provider_id and k[1] == name})
         # The next projection writes the graph again with a new id catalogue; every
         # long-lived reader must drop its old one (graph_generation).
         from backend.app.providers.graph_generation import bump_graph_generation
@@ -466,6 +493,7 @@ class FalkorProjector:
             from_seq, to_seq = ps.projected_commit_seq, ps.target_commit_seq
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             provider_id = ps.falkor_provider    # pinned instance; None → env default
+            owned = bool(ps.owns_falkor_graph)  # how the verify counts it (falkor_counts)
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -531,10 +559,11 @@ class FalkorProjector:
                 # took every :AGGREGATED rollup with it. On a fresh key the diff is simply
                 # "everything", so a first seed is the same code path.
                 reconciled = await self._reconcile_in_place(
-                    client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True)
+                    client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True,
+                    provider_id=provider_id)
             else:
                 await self._relabel_in_place(client, retypes)
-                await self._apply(client, *changes, level_map=level_map)
+                await self._apply(client, *changes, level_map=level_map, provider_id=provider_id)
             window_rollups_applied = False
             if rollup_pairs and rollup_pairs != "stale":
                 window_rollups_applied = True
@@ -563,7 +592,8 @@ class FalkorProjector:
             verify_error, healed = (
                 await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork,
                                             level_map=level_map, heal_outcome=heal_outcome,
-                                            rollups_moved=window_rollups_applied)
+                                            rollups_moved=window_rollups_applied, owned=owned,
+                                            provider_id=provider_id)
                 if config.PROJECTION_VERIFY_ENABLED else (None, False)
             )
 
@@ -823,46 +853,64 @@ class FalkorProjector:
         # Incremental: net of each entity's rows in (from_seq, to_seq]. Key the fold by
         # (kind, entity_id) — NOT entity_id alone — so a node and an edge that ever share
         # an entity_id can never overwrite each other (which would silently drop a node
-        # delete/upsert by mis-handling it as an edge).
+        # delete/upsert by mis-handling it as an edge). The fold reads the rows' identity columns,
+        # never their payloads: every superseded row of the window was read whole before, and every
+        # winner's payload held at once; ``_apply`` now reads the winners' a batch at a time.
         last: Dict[Tuple[str, str], Tuple[str, str, Optional[dict]]] = {}
         for model, kind in ((NodeVersionORM, "node"), (EdgeVersionORM, "edge")):
+            named = ((model.urn, model.entity_type, null(), null()) if kind == "node" else
+                     (null(), model.edge_type, model.source_entity_id, model.target_entity_id))
             rows = (await s.execute(
-                select(model).where(
+                select(model.entity_id, model.id, model.op, *named).where(
                     model.graph_id == graph.id, model.branch_id == main_id,
                     model.commit_seq > from_seq, model.commit_seq <= to_seq,
                 ).order_by(model.commit_seq, model.created_at)
-            )).scalars().all()
-            for r in rows:
-                last[(kind, r.entity_id)] = (kind, r.op, r.payload)
+            )).all()
+            type_key = "entityType" if kind == "node" else "edgeType"
+            for eid, vid, op, urn, typ, src, tgt in rows:
+                last[(kind, eid)] = (kind, op, None if op == "delete" else _Pending(
+                    (kind, graph.id, vid),
+                    (("urn", urn), (type_key, typ), ("sourceEntityId", src), ("targetEntityId", tgt))))
+        deleted_nodes: List[str] = []
         for (kind, eid), (_, op, p) in last.items():
             if kind != "node":
                 continue
             if op == "delete":
-                node_deletes.append(await self._urn_label_for(s, graph, main_id, eid))
+                deleted_nodes.append(eid)
             else:
                 urn = _node_urn(eid, p)
                 urn_of[eid] = urn
                 label_of[eid] = str((p or {}).get("entityType") or "Entity")
                 node_upserts.append((eid, urn, p))
         deleted_edge_ids: List[str] = []
+        live_edges: List[Tuple[str, dict]] = []
         for (kind, eid), (_, op, p) in last.items():
             if kind != "edge":
                 continue
             if op == "delete":
                 deleted_edge_ids.append(eid)
-            elif _is_derived_edge_payload(p):
-                continue
-            else:
-                src, tgt = _edge_endpoints(p)
-                su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
-                tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
-                edge_upserts.append((eid, su, tu, p, slb, tlb))
+            elif not _is_derived_edge_payload(p):
+                live_edges.append((eid, p))
         # Deleted edges: resolve the BEFORE-window value so the delete can
         # run typed + endpoint-anchored (delete rows carry no payload).
         # Unresolvable ids keep the legacy scan-delete fallback.
+        before = (await self._svc._values_at(s, graph.id, main_id, deleted_edge_ids, from_seq)
+                  if deleted_edge_ids else {})
+        # Every urn/label the window's deletes and edge ends need that it does not itself say, in
+        # a few batched reads rather than one per endpoint (``_endpoint`` remains the fallback).
+        await self._prefetch_endpoints(
+            s, graph, main_id,
+            [*deleted_nodes, *(e for _eid, p in live_edges for e in _edge_endpoints(p)),
+             *(e for p in before.values() if p and _is_edge_payload(p) for e in _edge_endpoints(p))],
+            urn_of, label_of)
+        for eid in deleted_nodes:
+            node_deletes.append(await self._endpoint(s, graph, main_id, eid, urn_of, label_of))
+        for eid, p in live_edges:
+            src, tgt = _edge_endpoints(p)
+            su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
+            tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+            edge_upserts.append((eid, su, tu, p, slb, tlb))
         if deleted_edge_ids:
-            before = await self._svc._values_at(
-                s, graph.id, main_id, deleted_edge_ids, from_seq)
             for eid in deleted_edge_ids:
                 p = before.get(eid)
                 if p and _is_derived_edge_payload(p):
@@ -1445,6 +1493,29 @@ class FalkorProjector:
             urn_of[entity_id], label_of[entity_id] = urn, label
         return urn, label
 
+    async def _prefetch_endpoints(
+        self, s, graph: GraphORM, main_id: str, entity_ids: Iterable[str],
+        urn_of: Dict[str, str], label_of: Dict[str, str],
+    ) -> None:
+        """Fill the window caches with the (urn, label) :meth:`_urn_label_for` gives each of
+        ``entity_ids`` not in them yet: the latest urn-bearing version row on ``main``, read for
+        ``_ENDPOINT_CHUNK`` ids per statement instead of one statement per id — the per-endpoint
+        reads were a 100k-edge window's 100k round trips. An id this does not resolve (a fork's
+        parent rows, no urn at all) is left to :meth:`_endpoint`'s own fallback."""
+        want = [e for e in dict.fromkeys(entity_ids) if e and (e not in urn_of or e not in label_of)]
+        for chunk in _batches(want, _ENDPOINT_CHUNK):
+            rows = (await s.execute(
+                select(NodeVersionORM.entity_id, NodeVersionORM.urn, NodeVersionORM.entity_type)
+                .where(NodeVersionORM.graph_id == graph.id, NodeVersionORM.branch_id == main_id,
+                       NodeVersionORM.entity_id.in_(chunk), NodeVersionORM.urn.is_not(None))
+                .order_by(NodeVersionORM.entity_id, NodeVersionORM.commit_seq.desc(),
+                          NodeVersionORM.created_at.desc())
+                .distinct(NodeVersionORM.entity_id))).all()
+            for eid, urn, etype in rows:
+                if urn:                                  # an empty one: _endpoint says what it is
+                    urn_of.setdefault(eid, str(urn))
+                    label_of.setdefault(eid, str(etype or "Entity"))
+
     async def _pg_live_counts(self, graph_id, main_id, to_seq, is_fork):
         """Node count + the count a FAITHFUL FalkorDB projection should hold, from ``entity_heads``,
         for a NON-fork main fully caught up (``main_head == to_seq``); ``None`` otherwise (a fork's
@@ -1465,11 +1536,14 @@ class FalkorProjector:
             return await pg_live_counts_projectable(s, graph_id, main_id)
 
     @staticmethod
-    async def _falkor_counts(client):
+    async def _falkor_counts(client, owned: bool = True):
         # Delegates to reconcile.falkor_counts (single source of the count cypher + its rollup
         # exclusion, shared with the reconciler). Kept as a thin method so the verify path and
-        # its tests can monkeypatch it per-instance.
-        return await falkor_counts(client)
+        # its tests can monkeypatch it per-instance. ``owned`` is the graph's
+        # ``owns_falkor_graph``: a pinned customer graph is counted as the reconciler counts it
+        # (urn-bearing nodes, DISTINCT edge triples), or a bootstrapped graph's urn-less nodes
+        # and parallel relationships read as "extra entities" on every verify.
+        return await falkor_counts(client, owned=owned)
 
     # Internal-id page for the reconcile's scan: ``id(n)`` ranges compile to a
     # NodeByIdSeek, so each page costs its own size, never a full scan.
@@ -1576,7 +1650,8 @@ class FalkorProjector:
 
     async def _reconcile_in_place(self, client, graph_id, main_id, to_seq, is_fork,
                                   level_map, track_progress: bool = False,
-                                  rollups_moved_this_pass: bool = False) -> Dict[str, object]:
+                                  rollups_moved_this_pass: bool = False,
+                                  provider_id: Optional[str] = None) -> Dict[str, object]:
         """Make FalkorDB hold exactly committed main at ``to_seq`` by writing only the
         difference, and move the rollups by that same difference — never dropping the graph.
         See ``projection_reconcile``.
@@ -1685,7 +1760,7 @@ class FalkorProjector:
                         for k in edge_keys]
         await self._apply(client, node_upserts, edge_upserts,
                           [(u, l) for (l, u) in diff.node_deletes], [],
-                          progress=progress, level_map=level_map)
+                          progress=progress, level_map=level_map, provider_id=provider_id)
         await self._delete_edges_by_key(client, diff.edge_deletes, progress)
 
         if plan is not None and plan.pairs:
@@ -1748,6 +1823,7 @@ class FalkorProjector:
     async def _verify_and_heal(
         self, client, graph_id, main_id, from_seq, to_seq, is_fork, level_map=None,
         heal_outcome: Optional[Dict[str, object]] = None, rollups_moved: bool = False,
+        owned: bool = True, provider_id: Optional[str] = None,
     ) -> Tuple[Optional[str], bool]:
         """Reconcile live node/edge COUNTS between Postgres (SoR) and FalkorDB after an
         apply, and — on a FULL SEED — additionally CONTENT-verify (id-set + deep fields), since
@@ -1772,7 +1848,7 @@ class FalkorProjector:
             pg = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
             if pg is None:
                 return None, False                       # fork / lagging head — not applicable
-            fk = await self._falkor_counts(client)
+            fk = await self._falkor_counts(client, owned)
         except Exception:
             logger.debug("projection verify skipped for %s (count failed)", graph_id, exc_info=True)
             return None, False
@@ -1789,7 +1865,7 @@ class FalkorProjector:
             # (never-versioned) entities carry no tombstone, so they survive the sweep.
             try:
                 await self._sweep_tombstoned(client, graph_id, main_id)
-                fk = await self._falkor_counts(client)
+                fk = await self._falkor_counts(client, owned)
             except Exception:
                 logger.exception("projection tombstone sweep failed for %s", graph_id)
             else:
@@ -1820,11 +1896,11 @@ class FalkorProjector:
                 # and move the rollups by the same difference.
                 healed = await self._reconcile_in_place(
                     client, graph_id, main_id, to_seq, is_fork, level_map,
-                    rollups_moved_this_pass=rollups_moved)
+                    rollups_moved_this_pass=rollups_moved, provider_id=provider_id)
                 if heal_outcome is not None:
                     heal_outcome.update(healed)
                 pg2 = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
-                fk2 = await self._falkor_counts(client)
+                fk2 = await self._falkor_counts(client, owned)
                 if pg2 is None or pg2 == fk2:
                     return None, True
             except Exception:
@@ -1980,7 +2056,8 @@ class FalkorProjector:
         return _on_chunk
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
-                     progress=None, level_map: Optional[Dict[str, int]] = None) -> None:
+                     progress=None, level_map: Optional[Dict[str, int]] = None,
+                     provider_id: Optional[str] = None) -> None:
         """Apply one pass: nodes in (grouped by label), edges in (grouped by
         type + endpoint labels — the per-label URN indexes drive every node
         match), edges out, nodes out.
@@ -1991,7 +2068,15 @@ class FalkorProjector:
         ``FALKORDB_NATIVE_PROPERTY_BUDGET``. The reserve is decided from the
         registered names this pass already reads, so it costs nothing on a
         graph that holds them and happens again by itself after a full seed
-        DROPs the graph and takes every registered name with it."""
+        DROPs the graph and takes every registered name with it.
+
+        An upsert's payload may be a :class:`_Pending`; it is read with the batch that writes it.
+        ``provider_id`` is the instance ``client`` writes to (None: the default one)."""
+        await self._ensure_urn_indexes(client, provider_id, [
+            *(p.get("entityType") or "Entity" for _e, _u, p in node_upserts),
+            *(lbl for *_rest, slb, tlb in edge_upserts for lbl in (slb, tlb)),
+            *(lbl for _u, lbl in node_deletes),
+            *(e.get(k) for e in edge_deletes if isinstance(e, dict) for k in ("slb", "tlb"))])
         # Which user property keys this pass writes natively — the same
         # budget the provider's own writers apply, so a versioned graph and
         # a direct-load graph spend their attribute ids the same way.
@@ -2005,7 +2090,7 @@ class FalkorProjector:
             )
             budget = _native_property_budget()
             native_keys, demoted = _admit_native_keys(
-                [p.get("properties") for _, _, p in node_upserts],
+                await self._native_key_counts(node_upserts),
                 registered=registered,
                 budget=budget, reserve=_NAME_FALLBACK_KEYS,
             )
@@ -2019,34 +2104,40 @@ class FalkorProjector:
                     len(demoted), len(native_keys), budget, demoted[:5],
                 )
         by_label: Dict[str, list] = {}
-        for eid, urn, p in node_upserts:
-            label = _sanitize_label(p.get("entityType") or "Entity")
-            item = _node_item(eid, urn, p, level_map, native_keys)
-            # The fingerprint a later reconcile compares against, so it can
-            # tell an up-to-date node from one it must rewrite.
-            item["gvHash"] = _node_fingerprint(
-                label, content_hash(p), (level_map or {}).get(p.get("entityType")))
-            by_label.setdefault(label, []).append(item)
+        for up in node_upserts:
+            by_label.setdefault(_sanitize_label(up[2].get("entityType") or "Entity"), []).append(up)
         keep = _projector_owned_property_names()
-        for label, items in by_label.items():
-            for chunk in _batches(items, self._batch):
+        for label, ups in by_label.items():
+            for batch in _batches(ups, self._batch):
+                chunk = []
+                for eid, urn, p in await self._loaded(batch, 2):
+                    item = _node_item(eid, urn, p, level_map, native_keys)
+                    # The fingerprint a later reconcile compares against, so it can
+                    # tell an up-to-date node from one it must rewrite.
+                    item["gvHash"] = _node_fingerprint(
+                        label, content_hash(p), (level_map or {}).get(p.get("entityType")))
+                    chunk.append(item)
                 await self._mark_removed_properties(client, label, chunk, keep)
                 await _q(client, _node_merge_cypher(label), params={"batch": chunk})
                 if progress:
                     await progress(len(chunk))
 
         by_rel: Dict[Tuple[str, str, str], list] = {}
-        for eid, su, tu, p, slb, tlb in edge_upserts:
+        for up in edge_upserts:
+            _eid, _su, _tu, p, slb, tlb = up
             key = (
                 _sanitize_label(p.get("edgeType") or "REL"),
                 _sanitize_label(slb or "Entity"),
                 _sanitize_label(tlb or "Entity"),
             )
-            item = _edge_item(eid, su, tu, p)
-            item["gvHash"] = _edge_fingerprint(key[0], content_hash(p))
-            by_rel.setdefault(key, []).append(item)
-        for (rel, sl, tl), items in by_rel.items():
-            for chunk in _batches(items, self._batch):
+            by_rel.setdefault(key, []).append(up)
+        for (rel, sl, tl), ups in by_rel.items():
+            for batch in _batches(ups, self._batch):
+                chunk = []
+                for eid, su, tu, p, _slb, _tlb in await self._loaded(batch, 3):
+                    item = _edge_item(eid, su, tu, p)
+                    item["gvHash"] = _edge_fingerprint(rel, content_hash(p))
+                    chunk.append(item)
                 await _q(client, _edge_merge_cypher(rel, sl, tl), params={"batch": chunk})
                 if progress:
                     await progress(len(chunk))
@@ -2061,6 +2152,66 @@ class FalkorProjector:
                 await _q(client, _delete_nodes_cypher(label), params={"urns": list(chunk)})
                 if progress:
                     await progress(len(chunk))
+
+    async def _ensure_urn_indexes(self, client, provider_id: Optional[str],
+                                  labels: Iterable[Optional[str]]) -> None:
+        """Best effort, before a pass writes: the urn index of every label it merges or anchors on,
+        so each MERGE / MATCH seeks instead of scanning the label per UNWIND row — a key nothing
+        else indexed (one the versioning layer fills itself) had none.
+
+        Once per (instance, graph, label) in a process — but only once it is made (or found made):
+        a refused statement is logged and asked again by the next pass, and the pass goes on
+        unindexed (slower, never wrong). A refusal about the NODE rather than the statement (no
+        in-sync replica, still loading, not answering — ``_index_ddl_deferred_reason``) stops the
+        set: every other statement would fail the same way. ``drop_graph`` forgets a graph's
+        entries, since GRAPH.DELETE takes its indexes."""
+        name = str(getattr(client, "name", "") or "")
+        want = [lbl for lbl in dict.fromkeys(_sanitize_label(lbl or "Entity") for lbl in labels)
+                if (provider_id, name, lbl) not in _URN_INDEXED]
+        for lbl in want:
+            try:
+                await ensure_urn_indexes(client, [lbl], strict=True)
+            except Exception as exc:
+                reason = _index_ddl_deferred_reason(exc)
+                if reason is not None:
+                    logger.warning("projection: urn indexes on %s deferred — the node %s",
+                                   name or "the graph", reason)
+                    return
+                logger.warning("projection: urn index on %s(:%s) not created: %s",
+                               name or "the graph", lbl, exc)
+                continue
+            if name:
+                _URN_INDEXED.add((provider_id, name, lbl))
+
+    async def _native_key_counts(self, node_upserts) -> Iterable[dict]:
+        """What ``_admit_native_keys`` counts over ``node_upserts`` — each property key once per
+        node whose value for it could be stored natively — with a pending payload read a batch at a
+        time and let go, so the admission sees every node without holding every payload."""
+        counts: Counter = Counter()
+        pending = []
+        for _eid, _urn, p in node_upserts:
+            if isinstance(p, _Pending):
+                pending.append(p.ref)
+            else:
+                counts.update(k for k, v in (p.get("properties") or {}).items()
+                              if v is not None and _is_native_value(v))
+        for refs in _batches(pending, self._batch):
+            async with self._session() as s:
+                payload_of = await self._svc._payloads_by_version(s, refs)
+            for p in payload_of.values():
+                counts.update(k for k, v in ((p or {}).get("properties") or {}).items()
+                              if v is not None and _is_native_value(v))
+        return ({k: True} for k in counts.elements())
+
+    async def _loaded(self, batch: list, at: int) -> list:
+        """``batch``'s upserts with each pending payload (slot ``at``) read, in one statement."""
+        refs = [up[at].ref for up in batch if isinstance(up[at], _Pending)]
+        if not refs:
+            return batch
+        async with self._session() as s:
+            payload_of = await self._svc._payloads_by_version(s, refs)
+        return [(*up[:at], payload_of.get(up[at].ref[2]), *up[at + 1:])
+                if isinstance(up[at], _Pending) else up for up in batch]
 
     async def _mark_removed_properties(self, client, label: str, chunk: list, keep) -> None:
         """Give each item a ``gone`` map of the user properties its node still carries but

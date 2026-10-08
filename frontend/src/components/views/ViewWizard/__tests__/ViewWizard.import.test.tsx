@@ -22,18 +22,20 @@
  *     if chosen), and the view then opens on that draft; the draft can be submitted for review
  *     from there (the view opens live once it's published), and a file's views all at once,
  *     one review per view's draft;
- *   - a view with its data (a package): its data goes into a new draft of a version-controlled
- *     target, the view is checked against that draft and goes into it too, and opens there; a
- *     target that can't take the data is refused (the view alone still can be imported); and data
- *     that already went into a draft elsewhere asks for the file again; a data import that failed
- *     can be tried again, into the same draft.
+ *   - a view with its data (a package): while it is read, it says how much of it is up, then that
+ *     it is checked; its data goes into a new draft of a version-controlled target (saying how many
+ *     rows it read, and applied), the view is checked against that draft and goes into it too, and
+ *     opens there; a target that can't take the data is refused (the view alone still can be
+ *     imported); another target takes the same upload into a draft of its own, with no file to
+ *     choose again; an upload that expired asks for the file again; a data import that failed can
+ *     be tried again, into the same draft.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
-  ImportViewResult, InspectResult, PackageInspectResult, ReconcileResult,
+  ImportViewResult, InspectResult, PackageInspectResult, PackageProgress, ReconcileResult,
 } from '@/services/viewTransferApiService'
 
 const inspectMock = vi.fn()
@@ -92,6 +94,11 @@ vi.mock('@/features/versioning/components/PublishDraftDialog', () => ({
   ),
 }))
 vi.mock('@/services/telemetryService', () => ({ recordEvent: vi.fn() }))
+// Jobs are followed with pollJob; its waits shortened so the tests don't sit them out.
+vi.mock('@/config/polling', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/config/polling')>()),
+  jobPollDelayMs: () => 1,
+}))
 const reloadLibraryMock = vi.fn()
 vi.mock('@/store/viewLibraryStore', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/store/viewLibraryStore')>()),
@@ -920,7 +927,40 @@ describe('ViewWizard — a view with its data', () => {
     expect(packageDataMock).not.toHaveBeenCalled()
   })
 
-  it('asks for the file again once the data went into a draft elsewhere', async () => {
+  it('says how much of the package is up, then that it is checked', async () => {
+    let progress: ((p: PackageProgress) => void) | undefined
+    inspectPackageMock.mockImplementation((_file: File, opts?: { onProgress?: (p: PackageProgress) => void }) => {
+      progress = opts?.onProgress
+      return new Promise(() => {})                       // still reading
+    })
+    renderPackage()
+    await waitFor(() => expect(progress).toBeDefined())
+
+    act(() => progress!({ stage: 'upload', sent: 5 * 1024 ** 2, total: 20 * 1024 ** 2 }))
+    expect(await screen.findByText('Uploading… 25% of 20.0 MB')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '25')
+    act(() => progress!({ stage: 'check', progress: null }))
+    expect(await screen.findByText('Checking the package…')).toBeInTheDocument()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+  })
+
+  it('says how many rows the data import read, and how many it applied', async () => {
+    let finished = false
+    getImportMock.mockImplementation(async () => (finished
+      ? { jobId: 'imp_1', jobType: 'ingest', status: 'completed', graphId: 'g1', branchId: 'br_data' }
+      : { jobId: 'imp_1', jobType: 'ingest', status: 'running', graphId: 'g1', phase: 'nodes', processed: 4000, total: 12000 }))
+    renderPackage()
+    await screen.findByText('Import a view with its data')
+    await next()                                          // → Target
+    await next()                                          // → Data
+    fireEvent.click(await screen.findByRole('button', { name: /Bring the data into a draft/ }))
+
+    expect(await screen.findByText('Read 12,000 rows · applied 4,000 of 12,000')).toBeInTheDocument()
+    finished = true
+    expect(await screen.findByText('The data is in the draft')).toBeInTheDocument()
+  })
+
+  it('brings the data into another target’s own draft too, with no file to choose again', async () => {
     renderPackage()
     await screen.findByText('Import a view with its data')
     await next()
@@ -931,10 +971,40 @@ describe('ViewWizard — a view with its data', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back' }))                 // → Target
     fireEvent.click(await screen.findByRole('button', { name: /Archive/ }))
     await next()                                                                    // → Data, for Archive
-    expect(await screen.findByText('The data already went into another draft')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(await screen.findByText(/It already went into “Import: Finance lineage”, where you chose before/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Choose the file again/ })).not.toBeInTheDocument()
+    packageDataMock.mockResolvedValueOnce({ ...DATA_STARTED, jobId: 'imp_2', branchId: 'br_archive', dataSourceId: 'ds2' })
+    fireEvent.click(screen.getByRole('button', { name: /Bring the data into a draft/ }))
+
+    expect(await screen.findByText('The data is in the draft')).toBeInTheDocument()
+    expect(packageDataMock).toHaveBeenCalledTimes(2)
+    expect(packageDataMock.mock.calls[1]).toEqual(['up_1', expect.objectContaining({ workspaceId: 'ws1', dataSourceId: 'ds2' })])
+  })
+
+  it('asks for the file again once its upload has expired', async () => {
+    packageDataMock.mockRejectedValue(new ViewTransferError(
+      'This package upload is about to expire. Choose the file again to import it.', 410, 'upload_expired'))
+    renderPackage()
+    await screen.findByText('Import a view with its data')
+    await next()
+    await next()
+    fireEvent.click(await screen.findByRole('button', { name: /Bring the data into a draft/ }))
+
+    expect(await screen.findByText('The package’s upload has expired')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Try again/ })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Choose the file again/ }))
     expect(await screen.findByText('Drop a view file here')).toBeInTheDocument()
-    expect(packageDataMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not take any 404 for an expired upload', async () => {
+    packageDataMock.mockRejectedValue(new ViewTransferError("Workspace 'ws1' not found", 404))
+    renderPackage()
+    await screen.findByText('Import a view with its data')
+    await next()
+    await next()
+    fireEvent.click(await screen.findByRole('button', { name: /Bring the data into a draft/ }))
+
+    expect(await screen.findByText("Workspace 'ws1' not found")).toBeInTheDocument()
+    expect(screen.queryByText('The package’s upload has expired')).not.toBeInTheDocument()
   })
 })

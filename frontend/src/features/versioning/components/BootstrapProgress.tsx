@@ -2,27 +2,35 @@
  * BootstrapProgress — what the user watches while their graph is copied into version
  * history, and the receipt they get afterwards.
  *
- * Three states, one component (so the canvas strip and the data-source card can never
+ * Four states, one component (so the canvas strip and the data-source card can never
  * disagree — they read the same query):
  *
- *  • running   — named phases with check marks, a live count, a progress bar.
- *  • completed — the INTEGRITY REPORT: what was checked, and the plain statement that
- *                nothing was lost. This is the whole point of the rewrite: enabling
- *                version control used to be an act of faith.
- *  • failed    — a plain-language reason, Resume / Start over / Give up, the report
- *                to download, and technical details for whoever needs them.
+ *  • running        — named phases with check marks, a live count, a progress bar.
+ *  • needs decision — the source uses some identifiers more than once, found before
+ *                     anything was copied: what collides, which copy would be kept, the
+ *                     full list to download, and (for a manager) collapse / re-check /
+ *                     give up. Version history keeps one item per identifier, so someone
+ *                     has to choose; we never collapse a customer's data on our own.
+ *  • completed      — the INTEGRITY REPORT: what was checked, and the plain statement that
+ *                     nothing was lost. This is the whole point of the rewrite: enabling
+ *                     version control used to be an act of faith.
+ *  • failed         — a plain-language reason, the recovery the failure allows (Resume or
+ *                     Start over), Give up, the report to download, and technical details
+ *                     for whoever needs them.
  */
 import { useState } from 'react'
 import {
-  AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronRight, Download,
-  Loader2, RotateCcw, ShieldCheck, Trash2, X,
+  AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronRight, Copy, Download,
+  Hourglass, Loader2, Merge, RefreshCw, RotateCcw, ShieldCheck, Trash2, Users, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
-import type { BootstrapJob, BootstrapPhase } from '@/services/versioningApiService'
-import { useAbandonBootstrap, useRetryBootstrap } from '../hooks/useVersioning'
+import {
+  BootstrapDecisionError, bootstrapDuplicatesCsvUrl, type BootstrapJob, type BootstrapPhase,
+} from '@/services/versioningApiService'
+import { useAbandonBootstrap, useDecideBootstrapDuplicates, useRetryBootstrap } from '../hooks/useVersioning'
 
 /** The job's eight phases, told as the four things a person actually cares about. */
 const STEPS: Array<{ id: string; label: string; phases: BootstrapPhase[] }> = [
@@ -39,6 +47,13 @@ function stepIndex(phase: BootstrapPhase | null): number {
 }
 
 const num = (n: unknown) => (typeof n === 'number' ? n.toLocaleString() : '—')
+
+/** When a duplicate copy was last synced — the first thing deciding which copy is kept. */
+function syncedAt(iso: string | null): string {
+  if (!iso) return 'no sync time'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
 
 /** Phases where the item counter actually advances — the only ones we can honestly time. */
 const COUNTING_PHASES: BootstrapPhase[] = ['nodes', 'edges']
@@ -81,15 +96,32 @@ export function BootstrapProgress({
   const { notify } = useAppNotifications()
   const retry = useRetryBootstrap(wsId, dataSourceId)
   const abandon = useAbandonBootstrap(wsId, dataSourceId)
+  const decide = useDecideBootstrapDuplicates(wsId, dataSourceId)
   const openPanel = useVersioningPanelStore((s) => s.openPanel)
   const [showDetails, setShowDetails] = useState(false)
-  const [confirming, setConfirming] = useState<null | 'restart' | 'abandon'>(null)
+  const [confirming, setConfirming] = useState<null | 'restart' | 'abandon' | 'collapse'>(null)
+  // The decision was refused because the list changed under it: say so beside the (refetched) list.
+  const [listChanged, setListChanged] = useState(false)
 
   const running = job.status === 'pending' || job.status === 'running'
+  const needsDecision = job.status === 'needs_decision'
   const failed = job.status === 'failed'
   const done = job.status === 'completed'
   const eta = timeLeft(job)
   const active = stepIndex(job.phase)
+  const dup = job.duplicates ?? null
+  // Who else reads the graph a collapse changes: named in this workspace, counted elsewhere.
+  const otherWorkspaces = dup?.sharedWithOtherWorkspaces ?? 0
+  const shared = (dup?.sharedWith.length ?? 0) + otherWorkspaces
+  // Once a collapse was decided, the source graph may already have lost its extra copies: nothing
+  // that runs after (Give up included) puts them back, so the copy must stop promising "untouched".
+  // `sourceCollapse` outlives a restart, which re-reads the list (and may find none left).
+  const decided = !!dup?.decision || !!job.sourceCollapse
+  // Offer only the recovery that can work: resuming an integrity failure fails the same way again,
+  // and an internal one is a bug no button fixes. A job from before failures carried an action
+  // offers both, as it always did.
+  const canResume = !job.failure || job.failure.action === 'resume'
+  const canRestart = !job.failure || job.failure.action !== null
 
   const downloadReport = () => {
     const blob = new Blob([JSON.stringify(job.report ?? job, null, 2)], { type: 'application/json' })
@@ -103,15 +135,102 @@ export function BootstrapProgress({
 
   const runRetry = (mode: 'resume' | 'restart') =>
     retry.mutate(mode, {
-      onSuccess: () => notify('success', mode === 'resume' ? 'Picking up where it left off…' : 'Starting over…'),
+      onSuccess: () => notify('success', mode === 'resume' ? 'Picking up where it left off…'
+        : needsDecision ? 'Checking the source again…' : 'Starting over…'),
       onError: (e) => notify('error', e instanceof Error ? e.message : 'Could not retry.'),
     })
 
   const runAbandon = () =>
     abandon.mutate(undefined, {
-      onSuccess: () => notify('success', 'Cancelled — this data source is exactly as it was.'),
+      onSuccess: () => notify('success', decided
+        ? 'Cancelled — version control is off for this data source.'
+        : 'Cancelled — this data source is exactly as it was.'),
       onError: (e) => notify('error', e instanceof Error ? e.message : 'Could not cancel.'),
     })
+
+  // Sent with the fingerprint of the list the manager was shown, so it can never apply to a list
+  // that changed since: the server refuses (`stale_decision`), and the hook refetches the new one.
+  const runCollapse = (fingerprint: string) => {
+    setListChanged(false)
+    decide.mutate(fingerprint, {
+      onSuccess: () => notify('success', 'Collapsing the duplicates — the copy carries on.'),
+      onError: (e) => {
+        if (e instanceof BootstrapDecisionError && e.type === 'stale_decision') setListChanged(true)
+        else notify('error', e instanceof Error ? e.message : 'Could not decide.')
+      },
+    })
+  }
+
+  // ── the two-step confirm every destructive action goes through ─────────────
+  const confirmBox = confirming && (
+    <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2.5">
+      <p className="text-[12px] text-ink leading-relaxed">
+        {confirming === 'restart' ? (
+          <>
+            Starting over throws away the{' '}
+            <span className="font-semibold">{num(job.processed)} items</span> already copied
+            and begins again from nothing.{' '}
+            {canResume ? (
+              <>
+                <span className="font-semibold">Resuming keeps them</span> and picks up where it
+                stopped — try that first unless the source graph has changed.
+              </>
+            ) : (
+              <>Resuming can't fix this one — it would only fail the same way again.</>
+            )}
+          </>
+        ) : confirming === 'collapse' && dup ? (
+          <>
+            For each of the {num(dup.identifiers)} identifier(s) we keep one copy: the one synced most
+            recently (latest lastSyncedAt), then the one with the lowest internal id. The connections of
+            the other {num(dup.extraCopies)} move to the kept copy, and{' '}
+            <span className="font-semibold">those copies are removed from the source graph</span>
+            {shared > 0 && ' — for every data source that reads it'}. Rollups are rebuilt
+            afterwards.{' '}
+            <span className="font-semibold">Giving up later won't restore them.</span>
+          </>
+        ) : decided ? (
+          <>
+            This stops the copy and removes everything it wrote.{' '}
+            <span className="font-semibold">Duplicate copies already removed from your data source are
+            not put back</span> — otherwise it stays exactly as it is now, just without version control.
+          </>
+        ) : (
+          <>
+            This stops the copy and removes everything it wrote.{' '}
+            <span className="font-semibold">Your data source is not touched</span> — it stays
+            exactly as it is now, just without version control.
+          </>
+        )}
+      </p>
+      <div className="mt-2.5 flex items-center gap-2">
+        <button
+          onClick={() => {
+            const what = confirming
+            setConfirming(null)
+            if (what === 'restart') runRetry('restart')
+            else if (what === 'collapse') { if (dup) runCollapse(dup.fingerprint) }
+            else runAbandon()
+          }}
+          className={cn(
+            'px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white shadow-sm transition-colors',
+            confirming === 'abandon'
+              ? 'bg-rose-600 hover:bg-rose-700'
+              : 'bg-amber-600 hover:bg-amber-700',
+          )}
+        >
+          {confirming === 'restart' ? 'Yes, start over'
+            : confirming === 'collapse' ? 'Yes, collapse and continue' : 'Yes, remove it'}
+        </button>
+        <button
+          onClick={() => setConfirming(null)}
+          className="px-3 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted hover:text-ink transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
 
   // ── running ───────────────────────────────────────────────────────────────
   const body = (
@@ -156,6 +275,122 @@ export function BootstrapProgress({
         </>
       )}
 
+      {/* ── needs decision: duplicate identifiers, found before anything was copied ── */}
+      {needsDecision && dup && (
+        <>
+          <div className="flex items-start gap-2.5">
+            <Copy className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-ink leading-snug">Some identifiers are used more than once</p>
+              <p className="text-[12px] text-ink-muted leading-snug">
+                {num(dup.identifiers)} identifier(s) each belong to more than one item ({num(dup.sameType)} where
+                the copies share a type, {num(dup.crossType)} where they don't) —{' '}
+                {num(dup.extraCopies)} extra {dup.extraCopies === 1 ? 'copy' : 'copies'} in all. Version history
+                keeps one item per identifier, so the copy is paused until a manager decides: collapse them
+                here, or fix them in the source and re-check it.
+              </p>
+              <p className="text-[11px] text-ink-muted mt-1">Nothing has been copied yet.</p>
+            </div>
+          </div>
+          {shared > 0 && (
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2">
+              <Users className="w-3.5 h-3.5 text-amber-500 mt-0.5 shrink-0" />
+              <p className="min-w-0 text-[12px] text-ink leading-snug">
+                This graph is also read by{' '}
+                {dup.sharedWith.length > 0 && (
+                  <span className="font-semibold">{dup.sharedWith.map((s) => s.name).join(', ')}</span>
+                )}
+                {dup.sharedWith.length > 0 && otherWorkspaces > 0 && ' and '}
+                {otherWorkspaces > 0 && (
+                  <span className="font-semibold">
+                    {num(otherWorkspaces)} data source{otherWorkspaces === 1 ? '' : 's'} in other workspaces
+                  </span>
+                )}.
+                Collapsing removes the extra copies for {shared === 1 ? 'it' : 'them'} too.
+              </p>
+            </div>
+          )}
+          {listChanged && (
+            <p role="alert" className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-[12px] text-ink">
+              The list changed — review it again before deciding.
+            </p>
+          )}
+          <p className="mt-3 text-[11px] text-ink-muted">
+            Of each identifier's copies we keep the one synced most recently, then the one with the lowest
+            internal id:
+          </p>
+          <ul
+            className={cn(
+              'mt-1.5 overflow-y-auto rounded-lg border border-glass-border divide-y divide-glass-border',
+              variant === 'bar' ? 'max-h-28' : 'max-h-48',   // the canvas strip must not swallow the canvas
+            )}
+          >
+            {dup.sample.map((c) => (
+              <li key={`${c.urn} ${c.internalId}`} className="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
+                <span className="min-w-0 flex-1 truncate font-mono text-ink-secondary" title={c.urn}>{c.urn}</span>
+                <span className="shrink-0 text-ink-muted">{c.label ?? '—'}</span>
+                <span className="shrink-0 text-ink-muted tabular-nums">#{c.internalId}</span>
+                <span className="shrink-0 text-ink-muted">{syncedAt(c.lastSyncedAt)}</span>
+                <span className="w-9 shrink-0 text-right">
+                  {c.kept && (
+                    <span className="text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                      kept
+                    </span>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-[11px] text-ink-muted">
+            {dup.sample.length < dup.identifiers + dup.extraCopies && (
+              <>Showing {num(dup.sample.length)} of {num(dup.identifiers + dup.extraCopies)} copies · </>
+            )}
+            <a
+              href={bootstrapDuplicatesCsvUrl(wsId, dataSourceId)}
+              download={`duplicate-identifiers-${dataSourceId}.csv`}
+              className="inline-flex items-center gap-1 font-medium text-accent-lineage hover:underline"
+            >
+              <Download className="w-3 h-3" /> Download full list (CSV)
+            </a>
+          </p>
+          {canManage && confirmBox}
+          {canManage && !confirming && (
+            <div className="mt-3 flex items-center gap-2 flex-wrap">
+              {/* Collapsing removes data from the customer's own graph — it asks first, and says so. */}
+              <button
+                onClick={() => setConfirming('collapse')}
+                disabled={decide.isPending}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
+              >
+                {decide.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Merge className="w-3.5 h-3.5" />}
+                Collapse {num(dup.extraCopies)} {dup.extraCopies === 1 ? 'duplicate' : 'duplicates'} and continue
+              </button>
+              {/* Nothing has been copied, so re-reading the source costs nothing worth confirming. */}
+              <button
+                onClick={() => runRetry('restart')}
+                disabled={retry.isPending}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted border border-glass-border hover:text-ink transition-colors disabled:opacity-60"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Re-check source
+              </button>
+              <button
+                onClick={() => setConfirming('abandon')}
+                disabled={abandon.isPending}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted border border-glass-border hover:text-rose-500 hover:border-rose-500/30 transition-colors disabled:opacity-60"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Give up
+              </button>
+            </div>
+          )}
+          {!canManage && (
+            <p className="mt-3 inline-flex items-center gap-1.5 text-[12px] text-ink-muted">
+              <Hourglass className="w-3.5 h-3.5 shrink-0" />
+              Waiting for a workspace manager to decide what happens to the duplicates.
+            </p>
+          )}
+        </>
+      )}
+
       {/* ── completed: the integrity report ─────────────────────────────────── */}
       {done && job.report && (
         <>
@@ -184,6 +419,12 @@ export function BootstrapProgress({
             <p className="mt-1 text-[11px] text-ink-muted">
               {num(job.report.mergedDuplicateConnections)} duplicate connection(s) were merged (same type
               between the same two items — the graph reads identically).
+            </p>
+          )}
+          {(job.collapsed?.nodes ?? 0) > 0 && (
+            <p className="mt-1 text-[11px] text-ink-muted">
+              {num(job.collapsed!.nodes)} duplicate item(s) were collapsed into the copy kept for their
+              identifier, as decided — their connections moved to it.
             </p>
           )}
           {(job.report.skippedWithoutIdentifier?.nodes ?? 0) > 0 && (
@@ -228,79 +469,48 @@ export function BootstrapProgress({
           <div className="flex items-start gap-2.5">
             <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
             <div className="min-w-0">
-              <p className="text-sm font-semibold text-ink leading-snug">We stopped before changing anything</p>
+              <p className="text-sm font-semibold text-ink leading-snug">
+                {decided ? 'We stopped before switching it on' : 'We stopped before changing anything'}
+              </p>
               <p className="text-[12px] text-ink-muted leading-snug">
                 {job.error ?? 'The copy did not match the source graph.'}
               </p>
               <p className="text-[11px] text-ink-muted/80 mt-1">
-                This data source is untouched and still reads exactly as it did.
+                {decided
+                  ? 'This data source still reads as it did — except that duplicate copies you chose to collapse may already have been removed.'
+                  : 'This data source is untouched and still reads exactly as it did.'}
               </p>
             </div>
           </div>
-          {canManage && confirming && (
-            <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2.5">
-              <p className="text-[12px] text-ink leading-relaxed">
-                {confirming === 'restart' ? (
-                  <>
-                    Starting over throws away the{' '}
-                    <span className="font-semibold">{num(job.processed)} items</span> already copied
-                    and begins again from nothing.{' '}
-                    <span className="font-semibold">Resuming keeps them</span> and picks up where it
-                    stopped — try that first unless the source graph has changed.
-                  </>
-                ) : (
-                  <>
-                    This stops the copy and removes everything it wrote.{' '}
-                    <span className="font-semibold">Your data source is not touched</span> — it stays
-                    exactly as it is now, just without version control.
-                  </>
-                )}
-              </p>
-              <div className="mt-2.5 flex items-center gap-2">
-                <button
-                  onClick={() => {
-                    const what = confirming
-                    setConfirming(null)
-                    if (what === 'restart') runRetry('restart')
-                    else runAbandon()
-                  }}
-                  className={cn(
-                    'px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white shadow-sm transition-colors',
-                    confirming === 'restart'
-                      ? 'bg-amber-600 hover:bg-amber-700'
-                      : 'bg-rose-600 hover:bg-rose-700',
-                  )}
-                >
-                  {confirming === 'restart' ? 'Yes, start over' : 'Yes, remove it'}
-                </button>
-                <button
-                  onClick={() => setConfirming(null)}
-                  className="px-3 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted hover:text-ink transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
+          {canManage && confirmBox}
           {canManage && !confirming && (
             <div className="mt-3 flex items-center gap-2 flex-wrap">
-              <button
-                onClick={() => runRetry('resume')}
-                disabled={retry.isPending}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
-              >
-                {retry.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
-                Resume
-              </button>
+              {canResume && (
+                <button
+                  onClick={() => runRetry('resume')}
+                  disabled={retry.isPending}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
+                >
+                  {retry.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                  Resume
+                </button>
+              )}
               {/* Both of these DESTROY work, and they sit next to the safe one. They ask first —
                   and say what they will cost, in the numbers this job actually has. */}
-              <button
-                onClick={() => setConfirming('restart')}
-                disabled={retry.isPending}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium text-ink-muted border border-glass-border hover:text-ink transition-colors disabled:opacity-60"
-              >
-                Start over
-              </button>
+              {canRestart && (
+                <button
+                  onClick={() => setConfirming('restart')}
+                  disabled={retry.isPending}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] disabled:opacity-60',
+                    canResume
+                      ? 'font-medium text-ink-muted border border-glass-border hover:text-ink transition-colors'
+                      : 'font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm',
+                  )}
+                >
+                  Start over
+                </button>
+              )}
               <button
                 onClick={() => setConfirming('abandon')}
                 disabled={abandon.isPending}

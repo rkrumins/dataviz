@@ -444,7 +444,9 @@ export function useBootstrapGraph(wsId: string) {
 /** Live progress of the enablement job. Polls ONLY while a job is actually running —
  *  a completed/failed/absent job settles to no network at all (the storm-safe pattern
  *  the projection watermark uses) — and less often the longer it runs (`jobPollDelayMs`):
- *  a copy takes minutes to hours. `seed` renders instantly from /resolve on reload. */
+ *  a copy takes minutes to hours. A job paused for a decision (`needs_decision`) is not
+ *  polled either: it can wait for days, nothing moves until someone decides, and deciding
+ *  refetches it. `seed` renders instantly from /resolve on reload. */
 export function useBootstrapStatus(
   wsId?: string, dataSourceId?: string | null,
   opts: { enabled?: boolean; seed?: api.BootstrapJob | null } = {},
@@ -471,6 +473,20 @@ export function useRetryBootstrap(wsId: string, dataSourceId: string) {
     mutationFn: (mode: 'resume' | 'restart' = 'resume') =>
       api.retryBootstrap(wsId, dataSourceId, mode),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
+    },
+  })
+}
+
+/** Collapse the duplicates a paused copy found (pass the list's `fingerprint`), so it carries on.
+ *  Refetched on a refusal too: a refusal means the list changed or the job moved on, and the user
+ *  must see what it is now, not decide again on what it was. */
+export function useDecideBootstrapDuplicates(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (fingerprint: string) =>
+      api.decideBootstrapDuplicates(wsId, dataSourceId, { fingerprint }),
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
     },
   })

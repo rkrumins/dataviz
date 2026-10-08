@@ -34,6 +34,7 @@ tests/test_api_graph.py
 tests/test_automation_holds.py
 tests/test_automation_holds_scope.py
 tests/test_background_tasks.py
+tests/test_bootstrap_duplicates_unit.py
 tests/test_bootstrap_resilience.py
 tests/test_bootstrap_routes.py
 tests/test_branding_endpoint.py
@@ -49,12 +50,14 @@ tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
 tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
+tests/test_draft_overlay_lazy.py
 tests/test_drift_probe_cost.py
 tests/test_edge_integrity_index.py
 tests/test_edge_update_patch_semantics.py
 tests/test_edges_beneath.py
 tests/test_entity_audit_unit.py
 tests/test_export_downloads.py
+tests/test_export_native_lines.py
 tests/test_falkordb_edges_pair_binding.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
@@ -81,7 +84,9 @@ tests/test_heal_native_leftovers.py
 tests/test_helm_worker_lanes.py
 tests/test_import_formats.py
 tests/test_import_job_liveness.py
+tests/test_import_resolve.py
 tests/test_import_resume.py
+tests/test_import_template.py
 tests/test_import_uploads.py
 tests/test_import_xlsx.py
 tests/test_index_ddl_once.py
@@ -102,6 +107,7 @@ tests/test_object_store.py
 tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
+tests/test_projection_batched_payloads.py
 tests/test_projection_property_removal_unit.py
 tests/test_projection_stalled_reconcile.py
 tests/test_property_index.py
@@ -130,6 +136,7 @@ tests/test_search_values.py
 tests/test_seed_memory.py
 tests/test_shard_capacity.py
 tests/test_source_changed_signal.py
+tests/test_squash_plan_unit.py
 tests/test_store_governor.py
 tests/test_thread_count_assumption.py
 tests/test_timeout_ladder.py
@@ -138,6 +145,7 @@ tests/test_top_level_provider_kwargs.py
 tests/test_transfer_jobs.py
 tests/test_typed_compiler.py
 tests/test_typed_patch_merge.py
+tests/test_upload_pins.py
 tests/test_versioned_branch_resolve_identities.py
 tests/test_versioning_read_only_queries.py
 tests/test_view_bundle_schema.py

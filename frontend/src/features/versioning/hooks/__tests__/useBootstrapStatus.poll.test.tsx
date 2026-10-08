@@ -44,4 +44,17 @@ describe('useBootstrapStatus', () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(getBootstrapStatus).toHaveBeenCalledTimes(4)
   })
+
+  it('does not ask while the job is paused for a decision: nothing moves until someone decides', async () => {
+    getBootstrapStatus.mockReset().mockResolvedValue(job('needs_decision'))
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    )
+    const { result } = renderHook(() => useBootstrapStatus('ws1', 'ds1'), { wrapper })
+
+    await waitFor(() => expect(result.current.data?.status).toBe('needs_decision'))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(getBootstrapStatus).toHaveBeenCalledTimes(1)
+  })
 })

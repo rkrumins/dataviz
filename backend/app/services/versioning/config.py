@@ -220,6 +220,11 @@ DIFF_TREE_MAX_CHANGES: int = int(os.getenv("GRAPHVER_DIFF_TREE_MAX_CHANGES", "20
 # versioning worker, not inside the request: the squash holds every changed payload and hashes
 # them all, which a web pod's memory and event loop can't spare at that size.
 SYNC_PUBLISH_MAX_CHANGES: int = int(os.getenv("GRAPHVER_SYNC_PUBLISH_MAX_CHANGES", "20000"))
+# Kill switch for the narrow squash: an up-to-date draft of a non-fork graph, published with no
+# conflict resolutions, is planned from content hashes and its rows copied inside Postgres instead
+# of every changed payload being loaded, merged and re-hashed in the worker. Off = always the full
+# merge. Temporary: removed one release after the narrow squash ships.
+NARROW_SQUASH: bool = os.getenv("GRAPHVER_NARROW_SQUASH", "1").lower() not in ("0", "false", "no")
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")
@@ -316,6 +321,12 @@ BOOTSTRAP_EDGE_TARGET: int = int(os.getenv("GRAPHVER_BOOTSTRAP_EDGE_TARGET", "50
 BOOTSTRAP_WINDOW: int = int(os.getenv("GRAPHVER_BOOTSTRAP_WINDOW", "50000"))
 # Entities re-read from the SOURCE and content-hash-compared during validation.
 BOOTSTRAP_SAMPLE_K: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SAMPLE_K", "64"))
+# The backfill WRITES to the customer's live graph (anchor keys, and re-pointing a duplicate
+# collapse's edges), and a FalkorDB write holds the graph's write lock for its whole run, queueing
+# every canvas read behind it. So each write is fitted to at most this many changes, and the job
+# pauses this long between writes to let the readers through.
+BOOTSTRAP_BACKFILL_MAX_WRITES: int = int(os.getenv("GRAPHVER_BOOTSTRAP_BACKFILL_MAX_WRITES", "20000"))
+BOOTSTRAP_BACKFILL_PAUSE_MS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_BACKFILL_PAUSE_MS", "200"))
 # The import commit's Merkle tree is built inline up to this many entities; above it
 # the root is left NULL (the column is expressly "async-filled for bulk") and the
 # report says so, rather than OOM-ing on a 10M-entity in-memory tree.

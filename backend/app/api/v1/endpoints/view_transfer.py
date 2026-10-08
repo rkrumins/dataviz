@@ -10,9 +10,13 @@ a large view's identity check is legitimately longer than the 30s default.
     POST /import      one view → written, with an ``import`` version that proves what was stored;
                       or, on a version-controlled data source, staged in a draft to go live with it
     POST /packages    views WITH their graph data → a View Package, built by an export job
-    POST /packages/inspect            a package (raw body) → verified, kept, and described
-    POST /packages/{uploadId}/data    its data → a new draft of the target, by an import job;
-                                      the view then follows into that draft (/import, stage)
+    POST /packages/uploads            a package to import, sent in parts (PUT …/parts/{n}), then
+                                      completed (POST …/complete): checked by an inspect job
+    GET  /packages/{uploadId}         the checked package, described as /inspect describes a file
+    POST /packages/inspect            a package of at most 100 MB as one raw body, uploaded so
+    POST /packages/{uploadId}/data    its data → a new draft of the target, by an import job that
+                                      reads the upload in place; the view then follows into that
+                                      draft (/import, stage)
 
 Import is one view per call: every request stays well inside the timeout tier, a multi-view
 import reports honest progress, one failure doesn't block the rest, and ``requestId`` makes a
@@ -26,18 +30,19 @@ import logging
 import os
 import re
 import tempfile
-import uuid
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Type, TypeVar
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.versioning import (
-    _domain_errors, get_import_export_service, get_versioning_service,
+    _domain_errors, export_scope_of, get_import_export_service, get_versioning_service,
 )
 from backend.app.api.v1.endpoints.large_json import json_response
 from backend.app.api.v1.endpoints.view_guards import editable_view, may_edit_view, readable_view
@@ -53,13 +58,13 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM, WorkspaceORM
 from backend.app.db.repositories import data_source_repo, view_activity_repo, view_repo
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services.storage.object_store import storage_key
+from backend.app.services.versioning.import_export import uploads
 from backend.app.services.view_transfer import importing, limits, package
 from backend.app.services.view_transfer.bundle import BundleError, check_depth, parse_bundle
-from backend.app.services.view_transfer.export import export_views, preview as export_preview
+from backend.app.services.view_transfer.export import export_views, preview as export_preview, seal
 from backend.app.services.view_transfer.inspect import identity_matches, target_suggestions, view_payload
 from backend.app.services.view_transfer.references import Rewrite, reference_layout
-from backend.app.services.view_transfer.sources import effective_data_source
+from backend.app.services.view_transfer.sources import effective_data_source, ontology_match
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.common.models.view_transfer import HistoryEntry, Manifest
 
@@ -149,10 +154,8 @@ class PackageRequest(BaseModel):
     #: ``published``, or ``draft``: the caller's own draft of the view.
     dataVersion: Literal["published", "draft"] = "published"
     message: Optional[str] = Field(None, max_length=500)
-
-
-async def _package_bytes(data: bytes):
-    yield data
+    #: Makes the request safe to send again: the same id answers with the job it started.
+    requestId: Optional[str] = Field(None, min_length=8, max_length=128)
 
 
 class ExportPreviewRequest(BaseModel):
@@ -177,8 +180,8 @@ async def preview_view_export(
     return await json_response({"views": views})
 
 
-@router.post("/packages", dependencies=[Depends(require_feature("viewExportEnabled")),
-                                        Depends(require_feature("graphExportEnabled"))])
+@router.post("/packages", status_code=202, dependencies=[Depends(require_feature("viewExportEnabled")),
+                                                         Depends(require_feature("graphExportEnabled"))])
 async def export_view_package(
     req: PackageRequest = Body(...),
     user=Depends(get_optional_user),
@@ -189,10 +192,12 @@ async def export_view_package(
 ):
     """Package views with their graph data, for another environment to import into a draft.
 
-    A package holds views from ONE version-controlled data source. The views are sealed as
-    versions, exactly as a view file's are; the data is the data source's own export (the
-    view's entities, or the whole source), written by an export job that packages the two. Poll
+    A package holds views from ONE version-controlled data source. Here the views are sealed as
+    versions, exactly as a view file's are, and published data is pinned to the commit it stands
+    at; an export job builds the package off the request — the views' file, then the data streamed
+    into it (the view's own entities, as its sealed version places them, or the whole source). Poll
     and download it through the data source's export endpoints; the download is named for it.
+    Sending the same ``requestId`` again answers with the job it started.
     """
     if req.scope == "view" and len(req.views) != 1:
         raise HTTPException(status_code=422, detail=(
@@ -207,14 +212,15 @@ async def export_view_package(
         view = await readable_view(session, ref.viewId, user, claims)
         requests.append((view, ref.version, await may_edit_view(session, view, user, claims)))
     first = requests[0][0]
+    workspace_id = first.workspace_id
     sources = {(ds.id if ds else None) for ds in [await effective_data_source(session, row) for row, _, _ in requests]}
     ds_id = next(iter(sources))
-    if len(sources) != 1 or ds_id is None or any(row.workspace_id != first.workspace_id for row, _, _ in requests):
+    if len(sources) != 1 or ds_id is None or any(row.workspace_id != workspace_id for row, _, _ in requests):
         raise HTTPException(status_code=422, detail="A package holds views from one data source.")
-    if not has_permission(claims, "workspace:datasource:read", workspace_id=first.workspace_id):
+    if not has_permission(claims, "workspace:datasource:read", workspace_id=workspace_id):
         raise HTTPException(status_code=403, detail="Missing permission: workspace:datasource:read")
     graph = await svc.get_graph_by_data_source(ds_id)
-    if graph is None or graph.get("workspace_id") != first.workspace_id:
+    if graph is None or graph.get("workspace_id") != workspace_id:
         raise HTTPException(status_code=422, detail={
             "type": "not_versioned",
             "message": "Only a data source under version control can be packaged with its data.",
@@ -222,16 +228,24 @@ async def export_view_package(
     actor = _actor(user)
     branch_id = None
     if req.dataVersion == "draft":
-        resolved = await svc.resolve_graph(data_source_id=ds_id, actor=actor, workspace_id=first.workspace_id,
+        resolved = await svc.resolve_graph(data_source_id=ds_id, actor=actor, workspace_id=workspace_id,
                                            open_draft_if_absent=False, originating_view_id=first.id)
         branch_id = ((resolved or {}).get("my_draft") or {}).get("branch_id")
         if not branch_id:
             raise HTTPException(status_code=422, detail="You have no draft of this view to package.")
+    key = f"package:{req.requestId}" if req.requestId else None
+    if key:
+        started = await ie.find_job(graph_id=graph["graph_id"], idempotency_key=key)
+        if started is not None:
+            return _package_started(started, req.requestId)
 
     try:
-        bundle, sealed = await export_views(session, requests, actor=actor, message=req.message)
+        sealed = [await seal(session, row, number, actor=actor, message=req.message, may_seal=may_seal)
+                  for row, number, may_seal in requests]
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    if req.scope == "view" and await asyncio.to_thread(export_scope_of, sealed[0].definition, []) is None:
+        raise HTTPException(status_code=422, detail=package.NO_PLACEMENTS)
     for item in sealed:
         await view_activity_repo.record_view_activity(
             session, view_id=item.row.id, workspace_id=item.row.workspace_id, action="exported",
@@ -243,37 +257,225 @@ async def export_view_package(
         filename = f"{_slug(sealed[0].label.get('name'))}.v{sealed[0].version.version}.view-package.zip"
     else:
         filename = f"{len(sealed)}-views.view-package.zip"
+    views = [{"viewId": item.row.id, "version": item.version.version} for item in sealed]
+    # The job reads these versions from another process, so they are committed before it exists.
+    await session.commit()
 
-    with _domain_errors():
-        created = await ie.create_export_job(
-            workspace_id=first.workspace_id, data_source_id=ds_id, graph_id=graph["graph_id"], actor=actor,
-            export_format="ndjson", scope_view_id=first.id if req.scope == "view" else None,
-            branch_id=branch_id, provider_id=graph.get("provider_id"),
-            package={"fileName": filename, "scope": req.scope, "dataVersion": req.dataVersion,
-                     "views": len(sealed), "bundleHash": bundle["bundleHash"]},
-        )
-    prefix = created["result_uri"].rsplit("/", 1)[0]
-    await ie.store.put_stream(f"{prefix}/view-bundle.json",
-                              _package_bytes(json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")))
+    try:
+        with _domain_errors():
+            created = await ie.create_export_job(
+                workspace_id=workspace_id, data_source_id=ds_id, graph_id=graph["graph_id"], actor=actor,
+                export_format="ndjson", scope_view_id=first.id if req.scope == "view" else None,
+                branch_id=branch_id, provider_id=graph.get("provider_id"),
+                as_of_seq=None if branch_id else graph.get("main_head_commit_seq"), idempotency_key=key,
+                package={"fileName": filename, "scope": req.scope, "dataVersion": req.dataVersion,
+                         "views": views, "actor": actor},
+            )
+    except IntegrityError:                  # the same requestId, sent twice at once
+        return _package_started(await ie.find_job(graph_id=graph["graph_id"], idempotency_key=key),
+                                req.requestId)
     status = await ie.start_export(created["job_id"])
-    return {"jobId": created["job_id"], "graphId": graph["graph_id"], "workspaceId": first.workspace_id,
-            "fileName": filename, "bundleHash": bundle["bundleHash"], "status": status,
-            "views": [{"viewId": item.row.id, "version": item.version.version} for item in sealed]}
+    return {"jobId": created["job_id"], "graphId": graph["graph_id"], "workspaceId": workspace_id,
+            "fileName": filename, "status": status, "views": views, "requestId": req.requestId}
 
 
-#: Where an inspected package waits for its data to be imported (pruned after a day).
-_UPLOADS = package.UPLOADS_PREFIX
-_UPLOAD_ID = re.compile(r"^up_[0-9a-f]{32}$")
+def _package_started(job: Dict[str, Any], request_id: Optional[str]) -> Dict[str, Any]:
+    """What ``POST /packages`` answered when it started ``job``."""
+    return {"jobId": job["jobId"], "graphId": job["graphId"], "workspaceId": job["workspaceId"],
+            "fileName": job.get("fileName"), "status": job["status"],
+            "views": (job.get("package") or {}).get("views") or [], "requestId": request_id}
 
 
-def _upload_key(upload_id: str, name: str) -> str:
-    return storage_key(_UPLOADS, upload_id, name)
+# ── Importing a package: uploaded in parts, checked by a job, its data read in place ─────
 
 
-def _package_error(exc: package.PackageError) -> HTTPException:
-    return HTTPException(status_code=413 if exc.code == "too_large" else 422, detail={
-        "type": "invalid_package", "code": exc.code, "message": str(exc),
-    })
+class PackageUploadRequest(BaseModel):
+    fileName: str = Field(..., max_length=500)
+    size: int = Field(..., gt=0)
+
+
+@contextmanager
+def _upload_errors():
+    try:
+        yield
+    except uploads.UploadError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
+async def _importer(user) -> None:
+    """Who may bring a package's data in: someone signed in, where version control is on."""
+    await require_versioning_enabled()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to import a view with its data.")
+
+
+async def _package_upload(ie, upload_id: str, user) -> Dict[str, Any]:
+    with _upload_errors():
+        return await uploads.load_package(ie.store, upload_id, user.id)
+
+
+async def _upload_state(ie, record: Dict[str, Any], *, received: bool = False) -> Dict[str, Any]:
+    """The upload as its dialog follows it: ``uploading`` until it is completed, ``inspecting``
+    while its job checks it (with the job's progress), then ``ready`` or ``invalid`` (with why).
+    ``received`` adds the parts stored whole (every part, once the upload is completed)."""
+    state = {"uploadId": record["uploadId"], "fileName": record["fileName"], "size": record["size"],
+             "partBytes": record["partBytes"], "parts": record["parts"],
+             "expiresAt": uploads.expires_at(record).isoformat(), "jobId": record.get("jobId")}
+    if record.get("error"):
+        state.update(status="invalid", error=record["error"])
+    elif record.get("archive"):
+        state["status"] = "ready"
+    elif record.get("jobId"):
+        job = await ie.get_job(record["jobId"]) or {}
+        if job.get("status") == "failed":           # the check broke (not a verdict): complete again
+            state.update(status="invalid", error={"code": "inspect_failed", "message": job.get("errorMessage")
+                                                  or "The package couldn't be checked. Try again."})
+        else:
+            state.update(status="inspecting", phase=job.get("phase"), progress=job.get("progress"),
+                         processed=job.get("processed"), total=job.get("total"))
+    else:
+        state["status"] = "uploading"
+    if received:
+        state["received"] = (list(range(record["parts"])) if record.get("jobId")
+                             else await uploads.received(ie.store, record))
+    return state
+
+
+async def _inspect(ie, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Queue the upload's check, once (asking again answers with the same job; a check that broke
+    is queued again). Every part must be in. Returns the record as it now stands.
+
+    Repeatable at every step: a completion that died after creating the job — before recording it
+    on the upload, or before queuing it — left a pending job no worker claims and an upload that
+    still reads ``uploading``. The next completion finds that job (``created`` False) and finishes
+    what the first started: it records the job on the upload if the stored record (read again)
+    still lacks it, and queues a pending job — ``start_inspect`` only touches a pending row, and a
+    pending inspection is queued already unless no completion got that far."""
+    if not record.get("jobId"):
+        have = set(await uploads.received(ie.store, record))
+        missing = [n for n in range(record["parts"]) if n not in have]
+        if missing:
+            raise HTTPException(status_code=409, detail={
+                "type": "parts_missing", "missing": missing,
+                "message": f"{len(missing)} of the file's {record['parts']} parts haven't arrived yet. "
+                           "Send them, then complete the upload."})
+        job_id, created = await ie.create_inspect_job(upload_id=record["uploadId"],
+                                                      source_uri=uploads.record_key(record))
+        if not created:
+            record = await uploads.read_record(ie.store, uploads.record_key(record))
+        if not record.get("jobId"):     # recorded before it is queued, so before it can run
+            record = {**record, "jobId": job_id}
+            await uploads.save(ie.store, record)
+    job = await ie.get_job(record["jobId"]) or {}
+    if job.get("status") == "pending":
+        await ie.start_inspect(record["jobId"])
+    elif job.get("status") == "failed" and not record.get("error"):
+        await ie.requeue_failed(record["jobId"])
+    return record
+
+
+@router.post("/packages/uploads", status_code=201, dependencies=[Depends(require_feature("viewImportEnabled"))])
+async def create_package_upload(
+    body: PackageUploadRequest,
+    user=Depends(get_optional_user),
+    ie=Depends(get_import_export_service),
+):
+    """Start uploading a view package: how it is to be split (``partBytes``, ``parts``). Send each
+    part with ``PUT …/parts/{n}``, several at once and in any order, then complete the upload. A
+    package too large to take is refused here, before any of it is sent (413)."""
+    await _importer(user)
+    with _upload_errors():
+        record = await uploads.create_package(ie.store, owner=user.id, file_name=body.fileName, size=body.size)
+    return {**await _upload_state(ie, record), "received": []}
+
+
+@router.get("/packages/uploads/{upload_id}", dependencies=[Depends(require_feature("viewImportEnabled"))])
+async def get_package_upload(
+    upload_id: str,
+    user=Depends(get_optional_user),
+    ie=Depends(get_import_export_service),
+):
+    """Where the upload stands: the parts that arrived (what to send again to resume it), and once
+    completed, its check (``inspecting``, then ``ready`` or ``invalid``)."""
+    await _importer(user)
+    return await _upload_state(ie, await _package_upload(ie, upload_id, user), received=True)
+
+
+@router.put("/packages/uploads/{upload_id}/parts/{part}",
+            dependencies=[Depends(require_feature("viewImportEnabled"))])
+async def put_package_upload_part(
+    upload_id: str, part: int, request: Request,
+    user=Depends(get_optional_user),
+    ie=Depends(get_import_export_service),
+):
+    """One part of the package, the raw request body. Sending a part again replaces it — until the
+    upload is completed: what was checked is what is imported."""
+    await _importer(user)
+    record = await _package_upload(ie, upload_id, user)
+    if record.get("jobId"):
+        raise HTTPException(status_code=409, detail="This upload is complete. Upload the file again to change it.")
+    with _upload_errors():
+        size = await uploads.put_part(ie.store, record, part, request.stream())
+    return {"part": part, "size": size}
+
+
+@router.post("/packages/uploads/{upload_id}/complete", status_code=202,
+             dependencies=[Depends(require_feature("viewImportEnabled"))])
+async def complete_package_upload(
+    upload_id: str,
+    user=Depends(get_optional_user),
+    ie=Depends(get_import_export_service),
+):
+    """Every part is in: check the package, on a job of its own (``GET …/uploads/{id}`` follows
+    it; ``GET /packages/{id}`` then describes it). Asking again answers with the same check."""
+    await _importer(user)
+    record = await _inspect(ie, await _package_upload(ie, upload_id, user))
+    state = await _upload_state(ie, record)
+    return {"uploadId": upload_id, "jobId": record["jobId"], "status": state["status"]}
+
+
+async def _file_range(path: str, start: int, length: int):
+    f = await asyncio.to_thread(open, path, "rb")
+    try:
+        await asyncio.to_thread(f.seek, start)
+        while length > 0:
+            chunk = await asyncio.to_thread(f.read, min(length, 1024 * 1024))
+            if not chunk:
+                return
+            length -= len(chunk)
+            yield chunk
+    finally:
+        await asyncio.to_thread(f.close)
+
+
+@router.post("/packages/inspect", status_code=202, dependencies=[Depends(require_feature("viewImportEnabled"))])
+async def inspect_view_package(
+    request: Request,
+    user=Depends(get_optional_user),
+    ie=Depends(get_import_export_service),
+):
+    """A package of at most 100 MB sent whole (the raw body), for scripts: stored as an upload and
+    checked as one sent in parts is. Returns ``{uploadId, jobId}``; follow it as such an upload."""
+    await _importer(user)
+    path = await _spool(request, limits.MAX_PACKAGE_BYTES)
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+        if head != _ZIP_MAGIC:
+            raise HTTPException(status_code=422, detail={
+                "type": "invalid_package", "code": "view_file",
+                "message": "This is a view file, without data. Import it with \"Import a view\".",
+            })
+        with _upload_errors():
+            record = await uploads.create_package(ie.store, owner=user.id, file_name="package.zip",
+                                                  size=os.path.getsize(path))
+            for n in range(record["parts"]):
+                await uploads.put_part(ie.store, record, n, _file_range(
+                    path, n * record["partBytes"], uploads.part_size(record, n)))
+    finally:
+        os.unlink(path)
+    record = await _inspect(ie, record)
+    return {"uploadId": record["uploadId"], "jobId": record["jobId"]}
 
 
 async def _spool(request: Request, cap: int) -> str:
@@ -281,7 +483,8 @@ async def _spool(request: Request, cap: int) -> str:
     passes ``cap``."""
     too_big = HTTPException(status_code=413, detail={
         "type": "invalid_package", "code": "too_large",
-        "message": f"This file is larger than {cap // (1024 * 1024)} MB, the most a package can be.",
+        "message": f"This file is larger than {cap // (1024 * 1024)} MB, the most a package can be "
+                   "in one request. Upload it in parts.",
     })
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > cap:
@@ -307,52 +510,56 @@ async def _read_json(store, key: str) -> Optional[Dict[str, Any]]:
     return json.loads(b"".join([c async for c in store.open_stream(key)]).decode("utf-8"))
 
 
-@router.post("/packages/inspect", dependencies=[Depends(require_feature("viewImportEnabled"))])
-async def inspect_view_package(
-    request: Request,
+_EXPIRED = "This package upload has expired. Choose the file again."
+
+
+def _gone() -> HTTPException:
+    """The package's upload, or a part of it, is gone: expired and swept. 410 ``upload_expired``,
+    typed, so the wizard asks for the file again on this answer and on no other — a 404 here also
+    means a missing workspace or view."""
+    return HTTPException(status_code=410, detail={"type": "upload_expired", "message": _EXPIRED})
+
+
+async def _package_to_read(ie, upload_id: str, user) -> Dict[str, Any]:
+    """The upload a package route reads, or :func:`_gone` — for one that was never this person's
+    too: the same answer either way, as the upload routes give their 404."""
+    try:
+        return await _package_upload(ie, upload_id, user)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise _gone()
+        raise
+
+
+@router.get("/packages/{upload_id}", dependencies=[Depends(require_feature("viewImportEnabled"))])
+async def get_view_package(
+    upload_id: str,
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
     svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    """Read a view package (the raw body): verify every part, keep it for the data import that
-    follows (``uploadId``), and describe it as ``/inspect`` describes a view file, plus the
-    package itself. Only data sources under version control can take its data, since it goes into
-    a draft, so each suggested target says whether it is (``versioned``)."""
-    await require_versioning_enabled()
-    if user is None:
-        raise HTTPException(status_code=401, detail="Sign in to import a view with its data.")
-    path = await _spool(request, limits.MAX_PACKAGE_BYTES)
-    try:
-        with open(path, "rb") as f:
-            head = f.read(4)
-        if head != _ZIP_MAGIC:
-            raise HTTPException(status_code=422, detail={
-                "type": "invalid_package", "code": "view_file",
-                "message": "This is a view file, without data. Import it with \"Import a view\".",
-            })
-        try:
-            parsed_package = await asyncio.to_thread(package.read_package, path)
-        except package.PackageError as exc:
-            raise _package_error(exc)
-    finally:
-        os.unlink(path)
-    try:
-        try:
-            parsed = await asyncio.to_thread(parse_bundle, parsed_package.bundle)
-        except BundleError as exc:
-            raise _bundle_error(exc)
-        upload_id = f"up_{uuid.uuid4().hex}"
-        await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_DATA),
-                                  package.file_chunks(parsed_package.data_path))
-    finally:
-        os.unlink(parsed_package.data_path)
-    manifest = parsed_package.manifest
-    await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD), _package_bytes(json.dumps({
-        "owner": user.id, "createdAt": datetime.now(timezone.utc).isoformat(),
-        "views": [(v.raw.get("metadata") or {}).get("name") for v in parsed.views],
-    }).encode("utf-8")))
+    """A checked package, described as ``/inspect`` describes a view file — plus the package
+    itself (its parts, verified or not, and what its data holds by type: ``package.data.
+    typeStats``), and per source, the semantic layer here that is its own (``ontologyMatch``).
+    Only data sources under version control can take its data, since it goes into a draft, so each
+    suggested target says whether it is (``versioned``). 409 until the check is done; 422 when the
+    file is no package to import; 410 ``upload_expired`` once it is gone."""
+    await _importer(user)
+    record = await _package_to_read(ie, upload_id, user)
+    state = await _upload_state(ie, record)
+    if state["status"] == "invalid":
+        raise HTTPException(status_code=422, detail={"type": "invalid_package", **state["error"]})
+    if state["status"] != "ready":
+        raise HTTPException(status_code=409, detail={"type": "not_ready", "status": state["status"],
+                                                     "jobId": state["jobId"]})
+    inspection = await _read_json(ie.store, uploads.upload_key(record, package.INSPECTION))
+    key = uploads.upload_key(record, package.UPLOAD_BUNDLE)
+    if inspection is None or not (await ie.store.stat(key)).exists:
+        raise _gone()
+    raw = b"".join([c async for c in ie.store.open_stream(key)])
+    parsed = await asyncio.to_thread(parse_bundle, raw)            # checked when it was uploaded
 
     ctx = await _viewer_context(session, user, claims) if rbac_flag("RBAC_ENFORCE_VIEWS") else None
     suggestions = await target_suggestions(session, parsed, claims)
@@ -364,19 +571,19 @@ async def inspect_view_package(
                 graph = await svc.get_graph_by_data_source(ds) if ds else None
                 versioned[ds] = graph is not None and graph.get("workspace_id") == item.get("workspaceId")
             item["versioned"] = versioned[ds]
+    bundle = parsed.bundle.model_dump(mode="json", exclude={"views"})
     return await json_response({
         "uploadId": upload_id,
-        "package": {
-            "scope": manifest.get("scope"), "data": manifest.get("data"), "createdAt": manifest.get("createdAt"),
-            "parts": parsed_package.parts,
-            "integrity": "verified" if parsed_package.verified else "modified",
-        },
-        "bundle": parsed.bundle.model_dump(mode="json", exclude={"views"}),
+        "package": inspection["package"],
+        "bundle": bundle,
         "integrity": parsed.integrity,
         "notices": parsed.notices,
         "views": await asyncio.to_thread(view_payload, parsed),
         "identityMatches": await identity_matches(session, parsed, ctx),
         "targetSuggestions": suggestions,
+        "ontologyMatch": await ontology_match(session, claims, bundle["sources"],
+                                              (bundle.get("generator") or {}).get("environment")),
+        "expiresAt": state["expiresAt"],
     })
 
 
@@ -386,6 +593,11 @@ class PackageDataRequest(BaseModel):
     #: The view here the package's view will update, if it updates one: the draft is for it.
     viewId: Optional[str] = Field(None, max_length=128)
     draftName: Optional[str] = Field(None, max_length=200)
+
+
+#: How close to its expiry an upload stops taking new imports: a job created now is pinned against
+#: the sweep (uploads.jobs_input_prefixes), and this keeps the sweep from beating it to the upload.
+_EXPIRY_MARGIN = timedelta(hours=1)
 
 
 @router.post("/packages/{upload_id}/data", dependencies=[Depends(require_feature("viewImportEnabled"))])
@@ -398,41 +610,26 @@ async def import_package_data(
     svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    """Bring an inspected package's graph data into a new draft of the target data source: the
-    first half of importing a view with its data. The view follows into the same draft
-    (``/import`` with ``stage`` and this draft as ``target.branchId``), so the two are reviewed
-    and published together. It only ever adds and updates: a package never deletes anything.
+    """Bring a checked package's graph data into a new draft of the target data source: the first
+    half of importing a view with its data. The view follows into the same draft (``/import`` with
+    ``stage`` and this draft as ``target.branchId``), so the two are reviewed and published
+    together. It only ever adds and updates: a package never deletes anything.
 
-    Progress is the import job's, through the data source's import endpoints. Asking again for
-    the same upload answers with the job already started, or, when that job failed, queues that
-    same job again: it resumes into the same draft from where it stopped, reading its own copy of
-    the data (the upload's went with the job). A job still queued or running is never queued again.
+    The import job reads the data from the upload where it is — nothing is copied — and the upload
+    is kept while any job may still read it. Each target (data source, and view) gets its own draft
+    and job; asking again for the same target answers with its job, or, when that job failed,
+    queues it again: it resumes into the same draft from where it stopped. A job still queued or
+    running is never queued twice. Progress is the import job's, through the data source's import
+    endpoints. 409 until the package is checked; 410 ``upload_expired`` when the upload is gone or
+    about to expire.
     """
-    await require_versioning_enabled()
-    if user is None:
-        raise HTTPException(status_code=401, detail="Sign in to import a view with its data.")
-    expired = HTTPException(status_code=404, detail="This package upload has expired. Choose the file again.")
-    if not _UPLOAD_ID.match(upload_id):
-        raise expired
-    record = await _read_json(ie.store, _upload_key(upload_id, package.UPLOAD_RECORD))
-    if record is None or record.get("owner") != user.id:
-        raise expired
-    done = record.get("data")
-    if done:
-        if (done.get("workspaceId"), done.get("dataSourceId"), done.get("viewId")) != \
-                (body.workspaceId, body.dataSourceId, body.viewId):
-            # The upload's data went with that job: taking it somewhere else needs the file again.
-            raise HTTPException(status_code=409, detail=(
-                f"This package's data already went into the draft “{done.get('draftName')}”. "
-                "Choose the file again to bring it in here."))
-        job = await ie.get_job(done["jobId"])
-        if (job or {}).get("status") != "failed":
-            return done
-        source = (job or {}).get("sourceUri")
-        if not source or not (await ie.store.stat(source)).exists:
-            raise expired
-        await ie.requeue_failed(done["jobId"])    # a second retry racing this one finds it queued
-        return done
+    await _importer(user)
+    record = await _package_to_read(ie, upload_id, user)
+    if not record.get("archive"):
+        state = await _upload_state(ie, record)
+        raise HTTPException(status_code=409, detail={
+            "type": "not_inspected", "status": state["status"],
+            "message": "This package hasn't been checked yet. Wait for its check to finish."})
 
     workspace = await session.get(WorkspaceORM, body.workspaceId)
     if workspace is None or workspace.deleted_at is not None:
@@ -440,36 +637,50 @@ async def import_package_data(
     ds = await data_source_repo.get_data_source_orm(session, body.dataSourceId)
     if ds is None or ds.workspace_id != body.workspaceId:
         raise HTTPException(status_code=422, detail="That data source isn't part of this workspace.")
-    target = importing.Target(body.workspaceId, body.dataSourceId)
-    graph = await _draft_graph(svc, target, claims)
+    graph = await _draft_graph(svc, importing.Target(body.workspaceId, body.dataSourceId), claims)
     if body.viewId:
         row = await editable_view(session, body.viewId, user, claims)
         view_ds = await effective_data_source(session, row)
         if view_ds is None or view_ds.id != body.dataSourceId:
             raise HTTPException(status_code=422, detail="That view reads another data source.")
-    if not (await ie.store.stat(_upload_key(upload_id, package.UPLOAD_DATA))).exists:
-        raise expired
 
+    key = f"pkgdata:{upload_id}:{body.viewId or '-'}"
     names = record.get("views") or []
     name = (body.draftName or (f"Import: {names[0]}" if len(names) == 1 else f"Import: {len(names)} views"))[:200]
+    # Once checked, the upload's record is never written again: its imports read it while they run.
+    started = await ie.find_job(graph_id=graph["graph_id"], idempotency_key=key)
+    if started is not None:
+        if started["status"] == "failed":
+            if len(await uploads.received(ie.store, record)) != record["parts"]:
+                raise _gone()
+            await ie.requeue_failed(started["jobId"])    # a second retry racing this one finds it queued
+        return _data_started(started, body, name)
+    if datetime.now(timezone.utc) >= uploads.expires_at(record) - _EXPIRY_MARGIN:
+        raise HTTPException(status_code=410, detail={
+            "type": "upload_expired",
+            "message": "This package upload is about to expire. Choose the file again to import it."})
+
     with _domain_errors():
         branch_id = await svc.open_draft(graph_id=graph["graph_id"], owner=user.id, name=name,
                                          originating_view_id=body.viewId)
-        created = await ie.create_import_job(
-            workspace_id=body.workspaceId, data_source_id=body.dataSourceId, graph_id=graph["graph_id"],
-            actor=user.id, import_format="ndjson", branch_id=branch_id, reconcile_mode="upsert",
-            idempotency_key=f"pkgdata:{upload_id}:{body.viewId or '-'}", name=name,
-        )
-    await ie.store.put_stream(created["source_uri"],
-                              ie.store.open_stream(_upload_key(upload_id, package.UPLOAD_DATA)))
-    data = {"jobId": created["job_id"], "branchId": branch_id, "graphId": graph["graph_id"],
-            "workspaceId": body.workspaceId, "dataSourceId": body.dataSourceId, "viewId": body.viewId,
-            "draftName": name}
-    await ie.store.put_stream(_upload_key(upload_id, package.UPLOAD_RECORD),
-                              _package_bytes(json.dumps({**record, "data": data}).encode("utf-8")))
-    await ie.store.delete(_upload_key(upload_id, package.UPLOAD_DATA))     # the job has its own copy
+        try:
+            created = await ie.create_import_job(
+                workspace_id=body.workspaceId, data_source_id=body.dataSourceId, graph_id=graph["graph_id"],
+                actor=user.id, import_format="ndjson", source_uri=uploads.record_key(record),
+                branch_id=branch_id, reconcile_mode="upsert", idempotency_key=key, name=name,
+            )
+        except IntegrityError:              # the same target, asked for twice at once
+            return _data_started(await ie.find_job(graph_id=graph["graph_id"], idempotency_key=key), body, name)
     await ie.start_import(created["job_id"])
-    return data
+    return _data_started({"jobId": created["job_id"], "branchId": branch_id, "graphId": graph["graph_id"]},
+                         body, name)
+
+
+def _data_started(job: Dict[str, Any], body: PackageDataRequest, draft_name: str) -> Dict[str, Any]:
+    """What ``/data`` answers for the import ``job`` it started (or had started) for this target."""
+    return {"jobId": job["jobId"], "branchId": job["branchId"], "graphId": job["graphId"],
+            "workspaceId": body.workspaceId, "dataSourceId": body.dataSourceId, "viewId": body.viewId,
+            "draftName": draft_name}
 
 
 # ── Import ──────────────────────────────────────────────────────────────────

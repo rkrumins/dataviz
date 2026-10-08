@@ -62,8 +62,8 @@ export function useBootstrapWatch(
 
   return {
     job,
-    /** A copy is running, or it stopped and needs a decision. */
-    showProgress: !!job && (active || job.status === 'failed'),
+    /** A copy is running, paused for a decision about duplicates, or it stopped and needs one. */
+    showProgress: !!job && (active || job.status === 'needs_decision' || job.status === 'failed'),
     /** The integrity report, for whoever ran the copy, until they dismiss it. */
     showReport: !!job && job.status === 'completed' && watching && !reportDismissed,
     dismissReport: () => setDismissed(dataSourceId),

@@ -23,10 +23,11 @@ from ..models import JobORM
 
 logger = logging.getLogger(__name__)
 
-# The jobs the general transfer slots take, and the service entry point that runs each: called as
-# ``entry(job_id, lease)``, it records a failure on the job rather than raising.
+# The jobs the transfer slots take (the general ones, and the dedicated inspect slot), and the
+# service entry point that runs each: called as ``entry(job_id, lease)``, it records a failure on
+# the job rather than raising.
 _ENTRY_POINTS = {"ingest": "run_import_safe", "export": "run_export_safe",
-                 "publish": "run_publish_safe"}
+                 "publish": "run_publish_safe", "package_inspect": "run_inspect_safe"}
 JOB_TYPES = job_lease.TRANSFER_TYPES
 
 # What a queued job reads when no worker took it in ``TRANSFER_QUEUE_TIMEOUT_SECS``.

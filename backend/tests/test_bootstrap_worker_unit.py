@@ -103,7 +103,7 @@ def test_scan_summary_keeps_node_and_edge_tallies_apart():
                             rejects={"danglingEdges": 0}, sample=None, dupes=1)
     assert s["scanned"] == {"nodes": 2, "edges": 3,
                             "byLabel": {"Table": 2}, "byType": {"FLOWS_TO": 2}}
-    assert s["written"] == {"nodes": 2, "edges": 2}
+    assert (s["written"]["nodes"], s["written"]["edges"]) == (2, 2)
     assert s["collapsedParallelEdges"] == 1
 
 
@@ -184,10 +184,12 @@ def test_reservoir_resumes_from_checkpointed_state():
 # ── job-worker edge serialization is the canonical shape (regression: rebuild blanked edges) ──
 
 def _edges_to_rows(rows, live):
-    # `_edges_to_rows` reads no instance state, so drive it with a bare object as `self`.
-    commit = types.SimpleNamespace(id="cmt_1", commit_seq=1)
-    return BootstrapRunner._edges_to_rows(
-        object(), rows, commit, "main_1", "g1", "alice", None, live)
+    # `_edges_to_rows` reads no instance state, so drive it with a bare object as `self`. A scan
+    # row is (source id, target id, source urn, target urn, type, properties).
+    ctx = types.SimpleNamespace(commit_id="cmt_1", commit_seq=1, main_id="main_1", actor="alice")
+    win = BootstrapRunner._edges_to_rows(
+        object(), [(i, i + 1, *row) for i, row in enumerate(rows)], ctx, "g1", None, live)
+    return win.dicts, win.scanned, win.rejects, None, win.dupes
 
 
 def test_edges_to_rows_emits_canonical_payload_with_confidence_and_nested_props():

@@ -165,7 +165,7 @@ async def test_the_worker_sweeps_the_store_daily(monkeypatch):
     swept = []
 
     class _Store:
-        async def sweep(self, *, older_than_hours):
+        async def sweep(self, *, older_than_hours, keep_prefixes=()):
             swept.append(older_than_hours)
             return 0
 
@@ -176,8 +176,14 @@ async def test_the_worker_sweeps_the_store_daily(monkeypatch):
     async def _settle(_versioning):
         return {}
 
+    async def _no_pins():
+        return set()
+
+    from backend.app.services.versioning.import_export import uploads
+
     monkeypatch.setattr(object_store, "get_object_store", lambda: _Store())
     monkeypatch.setattr(draft_views, "settle", _settle)
+    monkeypatch.setattr(uploads, "jobs_input_prefixes", _no_pins)   # pins: test_upload_pins.py
     await ProjectionWorker(None, versioning=_Versioning()).sweep_once()
     assert swept == [config.OBJECT_STORE_TTL_HOURS]
 
@@ -320,6 +326,25 @@ async def test_db_store_delete_and_delete_prefix_match_keys_literally(db_store, 
     await db_store.delete("ws/g/jobX1/source.ndjson")
     assert await left() == ["ws/g/job_10/source.ndjson", "ws/g/job_1"]
     assert len(await _chunk_rows(sessions)) == 2, "the chunks went with their objects"
+
+
+async def test_db_store_reads_a_few_chunks_per_session(db_store, sessions):
+    """A read takes ``_CHUNKS_PER_TXN`` chunks per session, not a session (and a round trip) per
+    MiB — from any offset, in order."""
+    data = random.Random(5).randbytes(20 * MiB + 5)
+    await db_store.put_stream("ws/g/job/big", _chunks(data))
+    opened = []
+
+    @contextlib.asynccontextmanager
+    async def counted():
+        opened.append(1)
+        async with sessions() as s:
+            yield s
+
+    reader = DatabaseObjectStore(session_factory=counted)
+    assert await _drain(reader.open_stream("ws/g/job/big")) == data
+    assert len(opened) == 1 + 3, "the object's row, then 21 chunks in 3 sessions"
+    assert await _drain(reader.open_stream("ws/g/job/big", start=9 * MiB + 7)) == data[9 * MiB + 7:]
 
 
 async def test_db_store_sweep_reclaims_old_objects_and_dead_puts(db_store, sessions):

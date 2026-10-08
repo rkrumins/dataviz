@@ -256,12 +256,96 @@ async def bootstrap_status_endpoint(
     """Live progress of the enablement job — phase, counts, percent, and (on a terminal
     job) the integrity report. Deliberately NOT flag-gated: a job started before an
     admin turned versioning off must still be observable. Scoped to ``ws_id`` so a job
-    is never visible (nor its existence leaked) across tenants."""
+    is never visible (nor its existence leaked) across tenants.
+
+    A job the pre-flight paused on duplicate identifiers reads ``needs_decision``, with
+    ``duplicates`` — including ``sharedWith``, the other data sources reading the same physical
+    graph, which a collapse changes for them too (those in other workspaces only counted, as
+    ``sharedWithOtherWorkspaces``)."""
+    from backend.app.services.managed_sources import shared_with
     from backend.app.services.versioning.bootstrap_worker import bootstrap_status
-    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    ds = await _data_source_in_workspace(session, dataSourceId, ws_id)
     status = await bootstrap_status(data_source_id=dataSourceId, workspace_id=ws_id)
     if status is None:
         raise HTTPException(status_code=404, detail="no enablement job for this data source")
+    if status.get("duplicates"):
+        status["duplicates"].update(await shared_with(session, ds))
+    return status
+
+
+@router.get("/bootstrap/duplicates")
+async def bootstrap_duplicates_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose enablement job to read."),
+    after: Optional[str] = Query(None, description="The previous page's `next`."),
+    limit: int = Query(100, ge=1, le=500),
+    fmt: Optional[str] = Query(None, alias="format",
+                               description="csv: the whole list, as a download"),
+    _user=Depends(requires("workspace:datasource:read", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Every copy of every identifier the enablement pre-flight found more than once, in (urn,
+    copy) order — ``{items: [{urn, copy, kept, label, internalId, lastSyncedAt}], next}``, or with
+    ``format=csv`` the whole list as a download. Kept after the job ends: it is the record of what
+    a collapse removed. 404 when the job found none. Workspace read permission of its own, as the
+    graph export takes: an enumeration of the whole data source is more than a view's reach, so
+    a view-capability link (which the graph router admits) does not reach it."""
+    from backend.app.services.versioning.bootstrap_worker import duplicate_page, duplicates_csv
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        if fmt == "csv":
+            stream = await duplicates_csv(data_source_id=dataSourceId, workspace_id=ws_id)
+            return StreamingResponse(stream, media_type="text/csv", headers={
+                "Content-Disposition":
+                    f'attachment; filename="duplicate-identifiers-{dataSourceId}.csv"'})
+        return await duplicate_page(data_source_id=dataSourceId, workspace_id=ws_id,
+                                    after=after, limit=limit)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+class BootstrapDecision(BaseModel):
+    action: str = Field(..., description="collapse")
+    fingerprint: str = Field(..., description="The `duplicates.fingerprint` that was shown.")
+
+
+@router.post("/bootstrap/decision", status_code=202)
+async def bootstrap_decision_endpoint(
+    ws_id: str,
+    response: Response,
+    body: BootstrapDecision,
+    dataSourceId: str = Query(...),
+    _gate: None = Depends(require_versioning_enabled),
+    _perm=Depends(require_ws_manage),
+    user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Collapse the duplicate identifiers a paused enablement found, and let the copy carry on:
+    each identifier keeps one copy (the latest ``lastSyncedAt``, then the lowest internal id), the
+    others' connections move to it, and the others are removed from the source graph. ``body.
+    fingerprint`` must be the list as it was shown: 409 ``stale_decision`` if it has changed since
+    (review it again), 409 ``not_awaiting_decision`` if the job is not paused for one. 202 with the
+    job; 200 when this same decision was already recorded."""
+    from backend.app.services.managed_sources import shared_with
+    from backend.app.services.versioning.bootstrap_worker import (
+        BootstrapConflict, bootstrap_status, decide_duplicates)
+    if body.action != "collapse":
+        raise HTTPException(status_code=422, detail="action must be collapse")
+    ds = await _data_source_in_workspace(session, dataSourceId, ws_id)
+    try:
+        res = await decide_duplicates(data_source_id=dataSourceId, fingerprint=body.fingerprint,
+                                      actor=user.id if user else "system", workspace_id=ws_id)
+    except BootstrapConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    if res["already"]:
+        response.status_code = 200
+    status = await bootstrap_status(data_source_id=dataSourceId, workspace_id=ws_id)
+    if status and status.get("duplicates"):
+        status["duplicates"].update(await shared_with(session, ds))
     return status
 
 

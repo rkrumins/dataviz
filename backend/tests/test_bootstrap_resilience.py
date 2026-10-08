@@ -452,6 +452,45 @@ async def test_an_advance_by_a_worker_that_lost_the_job_is_not_made():
     assert (job.current_phase, job.last_cursor) == ("nodes", "nodes:4"), "nothing may move"
 
 
+async def test_a_job_paused_for_a_decision_stops_without_another_write():
+    """The pre-flight's last unit put the job back to pending (``awaiting_decision``) in its own
+    fenced write. The driver must stop there: no phase advance, no finish — those would clobber
+    the pause and hand the job straight back to a worker."""
+    lease = _recording_lease()
+
+    async def paused(_lease, _graph_id):
+        return "paused"
+
+    runner = _driven(_job(current_phase="counting"), counting=paused)
+    runner._contexts[(lease.job_id, lease.epoch)] = object()
+    out = await runner.run_job(lease)
+    assert out["status"] == "paused" and lease.calls == []
+    assert runner._contexts == {}, "a run's cached context goes with the run"
+
+
+async def test_a_backfill_write_pauses_for_the_readers_only_when_it_wrote(monkeypatch):
+    """Each write to the live source graph holds its write lock: the job steps aside for the
+    canvas's readers after one that changed something — and not after one that matched nothing."""
+    import backend.app.services.versioning.bootstrap_worker as bw
+    monkeypatch.setattr(config, "BOOTSTRAP_BACKFILL_PAUSE_MS", 200)
+    pauses, answers = [], [[[3]], [[0]]]
+
+    async def q(client, cypher, params=None, *, timeout_ms=0, read_only=False):
+        assert not read_only
+        return type("R", (), {"result_set": answers.pop(0)})()
+
+    async def sleep(d):
+        pauses.append(d)
+
+    monkeypatch.setattr(bw, "_q", q)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    r = _runner()
+    assert await r._write(object(), "UNWIND $rows AS row RETURN count(row)", [{"x": 1}]) == 3
+    assert await r._write(object(), "UNWIND $rows AS row RETURN count(row)", [{"x": 1}]) == 0
+    assert await r._write(object(), "never sent", []) == 0
+    assert pauses == [0.2]
+
+
 async def test_finishing_a_job_that_is_no_longer_ours_is_not_a_completion():
     lease = _recording_lease(landed=False)
 

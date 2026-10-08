@@ -1,26 +1,29 @@
 /**
- * BootstrapProgress — the three states a user actually sees while (and after) their
- * graph is copied into version history: live phases, the integrity report that makes
- * enabling an act of evidence rather than faith, and a failure that says plainly that
- * nothing was changed.
+ * BootstrapProgress — the states a user actually sees while (and after) their graph is
+ * copied into version history: live phases, a pause over duplicate identifiers that a
+ * manager decides, the integrity report that makes enabling an act of evidence rather
+ * than faith, and a failure that says plainly that nothing was changed.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const retryMutate = vi.fn()
 const abandonMutate = vi.fn()
+const decideMutate = vi.fn()
 const openPanel = vi.fn()
+const notify = vi.fn()
 
 vi.mock('../../hooks/useVersioning', () => ({
   useRetryBootstrap: () => ({ mutate: retryMutate, isPending: false }),
   useAbandonBootstrap: () => ({ mutate: abandonMutate, isPending: false }),
+  useDecideBootstrapDuplicates: () => ({ mutate: decideMutate, isPending: false }),
 }))
-vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/store/versioningPanelStore', () => ({
   useVersioningPanelStore: (sel: (s: unknown) => unknown) => sel({ openPanel }),
 }))
 
-import type { BootstrapJob } from '@/services/versioningApiService'
+import { BootstrapDecisionError, type BootstrapJob } from '@/services/versioningApiService'
 import { BootstrapProgress } from '../BootstrapProgress'
 
 const base: BootstrapJob = {
@@ -32,6 +35,24 @@ const base: BootstrapJob = {
   total: 9_800_000,
   percent: 47,
   report: null,
+}
+
+const DUPLICATES: NonNullable<BootstrapJob['duplicates']> = {
+  identifiers: 2,
+  extraCopies: 3,
+  sameType: 1,
+  crossType: 1,
+  rule: 'latest_last_synced_at_then_lowest_id',
+  fingerprint: 'fp_1',
+  detectedAt: '2026-10-08T10:00:00Z',
+  sample: [
+    { urn: 'urn:li:dataset:orders', label: 'Dataset', internalId: 7, lastSyncedAt: '2026-10-01T09:00:00Z', kept: true },
+    { urn: 'urn:li:dataset:orders', label: 'Dataset', internalId: 3, lastSyncedAt: '2026-09-01T09:00:00Z', kept: false },
+    { urn: 'urn:li:dataset:users', label: 'Table', internalId: 11, lastSyncedAt: null, kept: true },
+  ],
+  decision: null,
+  sharedWith: [],
+  sharedWithOtherWorkspaces: 0,
 }
 
 const render_ = (job: Partial<BootstrapJob>) =>
@@ -119,6 +140,11 @@ describe('when the copy lands', () => {
     expect(screen.getByText(/4 duplicate connection/)).toBeInTheDocument()
     expect(screen.getByText(/fingerprint is deferred/)).toBeInTheDocument()
   })
+
+  it('discloses the duplicate items collapsed, as decided', () => {
+    render_({ ...done, collapsed: { nodes: 3, byLabel: { Dataset: 3 }, selfLoops: 0 } })
+    expect(screen.getByText(/3 duplicate item\(s\) were collapsed/)).toBeInTheDocument()
+  })
 })
 
 describe('when the copy fails', () => {
@@ -185,10 +211,151 @@ describe('when the copy fails', () => {
     expect(screen.queryByRole('button', { name: /Resume/ })).not.toBeInTheDocument()
   })
 
+  // ── the failure says what can fix it, and only that is offered: resuming an integrity failure
+  //    would only fail the same way again, and an internal one is a bug no button fixes.
+
+  it('offers only Start over when resuming cannot help, and says why', () => {
+    render_({ ...failed, failure: { code: 'integrity', action: 'restart', phase: 'validate' } })
+    expect(screen.queryByRole('button', { name: /Resume/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Start over/ }))
+    expect(screen.getByText(/would only fail the same way again/)).toBeInTheDocument()
+    expect(screen.queryByText(/Resuming keeps them/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Yes, start over/ }))
+    expect(retryMutate).toHaveBeenCalledWith('restart', expect.anything())
+  })
+
+  it('offers Resume when the failure can be resumed', () => {
+    render_({ ...failed, failure: { code: 'infrastructure', action: 'resume', phase: 'edges' } })
+    expect(screen.getByRole('button', { name: /Resume/ })).toBeInTheDocument()
+  })
+
+  it('offers no retry for a failure no retry can fix — only Give up', () => {
+    render_({ ...failed, failure: { code: 'internal', action: null, phase: 'heads' } })
+    expect(screen.queryByRole('button', { name: /Resume/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Start over/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Give up/ })).toBeInTheDocument()
+  })
+
+  it('stops promising an untouched source once a collapse was decided', () => {
+    render_({ ...failed, duplicates: { ...DUPLICATES, decision: {
+      policy: 'collapse', fingerprint: 'fp_1', decidedBy: 'u1', decidedAt: '2026-10-08T10:00:00Z' } } })
+    expect(screen.queryByText(/untouched/)).not.toBeInTheDocument()
+    expect(screen.getByText(/may already have been removed/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Give up/ }))
+    expect(screen.queryByText(/Your data source is not touched/)).not.toBeInTheDocument()
+    expect(screen.getByText(/already removed from your data source are\s+not put back/)).toBeInTheDocument()
+  })
+
+  it('remembers that copies left the source after a restart forgot the list', () => {
+    // A restart re-reads the source — whose duplicates the collapse already removed — so there is
+    // no list or decision left; `sourceCollapse` is what still says copies are gone.
+    render_({ ...failed, duplicates: null, sourceCollapse: { moved: 3, deleted: 2 } })
+    fireEvent.click(screen.getByRole('button', { name: /Give up/ }))
+    expect(screen.queryByText(/Your data source is not touched/)).not.toBeInTheDocument()
+    expect(screen.getByText(/already removed from your data source are\s+not put back/)).toBeInTheDocument()
+  })
+
   it('keeps the technical details one click away', () => {
     render_(failed)
     expect(screen.queryByText(/job vjob_1/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Technical details/ }))
     expect(screen.getByText(/job vjob_1/)).toBeInTheDocument()
+  })
+})
+
+// ── paused before copying anything: the source uses some identifiers more than once, and
+//    version history keeps one item per identifier. Collapsing removes data from the
+//    customer's own graph, so it is a manager's informed decision — never ours.
+
+describe('when the source has duplicate identifiers', () => {
+  const paused: Partial<BootstrapJob> = {
+    status: 'needs_decision', phase: 'awaiting_decision', processed: 0, total: 0, percent: 0,
+    duplicates: DUPLICATES,
+  }
+
+  it('says what collides, split by type, and that nothing has been copied', () => {
+    render_(paused)
+    expect(screen.getByText('Some identifiers are used more than once')).toBeInTheDocument()
+    expect(screen.getByText(/2 identifier\(s\) each belong to more than one item/)).toBeInTheDocument()
+    expect(screen.getByText(/1 where\s+the copies share a type, 1 where they don't/)).toBeInTheDocument()
+    expect(screen.getByText(/3 extra copies in all/)).toBeInTheDocument()
+    expect(screen.getByText('Nothing has been copied yet.')).toBeInTheDocument()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+  })
+
+  it('shows a sample with the copy that would be kept marked, and the whole list as CSV', () => {
+    render_(paused)
+    const rows = screen.getAllByRole('listitem')
+    expect(rows).toHaveLength(3)
+    expect(rows[0]).toHaveTextContent('urn:li:dataset:orders')
+    expect(rows[0]).toHaveTextContent('kept')
+    expect(rows[1]).not.toHaveTextContent('kept')
+    expect(screen.getByText(/Showing 3 of 5 copies/)).toBeInTheDocument()
+    const csv = screen.getByRole('link', { name: /Download full list \(CSV\)/ })
+    expect(csv).toHaveAttribute('href', '/api/v1/ws1/graph/bootstrap/duplicates?dataSourceId=ds1&format=csv')
+  })
+
+  it('will not collapse on one click, and says exactly what collapsing does', () => {
+    render_(paused)
+    fireEvent.click(screen.getByRole('button', { name: /Collapse 3 duplicates and continue/ }))
+    expect(decideMutate).not.toHaveBeenCalled()
+
+    expect(screen.getByText(/latest lastSyncedAt\), then the one with the lowest internal id/)).toBeInTheDocument()
+    expect(screen.getByText(/move to the kept copy/)).toBeInTheDocument()
+    expect(screen.getByText('those copies are removed from the source graph')).toBeInTheDocument()
+    expect(screen.getByText(/Rollups are rebuilt/)).toBeInTheDocument()
+    expect(screen.getByText(/Giving up later won't restore them/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /Yes, collapse and continue/ }))
+    expect(decideMutate).toHaveBeenCalledWith('fp_1', expect.anything())
+  })
+
+  it('asks for a fresh look when the list changed before the decision landed', () => {
+    decideMutate.mockImplementationOnce((_fp, opts) => opts.onError(new BootstrapDecisionError('stale_decision')))
+    render_(paused)
+    fireEvent.click(screen.getByRole('button', { name: /Collapse 3 duplicates/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Yes, collapse and continue/ }))
+    expect(screen.getByRole('alert')).toHaveTextContent(/The list changed — review it again/)
+    expect(notify).not.toHaveBeenCalledWith('error', expect.anything())
+  })
+
+  it('warns that collapsing changes the graph for every data source that reads it', () => {
+    render_({ ...paused, duplicates: { ...DUPLICATES, sharedWith: [{ dataSourceId: 'ds2', name: 'Finance DWH' }] } })
+    expect(screen.getByText('Finance DWH')).toBeInTheDocument()
+    expect(screen.getByText(/Collapsing removes the extra copies for it too/)).toBeInTheDocument()
+  })
+
+  it('counts the readers in other workspaces without naming them', () => {
+    render_({ ...paused, duplicates: { ...DUPLICATES, sharedWithOtherWorkspaces: 2 } })
+    expect(screen.getByText('2 data sources in other workspaces')).toBeInTheDocument()
+    expect(screen.getByText(/Collapsing removes the extra copies for them too/)).toBeInTheDocument()
+  })
+
+  it('re-checks the source at once — nothing has been copied, so there is nothing to lose', () => {
+    render_(paused)
+    fireEvent.click(screen.getByRole('button', { name: /Re-check source/ }))
+    expect(retryMutate).toHaveBeenCalledWith('restart', expect.anything())
+  })
+
+  it('will not give up on one click', () => {
+    render_(paused)
+    fireEvent.click(screen.getByRole('button', { name: /Give up/ }))
+    expect(abandonMutate).not.toHaveBeenCalled()
+    expect(screen.getByText(/Your data source is not touched/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Yes, remove it/ }))
+    expect(abandonMutate).toHaveBeenCalled()
+  })
+
+  it('tells someone who cannot decide that it waits for a manager', () => {
+    render(
+      <BootstrapProgress
+        job={{ ...base, ...paused } as BootstrapJob}
+        wsId="ws1" dataSourceId="ds1" canManage={false}
+      />,
+    )
+    expect(screen.getByText(/Waiting for a workspace manager/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Collapse/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Give up/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Download full list/ })).toBeInTheDocument()
   })
 })

@@ -58,12 +58,14 @@ logger = logging.getLogger(__name__)
 
 PURGE_JOB_TYPE = "purge"
 
-PHASES = ("count", "edges", "nodes", "heads", "merkle", "working", "commits",
+PHASES = ("count", "edges", "nodes", "heads", "merkle", "working", "commits", "preflight",
           "falkor", "meta", "finalize")
 
 # The bulk tables, in delete order, with the PK column list that makes each window an Index Scan
 # rather than a Seq Scan over dead tuples. Order matters only for readability — there are no FKs
-# between these — but deleting the heaviest first makes progress legible.
+# between these — but deleting the heaviest first makes progress legible. ``bootstrap_nodes`` is an
+# enablement pre-flight's view of the source (one row per source node, the duplicates kept after it
+# finishes as their audit list).
 _BULK: Tuple[Tuple[str, str], ...] = (
     ("edge_versions", "graph_id, id"),
     ("node_versions", "graph_id, id"),
@@ -71,15 +73,17 @@ _BULK: Tuple[Tuple[str, str], ...] = (
     ("merkle_nodes", "graph_id, commit_id, path"),
     ("working_changes", "graph_id, id"),
     ("commits", "graph_id, id"),
+    ("bootstrap_nodes", "graph_id, falkor_id"),
 )
 _PHASE_TABLE = {
     "edges": _BULK[0], "nodes": _BULK[1], "heads": _BULK[2],
-    "merkle": _BULK[3], "working": _BULK[4], "commits": _BULK[5],
+    "merkle": _BULK[3], "working": _BULK[4], "commits": _BULK[5], "preflight": _BULK[6],
 }
 
 # Progress floors, so the bar moves through the phases instead of sitting at 0 then jumping.
 _PHASE_FLOOR = {"count": 0, "edges": 1, "nodes": 25, "heads": 50, "merkle": 70,
-                "working": 80, "commits": 82, "falkor": 92, "meta": 95, "finalize": 99}
+                "working": 80, "commits": 82, "preflight": 90, "falkor": 92, "meta": 95,
+                "finalize": 99}
 
 
 class PurgeRefused(Exception):
