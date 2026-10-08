@@ -233,7 +233,7 @@ function OrphanRow({ node, layers, where, onReveal, onPlace }: {
         disabled={!where.layerId}
         title={where.layerId ? undefined : 'Not in this view'}
         aria-label={`Reveal ${name} on the canvas`}
-        className="px-2 py-1 rounded-lg text-[11px] font-medium text-accent-lineage bg-accent-lineage/10 hover:bg-accent-lineage/20 disabled:text-ink-muted/50 disabled:bg-transparent disabled:cursor-not-allowed transition-colors"
+        className="px-2 py-1 rounded-lg text-[11px] font-medium text-accent-lineage bg-accent-lineage/10 hover:bg-accent-lineage/20 disabled:text-ink-muted disabled:bg-transparent disabled:cursor-not-allowed transition-colors"
       >
         Reveal
       </button>
