@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from backend.app.providers.falkordb_provider import _decode_keyset_cursor, _encode_keyset_cursor
 from backend.app.services import top_level_cache
 from backend.common.models.graph import GraphNode, TopLevelNodesResult
 
@@ -469,7 +470,7 @@ async def test_try_serve_first_page(monkeypatch):
     )
     assert [n.display_name for n in result.nodes] == ["Alpha", "Beta", "Delta"]
     assert result.has_more is True
-    assert result.next_cursor == "Delta"
+    assert _decode_keyset_cursor(result.next_cursor) == ("Delta", "urn:Table:Delta")
     assert result.total_count == 5
 
 
@@ -483,15 +484,17 @@ async def test_try_serve_mid_window_cursor(monkeypatch):
     result, _ = await top_level_cache.try_serve_top_level(
         session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1", limit=2, cursor="Beta",
     )
+    # A legacy name-only cursor is still served; the next cursor is a keyset one.
     assert [n.display_name for n in result.nodes] == ["Delta", "Epsilon"]
     assert result.has_more is True
-    assert result.next_cursor == "Epsilon"
+    assert _decode_keyset_cursor(result.next_cursor) == ("Epsilon", "urn:Table:Epsilon")
 
 
 @pytest.mark.asyncio
 async def test_try_serve_duplicate_display_names_at_cursor_boundary(monkeypatch):
     names = ["Alpha", "Beta", "Beta", "Gamma"]
     payload = _stored_payload(names, digest=DIGEST, total=4)
+    payload["nodes"][1]["urn"], payload["nodes"][2]["urn"] = "urn:Table:Beta:1", "urn:Table:Beta:2"
     row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
     _patch(monkeypatch, row=row)
 
@@ -499,14 +502,19 @@ async def test_try_serve_duplicate_display_names_at_cursor_boundary(monkeypatch)
         session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1", limit=2, cursor=None,
     )
     assert [n.display_name for n in first.nodes] == ["Alpha", "Beta"]
-    assert first.next_cursor == "Beta"
+    assert _decode_keyset_cursor(first.next_cursor) == ("Beta", "urn:Table:Beta:1")
 
-    # Strict '>' excludes the duplicate "Beta" — matches live FalkorDB
-    # cursor semantics (contract-identical, not a caching bug).
+    # The (displayName, urn) cursor continues with the second "Beta", as live does.
     second, _ = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1", limit=2, cursor=first.next_cursor,
+    )
+    assert [n.urn for n in second.nodes] == ["urn:Table:Beta:2", "urn:Table:Gamma"]
+
+    # A legacy name-only cursor keeps its old strict '>' meaning.
+    legacy, _ = await top_level_cache.try_serve_top_level(
         session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1", limit=2, cursor="Beta",
     )
-    assert [n.display_name for n in second.nodes] == ["Gamma"]
+    assert [n.display_name for n in legacy.nodes] == ["Gamma"]
 
 
 @pytest.mark.asyncio
@@ -549,7 +557,82 @@ async def test_try_serve_limit_exceeds_window_truncated_has_more_true(monkeypatc
     )
     assert [n.display_name for n in result.nodes] == ["Alpha", "Beta"]
     assert result.has_more is True
-    assert result.next_cursor == "Beta"
+    assert _decode_keyset_cursor(result.next_cursor) == ("Beta", "urn:Table:Beta")
+
+
+def _payload_rows(rows, **kw) -> dict:
+    """A stored payload from (displayName, urn, entityType) rows, in the given order."""
+    payload = _stored_payload([r[0] for r in rows], digest=DIGEST, entity_types=[r[2] for r in rows], **kw)
+    for node, (_, urn, _) in zip(payload["nodes"], rows):
+        node["urn"] = urn
+    return payload
+
+
+async def _serve_every_page(limit: int, **kw):
+    """Follow next_cursor to the end, as a client does: (every node, every page's total)."""
+    seen, totals, cursor = [], [], None
+    for _ in range(20):  # loop guard
+        result, _ = await top_level_cache.try_serve_top_level(
+            session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1", limit=limit, cursor=cursor, **kw,
+        )
+        seen += [n.urn for n in result.nodes]
+        totals.append(result.total_count)
+        if not result.has_more:
+            return seen, totals
+        cursor = result.next_cursor
+    raise AssertionError("paging never ended")
+
+
+@pytest.mark.asyncio
+async def test_try_serve_keyset_walks_same_named_rows_once(monkeypatch):
+    rows = [("Alpha", "urn:a", "Table"), ("id", "urn:id1", "Table"), ("id", "urn:id2", "Table"),
+            ("id", "urn:id3", "Table"), ("Zeta", "urn:z", "Table")]
+    row = _FakeStatsRow(top_level_nodes=json.dumps(_payload_rows(rows)), top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row)
+
+    seen, _ = await _serve_every_page(2)
+    assert sorted(seen) == ["urn:a", "urn:id1", "urn:id2", "urn:id3", "urn:z"]  # each exactly once
+
+
+@pytest.mark.asyncio
+async def test_try_serve_orders_a_payload_stored_by_name_only(monkeypatch):
+    """A payload built before the urn tiebreaker can hold a run of equal
+    names in any order; serving still walks every row once."""
+    rows = [("id", "urn:id3", "Table"), ("id", "urn:id1", "Table"), ("id", "urn:id2", "Table")]
+    row = _FakeStatsRow(top_level_nodes=json.dumps(_payload_rows(rows)), top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row)
+
+    seen, _ = await _serve_every_page(1)
+    assert seen == ["urn:id1", "urn:id2", "urn:id3"]
+
+
+@pytest.mark.asyncio
+async def test_try_serve_continues_a_live_keyset_cursor(monkeypatch):
+    """A listing that started live (payload dirty then) continues from the payload."""
+    payload = _stored_payload(["Alpha", "Beta", "Delta", "Epsilon"], digest=DIGEST)
+    row = _FakeStatsRow(top_level_nodes=json.dumps(payload), top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row)
+
+    result, _ = await top_level_cache.try_serve_top_level(
+        session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1", limit=10,
+        cursor=_encode_keyset_cursor("Beta", "urn:Table:Beta"),
+    )
+    assert [n.display_name for n in result.nodes] == ["Delta", "Epsilon"]
+    assert result.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_try_serve_orphan_type_filter_exact_total(monkeypatch):
+    """orphansOnly reaches the payload as a type list: only those rows, every
+    one of them across pages (same names included), and an exact total."""
+    rows = [("Finance", "urn:d1", "Domain"), ("orders", "urn:t1", "Table"), ("orders", "urn:t2", "Table"),
+            ("orders", "urn:t3", "Table"), ("Sales", "urn:d2", "Domain")]
+    row = _FakeStatsRow(top_level_nodes=json.dumps(_payload_rows(rows)), top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row)
+
+    seen, totals = await _serve_every_page(2, entity_types=["table"])
+    assert seen == ["urn:t1", "urn:t2", "urn:t3"]
+    assert set(totals) == {3}
 
 
 # ── classification ────────────────────────────────────────────────────
@@ -688,7 +771,7 @@ async def test_try_serve_combined_filters_and_pagination(monkeypatch):
     assert [n.display_name for n in result.nodes] == ["Alpha", "Alpine"]
     assert result.total_count == 3
     assert result.has_more is True
-    assert result.next_cursor == "Alpine"
+    assert _decode_keyset_cursor(result.next_cursor) == ("Alpine", "urn:Table:Alpine")
 
     page2, _ = await top_level_cache.try_serve_top_level(
         session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1",

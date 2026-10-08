@@ -509,8 +509,12 @@ class DraftOverlayProvider:
         # A removed node was a root of main unless the draft also removed a parent link to it.
         had_parent = {e.target_urn for e in d.cont_removed}
         removed = sum(1 for urn in d.node_remove if urn not in had_parent and urn not in d.node_new)
+        # A main top-level node the draft gives a parent is no longer top-level (an
+        # orphan being fixed). The total keeps it: only this page shows which
+        # targets were top-level in main.
+        base_nodes = [n for n in base.nodes if n.urn not in has_parent]
         nodes, total = d.compose_page(
-            base.nodes, added, first_page=not cursor,
+            base_nodes, added, first_page=not cursor,
             base_total=base.total_count, removed=removed)
         return base.model_copy(update={"nodes": nodes, "total_count": total})
 

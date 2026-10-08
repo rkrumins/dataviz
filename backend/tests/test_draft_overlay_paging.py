@@ -124,3 +124,15 @@ def test_a_draft_root_appears_once_across_cursor_pages_with_the_right_total():
     assert [n.urn for n in first.nodes] == ["A", "B", "N"]
     assert [n.urn for n in second.nodes] == ["C"], "a new root must not repeat on later pages"
     assert first.total_count == 4 and second.total_count == 4
+
+
+def test_a_main_orphan_given_a_parent_in_the_draft_leaves_the_top_level_page():
+    """Fixing an orphan in a draft (a new containment edge to it) takes it off the page."""
+    delta = {"nodesUpsert": [], "nodesNew": [], "nodesRemove": [],
+             "edgesUpsert": [_edge("e-B", "S", "B")], "edgesRemove": []}
+    p = DraftOverlayProvider(PagingMain([], ["A", "B", "C"]), svc=FakeSvc(delta), graph_id="g", branch_id="d")
+    p.set_containment_edge_types(["CONTAINS"])
+
+    page = asyncio.run(p.get_top_level_or_orphan_nodes(limit=10))
+    assert [n.urn for n in page.nodes] == ["A", "C"]
+    assert page.total_count == 3  # documented limitation: the total still counts it

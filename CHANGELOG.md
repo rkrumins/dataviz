@@ -29,6 +29,33 @@ uses to save a view's details, does not check rules). See `docs/services/ASSIGNM
 **`python -m backend.scripts.placement_dry_run`** reports, per saved view, what turning the flag on
 would change and why, before anyone sees it.
 
+**Orphaned entities, for power users.** An orphan is an entity whose type the ontology says sits
+inside another (a Table inside a Schema) but which has no parent in the data. Most people just want
+to see the data, so nothing changes on the board, in the default lists or in the status chips.
+Power users find orphans in two places:
+
+- In the wizard's and Layer Studio's entity browser, the **⋯ More filters** button after *Unassigned
+  only* has an **Advanced** section with **Orphans only**. It lists every orphan, with the server's
+  exact count (or "many" when the count could not finish in time), and they stay assignable like any
+  other entity.
+- On the Context View canvas, the **Display** menu has an **Advanced** section with **Orphaned
+  entities…**. It opens a side panel with each orphan's name, type and layer in this view, a
+  **Reveal** button, and **Place in layer** on a draft.
+
+`GET /graph/nodes/top-level` takes `orphansOnly=true` (see `docs/TOP_LEVEL_NODES_PERFORMANCE.md`).
+Orphans work the same with `placementContractEnabled` on or off.
+
+### Fixed
+
+- **The entity browser's total.** Its "N top-level · M orphan" line counted only the last page
+  loaded. It now shows the true total ("N total").
+- **Paging the stored top-level list.** On large data sources, paging skipped same-named entities at
+  a page boundary. It now pages by name and URN like the live query, and old cursors still work.
+- **Totals from version history.** Reads served from version history (just after a merge, or as-of)
+  reported a too-low top-level total when they had not scanned everything. They now report none, so
+  there the browser may show no total and its coverage bar counts only loaded rows until the count
+  is known, as it already does when the live count times out.
+
 ### Upgrading
 
 - Nothing changes until an admin turns the flag on. Before that, run the dry run and follow the
@@ -43,6 +70,16 @@ would change and why, before anyone sees it.
 - The browser cannot tell a whole-number float from an integer, so a text rule on a whole-number
   float from 1e15 up to 2^53, or a rule value stored as an integer of 2^53 or more, can place an
   entity differently on the canvas than on the server.
+- Reads served from version history (just after a merge, or as-of) still page the top-level list by
+  name, so same-named entities at a page boundary can be skipped there.
+- On those reads, *Orphans only* can be slow on very large graphs: it scans every containable
+  entity.
+- In a draft that deletes top-level entities that are not orphans, the orphan total is low by that
+  number.
+- An orphan given a parent in a draft drops off the list, but the total still counts it until the
+  draft is published.
+- An entity orphaned only inside a draft (its parent link removed there) is not listed until the
+  draft is published.
 
 ---
 

@@ -50,6 +50,40 @@ ever pay O(page).
      `totalCount: null` — the page still returns; pagination is driven by
      `hasMore` (page-size derived), never by the count.
 
+## Orphans only (`orphansOnly=true`)
+
+An orphan is a top-level instance of a type the data source's ontology
+declares as containable (a non-root type), e.g. a Table with no Schema.
+`orphansOnly=true` lists only those.
+
+- **The type list.** `ContextEngine.orphan_entity_types` returns every type
+  the resolved ontology defines minus its root types, narrowed by any
+  `entityTypes` in the request (case-insensitive). Introspected types are
+  roots, so never listed. When the list is empty (a root-type filter, an
+  ontology where every type is a root, or the degraded fallback when the
+  ontology service is down, which declares no types) the endpoint returns an
+  empty page with `totalCount: 0` and runs no query.
+- **Every layer applies unchanged.** The list replaces `entityTypes` before
+  any cache, so the payload filter, the count side-cache and the page cache
+  all key on it. There is no new key field, and default requests keep their
+  keys byte for byte.
+- **Cost.** The live query scans only those labels, a subset of the default
+  label union, so it never costs more than the default list. On reads served
+  from version history (just after a merge, or as-of) the candidate window
+  grows until it finds a full page; orphans are rare, so it can scan every
+  containable entity and be slow on very large graphs.
+- **Totals** are exact, or `null` when the count timed out. A complete
+  payload gives an exact filtered total; a truncated one goes live. Version
+  history gives a total only when its scan finished. In a draft the total is
+  main's plus what the draft added minus what it removed; an orphan the draft
+  gives a parent drops off the page but is still counted.
+- **Payload paging.** The stored payload pages by `(displayName, urn)` with
+  the same cursor as the live query, so same-named rows at a page boundary
+  are not skipped and a listing can move between the payload and live either
+  way. Payloads stored before this are sorted at serve time, and old
+  name-only cursors are still accepted. Version history still pages by name
+  only.
+
 ## The timeout ladder
 
 Every layer's budget must exceed the layer below it, so the innermost

@@ -817,6 +817,22 @@ class ContextEngine:
                 include_child_count=include_child_count,
             )
 
+    async def orphan_entity_types(self, requested: Optional[List[str]] = None) -> List[str]:
+        """Types whose top-level instances are orphans: every type the resolved
+        ontology defines that is not a root type, narrowed to ``requested``
+        case-insensitively. Introspected types are roots, so never listed; the
+        degraded fallback defines no types, so it lists none."""
+        resolved = await self._resolve_ontology()
+        if resolved is None:
+            return []
+        roots = {str(t).lower() for t in (getattr(resolved, "root_entity_types", None) or [])}
+        types = [t for t in (getattr(resolved, "entity_type_definitions", None) or {})
+                 if str(t).lower() not in roots]
+        if requested:
+            wanted = {str(t).lower() for t in requested}
+            types = [t for t in types if str(t).lower() in wanted]
+        return types
+
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
         if query is None: query = EdgeQuery()
         return await self.provider.get_edges(query)
