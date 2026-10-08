@@ -89,6 +89,8 @@ describe('OrphansDrawer', () => {
     await screen.findByText('Alpha')
     const gamma = screen.getByRole('button', { name: 'Reveal Gamma on the canvas' })
     expect(gamma).toBeDisabled()
+    expect(gamma).toHaveAttribute('title', 'Not in this view')
+    expect(screen.getByRole('button', { name: 'Reveal Alpha on the canvas' })).not.toHaveAttribute('title')
     fireEvent.click(gamma)
     fireEvent.click(screen.getByRole('button', { name: 'Reveal Alpha on the canvas' }))
     expect(onReveal).toHaveBeenCalledTimes(1)
@@ -170,6 +172,37 @@ describe('OrphansDrawer', () => {
     await act(async () => { answerOld(page([node('urn:old', 'Stale')])) })
     expect(screen.queryByText('Stale')).toBeNull()
     expect(screen.getByText('Fresh')).toBeInTheDocument()
+  })
+
+  it('after a provider switch, shows none of the old list and pages the new one from the start', async () => {
+    const oldProvider = providerWith(async () => page([node('urn:old', 'Stale')], { totalCount: 2, hasMore: true, nextCursor: 'old-cursor' }))
+    let failFirst: (e: Error) => void = () => {}
+    let calls = 0
+    const newProvider = providerWith(() => (++calls === 1
+      ? new Promise<TopLevelNodesResult>((_, reject) => { failFirst = reject })
+      : Promise.resolve(page([node('urn:new', 'Fresh')]))))
+    const { props, rerender } = renderDrawer({ provider: oldProvider })
+    await screen.findByText('Stale')
+
+    rerender(<OrphansDrawer {...props} provider={newProvider} />)
+    // While the new first page is on its way: no old rows, and no Load more on the old cursor.
+    expect(screen.queryByText('Stale')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+    expect(screen.getByText('Loading orphaned entities…')).toBeInTheDocument()
+
+    await act(async () => { failFirst(new Error('boom')) })
+    fireEvent.click(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }))
+    await screen.findByText('Fresh')
+    expect(newProvider.getTopLevelNodes.mock.calls.map((c) => (c[0] as { cursor: string | null }).cursor)).toEqual([null, null])
+    expect(screen.queryByText('Stale')).toBeNull()
+  })
+
+  it('takes focus when it opens with none, so Escape closes it at once', async () => {
+    const { props } = renderDrawer()
+    await screen.findByText(/No orphaned entities/)
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Orphaned entities' }))
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(props.onClose).toHaveBeenCalledTimes(1)
   })
 
   it('closes from its button and from Escape', async () => {

@@ -114,7 +114,9 @@ pages through the rest. Each row shows:
   entities this view doesn't place;
 - **Place in layer…**, on a draft and not during a trace. It pins the entity to
   the layer you pick, just like dragging it into that column, and shows up in
-  **Review & Save** as a layout change you can undo.
+  **Review & Save** as a layout change you can undo. Undoing it takes the
+  entity out of the layer but leaves it loaded, so the canvas then counts it
+  among the loaded entities that are not in this view.
 
 Opening the panel changes nothing on the canvas. Only Reveal and Place in layer
 do.

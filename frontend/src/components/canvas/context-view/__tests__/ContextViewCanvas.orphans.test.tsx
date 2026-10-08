@@ -11,8 +11,11 @@ import { act, fireEvent, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { LensWalkModel, LensWalkNode } from '@/components/canvas/context-view/lens/closure-adapter'
+import { toCanvasNode } from '@/lib/canvasNodeMapper'
+import { primeRevealSpine } from '@/lib/primeRevealSpine'
 import type { GraphDataProvider, GraphNode } from '@/providers/GraphDataProvider'
 import { useAuthStore } from '@/store/auth'
+import { useCanvasStore } from '@/store/canvas'
 import { useFeaturesStore } from '@/store/features'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useSchemaStore } from '@/store/schema'
@@ -25,6 +28,11 @@ const captured: { drawer?: OrphansDrawerProps } = {}
 vi.mock('@/components/canvas/context-view/OrphansDrawer', () => ({
   OrphansDrawer: (props: OrphansDrawerProps) => { captured.drawer = props; return null },
 }))
+// The real thing, unless a test times the load itself.
+vi.mock('@/lib/primeRevealSpine', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/primeRevealSpine')>()
+  return { primeRevealSpine: vi.fn(actual.primeRevealSpine) }
+})
 
 const wn = (urn: string, name: string, type: string, childCount = 0): LensWalkNode => ({
   id: urn, type: 'default', position: { x: 0, y: 0 },
@@ -111,6 +119,16 @@ describe('the canvas and its orphans panel', () => {
         expect(captured.drawer!.layerOf(graphNode('urn:loose', 'table'))).toEqual({ layerId: 'L2', drawn: false })
       })
 
+      it('where: a stale entry in an open view falls through to the type rule only under the contract', async () => {
+        const h = await renderCanvasWithTrace(estate({ D: { layerId: 'L1' }, 'urn:stale': { layerId: 'GONE' } }), {
+          focus: 'D', browseHolds: ['D', 'T'], entityScope: 'all', placementContract,
+        })
+        await h.settle()
+        // On, place() with the canvas's own spec; off, the legacy resolver strands a stale entry.
+        expect(captured.drawer!.layerOf(graphNode('urn:stale', 'table')))
+          .toEqual({ layerId: placementContract ? 'L2' : undefined, drawn: false })
+      })
+
       it('Place in layer pins it, stages a move naming it, and draws it there', async () => {
         const h = await renderCanvasWithTrace(estate(), { focus: 'D', browseHolds: ['D', 'T'], draft: true, placementContract })
         expect(columnOf('O')).toBeNull()
@@ -127,6 +145,18 @@ describe('the canvas and its orphans panel', () => {
       })
     })
   }
+
+  it('Place in layer names an entity that is in the store but not yet rendered', async () => {
+    const h = await renderCanvasWithTrace(estate(), { focus: 'D', browseHolds: ['D', 'T'], draft: true })
+    // The load lands in the store a microtask before Place goes on, so the canvas has not rendered it.
+    vi.mocked(primeRevealSpine).mockImplementationOnce(async () => {
+      queueMicrotask(() => useCanvasStore.getState().addGraph([toCanvasNode({ ...graphNode('O', 'table'), displayName: 'Orders' })], []))
+    })
+    await act(async () => { captured.drawer!.onPlace!('O', 'L2') })
+    await h.settle()
+    const staged = useStagedChangesStore.getState().changes.filter(c => c.type === 'assign_layer' && c.targetId === 'O')
+    expect(staged.map(c => c.summary)).toEqual(["Move 'Orders' → Tables"])
+  })
 
   it('offers no Place in layer off a draft', async () => {
     await renderCanvasWithTrace(estate(), { focus: 'D', browseHolds: ['D', 'T'] })
