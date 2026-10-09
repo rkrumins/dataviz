@@ -1,5 +1,5 @@
 /**
- * CommandPalette - Power user command interface (⌘K)
+ * CommandPalette - Power user command interface (⌘⇧P)
  * 
  * A Spotlight/VSCode-style command palette for:
  * - Quick entity creation

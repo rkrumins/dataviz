@@ -35,6 +35,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import resilience
+from backend.common.derived_artifacts import strip_derived_counts
 from ..models import (
     DataSourceCountAlertORM,
     DataSourceCountSnapshotORM,
@@ -327,13 +328,19 @@ def _worst_movement(rows: list, *, metric: str, baseline: int, floor: str):
     The WORST, not the most recent. A thrashing source produces several; the
     one worth a person's attention is the biggest, and reporting the latest
     instead would describe the aftershock rather than the event.
+
+    Judged on the SOURCE's own data — ``source_delta_of`` takes the
+    materialised ``:AGGREGATED`` overlay back out of the edge figures. The
+    total is what the profiling surfaces display, but a rebuild wipes and
+    rewrites the overlay, and measuring against the total reported the
+    platform's own work as a critical loss of the customer's relationships.
     """
     worst, worst_severity = None, "normal"
     for row in rows:
-        delta = stats_history_repo.delta_of(row, metric)
+        delta = stats_history_repo.source_delta_of(row, metric)
         severity = stats_history_repo.classify_significance(
             delta, baseline,
-            before=stats_history_repo.count_of(row, metric) - int(delta or 0),
+            before=stats_history_repo.source_count_of(row, metric) - int(delta or 0),
         )
         if not _meets(severity, floor):
             continue
@@ -344,7 +351,7 @@ def _worst_movement(rows: list, *, metric: str, baseline: int, floor: str):
             _SEVERITY_RANK[severity], abs(delta or 0)
         ) > (
             _SEVERITY_RANK[worst_severity],
-            abs(stats_history_repo.delta_of(worst, metric) or 0),
+            abs(stats_history_repo.source_delta_of(worst, metric) or 0),
         ):
             worst, worst_severity = row, severity
     return worst, worst_severity
@@ -368,7 +375,17 @@ def _types_that_vanished(rows: list) -> Dict[str, tuple]:
     ):
         previous: Dict[str, int] = {}
         for row in rows:
-            current = stats_history_repo.loads_counts(getattr(row, field, None))
+            # Launder platform-written bookkeeping out of already-stored
+            # snapshots. The providers no longer record it, but rows captured
+            # before that fix stay readable for the whole retention window —
+            # and `_AggMeta` toggles 1 -> 0 -> 1 (MERGEd per aggregation run,
+            # wiped by projection seeds and purges), so every dip in that
+            # history would raise a SEVERE "type is gone" finding plus a
+            # notification about the platform's own node.
+            current = strip_derived_counts(
+                stats_history_repo.loads_counts(getattr(row, field, None)),
+                edges=(field == "edge_type_counts"),
+            )
             for name, before in previous.items():
                 if before and not current.get(name):
                     # Last writer wins: if a type vanished twice in the window
@@ -427,7 +444,12 @@ async def evaluate_source(
 
     # ── movement, judged per metric ──
     for metric in stats_history_repo.METRICS:
-        baseline = stats_history_repo.change_baseline(rows, metric)
+        # The baseline has to measure the same thing the movement does, or a
+        # source that rebuilds nightly carries a median inflated by overlay
+        # swings and its real losses read as ordinary.
+        baseline = stats_history_repo.change_baseline(
+            rows, metric, delta_fn=stats_history_repo.source_delta_of,
+        )
         worst, severity = _worst_movement(
             rows, metric=metric, baseline=baseline, floor=policy.min_severity,
         )
@@ -443,8 +465,8 @@ async def evaluate_source(
         notices.append(await _record(
             session, ds_id=ds_id, row=worst, identity=identity, now=now,
             severity=severity, metric=metric, finding="movement",
-            delta=int(stats_history_repo.delta_of(worst, metric) or 0),
-            count=stats_history_repo.count_of(worst, metric),
+            delta=int(stats_history_repo.source_delta_of(worst, metric) or 0),
+            count=stats_history_repo.source_count_of(worst, metric),
             baseline=baseline,
         ))
 
@@ -691,6 +713,71 @@ async def acknowledge(
     return row
 
 
+async def acknowledge_many(
+    session: AsyncSession,
+    *,
+    actor_id: Optional[str],
+    visible: Optional[Sequence[str]],
+    ids: Optional[Sequence[str]] = None,
+    data_source_id: Optional[str] = None,
+) -> int:
+    """Mark a whole set as seen in one statement. Returns the row count.
+
+    ``ids=None`` means every OPEN finding in scope — the notifications
+    mark-all contract, where an omitted list is "all" and an explicit empty
+    one is nothing. ``data_source_id`` narrows to one source.
+
+    Four things here are load-bearing:
+
+    * ``acknowledged_at IS NULL`` in the WHERE keeps FIRST-WINS across the
+      whole set, matching :func:`acknowledge`. No bulk verb may rewrite who
+      actually looked at something.
+    * **The tenant clause applies to the ``ids`` path too.**
+      ``notification_repo.mark_read`` can filter on ids alone because
+      ``user_id`` is already in its WHERE; there is no such column here, so
+      without ``data_source_id.in_(visible)`` a workspace user could
+      acknowledge another tenant's finding by guessing an id.
+    * ``visible == []`` means NOTHING, never everything. ``_visible`` returns
+      ``None`` for a platform operator and a possibly-empty list for everyone
+      else, and conflating the two is the difference between "you may see no
+      sources" and "you may see all of them".
+    * No notification side-write. Acknowledging a finding has never touched
+      the bell (``acknowledge`` does not), notifications are per-user rows
+      while these are global, and there is no FK between them — only the
+      ``kind`` + title match a one-shot migration can justify and a request
+      path cannot. The two verbs must mean the same thing.
+    """
+    if ids is not None and not ids:
+        return 0
+    stmt = (
+        update(DataSourceCountAlertORM)
+        .where(DataSourceCountAlertORM.acknowledged_at.is_(None))
+        .values(
+            acknowledged_at=datetime.now(timezone.utc).isoformat(),
+            acknowledged_by=actor_id,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if visible is not None:
+        stmt = stmt.where(
+            DataSourceCountAlertORM.data_source_id.in_(list(visible))
+        )
+    if data_source_id:
+        stmt = stmt.where(
+            DataSourceCountAlertORM.data_source_id == data_source_id
+        )
+    if ids is not None:
+        stmt = stmt.where(DataSourceCountAlertORM.id.in_(list(ids)))
+    result = await session.execute(stmt)
+    count = int(getattr(result, "rowcount", 0) or 0)
+    logger.info(
+        "count alerts: %s acknowledged %d finding(s) (source=%s, ids=%s)",
+        actor_id or "unknown", count, data_source_id or "all",
+        "explicit" if ids is not None else "all-open",
+    )
+    return count
+
+
 async def purge_alerts(
     session: AsyncSession, *, retention_days: int, batch: int = 1000,
 ) -> int:
@@ -725,6 +812,7 @@ __all__: Sequence[str] = (
     "AlertIdentity",
     "PendingNotice",
     "acknowledge",
+    "acknowledge_many",
     "env_alert_policy",
     "evaluate_silent_sources",
     "evaluate_source",

@@ -102,6 +102,50 @@ else until it does. Supply your own `ADMIN_PASSWORD` and no prompt appears.
 Admin → Users shows a **DEFAULT PASSWORD** badge against any account still in
 that state.
 
+The same table's **Sign-in** column says how each account gets in: **Local**
+for a password account, a chip naming each linked identity provider for an
+SSO one (hover it for the last sign-in and whether SSO created the account),
+both together when an account has both, and **No sign-in** for an account
+with neither — stranded until you grant a reset token or a connection links
+it. A **System** chip leads the cell for break-glass accounts (below). The
+search box matches provider names too, so "everyone from Entra" is one
+query.
+
+Next to **Joined**, **Last seen** says how long ago each person last had the
+app open (hover it for the exact time, in UTC). Sort by it to find accounts
+nobody uses any more; accounts never seen sort last either way.
+
+Clicking a row opens that person's access drawer, which leads with an
+**Activity** block:
+
+| Field | What it means |
+|---|---|
+| **Joined** | When the account was created. |
+| **Last signed in** | The last successful sign-in of any kind — password, invite link, OIDC, SAML, portal, Enterprise Gateway, including the gateway's silent re-sign-in. |
+| **Last seen** | The last time they had the app open (made any signed-in request). |
+| **Last activity** | The last time they did something Activity analytics counts: opened a view, searched or traced, exported or published, or edited a view. |
+
+Each shows the exact time in UTC and how long ago it was. **Last seen** and
+**Last activity** are recorded to the nearest five minutes. All three
+"Last …" values start filling in from when this tracking was deployed, so
+**Not yet** means nothing has happened *since then*, not necessarily never.
+The exception is **Last signed in** for SSO users, which is backfilled from
+their linked identities' last sign-in.
+
+### System accounts (break-glass)
+
+Marking an account as a **system account** (the shield button on its row)
+takes it out of scope for SSO enforcement: it keeps password sign-in even
+while **Passwords** is switched off in Admin → SSO → Settings — via
+`/login?password=1`, since the sign-in page hides the form — and
+"require everyone to sign in again" sweeps skip it. The seeded administrator
+is marked automatically on a fresh install; reserve the mark for operational
+accounts, because it is the door that survives an identity-provider outage.
+
+Unmarking re-runs the lockout check: while passwords are off, the flag
+cannot be stripped from an active admin who has no linked SSO identity —
+that flag is the only thing keeping them able to sign in.
+
 ### Locked out
 
 If the only administrator forgets their password there is no way in through the

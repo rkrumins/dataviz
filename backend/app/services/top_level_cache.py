@@ -4,7 +4,7 @@ For data sources at/above ``resilience.STATS_POLL_LARGE_THRESHOLD`` nodes,
 the live top-level/orphan query is too expensive to run per-request. The
 insights counts lane (the collector) materializes a JSON payload —
 displayName-sorted nodes, a fingerprint of the graph counts, and a digest
-of the ontology's containment/root types — into
+of the ontology's containment/root types and assigned entity types — into
 ``DataSourceStatsORM.top_level_nodes``. The ``/top-level`` endpoint serves
 pages out of that payload via :func:`try_serve_top_level` instead of
 querying the provider directly.
@@ -69,21 +69,42 @@ def _kill_switch_enabled() -> bool:
     )
 
 
-def containment_digest(containment_types: Iterable[str], root_types: Iterable[str]) -> str:
+def containment_digest(
+    containment_types: Iterable[str], root_types: Iterable[str],
+    entity_types: Iterable[str] = (),
+) -> str:
     """Digest of the ontology shape that the materialized payload depends on.
 
     Order-insensitive and dedup'd — only the *set* of containment/root
     types matters, so a re-resolve that returns the same types in a
     different order does not spuriously invalidate the cache.
+
+    ``entity_types`` is the assigned ontology's vocabulary
+    (:func:`assigned_entity_types`): the payload is a label union over it, so
+    a reassigned ontology must not keep serving the old one's nodes — and the
+    new input retires, once, every payload built before it was part of the
+    digest.
     """
     canonical = json.dumps(
         {
             "containment": sorted(set(containment_types or [])),
             "rootTypes": sorted(set(root_types or [])),
+            "entityTypes": sorted(set(entity_types or [])),
         },
         sort_keys=True,
     )
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+
+
+def assigned_entity_types(resolved) -> List[str]:
+    """The entity types the data source's ASSIGNED ontology declares — not the
+    introspected ones, which come and go with an introspection that can time
+    out on exactly the large graphs this payload serves."""
+    sources = getattr(resolved, "resolution_sources", None) or {}
+    return [
+        k for k in (getattr(resolved, "entity_type_definitions", None) or {})
+        if sources.get(k) == "assigned"
+    ]
 
 
 def build_top_level_payload(result: TopLevelNodesResult, *, stats: dict, digest: str) -> str:
@@ -96,11 +117,11 @@ def build_top_level_payload(result: TopLevelNodesResult, *, stats: dict, digest:
         result.has_more
         or (result.total_count is not None and len(result.nodes) < result.total_count)
     )
-    # try_serve_top_level keyset-slices this window assuming displayName-ASC;
-    # enforce that invariant where the payload is built rather than trusting the
-    # provider's ordering (defense-in-depth against the FalkorDB aggregating
+    # try_serve_top_level keyset-slices this window assuming (displayName, urn)
+    # ASC; enforce that invariant where the payload is built rather than trusting
+    # the provider's ordering (defense-in-depth against the FalkorDB aggregating
     # ORDER-BY quirk). Same key the serve path compares the cursor on.
-    ordered = sorted(result.nodes, key=lambda n: n.display_name or "")
+    ordered = sorted(result.nodes, key=lambda n: (n.display_name or "", n.urn or ""))
     nodes = [n.model_dump(by_alias=True, mode="json") for n in ordered]
 
     payload: Dict[str, Any] = {
@@ -142,6 +163,17 @@ def should_rematerialize(
     return False
 
 
+async def is_dirty(ds_id: str) -> bool:
+    """Whether ``ds_id`` changed since its payload was built — a peek, not a
+    consume (only the collector that rebuilds the payload clears the flag).
+    Best-effort: an unreadable flag reads as "not dirty", as before."""
+    try:
+        return await get_redis().exists(_dirty_key(ds_id)) > 0
+    except Exception as exc:
+        logger.warning("top_level_cache.is_dirty ds=%s error=%s", ds_id, exc)
+        return False
+
+
 async def consume_dirty_flag(ds_id: str) -> bool:
     """GETDEL the dirty flag for ``ds_id``. Best-effort: any Redis error
     is swallowed and treated as "not dirty"."""
@@ -177,6 +209,10 @@ def _serve_min_nodes() -> int:
     return resilience.STATS_POLL_LARGE_THRESHOLD
 
 
+def _keyset_key(node: dict) -> Tuple[str, str]:
+    return (node.get("displayName") or "", node.get("urn") or "")
+
+
 async def try_serve_top_level(
     session, engine, *, ds_id: str, ws_id: str, limit: int, cursor: Optional[str],
     search_query: Optional[str] = None, entity_types: Optional[List[str]] = None,
@@ -209,6 +245,12 @@ async def try_serve_top_level(
     if (row.node_count or 0) < _serve_min_nodes():
         return _outcome("miss_small")
 
+    if await is_dirty(ds_id):
+        # The graph changed since this payload was built (a publish, a reconcile, a load)
+        # and the collector has not re-materialised it yet. Serving it here would be
+        # re-cached by the read cache under the post-change generation for its whole TTL.
+        return _outcome("miss_dirty")
+
     raw = row.top_level_nodes
     if not raw:
         await enqueue_stats_job_safe_ex(ds_id, ws_id)
@@ -230,6 +272,7 @@ async def try_serve_top_level(
     digest = containment_digest(
         getattr(resolved, "containment_edge_types", None) or [],
         getattr(resolved, "root_entity_types", None) or [],
+        assigned_entity_types(resolved),
     )
     if digest != payload.get("digest"):
         await enqueue_stats_job_safe_ex(ds_id, ws_id)
@@ -244,7 +287,8 @@ async def try_serve_top_level(
     if tier == "stale":
         await enqueue_stats_job_safe_ex(ds_id, ws_id)
 
-    window = payload.get("nodes") or []
+    # Sorted here too: payloads built before the urn tiebreaker ordered by name only.
+    window = sorted(payload.get("nodes") or [], key=_keyset_key)
 
     if filters_active:
         # A truncated window cannot answer a filtered query — matches may
@@ -269,10 +313,20 @@ async def try_serve_top_level(
         # unfiltered totalCount. The window is complete, so this is exact.
         total = len(window)
 
-    filtered = (
-        [n for n in window if n.get("displayName", "") > cursor]
-        if cursor is not None else window
+    # Same (displayName, urn) keyset as the live query, so same-named rows at a
+    # page boundary are not skipped and a cursor can continue on either side.
+    # Imported here so loading this module does not load the provider.
+    from backend.app.providers.falkordb_provider import (
+        _decode_keyset_cursor, _encode_keyset_cursor,
     )
+    if cursor is not None:
+        after_name, after_urn = _decode_keyset_cursor(cursor)
+        if after_urn:
+            filtered = [n for n in window if _keyset_key(n) > (after_name, after_urn)]
+        else:  # legacy name-only cursor
+            filtered = [n for n in window if (n.get("displayName") or "") > after_name]
+    else:
+        filtered = window
     page = filtered[:limit]
 
     if not page:
@@ -295,7 +349,7 @@ async def try_serve_top_level(
             orphan_count += 1
 
     has_more = len(filtered) > len(page) or bool(payload.get("truncated"))
-    next_cursor = nodes[-1].display_name if has_more else None
+    next_cursor = _encode_keyset_cursor(nodes[-1].display_name, nodes[-1].urn) if has_more else None
 
     result = TopLevelNodesResult(
         nodes=nodes, totalCount=total, hasMore=has_more, nextCursor=next_cursor,

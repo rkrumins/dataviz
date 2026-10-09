@@ -569,6 +569,8 @@ async def update_data_source(
     # or workspace default underneath, CLEARING this source's override is a real
     # change, and setting it to the value it already inherited is not one.
     old_identity = await load_node_identity(session, old_ds)
+    # Read before the write: the update below changes ``old_ds`` in place.
+    old_ontology_id = old_ds.ontology_id
 
     # Evict old cache entry if provider/graph config changed
     if req.projection_mode is not None or req.dedicated_graph_name is not None:
@@ -610,6 +612,13 @@ async def update_data_source(
         # resolve — invalidate the process-wide resolved-ontology cache.
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
         await bump_ontology_generation(workspace_id, ds_id)
+        # Cached hierarchy reads were answered under the old ontology / name
+        # mapping (entity types, display names) — drop them. Only when one of
+        # them really moved: the edit form re-sends the current ontologyId with
+        # a rename. Never raises.
+        if ds.ontology_id != old_ontology_id or mapping_changed:
+            from backend.app.services.graph_cache import invalidate_hierarchy_reads
+            await invalidate_hierarchy_reads(workspace_id, ds_id)
 
     # A mapping change makes the materialized AGGREGATED edges stale, and the
     # stamp's NULL-only fill means a re-run is required to rewrite them.
@@ -1010,6 +1019,12 @@ async def get_cached_stats_bulk(
             "nodeCount": cache.node_count or 0,
             "edgeCount": cache.edge_count or 0,
             "entityTypeCounts": _counts(cache.entity_type_counts),
+            # Raw nullable, deliberately NOT ``or 0`` like its neighbours:
+            # NULL means "not measured" (the store would not answer, the
+            # provider is not FalkorDB, or the row predates collection).
+            # Zero would read as "this graph has no properties", which is
+            # exactly backwards for the graphs this figure warns about.
+            "propertyKeyCount": cache.property_key_count,
             "updatedAt": cache.updated_at,
         }
 
@@ -1114,6 +1129,12 @@ async def get_cached_stats(
             "schemaStats": _maybe_load(cache.schema_stats),
             "ontologyMetadata": _maybe_load(cache.ontology_metadata),
             "graphSchema": _maybe_load(cache.graph_schema),
+            # Raw nullable, deliberately NOT ``or 0`` like its neighbours:
+            # NULL means "not measured" (the store would not answer, the
+            # provider is not FalkorDB, or the row predates collection).
+            # Zero would read as "this graph has no properties", which is
+            # exactly backwards for the graphs this figure warns about.
+            "propertyKeyCount": cache.property_key_count,
         }
 
         service_status, last_error = await classify_stats_service_health(session, ds_id)

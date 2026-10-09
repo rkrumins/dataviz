@@ -23,8 +23,8 @@ vi.mock('@/services/freshnessService', async () => {
     }
 })
 
-vi.mock('@/components/ui/toast', () => ({
-    useToast: () => ({ showToast: vi.fn() }),
+vi.mock('@/components/ui/notifications', () => ({
+    useAppNotifications: () => ({ notify: vi.fn() }),
 }))
 
 describe('ReconcilePreviewDialog', () => {

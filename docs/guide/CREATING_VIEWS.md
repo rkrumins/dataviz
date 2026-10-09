@@ -56,6 +56,14 @@ give the graph structure. Common layerings:
 Good layering is what turns a tangle into a diagram. See
 [The Semantic Layer](/guide/semantic-layer) for how types and layers relate.
 
+**Advanced: Orphans only.** An *orphan* is an entity whose type normally sits
+inside another but which has no parent in the data, for example a Table with no
+Schema. To list only those, open the **⋯** (*More filters*) button next to
+**Unassigned only** and tick **Orphans only** under **Advanced**. The menu shows
+how many the data source holds, or *many* when the server couldn't count them in
+time. Each row is tagged *orphan*, and you place it in a layer like any other
+entity. Untick it to see everything again.
+
 ### Step 4 — Choose the canvas type
 Pick how the View is laid out:
 
@@ -68,6 +76,12 @@ Pick how the View is laid out:
 ### Step 5 — Preview and confirm
 Review the result, adjust if needed, and set the **visibility** (next section).
 Confirm to publish the View into the gallery.
+
+> **Tip:** *Already built it somewhere else?* If the View exists in another
+> environment where the same data source is onboarded, you don't have to build
+> it again. Choose **Import a view** on the wizard's first step, or **Import view**
+> in the Explorer, and bring in the file exported there. See
+> [Moving views between environments](/guide/import-export#moving-views-between-environments).
 
 ---
 
@@ -101,8 +115,9 @@ suggestions in [Ways of Working](/guide/ways-of-working).
 - Your View appears in the **gallery** and (for Team/Enterprise) becomes
   discoverable by others.
 - **Favourite** it (★) to pin it to your sidebar quick-access.
-- Iterate freely — open it, refine, and re-save. To hand it off or co-own it,
-  see [Managing Views](/guide/managing-views).
+- Iterate freely — open it, refine, and re-save. Every save in the wizard is kept
+  as a **version** of the View (v1, v2, …) that you can compare with or go back
+  to. To hand it off or co-own it, see [Managing Views](/guide/managing-views).
 
 ---
 

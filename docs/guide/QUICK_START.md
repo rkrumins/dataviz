@@ -29,8 +29,9 @@ layout:
 
 - **Left sidebar** — your main navigation: *Dashboard, Explore, Workspaces,
   Ingestion, Semantic Layers,* and (if you're an admin) *Administration*.
-- **Top bar** — global search (press `⌘K` / `Ctrl-K`), the **Business/Technical
-  persona toggle**, notifications, and your profile menu.
+- **Top bar** — global search across views, pages and actions (press `⌘K` /
+  `Ctrl-K`), the **Business/Technical persona toggle**, notifications, and
+  your profile menu.
 - **Main area** — the Dashboard shows your workspaces and a gallery of popular
   and recent Views.
 
@@ -87,8 +88,11 @@ connections:
 As you trace, watch how the highlighted path shows the *blast radius* — every
 item that would be affected if your selected node changed.
 
-> **Tip:** *Power move* — press `⌘K` / `Ctrl-K` to open the **Command Palette**
-> and jump straight to actions like search, trace, and filter.
+> **Tip:** *Power move* — press `⌘⇧P` / `Ctrl-Shift-P` on a canvas to open
+> the **action palette** and jump straight to trace, filter and layout. `/`
+> focuses the view's own search box and `⌘⇧F` / `Ctrl-Shift-F` shows or
+> hides its results; `⌘K` is the app-wide palette, for getting to another
+> view or page.
 
 Full details: [Exploring the Graph](/guide/exploring-graph).
 

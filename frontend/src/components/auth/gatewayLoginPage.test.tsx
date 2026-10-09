@@ -15,11 +15,12 @@
  * for that host, must not be navigated into a sign-in that cannot work,
  * and must not be re-attempted on every render.
  */
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LoginPage } from './LoginPage'
+import { REAUTH_COOLDOWN_MS } from '@/services/backchannelReauth'
 
 const {
     loginContext, resolveEmailDomain, runAuthenticateTrigger,
@@ -106,6 +107,7 @@ let assign: ReturnType<typeof vi.fn>
 beforeEach(() => {
     vi.clearAllMocks()
     window.sessionStorage.clear()
+    window.localStorage.clear()
     lastDenialRef.current = null
     errorRef.current = null
     assign = vi.fn()
@@ -251,7 +253,7 @@ describe('silent sign-in', () => {
     })
 
     it('stays quiet and explains while a silent recovery just failed', async () => {
-        window.sessionStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
             at: Date.now(), reason: 'The sign-in service answered 503.',
         }))
         renderLogin()
@@ -260,6 +262,66 @@ describe('silent sign-in', () => {
         expect(await screen.findByText(/answered 503/i)).toBeInTheDocument()
         await new Promise(r => setTimeout(r, 20))
         expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+    })
+
+    describe('a failure that was only the network', () => {
+        // A VPN still connecting when the page loaded, a Wi-Fi hop: the
+        // page tries again by itself rather than waiting for a click or a
+        // reload — but boundedly, so a gateway that is down is not polled.
+        beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }) })
+        afterEach(() => { vi.useRealTimers() })
+
+        it('is tried once more when the hold lapses', async () => {
+            runAuthenticateTrigger.mockRejectedValue(new TypeError('Failed to fetch'))
+            renderLogin()
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
+
+            runAuthenticateTrigger.mockResolvedValue(null)
+            await act(() => vi.advanceTimersByTimeAsync(REAUTH_COOLDOWN_MS + 1_000))
+            await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
+            expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2)
+        })
+
+        it('only once — after that, the button', async () => {
+            runAuthenticateTrigger.mockRejectedValue(new TypeError('Failed to fetch'))
+            renderLogin()
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
+            await act(() => vi.advanceTimersByTimeAsync(REAUTH_COOLDOWN_MS + 1_000))
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2))
+
+            await act(() => vi.advanceTimersByTimeAsync(5 * REAUTH_COOLDOWN_MS))
+            expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2)
+        })
+
+        it('is tried again when the network comes back, outside the hold', async () => {
+            runAuthenticateTrigger.mockRejectedValue(new TypeError('Failed to fetch'))
+            renderLogin()
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
+
+            // Inside the hold, coming back online changes nothing.
+            act(() => { window.dispatchEvent(new Event('online')) })
+            await act(() => vi.advanceTimersByTimeAsync(20))
+            expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
+
+            vi.setSystemTime(Date.now() + REAUTH_COOLDOWN_MS)
+            act(() => { window.dispatchEvent(new Event('online')) })
+            await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2))
+        })
+    })
+
+    it('explains a renewal that failed only on load, and still tries at once', async () => {
+        // The gateway was down when the session needed renewing. Nothing
+        // was learned about the corporate session, so nothing is held back
+        // — but the person landed here, and deserves to know why.
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+            at: Date.now(), reason: 'The sign-in service answered 503.', hold: false,
+        }))
+        runAuthenticateTrigger.mockRejectedValue(new Error('down'))
+        renderLogin()
+        expect(await screen.findByText(/could not be renewed automatically/i))
+            .toBeInTheDocument()
+        expect(screen.getByText(/answered 503.*try again shortly/i)).toBeInTheDocument()
+        await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
     })
 
     it('does not fire when two providers could both claim it', async () => {
@@ -323,17 +385,24 @@ describe('silent sign-in', () => {
         loginContext.mockResolvedValue({
             allowLocalLogin: false, emailFirstLogin: false, providers: [],
         })
-        window.sessionStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
             at: Date.now(), reason: 'Your session there has ended.',
         }))
         renderLogin()
-        expect(await screen.findByText(/could not be renewed automatically/i))
-            .toBeInTheDocument()
-        expect(screen.queryByText(/try signing in again/i))
-            .not.toBeInTheDocument()
+        // Wait on the Retry button, not on the banner. The banner's first
+        // sentence is rendered by BOTH branches (LoginPage.tsx:1102-1120)
+        // — it is the " Try signing in again." tail and the Retry button
+        // that differ, on `portalHasAffordance`, which is false only once
+        // the awaited login context lands. So awaiting the shared sentence
+        // let the absence assertion run against the pre-context render,
+        // where local login is still assumed on.
         expect(
             await screen.findByRole('button', { name: /^retry$/i }),
         ).toBeInTheDocument()
+        expect(screen.getByText(/could not be renewed automatically/i))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/try signing in again/i))
+            .not.toBeInTheDocument()
     })
 })
 
@@ -416,6 +485,157 @@ describe('email-first with a gateway connection', () => {
         expect(navigate).not.toHaveBeenCalledWith(
             expect.stringContaining('login'), expect.anything(),
         )
+    })
+
+    it('a miss says so and reveals the ways in, instead of doing nothing', async () => {
+        // The domain matches no connection (none configured, or a typo).
+        // This used to be a silent return — with the password form and
+        // the button row tucked behind disclosures, Enter did nothing
+        // at all, which reads as a broken page.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        resolveEmailDomain.mockResolvedValue({ provider: null })
+        renderLogin()
+        const emailInput = await screen.findByLabelText(/^email$/i)
+        await userEvent.type(emailInput, 'ada@personal.example{enter}')
+
+        expect(await screen.findByText(
+            /don't recognise that email's domain/i,
+        )).toBeInTheDocument()
+        // Every way in is on the table now: the password form opens…
+        expect(await screen.findByLabelText(/password/i)).toBeInTheDocument()
+        // …the gateway button stands, and nothing signed in silently.
+        expect(screen.getByRole('button', { name: /corporate gateway/i }))
+            .toBeInTheDocument()
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+
+    it('a failed resolve is a miss, not a crash', async () => {
+        // The endpoint is rate-limited like /login; a 429 (or outage)
+        // lands in the same spoken miss rather than a silent return.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        resolveEmailDomain.mockRejectedValue(new Error('429'))
+        renderLogin()
+        const emailInput = await screen.findByLabelText(/^email$/i)
+        await userEvent.type(emailInput, 'ada@corp.example{enter}')
+
+        expect(await screen.findByText(
+            /don't recognise that email's domain/i,
+        )).toBeInTheDocument()
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+})
+
+// ── a gateway that reads the corporate cookie itself ─────────────────
+
+describe('silent sign-in with no browser half', () => {
+    // Server mode: the corporate cookie rides every request to us, so an
+    // empty POST is the whole sign-in. Before, this page never tried it,
+    // and someone whose renewal had failed had to press the button even
+    // once their corporate session was back.
+    const COOKIE_ROW = {
+        id: 'idp_3', slug: 'corp-cookie', displayName: 'Corporate Portal',
+        kind: 'backchannel', priority: 100, config: {},
+    }
+
+    function only(...providers: unknown[]) {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: false, providers,
+        })
+    }
+
+    it('posts for the cookie and lands inside', async () => {
+        only(COOKIE_ROW)
+        renderLogin()
+        await waitFor(() => expect(storeLoginWithBackchannel)
+            .toHaveBeenCalledWith('corp-cookie', {}))
+        await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
+        expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+    })
+
+    it.each(['backchannel_no_session', 'http_404', 'http_503', 'backchannel_unavailable'])(
+        'is silent when the answer is %s — nothing to sign in with, or only load',
+        async (code) => {
+            only(COOKIE_ROW)
+            storeLoginWithBackchannel.mockResolvedValue(false)
+            lastDenialRef.current = { code }
+            renderLogin()
+            await waitFor(() => expect(storeLoginWithBackchannel).toHaveBeenCalled())
+            await new Promise(r => setTimeout(r, 20))
+            expect(screen.queryByText(/did not work/i)).not.toBeInTheDocument()
+            expect(await screen.findByLabelText(/password/i)).toBeInTheDocument()
+        },
+    )
+
+    it('says so when the corporate side refused a session it was shown', async () => {
+        only(COOKIE_ROW)
+        storeLoginWithBackchannel.mockResolvedValue(false)
+        lastDenialRef.current = { code: 'backchannel_idp_rejected:401' }
+        renderLogin()
+        expect(await screen.findByText(
+            /Signing in with your Corporate Portal session did not work/i,
+        )).toBeInTheDocument()
+    })
+
+    it('respects the connection\'s opt-out', async () => {
+        only({ ...COOKIE_ROW, config: { autoSignIn: false } })
+        renderLogin()
+        await new Promise(r => setTimeout(r, 20))
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+
+    it('stays off after someone signed out on purpose', async () => {
+        window.localStorage.setItem('nx_signed_out', String(Date.now()))
+        only(COOKIE_ROW)
+        renderLogin()
+        await new Promise(r => setTimeout(r, 20))
+        expect(storeLoginWithBackchannel).not.toHaveBeenCalled()
+    })
+
+    it('gives way to a browser-driven connection, as before', async () => {
+        only(GATEWAY, COOKIE_ROW)
+        renderLogin()
+        await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
+        expect(storeLoginWithBackchannel).toHaveBeenCalledTimes(1)
+        expect(storeLoginWithBackchannel).toHaveBeenCalledWith('corp-gateway', {})
+    })
+})
+
+// ── where it lands ───────────────────────────────────────────────────
+
+describe('the way back', () => {
+    // A session that ended mid-task arrives here with ``?next=`` — the
+    // page the user was on — and signing in again returns them to it.
+    const renderAt = (url: string) =>
+        render(<MemoryRouter initialEntries={[url]}><LoginPage /></MemoryRouter>)
+
+    it('a sign-in returns to the page in next, query and all', async () => {
+        renderAt('/login?next=%2Fviews%2Fv1%3Ftab%3Dlineage')
+        await waitFor(() => expect(navigate)
+            .toHaveBeenCalledWith('/views/v1?tab=lineage', { replace: true }))
+    })
+
+    it('anything that could leave this site is ignored', async () => {
+        for (const next of ['//evil.example', 'https://evil.example', '/\\evil.example']) {
+            navigate.mockClear()
+            window.sessionStorage.clear()
+            const { unmount } = renderAt(`/login?next=${encodeURIComponent(next)}`)
+            await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
+            unmount()
+        }
+    })
+
+    it('rides a redirect sign-in too', async () => {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: false, providers: [OIDC],
+        })
+        renderAt('/login?next=%2Fviews%2Fv1')
+        const link = await screen.findByRole('link', { name: /entra/i })
+        expect(link.getAttribute('href'))
+            .toBe('/api/v1/auth/entra/login?next=%2Fviews%2Fv1')
     })
 })
 
@@ -531,6 +751,16 @@ describe('a refused link', () => {
         expect(await screen.findByText(/could not sign in with corporate gateway/i))
             .toBeInTheDocument()
         expect(screen.queryByText(/already exists/i)).not.toBeInTheDocument()
+    })
+
+    it('gives the reference an administrator looks the refusal up by', async () => {
+        lastDenialRef.current = { code: 'backchannel_no_session', ref: 'ab12cd34' }
+        renderLogin()
+        await userEvent.click(
+            await screen.findByRole('button', { name: /Corporate Gateway/i }),
+        )
+
+        expect(await screen.findByText(/reference ab12cd34/i)).toBeInTheDocument()
     })
 
     it('never opens the modal from the silent attempt', async () => {

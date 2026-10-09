@@ -1,0 +1,110 @@
+{
+  "format": "synodic.view-library",
+  "version": 1,
+  "source": { "viewName": "Data quality starter pack" },
+  "displayRules": [
+    {
+      "name": "Orphan",
+      "color": "#6366f1",
+      "icon": "CircleDot",
+      "enabled": true,
+      "predicate": { "kind": "isOrphan", "edgeClass": "lineage" }
+    },
+    {
+      "name": "Empty table",
+      "color": "#ec4899",
+      "icon": "Database",
+      "enabled": true,
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "property", "key": "rowCount", "op": "eq", "value": 0, "valueType": "number" }
+        ]
+      }
+    },
+    {
+      "name": "Stale",
+      "color": "#f59e0b",
+      "icon": "Flag",
+      "enabled": true,
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "group", "op": "not", "children": [
+            { "kind": "property", "key": "updatedAt", "op": "withinLast", "value": "P90D", "valueType": "date" }
+          ] }
+        ]
+      }
+    },
+    {
+      "name": "Dead end",
+      "color": "#14b8a6",
+      "icon": "Eye",
+      "enabled": true,
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "isLeaf", "edgeClass": "lineage" }
+        ]
+      }
+    }
+  ],
+  "savedQueries": [
+    {
+      "name": "Big datasets",
+      "description": "A million rows or more",
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "property", "key": "rowCount", "op": "gte", "value": 1000000, "valueType": "number" }
+        ]
+      }
+    },
+    {
+      "name": "Orphaned datasets",
+      "description": "No lineage in or out",
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "isOrphan", "edgeClass": "lineage" }
+        ]
+      }
+    },
+    {
+      "name": "No upstream lineage",
+      "description": "Datasets nothing feeds",
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "isRoot", "edgeClass": "lineage" }
+        ]
+      }
+    },
+    {
+      "name": "Not updated in 90 days",
+      "description": "updatedAt older than 90 days, or missing",
+      "predicate": {
+        "kind": "group",
+        "op": "and",
+        "children": [
+          { "kind": "entityType", "op": "in", "values": ["dataset"] },
+          { "kind": "group", "op": "not", "children": [
+            { "kind": "property", "key": "updatedAt", "op": "withinLast", "value": "P90D", "valueType": "date" }
+          ] }
+        ]
+      }
+    }
+  ]
+}

@@ -17,6 +17,7 @@ import { cn } from '@/lib/utils'
 import { useReferenceModelStore, useInstanceAssignments } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
+import { useFeature } from '@/store/features'
 import type { ViewLayerConfig } from '@/types/schema'
 
 // ============================================
@@ -67,6 +68,7 @@ export function LayerDropZone({
     const containmentEdgeTypes = useContainmentEdgeTypes()
     const storeParentMap = useReferenceModelStore(s => s.parentMap)
     const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
+    const placementContractOn = useFeature('placementContractEnabled')
 
     // Derive parentMap from canvas edges (ground truth, works even when store is empty)
     const parentMap = useMemo(() => {
@@ -91,12 +93,13 @@ export function LayerDropZone({
     }, [parentMap])
 
     // Merged assignment lookup: instanceAssignments + effectiveAssignments
+    // (flag off only: under the placement contract nothing computes the store's result).
     const layerAssignmentMap = useMemo(() => {
         const map = new Map<string, string>()
-        storeEffectiveAssignments.forEach((a, entityId) => map.set(entityId, a.layerId))
+        if (!placementContractOn) storeEffectiveAssignments.forEach((a, entityId) => map.set(entityId, a.layerId))
         instanceAssignments.forEach((a, entityId) => map.set(entityId, a.layerId))
         return map
-    }, [storeEffectiveAssignments, instanceAssignments])
+    }, [storeEffectiveAssignments, instanceAssignments, placementContractOn])
 
     // Build node name lookup for displaying assigned entities
     const nodeNameMap = useMemo(() => {

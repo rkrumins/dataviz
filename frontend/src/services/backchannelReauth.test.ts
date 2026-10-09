@@ -45,10 +45,14 @@ import {
     attemptSilentReauth,
     autoPortalAlreadyTried,
     clearReauthFailure,
+    clearSignedOutByChoice,
     markAutoPortalTried,
+    markSignedOutByChoice,
     readReauthFailure,
+    readReauthNotice,
     REAUTH_COOLDOWN_MS,
 } from './backchannelReauth'
+import { BackchannelLoginError, GatewayCallError } from './authService'
 
 const GATEWAY = {
     id: 'idp_1', slug: 'corp-gateway', displayName: 'Corporate Gateway',
@@ -72,6 +76,7 @@ function contextWith(providers: unknown[]) {
 beforeEach(() => {
     vi.clearAllMocks()
     window.sessionStorage.clear()
+    window.localStorage.clear()
     clearReauthFailure()
     contextWith([GATEWAY])
     runAuthenticateTrigger.mockResolvedValue(null)
@@ -124,9 +129,19 @@ describe('recovery', () => {
 
     it('hydrates what the app caches, so nothing runs on stale state', async () => {
         await attemptSilentReauth('corp-gateway')
-        expect(writeUserCache).toHaveBeenCalledWith({ id: 'u1' })
-        expect(refreshPermissions).toHaveBeenCalledWith({ skipAuthRefresh: true })
-        expect(notifyPermissionsChanged).toHaveBeenCalled()
+        await vi.waitFor(() => {
+            expect(writeUserCache).toHaveBeenCalledWith({ id: 'u1' })
+            expect(refreshPermissions).toHaveBeenCalledWith({ skipAuthRefresh: true })
+            expect(notifyPermissionsChanged).toHaveBeenCalled()
+        })
+    })
+
+    it('does not wait for that hydrate to report the recovery', async () => {
+        // It runs inside the refresh lock, and the hydrate's own requests
+        // can need the refresh — which is waiting on this. Awaited, a
+        // hydrate that joins the in-flight refresh never settles.
+        refreshPermissions.mockReturnValue(new Promise(() => {}))
+        expect(await attemptSilentReauth('corp-gateway')).toBe('recovered')
     })
 
     it('clears the login page sentinel, so a later bounce can auto-try', async () => {
@@ -148,11 +163,38 @@ describe('standing aside', () => {
         expect(await attemptSilentReauth('corp-gateway')).toBe('not-applicable')
     })
 
-    it('a row with no browser half keeps its navigation', async () => {
-        // The corporate cookie may still be alive — the server leg the
-        // navigation runs is the right tool, and nothing here beats it.
+    it('a row with no browser half renews in place from its cookie', async () => {
+        // Server mode: the corporate cookie rides the POST itself, so the
+        // empty body redeems it without the page going anywhere.
         contextWith([{ ...GATEWAY, config: {} }])
-        expect(await attemptSilentReauth('corp-gateway')).toBe('not-applicable')
+        expect(await attemptSilentReauth('corp-gateway')).toBe('recovered')
+        expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+        expect(loginWithBackchannel).toHaveBeenCalledWith(
+            'corp-gateway', {}, { skipAuthRefresh: true },
+        )
+    })
+
+    it('a row with no browser half that is refused says so on the sign-in page', async () => {
+        // The navigation would run the same exchange and get the same
+        // answer, one round trip later and without the page to return to.
+        contextWith([{ ...GATEWAY, config: {} }])
+        loginWithBackchannel.mockRejectedValue(
+            new BackchannelLoginError('backchannel_no_session'),
+        )
+        expect(await attemptSilentReauth('corp-gateway')).toBe('failed')
+        expect(readReauthFailure()).not.toBeNull()
+    })
+
+    it('a row with no browser half keeps its navigation when the POST says nothing', async () => {
+        // A row that reads no cookie refuses the shape (a bare 404); load
+        // or the network is not an answer. The navigation still has a
+        // chance in both, so neither latches.
+        contextWith([{ ...GATEWAY, config: {} }])
+        for (const code of ['http_404', 'http_503', 'backchannel_unavailable']) {
+            loginWithBackchannel.mockRejectedValueOnce(new BackchannelLoginError(code))
+            expect(await attemptSilentReauth('corp-gateway')).toBe('not-applicable')
+            expect(readReauthFailure()).toBeNull()
+        }
     })
 
     it('an unreachable catalog is not a verdict about the session', async () => {
@@ -210,7 +252,7 @@ describe('failure, latched', () => {
 
     it('the latch lapses on its own — recovery is suppressed, not disabled', async () => {
         const now = Date.now()
-        window.sessionStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
             at: now - REAUTH_COOLDOWN_MS - 1, reason: 'old news',
         }))
         expect(readReauthFailure()).toBeNull()
@@ -233,5 +275,160 @@ describe('failure, latched', () => {
         runAuthenticateTrigger.mockRejectedValue(new Error('down'))
         await attemptSilentReauth('corp-gateway')
         expect(autoPortalAlreadyTried()).toBe(true)
+    })
+})
+
+
+describe('a busy moment is not a verdict', () => {
+    // At 9am a whole office renews at once, often behind one corporate
+    // egress address, and our own completion POST can answer 429 or 5xx.
+    // That says nothing about the corporate session — treating it as a
+    // refusal latched the cooldown and cost everyone a click and a minute.
+
+    async function settle<T>(p: Promise<T>): Promise<T> {
+        // The retry waits a jittered second; don't make the suite do so.
+        await vi.runAllTimersAsync()
+        return p
+    }
+
+    beforeEach(() => { vi.useFakeTimers() })
+    afterEach(() => { vi.useRealTimers() })
+
+    it('a rate-limited completion is retried once, from the top', async () => {
+        loginWithBackchannel
+            .mockRejectedValueOnce(new BackchannelLoginError('http_429'))
+            .mockResolvedValueOnce({ user: { id: 'u1' } })
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('recovered')
+        // The whole browser half again — a browser-exchange assertion is
+        // single-use, so the one that just failed cannot be re-posted.
+        expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2)
+        expect(loginWithBackchannel).toHaveBeenCalledTimes(2)
+    })
+
+    it('still failing, it leaves the cooldown unlatched for the login page', async () => {
+        loginWithBackchannel.mockRejectedValue(new BackchannelLoginError('http_503'))
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(loginWithBackchannel).toHaveBeenCalledTimes(2)
+        // The login page this lands on gets its own automatic attempt.
+        expect(readReauthFailure()).toBeNull()
+        expect(autoPortalAlreadyTried()).toBe(false)
+        // ...and still says why the person is looking at it.
+        expect(readReauthNotice()).toMatchObject({
+            hold: false, reason: expect.stringMatching(/could not be reached/),
+        })
+    })
+
+    it('an attempt that outruns its deadline gives up, and holds nothing', async () => {
+        // It runs inside the cross-tab refresh lock: every tab's requests
+        // wait on it. A corporate host that never answers must not hold
+        // them for the minutes its calls' own timeouts add up to.
+        runAuthenticateTrigger.mockReturnValue(new Promise(() => {}))
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(readReauthFailure()).toBeNull()
+        expect(readReauthNotice()).toMatchObject({
+            hold: false, reason: expect.stringMatching(/did not answer in time/),
+        })
+    })
+
+    it('a gateway that timed out behind us is retried too', async () => {
+        loginWithBackchannel
+            .mockRejectedValueOnce(new BackchannelLoginError('backchannel_unavailable'))
+            .mockResolvedValueOnce({ user: { id: 'u1' } })
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('recovered')
+    })
+
+    it('a refusal is a verdict: no retry, and the cooldown latches', async () => {
+        loginWithBackchannel.mockRejectedValue(
+            new BackchannelLoginError('backchannel_no_session'),
+        )
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(loginWithBackchannel).toHaveBeenCalledTimes(1)
+        expect(readReauthFailure()).not.toBeNull()
+    })
+
+    it('the browser\'s own call failing like the network is retried once', async () => {
+        // A VPN still connecting, a Wi-Fi hop: the corporate host never
+        // answered, so nothing was learned about the corporate session.
+        runAuthenticateTrigger
+            .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+            .mockResolvedValueOnce(null)
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('recovered')
+        expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2)
+    })
+
+    it('so is a corporate host that timed out or answered 5xx', async () => {
+        runAuthenticateTrigger.mockRejectedValue(
+            new GatewayCallError('The sign-in service answered 503.', true),
+        )
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(runAuthenticateTrigger).toHaveBeenCalledTimes(2)
+        expect(readReauthFailure()).toBeNull()
+        expect(readReauthNotice()?.reason).toMatch(/503/)
+    })
+
+    it('a corporate host that answered is a verdict', async () => {
+        // A 401 is the machine outside the domain, or no corporate
+        // session at all — repeating it changes nothing.
+        runAuthenticateTrigger.mockRejectedValue(
+            new GatewayCallError('The sign-in service answered 401.', false),
+        )
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
+        expect(readReauthFailure()?.reason).toMatch(/401/)
+    })
+
+    it('this page\'s security policy blocking the call is a verdict, with its fix', async () => {
+        runAuthenticateTrigger.mockRejectedValue(new GatewayCallError(
+            "Blocked by this site's security policy — add "
+            + 'https://sso.corporate.com to CSP_CONNECT_SRC on the frontend.',
+            false,
+        ))
+
+        expect(await settle(attemptSilentReauth('corp-gateway'))).toBe('failed')
+        expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
+        expect(readReauthFailure()?.reason).toMatch(/CSP_CONNECT_SRC/)
+    })
+})
+
+describe('one latch for every tab', () => {
+    it('a refusal another tab recorded holds this one, with its reason', async () => {
+        // Every tab lands on the sign-in page when the session ends. Only
+        // one ran the recovery; the rest must not each re-run the browser
+        // half against the corporate host that just refused it.
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+            at: Date.now(), reason: 'The sign-in service answered 401.', hold: true,
+        }))
+
+        expect(await attemptSilentReauth('corp-gateway')).toBe('failed')
+        expect(fetchWithTimeout).not.toHaveBeenCalled()
+        expect(readReauthNotice()?.reason).toMatch(/401/)
+    })
+
+    it('a recovery anywhere clears it everywhere', async () => {
+        window.localStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+            at: Date.now(), reason: 'busy', hold: false,
+        }))
+        expect(await attemptSilentReauth('corp-gateway')).toBe('recovered')
+        expect(window.localStorage.getItem('nx_bc_reauth_failed')).toBeNull()
+    })
+})
+
+describe('signing out sticks', () => {
+    it('holds the automatic sign-in in every tab until a sign-in', () => {
+        markSignedOutByChoice()
+        // Not the tab's sixty-second sentinel: localStorage, and no clock.
+        window.sessionStorage.clear()
+        expect(autoPortalAlreadyTried()).toBe(true)
+
+        clearSignedOutByChoice()
+        expect(autoPortalAlreadyTried()).toBe(false)
     })
 })

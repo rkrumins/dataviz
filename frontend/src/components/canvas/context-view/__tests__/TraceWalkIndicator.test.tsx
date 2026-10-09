@@ -38,6 +38,9 @@ describe('TraceWalkIndicator — what it says', () => {
     expect(document.body.textContent).toMatch(/13,859 nodes · 11,044 flows · 2 requests/)
     expect(document.body.textContent).toMatch(/3,547/)
     expect(document.body.textContent).toMatch(/4,928/)
+    // The counts wear the lineage direction pair: up is in, down is out.
+    expect(screen.getByText(/↑ 3,547/).className).toMatch(/\btext-lineage-in\b/)
+    expect(screen.getByText(/4,928.*↓/).className).toMatch(/\btext-lineage-out\b/)
   })
 
   it('walking: mapping the flow, counts ticking, never a percent', () => {

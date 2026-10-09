@@ -205,6 +205,16 @@ The token's own `exp` bounds the application session instead: when it
 passes, the user's browser silently repeats the exchange, and your
 endpoint answering 401 there is what actually signs them out.
 
+**On the application's side: its page's Content-Security-Policy.**
+Both browser calls in this section — the authenticate call and the
+translate call — are fetches from the application's page, and its
+policy allows only its own origin (`connect-src 'self'`). Until the
+operator lists your origins in the frontend container's
+`CSP_CONNECT_SRC` (space-separated `https://` origins, no paths —
+e.g. `CSP_CONNECT_SRC="https://sso.corp.example"`), the browser
+refuses the call before it is sent, and nothing reaches your service
+or its logs.
+
 ---
 
 ## 3. Status codes — the part that matters most
@@ -299,13 +309,18 @@ What the application needs:
 | profile picture URL | no | see below |
 
 **The authentication instant** is the moment the person actually signed
-in — not the moment you answered us. Without it the application cannot
-tell how long ago that was, and a daily re-authentication ceiling stops
-applying to everyone on this connection. If your reply carries no such
+in — not the moment you answered us. The application's daily
+re-authentication ceiling measures from it. If your reply carries no such
 field, say so explicitly rather than letting a "close enough" timestamp
-be mapped to it. (An operator can turn the requirement off; the
-rehearsal verdict then states that the ceiling will measure from each
-sign-in instead of from your authentication.)
+be mapped to it.
+
+A missing instant never refuses the sign-in, and neither does an old one
+(your portal's original login, days ago, is common). Either way the
+ceiling measures from the sign-in to this application instead, the login
+is recorded as such (`auth_time_asserted: false` or
+`auth_time_anchored: true`), and the rehearsal verdict says so. Your own
+session still decides when ours ends: it is re-checked on every renewal
+(server mode), or bounds ours through its token's expiry (browser mode).
 
 **The profile picture** is a URL (`picture`, `avatarUrl`, `photoUrl`
 and similar names map by default), and it is opt-in per connection.
@@ -324,8 +339,10 @@ content hash, a version) when the photo changes.
 
 Of your endpoints:
 
-- **TLS**, with a certificate that validates. Plain HTTP is refused
-  outright in production.
+- **TLS**, with an answer that validates — against a public CA, or a
+  CA bundle this deployment has been given (`SSO_OUTBOUND_TLS_CA_CERTS`,
+  a PEM path; see the deployment guide for mounting it). Plain HTTP is
+  refused outright in production.
 - **No redirects.** A `3xx` from either endpoint is treated as an error,
   not followed. Redirecting a credentialed back-channel call is the
   standard way around a destination check, so it is refused rather than

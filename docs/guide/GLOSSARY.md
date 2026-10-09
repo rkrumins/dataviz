@@ -36,6 +36,7 @@ return whenever a word trips you up.
 | **Downstream** | What data feeds (follow arrows forwards). |
 | **Trace** | Following lineage edges from a node to reveal its chain. |
 | **Expand** | Following containment edges to reveal a node's children. |
+| **Orphan** | An entity whose type normally sits inside another (a Table in a Schema) but which has no parent in the data. An advanced tool lists them: **Display → Advanced → Orphaned entities…** on the canvas. |
 | **Blast Radius** | Everything affected by a change to a given node. |
 | **Granularity** | The level of detail: column → table → domain. |
 | **Persona Toggle** | Switch between Business and Technical framing of the same graph. |
@@ -95,7 +96,7 @@ return whenever a word trips you up.
 | **Neo4j** | A supported enterprise graph database. |
 | **DataHub** | A supported metadata/catalog source. |
 | **Spanner** | A supported cloud graph database backend. |
-| **PostgreSQL / SQLite** | The platform's own management database (prod / local dev). |
+| **PostgreSQL** | The platform's own management database, in every environment. |
 
 ---
 

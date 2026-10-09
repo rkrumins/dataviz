@@ -35,6 +35,30 @@ describe('groupLedgerBySweep', () => {
 })
 
 describe('OvernightLedger', () => {
+    it('names a projection hold in words, not as the raw backend code', async () => {
+        // ``SKIP_LABEL`` exists so an unlabelled reason cannot print as
+        // "Held (projection_stalled)" — ``paused`` once did exactly that. The
+        // reason this feature added was the only key missing from the map.
+        // Latent today (the sweeper appends a finding row only when the
+        // verdict carries a reason, and this verdict is an absolute skip) and
+        // live the moment anyone gives it one.
+        render(
+            <MemoryRouter>
+                <OvernightLedger
+                    items={[item({
+                        name: 'Orders Graph', reason: null, outcome: 'held',
+                        skip: 'projection_stalled', jobId: null,
+                    })]}
+                    isError={false}
+                    isLoading={false}
+                    onOpenSource={vi.fn()}
+                />
+            </MemoryRouter>,
+        )
+        expect(screen.getByText('Held (Connections not up to date)')).toBeInTheDocument()
+        expect(screen.queryByText(/projection_stalled/)).not.toBeInTheDocument()
+    })
+
     it('always shows the last pass as a report and links a rebuilt finding to its job', async () => {
         const user = userEvent.setup()
         const onOpen = vi.fn()

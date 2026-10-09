@@ -45,6 +45,7 @@ from backend.app.db.repositories import (
     user_repo,
 )
 from backend.auth_service.interface import User
+from backend.common.display_name import resolve_display_name
 from backend.common.models.rbac import (
     AccessRequestCreate,
     AccessRequestRequester,
@@ -80,7 +81,10 @@ async def _hydrate_requester(
     user_orm = row.scalar_one_or_none()
     if user_orm is None:
         return AccessRequestRequester(id=user_id)
-    full_name = f"{user_orm.first_name} {user_orm.last_name}".strip() or user_orm.email
+    full_name = resolve_display_name(
+        getattr(user_orm, "display_name", None),
+        user_orm.first_name, user_orm.last_name,
+    ) or user_orm.email
     return AccessRequestRequester(
         id=user_orm.id,
         email=user_orm.email,

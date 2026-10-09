@@ -168,7 +168,9 @@ class DataHubGraphQLProvider(GraphDataProvider):
     async def get_distinct_values(self, property_name: str) -> List[str]:
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None,
+    ) -> GraphSchemaStats:
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
     async def get_ancestors(

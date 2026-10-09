@@ -83,7 +83,15 @@ vi.mock('../steps/BasicsStep', () => ({
     return <div data-testid="basics-step" />
   },
 }))
-vi.mock('../steps/LayoutStep', () => ({ LayoutStep: () => <div data-testid="layout-step" /> }))
+// The real step pins entityScope when a rule-driven Quick Start is applied; the
+// stub exposes that one gesture so the pin can be traced to the layout write.
+vi.mock('../steps/LayoutStep', () => ({
+  LayoutStep: ({ updateFormData }: { updateFormData: (u: Record<string, unknown>) => void }) => (
+    <div data-testid="layout-step">
+      <button onClick={() => updateFormData({ entityScope: 'all' })}>stub-pin-open-scope</button>
+    </div>
+  ),
+}))
 vi.mock('../steps/EntitiesStep', () => ({ EntitiesStep: () => <div data-testid="entities-step" /> }))
 vi.mock('../steps/PreviewStep', () => ({ PreviewStep: () => <div data-testid="preview-step" /> }))
 vi.mock('../steps/AssignmentStep', () => ({ AssignmentStep: () => <div data-testid="assignment-step" /> }))
@@ -224,6 +232,27 @@ describe('ViewWizard — submit (edit path)', () => {
     expect(body.entityScope).toBe('curated')
   })
 
+  it('keeps the display rules and anything else the reference layout carries', async () => {
+    // The layout write replaces referenceLayout wholesale; a save from the wizard, which edits
+    // only layers and placements, used to delete the view's display rules with it.
+    renderWizard(makeView(baseConfig({
+      layers: [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }],
+      assignments: { 'urn:a': { layerId: 'l1', inheritsChildren: true } },
+      displayRules: [{ id: 'hot', op: 'color', value: '#f00' }],
+      futureField: { kept: true },
+    })))
+
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(1))
+    const [, body] = updateViewLayoutMock.mock.calls[0]
+    expect(body.referenceLayout.displayRules).toEqual([{ id: 'hot', op: 'color', value: '#f00' }])
+    expect(body.referenceLayout.futureField).toEqual({ kept: true })
+    expect(body.referenceLayout.assignments).toEqual({ 'urn:a': { layerId: 'l1', inheritsChildren: true } })
+  })
+
   it('preserves an explicit editingView.content.entityScope rather than deriving it', async () => {
     const config = baseConfig({
       layers: [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }],
@@ -273,6 +302,55 @@ describe('ViewWizard — submit (edit path)', () => {
     expect(onComplete).not.toHaveBeenCalled()
     expect(onClose).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument()
+  })
+})
+
+describe('ViewWizard — no hardcoded root types in the saved config', () => {
+  // Root types come from the data source's ontology at runtime. Older saves
+  // stamped a hardcoded ['domain'] into content.rootEntityTypes (baseConfig
+  // still carries it, as a stored view would).
+  it('drops a stale rootEntityTypes on an edit save, still sending the visible types', async () => {
+    renderWizard(makeView(baseConfig({
+      layers: [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }],
+      assignments: {},
+    })))
+
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewMock).toHaveBeenCalledTimes(1))
+    const content = updateViewMock.mock.calls[0][1].config.content
+    expect(content).not.toHaveProperty('rootEntityTypes')
+    expect(content.visibleEntityTypes).toEqual(['domain', 'dataset'])
+  })
+
+  it('writes no rootEntityTypes when creating a view', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={vi.fn()}
+            onComplete={vi.fn()}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    await waitFor(() => expect(createViewMock).toHaveBeenCalledTimes(1))
+    expect(createViewMock.mock.calls[0][0].config.content).not.toHaveProperty('rootEntityTypes')
   })
 })
 
@@ -533,5 +611,54 @@ describe('ViewWizard — node-ordering side-fields survive an edit-mode save', (
     expect(body.referenceLayout.defaultNodeSortMode).toBe('alpha-desc')
     expect(body.referenceLayout.assignments['urn:a'].orderKey).toBe('a1')
     expect(body.referenceLayout.layers[0].nodeSortMode).toBe('custom')
+  })
+})
+
+describe('ViewWizard — a pinned entityScope reaches the layout write', () => {
+  /** Walk to the Layout step, pin open scope there, then carry on to Preview. */
+  async function pinOpenScopeThenPreview() {
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('layout-step')
+    fireEvent.click(screen.getByRole('button', { name: 'stub-pin-open-scope' }))
+    for (const step of ['assignment-step', 'entities-step', 'preview-step']) {
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+      await screen.findByTestId(step)
+    }
+  }
+
+  it('keeps a rule-driven layout OPEN even though an assignment exists', async () => {
+    // Without the pin this derives 'curated' — and every root the type rule
+    // placed would stop rendering, leaving only the one dragged entity.
+    renderWizard(makeView(baseConfig({
+      layers: [{ id: 'l1', name: 'Domains', entityTypes: ['domain'], order: 0 }],
+      assignments: { 'urn:dragged': { layerId: 'l1', inheritsChildren: true } },
+    })))
+
+    await screen.findByTestId('basics-step')
+    await pinOpenScopeThenPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(1))
+    const [, body] = updateViewLayoutMock.mock.calls[0]
+    expect(body.entityScope).toBe('all')
+  })
+
+  it('ignores a pin once no layer carries a type rule', async () => {
+    // Self-healing: undo the gesture (or delete the layer) and the pin lapses
+    // rather than holding a view open that resolves nothing by rule.
+    renderWizard(makeView(baseConfig({
+      layers: [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }],
+      assignments: { 'urn:a': { layerId: 'l1', inheritsChildren: true } },
+    })))
+
+    await screen.findByTestId('basics-step')
+    await pinOpenScopeThenPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(1))
+    const [, body] = updateViewLayoutMock.mock.calls[0]
+    expect(body.entityScope).toBe('curated')
   })
 })

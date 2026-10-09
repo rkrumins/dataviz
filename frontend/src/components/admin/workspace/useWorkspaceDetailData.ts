@@ -30,6 +30,12 @@ export interface DataSourceProviderInfo {
   catalogItemName?: string
   host?: string
   port?: number
+  /** The semantic layer this source is read through, resolved from
+   *  `dataSource.ontologyId`. Absent when the source declares none, or when
+   *  the caller cannot read the ontologies list (it is admin-gated and fails
+   *  silently) — treat missing as "unknown", never as "none". */
+  ontologyName?: string
+  ontologyVersion?: number
 }
 
 export interface UseWorkspaceDetailDataReturn {
@@ -229,7 +235,13 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
       : undefined
 
     return deriveWorkspaceHealth(
-      entries.map(r => ({ aggregationStatus: r.aggregationStatus })),
+      // ``projectorCurrent`` rides along because a wedged versioned source
+      // reports ``aggregationStatus: 'ready'`` while serving no rolled-up
+      // connections — status alone cannot see it.
+      entries.map(r => ({
+        aggregationStatus: r.aggregationStatus,
+        projectorCurrent: r.projectorCurrent,
+      })),
       { nodeCount },
     )
   }, [workspace, readinessMap, dsStatsMap])

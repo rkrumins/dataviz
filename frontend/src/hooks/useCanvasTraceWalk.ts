@@ -26,13 +26,32 @@ import {
     FULL_WALK_INITIAL_DEPTH,
     type WalkEntry,
     type WalkProgress,
+    type WalkPhase,
+    type LensWalkStatus,
 } from './useLensWalk'
+import { unionWalkModels } from '@/components/canvas/context-view/lens/closure-adapter'
+
+/** Stable empty seed list, so "not tracing" keeps one identity. */
+const EMPTY_SEEDS: readonly string[] = []
+
+/** The most seeds one trace walks. Each is its own full walk, and their union
+ *  is re-drawn on every wave of every one of them; a selection larger than
+ *  this traces its first `MAX_TRACE_SEEDS` (the canvas says so). */
+export const MAX_TRACE_SEEDS = 25
 
 export interface CanvasTraceWalk {
     isTracing: boolean
+    /** The FIRST seed. Kept for every consumer that reasons about one focal
+     *  (history, re-centre, the "already tracing this" check). */
     tracedUrn: string | null
-    /** Trace this urn. */
-    start: (urn: string) => void
+    /** Every seed being traced. One entry for a normal trace; several for a
+     *  bulk trace of a multi-selection. */
+    tracedUrns: readonly string[]
+    /** Trace one urn, or a selection of them — the first `MAX_TRACE_SEEDS`. */
+    start: (urn: string | readonly string[]) => void
+    /** Drop one seed from the trace. No re-walk: the other seeds' walks are
+     *  already in hand. Dropping the last one is leaving the trace. */
+    removeSeed: (urn: string) => void
     /** Back to browse. */
     exit: () => void
     /** Status/error/model for the trace bar and counts. */
@@ -46,17 +65,77 @@ export interface CanvasTraceWalk {
 }
 
 export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTraceWalk {
-    const [tracedUrn, setTracedUrn] = useState<string | null>(null)
+    const [tracedUrns, setTracedUrns] = useState<readonly string[]>(EMPTY_SEEDS)
+    const tracedUrn = tracedUrns[0] ?? null
     // Counts presses of Trace, not focals. Re-tracing the focal already on
     // screen leaves `tracedUrn` untouched, so without this the telemetry
     // effect below would never re-run and the second ask would go unrecorded —
     // while the other trace path records every press. Two surfaces counting
     // the same action differently is worse than either convention alone.
     const [attempt, setAttempt] = useState(0)
-    const walk = useLensWalk(tracedUrn, provider, FULL_WALK_INITIAL_DEPTH, true)
+    // The METHODS, never the object: `useLensWalk` hands back a fresh object
+    // every render, and a memo keyed on it re-ran the union and every
+    // consumer's view build on every render of the canvas. Each method keeps
+    // its identity until the walk state it reads actually moves.
+    const {
+        walkFor, walkProgressFor, retry,
+        continuePastCheckpoint: continueSeedPastCheckpoint, retryWalk: retrySeedWalk,
+    } = useLensWalk(tracedUrns, provider, FULL_WALK_INITIAL_DEPTH, true)
 
-    const walkEntry = tracedUrn ? walk.walkFor(tracedUrn) : null
-    const progress = tracedUrn ? walk.walkProgressFor(tracedUrn) : null
+    // ONE picture from however many seeds. With a single seed these collapse
+    // to exactly what they always were: `unionWalkModels` of one model
+    // returns that model by identity, and the aggregates below are that
+    // seed's own values.
+    const entries = useMemo(
+        () => tracedUrns.map(u => walkFor(u)).filter((e): e is WalkEntry => e !== null),
+        [tracedUrns, walkFor],
+    )
+    const walkEntry = useMemo<WalkEntry | null>(() => {
+        if (entries.length === 0) return null
+        if (entries.length === 1) return entries[0]!
+        const model = unionWalkModels(entries.map(e => e.model))
+        if (!model) return null
+        // Loading wins (something is still coming), then error (the picture
+        // is short and there is a retry to offer), then done.
+        const status: LensWalkStatus = entries.some(e => e.status === 'loading')
+            ? 'loading'
+            : entries.some(e => e.status === 'error')
+                ? 'error'
+                : entries.every(e => e.status === 'unsupported') ? 'unsupported' : 'done'
+        const extendStatus = new Map<string, 'loading' | 'error'>()
+        for (const e of entries) for (const [k, v] of e.extendStatus) extendStatus.set(k, v)
+        return {
+            model,
+            status,
+            error: entries.find(e => e.error)?.error ?? null,
+            extendStatus,
+            depth: Math.max(...entries.map(e => e.depth)),
+        }
+    }, [entries])
+
+    const progress = useMemo<WalkProgress | null>(() => {
+        if (tracedUrns.length === 0) return null
+        const all = tracedUrns.map(u => walkProgressFor(u)).filter((p): p is WalkProgress => p !== null)
+        if (all.length === 0) return null
+        if (all.length === 1) return all[0]!
+        // The phase the READER is waiting on: any seed still working keeps
+        // the whole trace "working", and a checkpoint or an error on any seed
+        // is something they have to be told about.
+        const phase: WalkPhase =
+            all.find(p => p.phase === 'error')?.phase
+            ?? all.find(p => p.phase === 'checkpoint')?.phase
+            ?? all.find(p => p.phase === 'loading' || p.phase === 'seeding' || p.phase === 'walking')?.phase
+            ?? 'done'
+        return {
+            phase,
+            nodes: all.reduce((n, p) => n + p.nodes, 0),
+            flows: all.reduce((n, p) => n + p.flows, 0),
+            requests: all.reduce((n, p) => n + p.requests, 0),
+            pending: all.reduce((n, p) => n + p.pending, 0),
+            unbounded: all.every(p => p.unbounded),
+            error: all.find(p => p.error)?.error ?? null,
+        }
+    }, [tracedUrns, walkProgressFor])
 
     // ── Telemetry ────────────────────────────────────────────────────
     // Tracing lineage is the product's value moment, and this is the SECOND
@@ -97,36 +176,54 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         })
     }, [tracedUrn, phase, walkEntry, attempt])
 
-    const exit = useCallback(() => setTracedUrn(null), [])
+    const exit = useCallback(() => setTracedUrns(EMPTY_SEEDS), [])
 
-    const start = useCallback((urn: string) => {
-        if (!urn) return
+    const start = useCallback((urn: string | readonly string[]) => {
+        const seeds = (typeof urn === 'string' ? [urn] : [...urn]).filter(Boolean)
+        if (seeds.length === 0) return
         // Asking again is asking again, even for the focal already on screen:
         // the reader wanted lineage twice, and the walk cache making the second
         // one instant does not mean it did not happen.
         setAttempt((n) => n + 1)
-        setTracedUrn(urn)
+        const capped = seeds.slice(0, MAX_TRACE_SEEDS)
+        setTracedUrns(prev =>
+            prev.length === capped.length && prev.every((u, i) => u === capped[i]) ? prev : capped)
     }, [])
 
+    // Not a new ask, so no `attempt`: the trace narrows, and every seed left
+    // is a walk already in hand (the walk cache never refetches one).
+    const removeSeed = useCallback((urn: string) => {
+        setTracedUrns(prev => {
+            if (!prev.includes(urn)) return prev
+            const next = prev.filter(u => u !== urn)
+            return next.length > 0 ? next : EMPTY_SEEDS
+        })
+    }, [])
+
+    // Both act on EVERY seed: a checkpoint or a failure belongs to one seed's
+    // walk, and the reader is looking at one picture.
     const continuePastCheckpoint = useCallback(() => {
-        if (tracedUrn) walk.continuePastCheckpoint(tracedUrn)
-    }, [walk, tracedUrn])
+        for (const u of tracedUrns) continueSeedPastCheckpoint(u)
+    }, [continueSeedPastCheckpoint, tracedUrns])
     const retryWalk = useCallback(() => {
-        if (!tracedUrn) return
-        if (walkEntry?.status === 'error') walk.retry(tracedUrn)
-        else walk.retryWalk(tracedUrn)
-    }, [walk, tracedUrn, walkEntry?.status])
+        for (const u of tracedUrns) {
+            if (walkFor(u)?.status === 'error') retry(u)
+            else retrySeedWalk(u)
+        }
+    }, [walkFor, retry, retrySeedWalk, tracedUrns])
 
     // Memoized: see `useUnifiedTrace`'s return. A fresh literal here re-triggered
     // every consumer memo that depends on the walk.
     return useMemo(() => ({
-        isTracing: tracedUrn !== null,
+        isTracing: tracedUrns.length > 0,
         tracedUrn,
+        tracedUrns,
         start,
+        removeSeed,
         exit,
         walkEntry,
         progress,
         continuePastCheckpoint,
         retryWalk,
-    }), [tracedUrn, start, exit, walkEntry, progress, continuePastCheckpoint, retryWalk])
+    }), [tracedUrn, tracedUrns, start, removeSeed, exit, walkEntry, progress, continuePastCheckpoint, retryWalk])
 }

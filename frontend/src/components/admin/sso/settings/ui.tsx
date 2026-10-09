@@ -162,7 +162,7 @@ export function SecretField({
     )
 }
 
-/** The two settings that knowingly degrade trust. Loud on purpose. */
+/** The settings that knowingly degrade trust. Loud on purpose. */
 export function DangerToggle({
     checked, onChange, title, children,
 }: {

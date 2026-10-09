@@ -19,6 +19,10 @@
  * Cause → Impact flip on the same node is one trace, not two; without
  * this, back/forward degenerates into stepping through direction flips.
  *
+ * A COMBINED trace (a multi-selection) is one entry carrying every seed in
+ * `urns`, and "the same focal" is the same SEED SET (`traceSeedKey`): tracing
+ * A and B is a different trace from tracing A alone.
+ *
  * Pure module: no React, no storage access — serialize/hydrate work on
  * strings, the caller owns localStorage (and, later, a server mirror).
  */
@@ -37,8 +41,13 @@ export interface TraceViewParams {
 }
 
 export interface TraceHistoryEntryRecord {
-    /** The traced entity's urn — what a restore re-traces. */
+    /** The traced entity's urn — what a restore re-traces. For a combined
+     *  trace, its PRIMARY seed (`urns[0]`). */
     urn: string
+    /** Every seed of a combined trace, `urn` first. Absent for a one-entity
+     *  trace — which is every entry written before combined traces existed,
+     *  so the storage version stands. */
+    urns?: string[]
     /** Canvas node id at trace time (display-name resolution in the dock). */
     focusId: string
     /** How the user was viewing this trace when they left it. */
@@ -77,11 +86,22 @@ export function currentTraceEntry(h: TraceHistoryStack): TraceHistoryEntryRecord
     return h.entries[h.cursor] ?? null
 }
 
+/** Every seed an entry traces — what a restore re-traces. */
+export function traceEntrySeeds(entry: Pick<TraceHistoryEntryRecord, 'urn' | 'urns'>): string[] {
+    return entry.urns && entry.urns.length > 0 ? entry.urns : [entry.urn]
+}
+
+/** A seed SET as one comparable value: order and repeats do not matter, and
+ *  one seed's key is its own urn. */
+export function traceSeedKey(urns: readonly string[]): string {
+    return [...new Set(urns)].sort().join('\n')
+}
+
 /** Push a focal: truncates the forward side; a re-push of the CURRENT
- *  focal updates its view/timestamp in place instead. */
+ *  focal (the same seed set) updates its view/timestamp in place instead. */
 export function pushTraceFocal(h: TraceHistoryStack, entry: TraceHistoryEntryRecord): TraceHistoryStack {
     const current = currentTraceEntry(h)
-    if (current && current.urn === entry.urn) {
+    if (current && traceSeedKey(traceEntrySeeds(current)) === traceSeedKey(traceEntrySeeds(entry))) {
         const entries = [...h.entries]
         entries[h.cursor] = { ...current, view: normalizeView(entry.view), timestamp: entry.timestamp }
         return { entries, cursor: h.cursor }
@@ -96,6 +116,32 @@ export function updateCurrentTraceView(h: TraceHistoryStack, view: TraceViewPara
     if (!current) return h
     const entries = [...h.entries]
     entries[h.cursor] = { ...current, view: normalizeView(view) }
+    return { entries, cursor: h.cursor }
+}
+
+/** A seed dropped from the combined trace on screen: the current entry now
+ *  describes what is left, in place — narrowing a trace is not a new one. A
+ *  new primary takes its own canvas node id (`focusIdOf`, the caller's
+ *  urn → node id map — the dock matches the active row and its type pill on
+ *  it), and one seed left is an ordinary one-entity entry. Nothing left is
+ *  an exit, which leaves history alone. */
+export function updateCurrentTraceSeeds(
+    h: TraceHistoryStack,
+    urns: readonly string[],
+    focusIdOf: (urn: string) => string,
+): TraceHistoryStack {
+    const current = currentTraceEntry(h)
+    const seeds = [...new Set(urns)]
+    if (!current || seeds.length === 0) return h
+    const urn = seeds[0]!
+    const entries = [...h.entries]
+    entries[h.cursor] = {
+        urn,
+        focusId: urn === current.urn ? current.focusId : focusIdOf(urn),
+        ...(seeds.length > 1 ? { urns: seeds } : {}),
+        view: current.view,
+        timestamp: current.timestamp,
+    }
     return { entries, cursor: h.cursor }
 }
 
@@ -127,6 +173,9 @@ function isValidEntry(e: unknown): e is TraceHistoryEntryRecord {
     const r = e as Record<string, unknown>
     const v = r.view as Record<string, unknown> | undefined
     return typeof r.urn === 'string'
+        // Absent is a one-entity trace. Present, it must name its seeds.
+        && (r.urns === undefined
+            || (Array.isArray(r.urns) && r.urns.length > 0 && r.urns.every(u => typeof u === 'string')))
         && typeof r.focusId === 'string'
         && typeof r.timestamp === 'number'
         && typeof v === 'object' && v !== null

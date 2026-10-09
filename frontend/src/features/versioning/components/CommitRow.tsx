@@ -13,6 +13,7 @@ import { useCallback, useState } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { ChevronRight, User, Loader2, Layers, MoreHorizontal, History, Undo2, ArrowDownToLine } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { getCommitDiffChildren } from '@/services/versioningApiService'
 import { useCommitDiffSummary, useSquashedCommits } from '../hooks/useVersioning'
@@ -208,14 +209,22 @@ export function CommitRow({
         <p className="text-[11px] text-ink-muted mt-0.5 flex items-center gap-1.5 flex-wrap pl-5">
           <User className="w-3 h-3" /> {actorLabel(commit.actor, userNames)}
           {others.length > 0 && (
-            <span title="Everyone who edited this revision">
-              · edits by {others.map((o) => ownerName(o, userNames)).join(', ')}
-            </span>
+            <HoverTip className="inline-flex" label="Everyone who edited this revision">
+              <span>
+                · edits by {others.map((o) => ownerName(o, userNames)).join(', ')}
+              </span>
+            </HoverTip>
           )}
           <span>·</span>
           <span>{timeAgo(commit.created_at as string)}</span>
           {showProvenance && (
             drilldownable ? (
+              <HoverTip
+                className="inline-flex"
+                label={isPull
+                  ? 'Show the published changes that came into this draft'
+                  : 'Show the draft save points folded into this publish'}
+              >
               <span
                 role="button"
                 tabIndex={0}
@@ -229,9 +238,6 @@ export function CommitRow({
                     ? 'bg-teal-500/10 text-teal-600 dark:text-teal-400 hover:bg-teal-500/20'
                     : 'bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20',
                 )}
-                title={isPull
-                  ? 'Show the published changes that came into this branch'
-                  : 'Show the draft commits squashed into this publish'}
               >
                 <ChevronRight className={cn('w-3 h-3 transition-transform', showSquashed && 'rotate-90')} />
                 {isPull ? <ArrowDownToLine className="w-3 h-3" /> : <Layers className="w-3 h-3" />}
@@ -239,16 +245,21 @@ export function CommitRow({
                   ? `${squashed} from Published`
                   : `merged ${squashed} commits`}
               </span>
+              </HoverTip>
             ) : (
-              <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted" title="Draft checkpoints squashed into this merge">
-                merged {squashed} commits
-              </span>
+              <HoverTip className="inline-flex" label="Draft save points folded into this publish">
+                <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted">
+                  merged {squashed} commits
+                </span>
+              </HoverTip>
             )
           )}
           {originatingViewLabel && (
-            <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted" title="Originating view">
-              view {originatingViewLabel}
-            </span>
+            <HoverTip className="inline-flex" label="The view these changes were made from">
+              <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted">
+                view {originatingViewLabel}
+              </span>
+            </HoverTip>
           )}
         </p>
       </button>

@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { IntegrityPulse } from './IntegrityPulse'
-import { checkNowToast, itemsInWindow, lastDriftAt, lastPassBrief, lastPassLabel, parseDriftWindow, pickLastPassRun, rankRepeatOffenders, sweepsHaveStopped } from './reconcileHealth'
+import { checkNowMessage, itemsInWindow, lastDriftAt, lastPassBrief, lastPassLabel, parseDriftWindow, pickLastPassRun, rankRepeatOffenders, sweepsHaveStopped } from './reconcileHealth'
 import type { FreshnessSummary, ReconcileActivityItem, ReconcilePolicy, ReconcileRun } from '@/services/freshnessService'
 
 const POLICY: ReconcilePolicy = {
@@ -51,7 +51,7 @@ describe('lastPassLabel', () => {
     it('names an empty auto tick as nobody due, not an empty set', () => {
         expect(lastPassLabel({ scanned: 0, findings: 0, actions: 0, bySkip: {} }, 12))
             .toBe('no sources were due this tick')
-        expect(checkNowToast({ skipped: false, run: { scanned: 0, findings: 0, actions: 0, bySkip: {} } }))
+        expect(checkNowMessage({ skipped: false, run: { scanned: 0, findings: 0, actions: 0, bySkip: {} } }))
             .toBe('No sources in the reconcile set yet.')
     })
 

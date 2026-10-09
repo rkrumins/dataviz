@@ -86,17 +86,19 @@ hook, and an `on_projected` nudge (`FalkorProjector.__init__`, `projection.py:15
 
 ## 3. Full seed vs incremental window — `_compute_changes`
 
-`_compute_changes` (`projection.py:433-493`) produces `(node_upserts, edge_upserts, node_deletes,
-edge_deletes)` two ways:
+A projection pass takes one of two paths:
 
-- **Full seed (`from_seq <= 0`)** — composes the *entire* live state via
-  `_svc._state_as_of(graph.id, main_id, to_seq)` (fork-aware copy-on-write composition), splits nodes
-  vs edges by `_is_edge_payload`, and resolves edge endpoint urns through a per-pass cache
-  (`projection.py:442-458`).
-- **Incremental (`from_seq > 0`)** — selects `node_versions`/`edge_versions` rows in
-  `(from_seq, to_seq]` ordered by `(commit_seq, created_at)` and **net-folds by `(kind, entity_id)`**
-  — keyed on the tuple, *not* `entity_id` alone, so a node and an edge that ever share an id can't
-  clobber each other (`projection.py:460-493`). Last op per entity wins; `delete` → a delete list,
+- **Full replay (`from_seq <= 0`)** — a first seed, an explicit rebuild or a repin **reconciles in
+  place** (`_reconcile_in_place`) rather than going through `_compute_changes`: it reads narrow heads
+  without payloads, scans FalkorDB in internal-id pages, diffs off the event loop, fetches payloads
+  only for the rows it must write, and never drops the graph (dropping renumbered every label, type
+  and property id under long-lived readers, and took the indexes and every `:AGGREGATED` rollup with
+  it). On a fresh key the diff is simply "everything", so a first seed is the same path.
+- **Incremental (`from_seq > 0`)** — `_compute_changes` (`projection.py:789`) selects
+  `node_versions`/`edge_versions` rows in `(from_seq, to_seq]` ordered by `(commit_seq, created_at)`
+  and **net-folds by `(kind, entity_id)`** — keyed on the tuple, *not* `entity_id` alone, so a node
+  and an edge that ever share an id can't clobber each other. It produces `(node_upserts,
+  edge_upserts, node_deletes, edge_deletes)`; last op per entity wins; `delete` → a delete list,
   else an upsert.
 
 `_apply` (`projection.py:1217`) writes in a fixed order — nodes-in (grouped by label), edges-in
@@ -105,11 +107,12 @@ edge_deletes)` two ways:
 `PROJECTION_BATCH_SIZE` (default 5000, `config.py:110`), firing the optional progress callback per
 chunk.
 
-> **Limitation (full-seed cost).** A full seed still composes the whole live state **in memory** (not
-> streamed). The per-edge endpoint lookup is no longer the bottleneck — since 2026-07 it is a
-> label+urn index seek (the unlabeled form was a full node scan per row, O(N·E) overall; the same
-> pattern measured ~2000× slower on `save_custom_graph`'s bulk path) — so the remaining cost is the
-> in-memory composition; a keyset-streaming rebuild is the documented upgrade path (see
+> **Limitation (full-replay memory).** A full replay no longer composes the live state, but its diff
+> still holds whole-graph maps of small tuples **in memory**, `O(N + E)` — narrow ids, not payloads —
+> rather than streaming by keyset. The per-edge endpoint lookup is no longer the bottleneck — since
+> 2026-07 it is a label+urn index seek (the unlabeled form was a full node scan per row, O(N·E)
+> overall; the same pattern measured ~2000× slower on `save_custom_graph`'s bulk path). A
+> keyset-streaming reconcile is the documented upgrade path (see
 > [09 · Scale & Limits](09-scale-limits-and-roadmap.md)).
 
 ---
@@ -285,19 +288,16 @@ source, **skips dedicated mode** (the `{graph_name}_proj` graph is never wiped b
 churn to one job. `resolve_aggregation_edge_types` (`projection_target.py:22-49`) likewise returns
 `None` in dedicated mode (incremental maintenance would write where nothing reads).
 
-> **Limitation (standalone-worker rollup gap).** The **in-process** worker (`main.py:905`) and the
-> **interactive** path (`versioning.py:148`) both wire `on_rollups_stale=make_rollup_rebuild_hook(...)`.
-> The **standalone** worker does **not** — `__main__.py:49-50` builds the projector with
-> `target_resolver` + `edge_types_resolver` but no `on_rollups_stale` (acknowledged at
-> `__main__.py:33-35`: no in-process aggregation service in that runtime). Consequence: in a
-> deployment running *only* the standalone worker, a full-seed wipe / `"stale"` window / heal-reseed
-> leaves `:AGGREGATED` rollups stale until a manual aggregation rebuild. This is the single biggest
-> behavioral difference between the two projector wirings.
+> **Fixed (standalone-worker rollup gap).** The standalone worker now wires
+> `on_rollups_stale=make_rollup_rebuild_hook(...)` like the in-process worker and the interactive
+> path (`backend/app/services/versioning/__main__.py:94`), so a full-seed wipe, a `"stale"` window
+> or a heal-reseed queues the rollup rebuild on every wiring.
 
-> **Limitation (no level stamps).** Incremental rollups stamp `gvSeq`/`aggKey`/`weight` but not a
-> hierarchy `level`, so they can't reconcile level-scoped aggregation; a bulk or overlapping window
-> punts to `"stale"` → full rebuild. Forks skip incremental rollups entirely (their containment chains
-> span the parent's rows), getting rollups only from full rebuilds (`projection.py:250-254`).
+> **Limitation (large windows and forks).** Incremental rollups now carry level and depth stamps
+> (`sourceLevel`, `targetLevel`, `sourceDepth`, `targetDepth`, `levelDigest`), but a window over
+> `PROJECTION_ROLLUP_INLINE_CAP` (50,000) or an overlapping one still punts to `"stale"` → full
+> rebuild. Forks skip incremental rollups entirely (their containment chains span the parent's rows),
+> getting rollups only from full rebuilds.
 
 ---
 
@@ -394,11 +394,12 @@ provider per request:
   to that provider's budget. Budgets come from `make_registry_budget_resolver` (`eviction_budget.py:24`,
   provider row → `vconfig.falkor_budget_for` fallback).
 
-> **Limitation (eviction dormant by default).** RAM is a property of a FalkorDB *instance*, so each
-> provider has its own budget — but `FALKOR_MAX_RESIDENT` defaults to **0** ("unlimited",
-> `config.py:151`) and the daemon is off entirely unless a budget is configured
-> (`falkor_eviction_configured`, `config.py:157-159`). In practice caches are currently unbounded per
-> provider until an operator sets `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS`.
+> **Limitation (no budget set by default).** RAM is a property of a FalkorDB *instance*, so each
+> provider has its own budget — its `falkorMaxResident` setting, falling back to
+> `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS`. The eviction loop always runs, but a
+> budget of **0** ("unlimited", the default, `config.py:182`) skips the provider, and no manifest,
+> chart or compose file sets one. In practice caches are unbounded per provider until an operator
+> does. (`falkor_eviction_configured` no longer gates anything; it has no callers.)
 
 > **Limitation (ephemeral pool unimplemented).** The `EPHEMERAL_POOL_MAX_GRAPHS` /
 > `EPHEMERAL_TTL_SECS` / `TRACE_LEASE_TTL_SECS` knobs (`config.py:189-194`) have **no call sites** —
@@ -428,13 +429,13 @@ keyset-paginated PG `entity_heads` under `COLLATE "C"` vs a FalkorDB scan — `_
 
 The projector runs in one of two runtimes (never blocking boot):
 
-- **In-process** (`main.py:872-916`) — gated by `GRAPHVER_PROJECTION_INPROCESS` (`config.py:126`, set
-  in the dev compose). Builds a `ProjectionWorker` with the full hook set:
+- **In-process** (`main.py:1530`) — gated by `GRAPHVER_PROJECTION_INPROCESS` (`config.py:157`; no
+  compose file sets it). Builds a `ProjectionWorker` with the full hook set:
   `make_registry_graph_factory()`, `target_resolver=repair_projection_target`,
   **`on_rollups_stale=make_rollup_rebuild_hook(...)`**, `on_projected`, and
   `evict_budget=make_registry_budget_resolver()` (`main.py:903-913`).
-- **Standalone** (`python -m backend.app.services.versioning`, `__main__.py`) — the same worker
-  **minus `on_rollups_stale`** (see §8's callout).
+- **Standalone** (`python -m backend.app.services.versioning`, `__main__.py`) — the same worker and
+  hook set, `on_rollups_stale` included; Compose and the Kubernetes manifests run this one.
 
 `ProjectionWorker.run` (`worker.py:112`) gathers several loops: `_poll_loop` (the durable backstop —
 `project_pending` every `PROJECTION_POLL_SECS=5`, `config.py:115`), `_stream_loop` (a Redis-stream
@@ -477,16 +478,18 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 
 Consolidated here and expanded in [09 · Scale & Limits](09-scale-limits-and-roadmap.md):
 
-1. **Standalone worker misses `on_rollups_stale`** → stale `:AGGREGATED` until a manual rebuild (§8).
-2. **Read-freshness defined twice** (ContextEngine strict vs neighbors `READ_MAX_LAG`) (§5).
-3. **Full seed is O(N·E), in-memory, non-streamed** (§3); keyset streaming is the upgrade.
-4. **Eviction budget dormant** (default 0 = unlimited) and the **ephemeral time-travel pool is
-   config-only** with no call sites (§11).
-5. **Incremental rollups lack level stamps**; forks never get incremental rollups (§8).
-6. **Reconcile sorted-merge assumes ASCII collation** (§12).
-7. **`gv:<id>` urn fallback can mint phantom nodes** — a reconciliation signal, not a handled case
+1. **Read-freshness defined twice** (ContextEngine strict vs neighbors `READ_MAX_LAG`) (§5).
+2. **A full re-projection holds `O(N + E)` ids in memory** — it reconciles in place from narrow
+   heads, but is not keyset-streamed (§3).
+3. **No eviction budget is set anywhere** (default 0 = unlimited; the loop runs and skips) and the
+   **ephemeral time-travel pool is config-only** with no call sites (§11).
+4. **Large or overlapping windows rebuild rollups in full**; forks never get incremental rollups
+   (§8).
+5. **Reconcile sorted-merge assumes ASCII collation** (§12).
+6. **`gv:<id>` urn fallback can mint phantom nodes** — a reconciliation signal, not a handled case
    (§2).
-8. **Credential rotation needs a process restart** (registry memoizes provider rows).
+7. **Credential rotation reaches the stats service and the control plane only on restart** — the
+   other processes drop their copies on a provider-edit broadcast.
 
 ---
 

@@ -35,6 +35,9 @@
  * parent instead (the containment tree, never a per-type break-out — see
  * 961293a), so its Layer cell shows a read-only "nested" indicator rather
  * than an editable target it wouldn't actually honor.
+ * Flag-on (One Placement Contract), a top-level row's cell comes from
+ * `contractRowLayer`, the call Apply makes, so its name, tags and properties
+ * count too; a nested row follows its parent unless its own layer rule claims it.
  * Ontology-agnostic: no type/layer names here.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -47,6 +50,7 @@ import type { EntityTypeSchema } from '@/types/schema'
 import type { BuildRow } from './buildRow'
 import { useBuildRowsStore } from './buildRowsStore'
 import { buildTypeLayerMap, resolveRowLayer } from './resolveRowLayer'
+import type { ContractRowLayer } from './BuildPanel'
 import { computeRangeIds, computeDownIds, descendantIds } from './buildGridSelection'
 import { TypePickerPopover } from './TypePickerPopover'
 
@@ -59,6 +63,8 @@ export interface BuildGridProps {
    *  default via `resolveRowLayer` so the Grid's displayed default always
    *  matches Apply-time placement (`resolveRowLayer.ts`). */
   fallbackLayerId?: string
+  /** Flag-on: the layer Apply draws a top-level row in (`BuildPanelProps.contractRowLayer`). */
+  contractRowLayer?: ContractRowLayer
 }
 
 const ROW_HEIGHT = 44
@@ -243,6 +249,8 @@ interface BuildGridRowProps {
   typeLayerMap: Map<string, string>
   /** Layer for a type that maps to no column — see `BuildGridProps.fallbackLayerId`. */
   fallbackLayerId?: string
+  /** See `BuildGridProps.contractRowLayer`. */
+  contractRowLayer?: ContractRowLayer
   selected: boolean
   onToggleSelect: (shiftKey: boolean) => void
   onUpdate: (patch: Partial<BuildRow>) => void
@@ -255,7 +263,7 @@ interface BuildGridRowProps {
 }
 
 function BuildGridRow({
-  row, isSynthetic, type, typeById, entityTypes, rawRows, layers, typeLayerMap, fallbackLayerId, selected,
+  row, isSynthetic, type, typeById, entityTypes, rawRows, layers, typeLayerMap, fallbackLayerId, contractRowLayer, selected,
   onToggleSelect, onUpdate, onSetLayer, onPasteDown, onAddSibling, onAddChild, onDuplicate, onRemove,
 }: BuildGridRowProps) {
   const [openPicker, setOpenPicker] = useState<'type' | 'parent' | 'layer' | null>(null)
@@ -284,9 +292,12 @@ function BuildGridRow({
   // reflects that instead (below).
   const isNested = row.depth > 0
   const layerNameById = useMemo(() => new Map(layers.map((l) => [l.id, l.name])), [layers])
-  const autoLayerId = (row.typeId ? typeLayerMap.get(row.typeId.toLowerCase()) : undefined) ?? fallbackLayerId
+  // Flag-on: Apply's own contract call, so a rule on the row's name, tags or properties counts.
+  const autoLayerId = contractRowLayer
+    ? contractRowLayer({ ...row, layerId: undefined })
+    : (row.typeId ? typeLayerMap.get(row.typeId.toLowerCase()) : undefined) ?? fallbackLayerId
   const autoLayerName = autoLayerId ? layerNameById.get(autoLayerId) : undefined
-  const effectiveLayerId = resolveRowLayer(row, { typeLayerMap, fallbackLayerId })
+  const effectiveLayerId = contractRowLayer ? contractRowLayer(row) : resolveRowLayer(row, { typeLayerMap, fallbackLayerId })
   const effectiveLayerName = effectiveLayerId ? layerNameById.get(effectiveLayerId) : undefined
 
   const handlePaste = (field: 'name' | 'description') => (e: React.ClipboardEvent<HTMLInputElement>) => {
@@ -378,7 +389,9 @@ function BuildGridRow({
       <div className="w-28 flex-shrink-0 relative">
         {isNested ? (
           <span
-            title="Nests under its parent — placement follows the parent, not its own type."
+            title={contractRowLayer
+              ? 'Nests under its parent — follows the parent\'s layer, unless its own layer rule claims it and the parent was not placed by hand.'
+              : 'Nests under its parent — placement follows the parent, not its own type.'}
             className="w-full flex items-center px-1.5 py-1 text-[11px] italic text-ink-muted/60 truncate"
           >
             ↳ nested
@@ -550,7 +563,7 @@ function FillDownBar({
   )
 }
 
-export function BuildGrid({ rows, typeById, fallbackLayerId }: BuildGridProps) {
+export function BuildGrid({ rows, typeById, fallbackLayerId, contractRowLayer }: BuildGridProps) {
   const rawRows = useBuildRowsStore((s) => s.rows)
   const addSibling = useBuildRowsStore((s) => s.addSibling)
   const addChild = useBuildRowsStore((s) => s.addChild)
@@ -727,6 +740,7 @@ export function BuildGrid({ rows, typeById, fallbackLayerId }: BuildGridProps) {
                   layers={sortedLayers}
                   typeLayerMap={typeLayerMap}
                   fallbackLayerId={fallbackLayerId}
+                  contractRowLayer={contractRowLayer}
                   selected={selectedIds.has(row.id)}
                   onToggleSelect={(shiftKey) => toggleRowSelection(row.id, shiftKey)}
                   onUpdate={(patch) => updateRow(row.id, patch)}

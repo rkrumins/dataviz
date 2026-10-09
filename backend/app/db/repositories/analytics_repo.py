@@ -64,6 +64,7 @@ from backend.app.db.models import (
     ViewVisitORM,
     WorkspaceDataSourceORM,
     WorkspaceORM,
+    view_is_live,
 )
 from backend.app.db.repositories import stats_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
@@ -582,7 +583,7 @@ async def view_usage(
     #    the one qualitative signal worth stating, and it needs to know who the
     #    author is to say it. It never leaves this function.
     allowed_stmt = select(ViewORM.id, ViewORM.created_by).where(
-        ViewORM.id.in_(ids), ViewORM.deleted_at.is_(None),
+        ViewORM.id.in_(ids), view_is_live(),
     )
     if readable is not None:
         allowed_stmt = allowed_stmt.where(readable)
@@ -730,7 +731,7 @@ async def workspace_usage(
     w = build_window(days, now=now)
 
     view_stmt = select(ViewORM.id, ViewORM.workspace_id, ViewORM.name).where(
-        ViewORM.workspace_id.in_(ids), ViewORM.deleted_at.is_(None),
+        ViewORM.workspace_id.in_(ids), view_is_live(),
     )
     if readable is not None:
         view_stmt = view_stmt.where(readable)
@@ -866,7 +867,7 @@ async def platform_summary(
 
     live_user = [UserORM.deleted_at.is_(None)]
     live_ws = [WorkspaceORM.deleted_at.is_(None)]
-    live_view = [ViewORM.deleted_at.is_(None)]
+    live_view = [view_is_live()]
     live_ds = [WorkspaceDataSourceORM.deleted_at.is_(None)]
 
     # One rollup over ``product_events`` feeds the adoption matrix, the value
@@ -2113,7 +2114,7 @@ async def _median_time_to_value(session: AsyncSession, w: Window) -> Optional[fl
     # the window were being read back only to be thrown away.
     rows = (await session.execute(
         select(ViewORM.created_by, func.min(ViewORM.created_at).label("first_at"))
-        .where(ViewORM.created_by.is_not(None), ViewORM.deleted_at.is_(None))
+        .where(ViewORM.created_by.is_not(None), view_is_live())
         .group_by(ViewORM.created_by)
         .having(func.min(ViewORM.created_at) >= w.start)
     )).all()
@@ -2220,7 +2221,7 @@ async def _retention_cohorts(
 async def _breakdowns(session: AsyncSession, w: Window, *, opens: _OpenFold) -> dict:
     """Categorical splits — who the users are, and what the content looks like."""
     live_user = [UserORM.deleted_at.is_(None)]
-    live_view = [ViewORM.deleted_at.is_(None)]
+    live_view = [view_is_live()]
 
     by_visibility = await _count_group(session, ViewORM.visibility, where=live_view)
     shared = sum(n for key, n in by_visibility if key in ("workspace", "enterprise"))
@@ -2291,7 +2292,7 @@ async def _leaderboards(session: AsyncSession, w: Window, *, opens: _OpenFold) -
         .where(
             ViewORM.created_at >= w.start,
             ViewORM.created_by.is_not(None),
-            ViewORM.deleted_at.is_(None),
+            view_is_live(),
         )
         .group_by(ViewORM.created_by)
     )).all()))
@@ -2341,7 +2342,8 @@ async def _leaderboards(session: AsyncSession, w: Window, *, opens: _OpenFold) -
         )).all()))
     view_rows = {
         v.id: v for v in (await session.execute(
-            select(ViewORM).where(ViewORM.id.in_(ranked_view_ids))
+            # A view still waiting in a draft is ranked nowhere, not even by its own opens.
+            select(ViewORM).where(ViewORM.id.in_(ranked_view_ids), ViewORM.draft_branch_id.is_(None))
         )).scalars().all()
     } if ranked_view_ids else {}
     top_views = [
@@ -2507,12 +2509,12 @@ async def workspace_rows(
 
     views_total = Counter(dict((await session.execute(
         select(ViewORM.workspace_id, func.count())
-        .where(ViewORM.deleted_at.is_(None))
+        .where(view_is_live())
         .group_by(ViewORM.workspace_id)
     )).all()))
     views_new = Counter(dict((await session.execute(
         select(ViewORM.workspace_id, func.count())
-        .where(ViewORM.deleted_at.is_(None), ViewORM.created_at >= w.start)
+        .where(view_is_live(), ViewORM.created_at >= w.start)
         .group_by(ViewORM.workspace_id)
     )).all()))
     activity = Counter(dict((await session.execute(
@@ -2654,7 +2656,7 @@ async def workspace_detail(
     if scope is not None and not scope.can_see(workspace_id):
         raise WorkspaceForbidden(workspace_id)
 
-    live_view = [ViewORM.deleted_at.is_(None), ViewORM.workspace_id == workspace_id]
+    live_view = [view_is_live(), ViewORM.workspace_id == workspace_id]
     ws_activity = [ViewActivityLogORM.workspace_id == workspace_id]
 
     views_total = await _scalar(session, select(func.count()).where(*live_view))
@@ -2675,11 +2677,11 @@ async def workspace_detail(
     # reason ``_workspaces_for_views`` keeps them — those opens really happened,
     # and dropping them would understate the workspace against its own totals.
     ws_views = (await session.execute(
-        select(ViewORM.id, ViewORM.deleted_at)
+        select(ViewORM.id, ViewORM.deleted_at, ViewORM.draft_branch_id)
         .where(ViewORM.workspace_id == workspace_id)
     )).all()
-    ws_view_ids = [vid for vid, _ in ws_views if vid]
-    live_view_ids = {vid for vid, deleted in ws_views if vid and deleted is None}
+    ws_view_ids = [vid for vid, _, _ in ws_views if vid]
+    live_view_ids = {vid for vid, deleted, staged in ws_views if vid and deleted is None and staged is None}
 
     opens = await _fold_opens(session, since=w.start, view_ids=ws_view_ids)
     opens_previous = await _fold_opens(

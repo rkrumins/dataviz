@@ -42,13 +42,48 @@ ever pay O(page).
 4. **Live FalkorDB** (`get_top_level_or_orphan_nodes`) — the fallback for
    branch reads, truncated-payload filters, and cold starts. Two queries:
    - **Page query**: keyset-paginated, budget
-     `FALKORDB_TOP_LEVEL_QUERY_TIMEOUT` (default 30s). A timeout here is
+     `FALKORDB_TOP_LEVEL_QUERY_TIMEOUT` (default 60s). A timeout here is
      fatal for the request (GraphCache's stale fallback catches it) and the
      error names the budget that fired.
    - **Count query**: full-scan, **best-effort**, budget
      `FALKORDB_TOP_LEVEL_COUNT_TIMEOUT` (default 5s). A timeout degrades to
      `totalCount: null` — the page still returns; pagination is driven by
      `hasMore` (page-size derived), never by the count.
+
+## Orphans only (`orphansOnly=true`)
+
+An orphan is a top-level instance of a type the data source's ontology
+declares as containable (a non-root type), e.g. a Table with no Schema.
+`orphansOnly=true` lists only those.
+
+- **The type list.** `ContextEngine.orphan_entity_types` returns every type
+  the resolved ontology defines minus its root types, narrowed by any
+  `entityTypes` in the request (case-insensitive). Introspected types are
+  roots, so never listed. When the list is empty (a root-type filter, an
+  ontology where every type is a root, or the degraded fallback when the
+  ontology service is down, which declares no types) the endpoint returns an
+  empty page with `totalCount: 0` and runs no query.
+- **Every layer applies unchanged.** The list replaces `entityTypes` before
+  any cache, so the payload filter, the count side-cache and the page cache
+  all key on it. There is no new key field, and default requests keep their
+  keys byte for byte.
+- **Cost.** The live query scans only those labels, a subset of the default
+  label union, so it never costs more than the default list. On reads served
+  from version history (just after a merge, or as-of) the candidate window
+  grows until it finds a full page; orphans are rare, so it can scan every
+  containable entity and be slow on very large graphs.
+- **Totals** are exact, or `null` when the count timed out. A complete
+  payload gives an exact filtered total; a truncated one goes live. Version
+  history gives a total only when its scan finished. In a draft the total is
+  main's plus what the draft added minus what it removed. A top-level entity
+  the draft gives a parent (an orphan being fixed, say) leaves the page for
+  its new parent's children but is still counted, on the default list too.
+- **Payload paging.** The stored payload pages by `(displayName, urn)` with
+  the same cursor as the live query, so same-named rows at a page boundary
+  are not skipped and a listing can move between the payload and live either
+  way. Payloads stored before this are sorted at serve time, and old
+  name-only cursors are still accepted. Version history still pages by name
+  only.
 
 ## The timeout ladder
 
@@ -58,16 +93,18 @@ accurate error always wins the race:
 | Layer | Knob | Default |
 |---|---|---|
 | nginx proxy read | `proxy_read_timeout` | 180s |
-| gunicorn worker | `GUNICORN_TIMEOUT` | 120s |
-| ASGI graph tier | `HTTP_TIMEOUT_GRAPH_SECS` | 60s |
-| Frontend abort | `VITE_TIMEOUT_TOP_LEVEL_MS` | 45s |
-| FalkorDB page query | `FALKORDB_TOP_LEVEL_QUERY_TIMEOUT` | 30s |
+| Frontend abort | `VITE_TIMEOUT_TOP_LEVEL_MS` | 150s |
+| ASGI graph tier | `HTTP_TIMEOUT_GRAPH_SECS` | 120s |
+| FalkorDB page query | `FALKORDB_TOP_LEVEL_QUERY_TIMEOUT` | 60s |
 | FalkorDB count query | `FALKORDB_TOP_LEVEL_COUNT_TIMEOUT` | 5s (best-effort) |
 
-Backend worst case ≈ 35s + overhead < the 45s client abort — the backend
-always loses the race and surfaces its own, accurate error. The frontend
-abort message states the actual client budget; the backend page-timeout
-error states the provider budget and graph.
+`GUNICORN_TIMEOUT` (120s) is not a layer here: under the uvicorn worker it is
+the worker's heartbeat deadline, not a per-request one.
+
+Backend worst case ≈ 65s + overhead < the 120s ASGI tier < the 150s client
+abort — the backend always loses the race and surfaces its own, accurate
+error. The frontend abort message states the actual client budget; the
+backend page-timeout error states the provider budget and graph.
 
 ### The server-side cap: `FALKORDB_SERVER_TIMEOUT_MAX_MS`
 

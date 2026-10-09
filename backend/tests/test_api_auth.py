@@ -81,6 +81,34 @@ async def test_signup_duplicate_email(test_client: AsyncClient, db_session: Asyn
     assert resp.status_code == 201
 
 
+async def test_signup_refused_when_local_login_disabled(
+    test_client: AsyncClient, db_session: AsyncSession, signup_enabled,
+):
+    """SSO enforcement closes password signup too: an account minted
+    here would hold a credential the login endpoint refuses — a dead
+    end discovered at first sign-in. ``signup_enabled`` keeps the
+    feature flag out of the way, so the 403 provably comes from the
+    posture gate."""
+    from backend.app.db.repositories import app_auth_config_repo
+
+    await app_auth_config_repo.update_config(
+        db_session, allow_local_login=False, updated_by="test",
+    )
+    await db_session.flush()
+
+    resp = await test_client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "enforced@example.com",
+            "password": "C0mpl3x!Passw0rd#",
+            "firstName": "En",
+            "lastName": "Forced",
+        },
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error"] == "local_login_disabled"
+
+
 # ── POST /forgot-password ────────────────────────────────────────────
 
 async def test_forgot_password_always_200(test_client: AsyncClient):

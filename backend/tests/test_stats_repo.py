@@ -361,3 +361,56 @@ async def test_invalidate_schema_facet_noop_when_row_missing(db_session: AsyncSe
 
     fetched = await stats_repo.get_data_source_stats(db_session, "ds_nonexistent")
     assert fetched is None
+
+
+# ── the property-name count ──────────────────────────────────────────
+
+
+async def test_the_property_name_count_is_recorded_with_the_counts(
+    db_session: AsyncSession,
+):
+    ds_id = await _seed_data_source(db_session, "ds_pkc1")
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session, ds_id, 10, 5, "{}", "{}", property_key_count=1234,
+    )
+    row = await stats_repo.get_data_source_stats(db_session, ds_id)
+    assert row.property_key_count == 1234
+
+
+async def test_a_probe_that_could_not_answer_does_not_erase_the_last_reading(
+    db_session: AsyncSession,
+):
+    """None means NOT MEASURED. Clobbering a known 64,000 with a null
+    because one poll timed out would erase exactly the trend this exists to
+    show — and on a ratchet the reading cannot have gone DOWN, so the stored
+    value is still the best answer available."""
+    ds_id = await _seed_data_source(db_session, "ds_pkc2")
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session, ds_id, 10, 5, "{}", "{}", property_key_count=64_000,
+    )
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session, ds_id, 11, 6, "{}", "{}", property_key_count=None,
+    )
+    row = await stats_repo.get_data_source_stats(db_session, ds_id)
+    assert row.property_key_count == 64_000
+    assert row.node_count == 11                       # the counts still moved
+
+
+async def test_a_name_count_that_moves_alone_is_not_counted_as_movement(
+    db_session: AsyncSession,
+):
+    """The digest decides what reads as a CHANGE, and a change drives the
+    ledger, the counts alerts and a bell notification. A loader registering
+    one new property key has not changed the data, and making it look like
+    it did is the noise the derived-artifact strip already exists to stop."""
+    ds_id = await _seed_data_source(db_session, "ds_pkc3")
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session, ds_id, 10, 5, "{}", "{}", property_key_count=100,
+    )
+    first = (await stats_repo.get_data_source_stats(db_session, ds_id)).counts_digest
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session, ds_id, 10, 5, "{}", "{}", property_key_count=900,
+    )
+    row = await stats_repo.get_data_source_stats(db_session, ds_id)
+    assert row.counts_digest == first                 # the data did not move
+    assert row.property_key_count == 900              # but the reading landed

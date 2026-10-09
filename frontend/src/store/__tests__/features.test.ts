@@ -170,6 +170,11 @@ describe('fail-open seeds', () => {
     expect(featureEnabled('semanticLayerNonAdminEditing')).toBe(false)
   })
 
+  it('seeds the placement contract preview OFF', () => {
+    // Experimental: it changes where entities sit, so nobody gets it before an admin opts in.
+    expect(DEFAULT_FEATURES.placementContractEnabled).toBe(false)
+  })
+
   it('seeds allowedViewModes as a list, not a boolean', () => {
     // It is a set of layouts, and a `useFeature()` boolean read of it would be meaningless.
     expect(DEFAULT_FEATURES.allowedViewModes).toEqual(

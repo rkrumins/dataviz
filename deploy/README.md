@@ -34,11 +34,13 @@ Kustomize image override.
 
 ## 3. Install the ingress controller
 
-GKE has no Nginx ingress by default:
+GKE has no Nginx ingress by default. Set `INGRESS_NGINX_CHART_REPO` to the
+ingress-nginx chart repository your cluster can reach — the project's own, or
+your organisation's mirror of it:
 
 ```sh
 helm upgrade --install ingress-nginx ingress-nginx \
-  --repo https://kubernetes.github.io/ingress-nginx \
+  --repo "$INGRESS_NGINX_CHART_REPO" \
   --namespace ingress-nginx --create-namespace
 ```
 
@@ -91,9 +93,15 @@ kubectl apply -k deploy/k8s
 kubectl apply -k deploy/k8s/stores
 ```
 
-The control plane is a singleton that runs Alembic and owns the
-`aggregation` schema; `viz/worker/stats` have a `wait-for-controlplane`
-initContainer so they don't start until it's healthy.
+The control plane owns the `aggregation` schema, which it creates at startup
+outside Alembic; `viz/worker/stats` have a `wait-for-controlplane`
+initContainer so they don't start until it's healthy. Nothing in these
+manifests applies Alembic migrations — the Helm chart runs them as a
+pre-upgrade hook, and Compose as a one-shot service. Until the kustomize base
+gets the same job, apply them by hand with the new release's image
+(`python -m backend.scripts.upgrade upgrade`) before rolling it out; the API
+reports not-ready (`schema_mismatch`) until you do. See
+[docs/TECHNICAL_DEBT.md](../docs/TECHNICAL_DEBT.md) §1.5.
 
 ## 6. DNS & verification
 

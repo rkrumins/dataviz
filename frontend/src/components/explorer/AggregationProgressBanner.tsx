@@ -1,9 +1,46 @@
 import { useState, useEffect } from 'react';
 import { Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService';
-import { DEFAULT_TIMEOUT_SECS } from '@/components/admin/shared/AggregationOverridesForm';
+import { DEFAULT_TIMEOUT_SECS, gentlePreset } from '@/components/admin/shared/AggregationOverridesForm';
+import { friendlyError } from '@/services/providerService';
+import { extendStallPatch } from '@/components/admin/job-history/timeLimits';
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage';
 import { SkipAggregationDialog } from './SkipAggregationDialog';
+
+/**
+ * Statuses no amount of polling will change.
+ *
+ * `none` means aggregation was never configured; `skipped` and `cancelled`
+ * mean a person decided; `failed` stays failed until someone acts. The Skip
+ * and Re-aggregate buttons below set their own state and bump `pollEpoch`, so
+ * the poll restarts when something actually starts.
+ */
+const TERMINAL_STATUSES = new Set(['none', 'skipped', 'cancelled', 'failed']);
+
+const IN_PROGRESS_BODY =
+  'We are pre-computing structural hierarchies to optimize deep graph queries. View creation is paused until this completes.';
+
+const HEADINGS: Record<string, string> = {
+  failed: 'Aggregation Failed',
+  running: 'Aggregating Graph Lineage...',
+  pending: 'Preparing Aggregation...',
+  none: 'Aggregation Not Set Up',
+  skipped: 'Aggregation Skipped',
+  cancelled: 'Aggregation Cancelled',
+};
+
+/**
+ * What each settled state actually means. The spinner copy — "we are
+ * pre-computing … view creation is paused until this completes" — used to be
+ * shown for ALL of these, so a source somebody had deliberately skipped
+ * claimed work was in flight and views were blocked. Both halves were false,
+ * and neither would ever have resolved.
+ */
+const BODIES: Record<string, string> = {
+  none: 'Aggregation has not been set up for this source. Views can still be created; rolled-up connections will not appear until it runs.',
+  skipped: 'Aggregation was skipped for this source. Views work as normal — rolled-up connections between items just will not appear. Re-aggregate below to compute them.',
+  cancelled: 'The last aggregation run was cancelled, so rolled-up connections may be missing or out of date. Nothing is running now.',
+};
 
 export function AggregationProgressBanner({
   dataSourceId,
@@ -40,10 +77,13 @@ export function AggregationProgressBanner({
             return res;
           });
           onStatusChange(res.isReady);
-          // Terminal states — polling can't change them: ready (drift
-          // included; it's steady-state until the user re-aggregates)
-          // and failed (stays failed until the user acts).
-          if (res.isReady || res.aggregationStatus === 'failed') {
+          // Terminal states — polling can't change them. `isReady` is only
+          // `status === 'ready'`, so it covers exactly one of them: `none`,
+          // `skipped`, `cancelled` and `failed` are every bit as settled, and
+          // without them listed here the 5s poll ran forever — on an end-user
+          // surface, from backgrounded tabs, for a source somebody had just
+          // explicitly skipped.
+          if (res.isReady || TERMINAL_STATUSES.has(res.aggregationStatus)) {
             clearInterval(pollInterval);
           }
         }
@@ -66,6 +106,14 @@ export function AggregationProgressBanner({
 
   if (!readiness || readiness.isReady) {
     if (readiness?.driftDetected) {
+      // Why this banner is still here. Drift is terminal for the poll above —
+      // it clears when something rebuilds the source, and while a hold is in
+      // force nothing automatic will. Saying so turns "this warning never goes
+      // away" into two things the reader can act on: the button below still
+      // works, and someone can lift the hold.
+      const heldWhere = readiness.heldBy === 'fleet' ? 'for every source'
+        : readiness.heldBy === 'provider' ? 'for this provider'
+          : readiness.heldBy === 'source' ? 'for this source' : null
       return (
         <div className="mb-6 px-4 py-3 rounded-xl border border-amber-500/20 bg-amber-500/10 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -75,6 +123,13 @@ export function AggregationProgressBanner({
               <p className="text-xs text-amber-600/80 dark:text-amber-400/80">
                 The underlying graph structure has changed since the last aggregation. Some lineage relationships may be out of date.
               </p>
+              {heldWhere && (
+                <p className="mt-1 text-xs text-amber-600/80 dark:text-amber-400/80">
+                  Automatic rebuilds are {readiness.heldKind === 'paused' ? 'paused' : 'off'} {heldWhere},
+                  so this will not rebuild on its own. Re-aggregate still works, or an admin can
+                  resume automation under Ingestion → Automation.
+                </p>
+              )}
             </div>
           </div>
           <button 
@@ -111,28 +166,39 @@ export function AggregationProgressBanner({
               <AlertCircle className="w-5 h-5 text-red-500" />
             ) : readiness.aggregationStatus === 'ready' || readiness.aggregationStatus === 'skipped' ? (
               <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+            ) : TERMINAL_STATUSES.has(readiness.aggregationStatus) ? (
+              // Settled, not working. A spinner here said something was in
+              // flight for a source where nothing was, and never stopped.
+              <AlertCircle className="w-5 h-5 text-amber-500" />
             ) : (
               <Loader2 className="w-5 h-5 text-indigo-500 animate-spin" />
             )}
           </div>
           <div>
             <h3 className="text-sm font-semibold text-ink">
-              {readiness.aggregationStatus === 'failed' ? 'Aggregation Failed' : 
-               readiness.aggregationStatus === 'running' ? 'Aggregating Graph Lineage...' : 
-               readiness.aggregationStatus === 'pending' ? 'Preparing Aggregation...' : 
-               'Aggregation Status: ' + readiness.aggregationStatus}
+              {HEADINGS[readiness.aggregationStatus] ?? ('Aggregation Status: ' + readiness.aggregationStatus)}
             </h3>
             <p className="text-xs text-ink-muted mt-0.5 max-w-xl">
-              {readiness.aggregationStatus === 'failed' ? (
-                activeJob?.errorMessage || 'An unknown error occurred during aggregation.'
-              ) : (
-                'We are pre-computing structural hierarchies to optimize deep graph queries. View creation is paused until this completes.'
-              )}
+              {readiness.aggregationStatus === 'failed'
+                ? (activeJob?.errorMessage ? friendlyError(activeJob.errorMessage) : 'An unknown error occurred during aggregation.')
+                : (BODIES[readiness.aggregationStatus] ?? IN_PROGRESS_BODY)}
             </p>
           </div>
         </div>
         
         <div className="flex items-center gap-3">
+          {readiness.aggregationStatus === 'running' && activeJob && dataSourceId && (
+            <button
+              type="button"
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-indigo-500/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors"
+              title="Raise this job's stall window by three hours without cancelling it"
+              onClick={() => {
+                aggregationService.setJobLimits(dataSourceId, activeJob.id, extendStallPatch(activeJob, 3)).catch(() => {});
+              }}
+            >
+              Give it more time (+3 h)
+            </button>
+          )}
           {readiness.aggregationStatus === 'running' && (
             <div className="flex flex-col items-end gap-1">
               <span className="text-xs font-semibold text-indigo-500">{progress}%</span>
@@ -145,6 +211,25 @@ export function AggregationProgressBanner({
             </div>
           )}
           
+          {readiness.aggregationStatus === 'failed' && dataSourceId
+            && (activeJob?.failureCategory === 'query_memory' || activeJob?.failureCategory === 'timeout') && (
+            <button
+              type="button"
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors"
+              title="Narrow scans, serial reads, generous pacing and a longer per-query timeout — the profile for a graph the store keeps refusing"
+              onClick={() => {
+                const gentle = gentlePreset();
+                aggregationService.triggerAggregation(dataSourceId, {
+                  projectionMode: 'in_source', batchSize: 500,
+                  maxRetries: gentle.maxRetries, timeoutSecs: gentle.timeoutMinutes * 60, tuning: gentle.tuning,
+                }, 'manual');
+                setReadiness(prev => prev ? { ...prev, aggregationStatus: 'pending' } : null);
+                setPollEpoch(e => e + 1);
+              }}
+            >
+              Retry with the Gentle profile
+            </button>
+          )}
           <button
             onClick={() => setShowSkipDialog(true)}
             className="text-xs text-ink-muted hover:text-ink underline underline-offset-2 transition-colors ml-2"

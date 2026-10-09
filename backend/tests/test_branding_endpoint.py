@@ -53,6 +53,47 @@ async def test_admin_patch_version_conflict_returns_409(test_client: AsyncClient
     assert resp.status_code == 409
 
 
+async def test_first_save_on_unseeded_db_uses_the_loaded_version(
+    test_client: AsyncClient,
+):
+    """The admin page's exact flow on a DB whose seed migration never ran:
+    load (v0), save with that version, save again with the new one."""
+    loaded = await test_client.get("/api/v1/admin/branding")
+    assert loaded.status_code == 200
+    assert loaded.json()["version"] == 0
+
+    first = await test_client.patch(
+        "/api/v1/admin/branding",
+        json={"appName": "First", "expectedVersion": 0},
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["version"] == 1
+
+    second = await test_client.patch(
+        "/api/v1/admin/branding",
+        json={"appName": "Second", "expectedVersion": 1},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["version"] == 2
+    assert second.json()["appName"] == "Second"
+
+
+async def test_stale_version_after_a_save_returns_409(test_client: AsyncClient):
+    saved = await test_client.patch(
+        "/api/v1/admin/branding",
+        json={"appName": "Mine", "expectedVersion": 0},
+    )
+    assert saved.status_code == 200, saved.text
+
+    stale = await test_client.patch(
+        "/api/v1/admin/branding",
+        json={"appName": "Theirs", "expectedVersion": 0},
+    )
+    assert stale.status_code == 409
+    again = await test_client.get("/api/v1/branding")
+    assert again.json()["appName"] == "Mine"
+
+
 # ── logo upload ───────────────────────────────────────────────────────
 
 async def test_logo_upload_stored_as_data_uri(test_client: AsyncClient):

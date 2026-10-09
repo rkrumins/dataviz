@@ -121,6 +121,7 @@ class AggregationEventPublisher:
         fingerprint: Optional[str],
         completed_at: str,
         workspace_id: Optional[str] = None,
+        identity_stamped: int = 0,
     ) -> None:
         await self.publish("job.completed", {
             "job_id": job_id,
@@ -132,6 +133,13 @@ class AggregationEventPublisher:
             "edge_count": edge_count,
             "fingerprint": fingerprint,
             "completed_at": completed_at,
+            # How many identity properties the run wrote onto NODES. A rollup
+            # rebuild normally touches only the :AGGREGATED layer, so the
+            # listener invalidates just the rollup reads — but stamping writes
+            # ``urn`` and ``displayName``, which the hierarchy endpoints
+            # render, so a run that stamped anything has to invalidate those
+            # too. Zero for a conforming source, which is the common case.
+            "identity_stamped": int(identity_stamped or 0),
         })
 
     async def job_failed(
@@ -139,18 +147,37 @@ class AggregationEventPublisher:
         job_id: str,
         data_source_id: str,
         error_message: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> None:
+        """``workspace_id`` is what makes the cache invalidation possible.
+
+        Without it the listener's invalidation is a guaranteed no-op — and a
+        failed run is exactly when one is needed. RECONCILE deletes stale
+        cells and APPLY writes new ones inside the per-range loop, both
+        checkpointing as they go, so a run that dies part way leaves the
+        :AGGREGATED layer partly old and partly new. Leaving the generation
+        where it is caches that half-rebuilt cube for a full TTL and lets the
+        mirror re-promote it for up to twice that."""
         await self.publish("job.failed", {
             "job_id": job_id,
             "data_source_id": data_source_id,
+            "workspace_id": workspace_id,
             "status": "failed",
             "error_message": error_message,
         })
 
-    async def job_cancelled(self, job_id: str, data_source_id: str) -> None:
+    async def job_cancelled(
+        self,
+        job_id: str,
+        data_source_id: str,
+        workspace_id: Optional[str] = None,
+    ) -> None:
+        """Same as :meth:`job_failed`: a cancel lands mid-write just as a
+        failure does, so the partly-rebuilt layer has to be invalidated."""
         await self.publish("job.cancelled", {
             "job_id": job_id,
             "data_source_id": data_source_id,
+            "workspace_id": workspace_id,
             "status": "cancelled",
         })
 

@@ -25,7 +25,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.engine import get_db_session
+from backend.app.db.engine import get_graph_read_db_session
+from backend.app.api.v1.endpoints.graph import _admit_graph_request
 from backend.app.providers.manager import provider_manager
 from backend.app.services.context_engine import ContextEngine
 from backend.common.adapters import ProviderUnavailable  # noqa: F401  (used by global handler)
@@ -55,7 +56,15 @@ async def get_context_engine(
         None,
         description="Opaque draft id (br_...) or 'main'. Omit to target main. Reads and writes both honor it.",
     ),
-    session: AsyncSession = Depends(get_db_session),
+    # Same two gates as v1, in the same order and for the same reasons:
+    # admission before the session, and the isolated GRAPH_READ pool rather
+    # than the WEB pool that serves auth and navigation. This router is not
+    # mounted today, so the WEB-pool session it used to take was harmless —
+    # and would have become the worst version of the bug the v1 gate fixes
+    # the day it was enabled, since a hung provider would then pin a
+    # connection from the pool every other endpoint in the app shares.
+    _admission: None = Depends(_admit_graph_request),
+    session: AsyncSession = Depends(get_graph_read_db_session),
 ) -> ContextEngine:
     """Resolve the workspace-scoped engine. v2 drops the legacy connectionId
     fallback — workspace scope is the only supported entry point."""

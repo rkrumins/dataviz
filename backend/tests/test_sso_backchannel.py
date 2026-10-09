@@ -196,6 +196,74 @@ async def test_one_level_of_nesting_is_hoisted_without_dotted_paths(monkeypatch)
     assert identity.email == "alice@corp.example"
 
 
+@pytest.mark.asyncio
+async def test_any_container_name_is_hoisted(monkeypatch):
+    """``entitlements`` was an example, not an allowlist entry — a
+    gateway nesting its user object under any name maps with no
+    override."""
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            "sub": "emp-1",
+            "corpDirectoryRecord": {
+                "email": "alice@corp.example",
+                "firstName": "Alice", "lastName": "Anders",
+                "auth_time": 1_700_000_000,
+                "groups": ["my-super-cool-group"],
+            },
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.email == "alice@corp.example"
+    assert identity.groups == ("my-super-cool-group",)
+
+
+@pytest.mark.asyncio
+async def test_the_sample_payload_signs_in_whole(monkeypatch):
+    """The literal gateway answer this cycle was asked about: numeric
+    user_id, full_name, an entitlements object with empty groups and a
+    stray extra. It carries no authentication-time claim either, and
+    signs in whole — the re-auth ceiling then measures from the sign-in."""
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            "user_id": 123,
+            "email": "jonh@gmail.com",
+            "entitlements": {"groups": [], "test": "test"},
+            "full_name": "John Doe",
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.external_id == "123"
+    assert identity.email == "jonh@gmail.com"
+    assert identity.groups == ()
+    assert (identity.first_name, identity.last_name) == ("John", "Doe")
+
+
+@pytest.mark.asyncio
+async def test_entitlements_membership_maps_with_no_configuration(monkeypatch):
+    """The AD-federation shape: groups nested under ``entitlements``,
+    beside a vestigial empty top-level ``groups``. Both the hoist and
+    the dotted default candidate cover it, so the connection needs no
+    mapping override at all."""
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            **CLAIMS,
+            "groups": [],
+            "entitlements": {"groups": ["group1", "group2", "group3"]},
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.groups == ("group1", "group2", "group3")
+
+
 # ── fail closed ──────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -282,11 +350,11 @@ async def test_claims_that_are_not_an_object_are_refused(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_claims_without_an_auth_time_are_refused_by_default(monkeypatch):
-    """``complete_sso_login`` falls back to "now" with a warning when
-    ``auth_time`` is absent, which quietly disables the 24h SSO re-auth
-    ceiling for every session this provider mints. Refusing here is what
-    keeps that ceiling meaningful."""
+async def test_claims_without_an_auth_time_still_sign_in(monkeypatch):
+    """A gateway reply with no authentication time used to be refused by
+    default, so a field renamed upstream locked out everyone on the
+    connection at once. It signs in; ``complete_sso_login`` measures the
+    re-auth ceiling from this sign-in and records that it had to."""
     def handler(request):
         if request.url.path.endswith("/redeem"):
             return httpx.Response(200, json={"access_token": "gw-token-abc"})
@@ -294,21 +362,9 @@ async def test_claims_without_an_auth_time_are_refused_by_default(monkeypatch):
                                          if k != "auth_time"})
 
     _routes(monkeypatch, handler)
-    with pytest.raises(BackchannelError, match="auth_time"):
-        await _provider().fetch_identity("ambient-xyz")
-
-
-@pytest.mark.asyncio
-async def test_an_operator_can_accept_claims_without_an_auth_time(monkeypatch):
-    def handler(request):
-        if request.url.path.endswith("/redeem"):
-            return httpx.Response(200, json={"access_token": "gw-token-abc"})
-        return httpx.Response(200, json={k: v for k, v in CLAIMS.items()
-                                         if k != "auth_time"})
-
-    _routes(monkeypatch, handler)
-    identity = await _provider(require_auth_time=False).fetch_identity("a-xyz")
+    identity = await _provider().fetch_identity("a-xyz")
     assert identity.email == "alice@corp.example"
+    assert identity.auth_time is None
 
 
 # ── the tokens stay opaque ───────────────────────────────────────────
@@ -466,7 +522,10 @@ def test_settings_survive_the_round_trip_from_a_row():
             "gateway_token_header": "Authorization",
             "gateway_headers": {"X-App-Id": "a"},
             "exchange_url": EXCHANGE, "liveness_grace_seconds": "120",
-            "timeout_seconds": "2.5", "require_auth_time": "false",
+            "timeout_seconds": "2.5",
+            # Retired, but still on rows saved before it was: it must
+            # parse, and change nothing.
+            "require_auth_time": "true",
         },
         claim_mapping={"email": ["mail"]}, linking_policy="allow_verified",
         button_label=None, button_icon=None,
@@ -477,7 +536,7 @@ def test_settings_survive_the_round_trip_from_a_row():
     assert s.gateway_headers == {"X-App-Id": "a"}
     assert s.liveness_grace_seconds == 120
     assert s.timeout_seconds == 2.5
-    assert s.require_auth_time is False
+    assert not hasattr(s, "require_auth_time")
     assert s.claim_mapping_override == {"email": ["mail"]}
     assert s.linking_policy == "allow_verified"
 
@@ -616,3 +675,86 @@ async def test_a_populated_top_level_key_still_wins_over_nested(monkeypatch):
     _routes(monkeypatch, handler)
     identity = await _provider().fetch_identity("ambient-xyz")
     assert identity.groups == ("real",)
+
+
+# ── per-connection TLS verification ──────────────────────────────────
+#
+# ``tls_verify`` off passes ``verify=False`` into every server-side
+# client this row builds; on (the default) passes ``None``, deferring
+# to the deployment CA bundle (``resolve_outbound_verify`` → True when
+# none is configured).
+
+
+def _routes_capturing(monkeypatch, handler):
+    captured: list[dict] = []
+
+    def _make(**kwargs):
+        captured.append(dict(kwargs))
+        kwargs.pop("verify", None)
+        return _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(handler), **kwargs,
+        )
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _make)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_tls_verify_off_reaches_both_legs(monkeypatch):
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS", raising=False)
+    captured = _routes_capturing(monkeypatch, _happy)
+    await _provider(tls_verify=False).fetch_identity("ambient-xyz")
+    assert len(captured) == 2
+    assert all(c["verify"] is False for c in captured)
+
+
+@pytest.mark.asyncio
+async def test_tls_verify_defaults_to_full_verification(monkeypatch):
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS", raising=False)
+    captured = _routes_capturing(monkeypatch, _happy)
+    await _provider().fetch_identity("ambient-xyz")
+    assert len(captured) == 2
+    assert all(c["verify"] is True for c in captured)
+
+
+def test_settings_from_snapshot_parses_tls_verify():
+    from backend.auth_service.providers.backchannel import (
+        settings_from_snapshot,
+    )
+
+    def _snap(settings):
+        return ProviderConfigSnapshot(
+            id="idp_t", slug="corp", display_name="Corp",
+            kind="backchannel", enabled=True, priority=100,
+            settings=settings, claim_mapping={}, linking_policy="strict",
+            button_label=None, button_icon=None,
+        )
+
+    base = {"gateway_url": GATEWAY, "gateway_token_path": "access_token"}
+    assert settings_from_snapshot(_snap(base)).tls_verify is True
+    assert settings_from_snapshot(
+        _snap({**base, "tls_verify": "false"})
+    ).tls_verify is False
+    assert settings_from_snapshot(
+        _snap({**base, "tls_verify": True})
+    ).tls_verify is True
+
+
+def test_a_per_call_timeout_is_capped_where_it_is_read():
+    """Each gateway call's timeout applies per phase, and every call runs
+    inside a request with its own deadline — so a connection saved with a
+    minute-long timeout could hold a sign-in or a renewal past it. Capped
+    where the setting is read rather than refused by validation, which
+    runs whenever a row is built: refusing would take a live connection
+    down on upgrade."""
+    snap = ProviderConfigSnapshot(
+        id="idp_1", slug="corp", display_name="Corp", kind="backchannel",
+        enabled=True, priority=100,
+        settings={
+            "token_source": "cookie", "token_source_key": "corp_session",
+            "gateway_url": GATEWAY, "timeout_seconds": "120",
+        },
+        claim_mapping={}, linking_policy="strict",
+        button_label=None, button_icon=None,
+    )
+    assert build_backchannel_provider(snap).settings.timeout_seconds == 30.0

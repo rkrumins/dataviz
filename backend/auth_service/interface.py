@@ -95,11 +95,15 @@ class IdentityService(Protocol):
         invalid, expired, or the user is not active."""
         ...
 
-    async def login(self, email: str, password: str) -> tuple[User, SessionTokens]:
+    async def login(
+        self, email: str, password: str, *, client: Optional[dict] = None,
+    ) -> tuple[User, SessionTokens]:
         """Authenticate by credentials and issue a fresh session.
 
         Raises ``InvalidCredentials`` for any failure (wrong password,
-        unknown email, inactive account) — never reveals which.
+        unknown email, inactive account) — never reveals which to the
+        caller. ``client`` (where the attempt came from) is recorded with
+        a refusal, alongside which of those it was.
         """
         ...
 
@@ -194,9 +198,13 @@ class SSOAuthError(AuthError):
     someone who has just proved control of the colliding email at the
     IdP, not to an anonymous caller."""
 
-    def __init__(self, code: str, *, deny_reasons: tuple[str, ...] = ()):
+    def __init__(self, code: str, *, deny_reasons: tuple[str, ...] = (),
+                 user_id: Optional[str] = None):
         super().__init__(code)
         self.deny_reasons = deny_reasons
+        #: The existing account the refusal concerns, when there is one —
+        #: for the audit record, never for the caller.
+        self.user_id = user_id
 
 
 class SsoReauthRequired(AuthError):

@@ -39,6 +39,8 @@ export const filenameMap: Record<string, string> = {
   'DEPLOYMENT.md': 'deployment',
   'MIGRATIONS.md': 'migrations',
   'FALKORDB_DEPLOYMENT.md': 'falkordb-deployment',
+  'CONCURRENCY_TUNING.md': 'concurrency-tuning',
+  'SCALING_CONCURRENT_USERS.md': 'scaling-concurrent-users',
   'FALKORDB_DR_RUNBOOK.md': 'falkordb-dr',
   'INFRASTRUCTURE_LAUNCH_SCALE.md': 'infra-launch-scale',
   'INFRASTRUCTURE_SCALING_250M.md': 'infra-scaling-250m',
@@ -52,6 +54,39 @@ export const filenameMap: Record<string, string> = {
   'SEARCH.md': 'services-search',
   'CONTEXT_ENGINE.md': 'services-context-engine',
   'ASSIGNMENTS.md': 'services-assignments',
+  // Feature docs (subfolder; the two link each other by basename)
+  'features/aggregation-reconciliation.md': 'feature-aggregation-reconciliation',
+  'features/external-change-notification.md': 'feature-external-change-notification',
+  'features/view-portability.md': 'feature-view-portability',
+  'features/search-and-rules-reference.md': 'feature-search-and-rules-reference',
+  'aggregation-reconciliation.md': 'feature-aggregation-reconciliation',
+  'external-change-notification.md': 'feature-external-change-notification',
+  // Versioning suite (subfolder; the chapters link each other by basename and
+  // other docs link them by path). Only docs/versioning/ links a bare README.md.
+  'versioning/README.md': 'versioning-guide',
+  'versioning/README-index.md': 'versioning-deep-dives',
+  'versioning/01-overview-and-architecture.md': 'versioning-overview',
+  'versioning/02-data-model.md': 'versioning-data-model',
+  'versioning/03-branching-commits-merge.md': 'versioning-branching-and-merge',
+  'versioning/04-projection-and-cache.md': 'versioning-projection-and-cache',
+  'versioning/05-ontology-governance.md': 'versioning-ontology-governance',
+  'versioning/06-api-reference.md': 'versioning-api-reference',
+  'versioning/07-frontend-integration.md': 'versioning-frontend-integration',
+  'versioning/08-import-export.md': 'versioning-import-export',
+  'versioning/09-scale-limits-and-roadmap.md': 'versioning-scale-and-roadmap',
+  'versioning/10-authoritative-sources-datahub-openmetadata.md': 'versioning-authoritative-sources',
+  'versioning/11-resync-at-any-scale.md': 'versioning-resync-at-any-scale',
+  'README.md': 'versioning-guide',
+  '02-data-model.md': 'versioning-data-model',
+  '03-branching-commits-merge.md': 'versioning-branching-and-merge',
+  '04-projection-and-cache.md': 'versioning-projection-and-cache',
+  '05-ontology-governance.md': 'versioning-ontology-governance',
+  '07-frontend-integration.md': 'versioning-frontend-integration',
+  '08-import-export.md': 'versioning-import-export',
+  '09-scale-limits-and-roadmap.md': 'versioning-scale-and-roadmap',
+  '10-authoritative-sources-datahub-openmetadata.md': 'versioning-authoritative-sources',
+  '11-resync-at-any-scale.md': 'versioning-resync-at-any-scale',
+  'VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md': 'versioning-drafts-and-merge',
 }
 
 // ── Callouts ────────────────────────────────────────────────────────
@@ -87,13 +122,21 @@ function calloutKind(children: React.ReactNode): keyof typeof CALLOUTS | null {
   return raw in CALLOUTS ? (raw as keyof typeof CALLOUTS) : null
 }
 
-function rewriteDocLink(href: string): string {
-  const cleaned = href.replace(/^\.\//, '')
-  if (cleaned.endsWith('.md')) {
-    const slug = filenameMap[cleaned]
-    if (slug) return `/docs/${slug}`
+/**
+ * Route a relative markdown link to its in-app doc. The path is read the way
+ * it resolves in the repository — leading `./` and `../` segments, and the
+ * `docs/` prefix that root-level docs such as CHANGELOG.md write, are dropped
+ * before the lookup — and an `#anchor` is kept, so one relative link works
+ * both on disk and in this reader. Anything else comes back unchanged.
+ */
+export function rewriteDocLink(href: string): string {
+  const hashAt = href.indexOf('#')
+  const path = hashAt === -1 ? href : href.slice(0, hashAt)
+  const key = path.replace(/^(?:\.\.?\/)+/, '').replace(/^docs\//, '')
+  if (key.endsWith('.md')) {
+    const slug = filenameMap[key]
+    if (slug) return `/docs/${slug}${hashAt === -1 ? '' : href.slice(hashAt)}`
   }
-  if (href.startsWith('#')) return href
   return href
 }
 

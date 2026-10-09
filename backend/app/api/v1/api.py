@@ -7,11 +7,13 @@ from backend.app.api.v1.capability_gate import (
 from backend.app.auth.dependencies import requires
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
-    graph, canvas, assignments, providers, ontologies, workspaces,
+    metrics as metrics_endpoint,
+    graph, graph_export, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
-    groups, workspace_members, view_grants, role_bindings,
+    graph_store,
+    groups, workspace_members, view_grants, view_versions, view_transfer, role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
     versioning,
     admin_idp_groups,
@@ -21,6 +23,8 @@ from .endpoints import (
     admin_sso_config,
     me_identities,
     audit,
+    sso_activity,
+    sso_failures,
     branding,
     telemetry,
     analytics,
@@ -37,6 +41,12 @@ api_router = APIRouter()
 #   * auth.router (legacy): /signup, /forgot-password, /reset-password,
 #     /verify-invite — flows that don't issue session cookies. Will follow
 #     into the auth service in a later move.
+# Prometheus scrape, at /api/v1/metrics (this router is mounted under
+# /api/v1). Point the scrape config at that path; the route itself 404s
+# unless METRICS_ENABLED says otherwise (see the module).
+api_router.include_router(
+    metrics_endpoint.router, tags=["metrics"],
+)
 api_router.include_router(
     auth_session_router, prefix="/auth", tags=["auth"],
 )
@@ -143,6 +153,20 @@ api_router.include_router(
     prefix="/views/{view_id}/grants",
     tags=["views:grants"],
 )
+# The history of a view's design (not graph version control). Included before
+# views.router like the grants above, so no `/{view_id}` route can capture it.
+api_router.include_router(
+    view_versions.router,
+    prefix="/views/{view_id}/versions",
+    tags=["views:versions"],
+)
+# Moving views between environments (export / import files). Before views.router
+# for the same reason: `/views/transfer/...` must never reach a `/{view_id}` route.
+api_router.include_router(
+    view_transfer.router,
+    prefix="/views/transfer",
+    tags=["views:transfer"],
+)
 # The bell — every route is scoped to the calling user by construction.
 api_router.include_router(
     notifications.router,
@@ -197,6 +221,21 @@ api_router.include_router(
     audit.router,
     prefix="/admin/audit",
     tags=["admin:audit"],
+)
+
+# Who could not sign in, why, and whether they have since — the audit
+# trail's sign-in failures summarised per person for SSO diagnostics.
+api_router.include_router(
+    sso_failures.router,
+    prefix="/admin/sso/failures",
+    tags=["admin:sso:diagnostics"],
+)
+
+# Every SSO event as a row with its fields as columns, filtered in SQL.
+api_router.include_router(
+    sso_activity.router,
+    prefix="/admin/sso/activity",
+    tags=["admin:sso:diagnostics"],
 )
 
 # RBAC Phase 5 — IdP group -> RoleBinding / Group membership mapping.
@@ -309,6 +348,15 @@ api_router.include_router(
     dependencies=[Depends(requires("system:admin"))],
 )
 
+# Graph store topology: /api/v1/admin/graph-store/* — every node of every
+# provider's store (masters AND replicas), the graphs on each shard, and
+# where one data source's graph lives. Gates are PER ROUTE: the fleet view
+# is system:admin, while a single graph's placement rides the Ingestion
+# read gate so a source's own page can show which node holds it.
+api_router.include_router(
+    graph_store.router, prefix="/admin/graph-store", tags=["admin:graph-store"],
+)
+
 # ── Top-level views (first-class, cross-workspace) ─────────────────
 api_router.include_router(
     views.router, prefix="/views", tags=["views"],
@@ -334,6 +382,12 @@ api_router.include_router(
 #
 # Graph endpoints: /api/v1/{ws_id}/graph/trace, /api/v1/{ws_id}/graph/nodes, etc.
 # (api_router is already mounted at /api/v1, so prefix is just /{ws_id}/graph)
+# Graph data export for a data source without version control (a version-controlled one exports
+# from its version store). Mounted before the graph router so its literal paths win. Takes
+# workspace:datasource:read itself: a whole data source is more than a view's reach.
+api_router.include_router(
+    graph_export.router, prefix="/{ws_id}/graph/export", tags=["graph:workspace"],
+)
 api_router.include_router(
     graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
     dependencies=[Depends(require_ds_read_or_view)],

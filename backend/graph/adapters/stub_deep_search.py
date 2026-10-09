@@ -28,11 +28,21 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from backend.app.services.deep_search import CompileError
 from backend.app.services.deep_search.settings import get_deep_search_settings
+from backend.common.search_semantics import (
+    SemanticsError,
+    element_texts,
+    evaluate,
+    fold_case,
+    resolve_comparison,
+    resolve_predicate,
+    value_slot,
+)
 from backend.common.models.search import (
     EntityTypePredicate,
     GroupPredicate,
     HasPropertyPredicate,
     LayerPredicate,
+    MatchAllPredicate,
     PropertyPredicate,
     SearchHit,
     SearchQuery,
@@ -48,6 +58,14 @@ from backend.common.models.search import (
 # ``layerAssignment`` (str, optional), and any number of arbitrary
 # property keys. Edge dict shape: ``source`` / ``target`` / ``type``
 # (all strs) plus optional property keys.
+
+# The fixture fields that are the node's own, not user properties — what a
+# search BY property name must not match (the FalkorDB compiler excludes
+# ``platform_property_names()`` for the same reason).
+_NODE_FIELDS = frozenset({
+    "urn", "entityType", "displayName", "qualifiedName", "description",
+    "tags", "layerAssignment", "searchableText",
+})
 
 
 class StubDeepSearchProvider:
@@ -87,8 +105,12 @@ class StubDeepSearchProvider:
                 if n.get("urn") in roots
                 or any(a in roots for a in n.get("ancestorUrns", []))
             ]
-        # Entity-type clamp from scope (resolver-stamped).
-        if query.scope.entity_types:
+        # Entity-type clamp from scope (resolver-stamped) — skipped when
+        # root_urns already bound the search, mirroring the FalkorDB
+        # provider: where a containment boundary exists it is the only
+        # boundary, or a descendant of another type could never be
+        # returned.
+        if query.scope.entity_types and not query.scope.root_urns:
             allowed = set(query.scope.entity_types)
             matches = [
                 n for n in matches if n.get("entityType") in allowed
@@ -112,10 +134,47 @@ class StubDeepSearchProvider:
             cursor=None,
             truncated=truncated,
             candidate_count=candidate_count,
+            # In-memory evaluation counts every match BEFORE the cap
+            # slice, so the exact total costs nothing extra.
+            total_count=candidate_count,
             deadline_exceeded=False,
             elapsed_ms=elapsed_ms,
             cache_hit=False,
         )
+
+    async def deep_search_count(self, query: SearchQuery, *, context=None,
+                                advance: bool = True) -> Dict[str, Any]:
+        """A rule's total over the fixture — complete in one answer."""
+        count = sum(1 for n in self._in_scope(query.scope) if _matches(n, query.predicate))
+        return {"count": count, "status": "complete", "sessionId": None,
+                "progress": {"scanned": 1, "total": 1, "matched": count},
+                "dataVersion": None, "notes": []}
+
+    async def deep_search_membership(self, scope, items, urns, *, context=None) -> Dict[str, Any]:
+        """Which of ``urns`` match each rule, inside ``scope``."""
+        wanted = set(urns)
+        nodes = [n for n in self._in_scope(scope) if n.get("urn") in wanted]
+        matches: Dict[str, List[str]] = {}
+        errors: Dict[str, str] = {}
+        for item_id, predicate in items:
+            try:
+                matches[item_id] = [n["urn"] for n in nodes if _matches(n, predicate)]
+            except CompileError as exc:
+                errors[item_id] = str(exc)
+        return {"matches": matches, "errors": errors, "elapsedMs": 0}
+
+    def _in_scope(self, scope) -> List[Dict[str, Any]]:
+        """The fixture nodes inside a resolved scope, as ``deep_search``
+        clamps them."""
+        nodes = list(self._nodes)
+        if scope.root_urns:
+            roots = set(scope.root_urns)
+            nodes = [n for n in nodes if n.get("urn") in roots
+                     or any(a in roots for a in n.get("ancestorUrns", []))]
+        elif scope.entity_types:
+            allowed = set(scope.entity_types)
+            nodes = [n for n in nodes if n.get("entityType") in allowed]
+        return nodes
 
     async def deep_search_explain(self, query: SearchQuery) -> Dict[str, Any]:
         # The stub doesn't emit Cypher; it returns a diagnostic dict
@@ -133,6 +192,40 @@ class StubDeepSearchProvider:
             "notes": ["stub provider — predicates evaluated in Python"],
         }
 
+    async def deep_search_values(
+        self,
+        *,
+        key: str,
+        entity_types: Optional[List[str]] = None,
+        q: str = "",
+        limit: int = 25,
+    ) -> Dict[str, Any]:
+        """Every fixture node counted — the FalkorDB query's answer on a
+        graph small enough to finish within its budget."""
+        start = time.monotonic()
+        wanted = {str(t).lower() for t in entity_types} if entity_types else None
+        needle = fold_case(q.strip())
+        counts: Dict[tuple, int] = {}
+        for n in self._nodes:
+            if wanted is not None and str(n.get("entityType", "")).lower() not in wanted:
+                continue
+            stored = n.get(key)
+            for v in stored if isinstance(stored, list) else [stored]:
+                if not isinstance(v, (str, int, float, bool)):
+                    continue
+                if needle and needle not in fold_case(element_texts(v)[0]):
+                    continue
+                slot = value_slot(v)
+                counts[slot] = counts.get(slot, 0) + 1
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0][1])))
+        return {
+            "key": key,
+            "values": [{"value": v, "count": c} for (_, v), c in ordered[:limit]],
+            "complete": True,
+            "truncated": len(ordered) > limit,
+            "elapsedMs": int((time.monotonic() - start) * 1000),
+        }
+
     async def deep_search_discover(
         self,
         *,
@@ -146,6 +239,7 @@ class StubDeepSearchProvider:
         # top-N when a label exceeds the per-label cap — mirrors the
         # FalkorDB discover behaviour (W1.1a).
         labels: Dict[str, Dict[str, Any]] = {}
+        missing_searchable_text = 0
         for n in self._nodes[: max(1, sample_per_label) * 32]:
             label = n.get("entityType")
             if not label:
@@ -158,6 +252,10 @@ class StubDeepSearchProvider:
             if entry["sampled"] >= sample_per_label:
                 continue
             entry["sampled"] += 1
+            if not n.get("searchableText"):
+                # Mirrors the FalkorDB discover diagnostic: absent or
+                # empty is unsearchable either way by text(target='any').
+                missing_searchable_text += 1
             for k, v in n.items():
                 if k in {"urn", "entityType", "tags", "ancestorUrns"}:
                     continue
@@ -240,6 +338,7 @@ class StubDeepSearchProvider:
             "blobOnlyLabels": [],
             "missingContainment": False,
             "tagValues": tag_values,
+            "missingSearchableText": missing_searchable_text,
             "edges": edges_out,
             "elapsedMs": int((time.monotonic() - start) * 1000),
         }
@@ -268,6 +367,9 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
             return not _matches(node, predicate.children[0])
         raise CompileError(f"stub: unsupported group op {predicate.op!r}")
 
+    if isinstance(predicate, MatchAllPredicate):
+        return True
+
     if isinstance(predicate, EntityTypePredicate):
         et = node.get("entityType")
         if predicate.op == "in":
@@ -282,84 +384,84 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
     if isinstance(predicate, TextPredicate):
         # Mirror the FalkorDB compiler's column mapping (see
         # ``_visit_text`` in ``falkordb_deep_search.py``):
-        #   name           → displayName + qualifiedName + searchableText
-        #   qualifiedName  → qualifiedName + searchableText
+        #   name           → displayName + qualifiedName
+        #   qualifiedName  → qualifiedName
         #   description    → description
         #   tags           → tag list
-        #   any            → searchableText
+        #   any            → searchableText + displayName + qualifiedName
         # Otherwise the stub silently produces different results than
-        # production for the same predicate.
+        # production for the same predicate. Each column is evaluated
+        # SEPARATELY (a match on displayName OR a match on
+        # qualifiedName) — never a space-joined haystack across fields
+        # — so exact/prefix/suffix semantics hold per field.
         target = predicate.target or "any"
+        if target == "property" and predicate.property_key:
+            # Same typed text comparison the compiler makes for it.
+            op = {"exact": "eq", "prefix": "startsWith",
+                  "suffix": "endsWith"}.get(predicate.match, "contains")
+            return evaluate(
+                node.get(predicate.property_key),
+                resolve_comparison(op, predicate.value, value_type="string",
+                                   case_sensitive=predicate.case_sensitive),
+            )
         needle = (predicate.value or "").lower()
         if not needle:
             return True
         if target == "name":
-            haystack = " ".join(
-                str(node.get(k) or "") for k in
-                ("displayName", "qualifiedName", "searchableText")
-            ).lower()
+            cols = ("displayName", "qualifiedName")
         elif target == "qualifiedName":
-            haystack = " ".join(
-                str(node.get(k) or "") for k in
-                ("qualifiedName", "searchableText")
-            ).lower()
+            cols = ("qualifiedName",)
         elif target == "description":
-            haystack = str(node.get("description") or "").lower()
+            cols = ("description",)
         elif target == "tags":
-            haystack = " ".join(node.get("tags") or []).lower()
+            cols = ("tags",)
         elif target == "any":
-            haystack = str(node.get("searchableText") or "").lower()
-            # Belt-and-braces: a fixture node that hasn't been
-            # pre-computed ``searchableText`` shouldn't silently fail
-            # — fall back to the same fields the production write path
-            # would have denormalised.
-            if not haystack:
-                haystack = " ".join(
-                    str(node.get(k) or "") for k in
-                    ("displayName", "qualifiedName", "description")
-                ).lower()
+            cols = ("searchableText", "displayName", "qualifiedName")
         else:
-            haystack = str(node.get(target) or "").lower()
-        if predicate.match == "exact":
-            return haystack == needle
-        if predicate.match == "prefix":
-            return haystack.startswith(needle)
-        # default substring
-        return needle in haystack
+            cols = (target,)
+
+        def _field(key: str) -> str:
+            v = node.get(key)
+            if isinstance(v, list):
+                return " ".join(str(x) for x in v).lower()
+            return str(v or "").lower()
+
+        for key in cols:
+            value = _field(key)
+            if predicate.match == "exact":
+                matched = value == needle
+            elif predicate.match == "prefix":
+                matched = value.startswith(needle)
+            elif predicate.match == "suffix":
+                matched = value.endswith(needle)
+            else:  # substring (default)
+                matched = needle in value
+            if matched:
+                return True
+        return False
 
     if isinstance(predicate, PropertyPredicate):
-        v = node.get(predicate.key)
-        op = predicate.op
-        target = predicate.value
-        if op == "eq":
-            return v == target
-        if op == "neq":
-            return v != target
-        if op == "gt":
-            return v is not None and v > target
-        if op == "gte":
-            return v is not None and v >= target
-        if op == "lt":
-            return v is not None and v < target
-        if op == "lte":
-            return v is not None and v <= target
-        if op == "in":
-            return v in set(target or [])
-        if op == "notIn":
-            return v not in set(target or [])
-        if op == "contains":
-            return v is not None and str(target) in str(v)
-        if op == "startsWith":
-            return isinstance(v, str) and v.startswith(str(target))
-        if op == "endsWith":
-            return isinstance(v, str) and v.endswith(str(target))
-        if op == "between":
-            lo, hi = target  # validator ensures 2-tuple
-            return v is not None and lo <= v <= hi
-        raise CompileError(f"stub: unsupported property op {op!r}")
+        # The reference evaluator IS the compiled Cypher's meaning (the
+        # live parity test holds them together), so the stub answers a
+        # typed comparison exactly as FalkorDB would.
+        try:
+            cmp = resolve_predicate(predicate)
+        except SemanticsError as exc:
+            raise CompileError(f"property {predicate.key!r}: {exc}") from exc
+        return evaluate(node.get(predicate.key), cmp)
 
     if isinstance(predicate, HasPropertyPredicate):
-        return predicate.key in node and node[predicate.key] is not None
+        if predicate.key_match == "exact":
+            present = node.get(predicate.key) is not None
+        else:
+            needle = fold_case(predicate.key)
+            present = any(
+                (fold_case(k).startswith(needle) if predicate.key_match == "prefix"
+                 else needle in fold_case(k))
+                for k, v in node.items()
+                if k not in _NODE_FIELDS and v is not None
+            )
+        return not present if predicate.negate else present
 
     if isinstance(predicate, TagPredicate):
         tags = set(node.get("tags") or [])

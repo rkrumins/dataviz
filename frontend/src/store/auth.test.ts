@@ -242,3 +242,46 @@ describe('applyProfile', () => {
         expect(readUserCache()).toBeNull()
     })
 })
+
+
+describe('signing out sticks until a sign-in', () => {
+    // The login page's automatic gateway / portal sign-in used to wait only
+    // sixty seconds, in this tab only — so a new tab, or a reload a minute
+    // later, signed the person straight back in with the corporate session
+    // they had just signed out in front of.
+    const signedOut = () => window.localStorage.getItem('nx_signed_out') !== null
+
+    beforeEach(() => { window.localStorage.clear() })
+
+    it('logout marks it, for every tab', async () => {
+        vi.mocked(authService.logout).mockResolvedValue({ ok: true })
+
+        await useAuthStore.getState().logout()
+
+        expect(signedOut()).toBe(true)
+    })
+
+    it('a sign-in clears it', async () => {
+        window.localStorage.setItem('nx_signed_out', '1')
+        vi.mocked(authService.login).mockResolvedValue({ user: _user() })
+        vi.mocked(authService.myPermissions).mockResolvedValue({
+            sid: 's1', global: ['system:admin'], ws: {},
+        })
+
+        await useAuthStore.getState().login('alice@example.com', 'pw')
+
+        expect(signedOut()).toBe(false)
+    })
+
+    it('so does a session found on load — a redirect sign-in lands there', async () => {
+        window.localStorage.setItem('nx_signed_out', '1')
+        vi.mocked(authService.me).mockResolvedValue({ user: _user() })
+        vi.mocked(authService.myPermissions).mockResolvedValue({
+            sid: 's1', global: ['system:admin'], ws: {},
+        })
+
+        await useAuthStore.getState().bootstrap()
+
+        expect(signedOut()).toBe(false)
+    })
+})

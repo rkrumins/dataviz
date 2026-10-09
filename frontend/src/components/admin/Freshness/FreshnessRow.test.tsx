@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import { automationChip, FreshnessRow } from './FreshnessRow'
+import { fleetHold, holdLabel, overrideWarning, rowHold } from './holds'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
 
 describe('automationChip', () => {
@@ -12,19 +13,57 @@ describe('automationChip', () => {
         expect(automationChip({ driftState: 'inSync', autoReconcile: true })).toBeNull()
     })
 
-    it('names a snooze', () => {
+    it('names a snooze, with how long is left', () => {
+        const chip = automationChip({
+            driftState: 'drifting', pausedUntil: new Date(Date.now() + 3 * 3600_000).toISOString(),
+        })
+        expect(chip?.label).toBe('Paused · 3h')
+        expect(chip?.facet).toBe('held')
+    })
+
+    it('shows a pause on a source that is currently fine — that is the one an operator forgets', () => {
+        // The old chip needed a live drift verdict before it would admit a
+        // pause existed, so a paused-but-healthy row looked like automation
+        // working normally. It is the pause, not the drift, that was set.
         expect(automationChip({
-            driftState: 'drifting', pausedUntil: '2999-01-01T00:00:00+00:00',
-        })?.label).toBe('Paused')
+            driftState: 'inSync', pausedUntil: '2999-01-01T00:00:00+00:00',
+        })?.label).toMatch(/^Paused/)
     })
 
     it('prefers the breaker over a plain drift verdict', () => {
         expect(automationChip({ driftState: 'suspended' })?.label).toBe('Needs a person')
     })
 
-    it('names a deliberate opt-out', () => {
+    it('prefers the breaker over a hold — a person is needed regardless', () => {
+        expect(automationChip({
+            driftState: 'suspended', heldBy: 'fleet', heldKind: 'stopped',
+        })?.label).toBe('Needs a person')
+    })
+
+    it('names a deliberate opt-out as a stop — the same word the wider scopes use', () => {
         expect(automationChip({ driftState: 'inSync', autoReconcile: false })?.label)
-            .toBe('Automation off')
+            .toBe('Stopped')
+    })
+
+    it('names the scope that is holding the row, because that is where it is released', () => {
+        expect(automationChip({
+            driftState: 'drifting', heldBy: 'provider', heldKind: 'stopped',
+        })?.label).toBe('Stopped by provider')
+        expect(automationChip({
+            driftState: 'inSync', heldBy: 'fleet', heldKind: 'paused',
+            heldUntil: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+        })?.label).toBe('Paused fleet-wide · 2d')
+        expect(automationChip({ heldBy: 'provider', heldKind: 'stopped' })?.title)
+            .toMatch(/provider row/)
+    })
+
+    it('trusts the server-resolved hold over the source\'s own switches', () => {
+        // The server applies most-restrictive-wins and reports the WIDEST
+        // scope; a paused source under a stopped provider says "provider".
+        expect(rowHold({
+            autoReconcile: true, pausedUntil: '2999-01-01T00:00:00+00:00',
+            heldBy: 'provider', heldKind: 'stopped',
+        })).toEqual({ scope: 'provider', kind: 'stopped', until: null })
     })
 
     it('leaves the cooldown to FreshnessBadges rather than saying it twice', () => {
@@ -34,12 +73,37 @@ describe('automationChip', () => {
     })
 
     it('prefers the opt-out over a snooze — Act stays off regardless of when the snooze lapses', () => {
-        // Drifting + paused + opted-out all at once: "Paused" would wrongly
-        // imply this source resumes on its own once the snooze expires.
+        // Drifting + paused + opted-out all at once, on a backend that
+        // predates the resolved hold: "Paused" would wrongly imply this
+        // source resumes on its own once the snooze expires.
         expect(automationChip({
             driftState: 'drifting', autoReconcile: false,
             pausedUntil: '2999-01-01T00:00:00+00:00',
-        })?.label).toBe('Automation off')
+        })?.label).toBe('Stopped')
+    })
+})
+
+describe('hold copy', () => {
+    it('drops the scope suffix on the scope\'s own surface', () => {
+        expect(holdLabel({ scope: 'provider', kind: 'stopped', until: null }, 'provider')).toBe('Stopped')
+        expect(holdLabel({ scope: 'fleet', kind: 'stopped', until: null }, 'provider')).toBe('Stopped fleet-wide')
+    })
+
+    it('reads the fleet hold off the policy as the server resolved it, naming what releases it', () => {
+        expect(fleetHold({ heldBy: 'fleet', heldKind: 'stopped', heldReason: 'act' }))
+            .toEqual({ scope: 'fleet', kind: 'stopped', until: null, reason: 'act' })
+        // A backend that predates ``heldBy`` on the policy: the row's stamps.
+        expect(fleetHold({ stoppedAt: '2026-09-01T00:00:00+00:00' }))
+            .toEqual({ scope: 'fleet', kind: 'stopped', until: null, reason: 'hold' })
+        expect(fleetHold({ heldBy: null, stoppedAt: null, pausedUntil: null })).toBeNull()
+        expect(fleetHold(undefined)).toBeNull()
+    })
+
+    it('tells a person overriding a hold that the hold stays', () => {
+        expect(overrideWarning({ scope: 'provider', kind: 'stopped', until: null }))
+            .toBe('Automatic rebuilds are stopped for every source under this provider. Rebuilding now runs once; automation stays off.')
+        expect(overrideWarning({ scope: 'source', kind: 'paused', until: null }))
+            .toMatch(/^Automatic rebuilds are paused for this source\. Rebuilding now runs once; the pause stays\.$/)
     })
 })
 
@@ -75,12 +139,73 @@ describe('FreshnessRow — quiet activity + automation chip', () => {
         expect(onFilterStatus).toHaveBeenCalledWith('suspended')
     })
 
-    it('renders "Automation off" as a plain label, not a dead filter button', () => {
+    it('makes a held chip a filter to the held facet', async () => {
+        const user = userEvent.setup()
+        const onFilterStatus = vi.fn()
         renderRow(
             { dataSourceId: 'ds-off', aggregationStatus: 'ready', driftState: 'inSync', autoReconcile: false },
-            { onFilterStatus: vi.fn() },
+            { onFilterStatus },
         )
-        expect(screen.getByText('Automation off')).toBeInTheDocument()
-        expect(screen.queryByRole('button', { name: /Automation off/i })).not.toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: /^Stopped$/ }))
+        expect(onFilterStatus).toHaveBeenCalledWith('held')
+    })
+})
+
+describe('FreshnessRow — a wedged projection is never a healthy row', () => {
+    it('never reads "Up to date" while the rolled-up connections are missing', () => {
+        // The source's last aggregation job succeeded and no marker is set, so
+        // every existing signal says healthy. It is not: main reads are
+        // falling back to the version log, which carries no rolled-up
+        // connections at all.
+        renderRow({
+            dataSourceId: 'ds-wedged', name: 'Wedged Source',
+            aggregationStatus: 'ready', driftState: 'projectionStalled',
+            platformMastered: true,
+        })
+        expect(screen.queryByText('Up to date')).not.toBeInTheDocument()
+        expect(screen.getByText('Connections not up to date')).toBeInTheDocument()
+    })
+
+    it('says automation will not rescue it, rather than staying silent', () => {
+        const chip = automationChip({ driftState: 'projectionStalled' })
+        expect(chip?.label).toBe("Rebuild won't fix this")
+        expect(chip?.facet).toBe('projectionStalled')
+        expect(chip?.title).toMatch(/version control/i)
+    })
+
+    it('reads the live projector, not only the sweep stamp', () => {
+        // One row, two clocks. ``driftState`` is written by the reconciliation
+        // sweep at most once per check interval (shipped default 3600s);
+        // ``projectorCurrent`` on the SAME row is read live on every request.
+        // For up to a whole interval after a wedge starts the payload says
+        // ``managed`` and ``projectorCurrent: false`` at once — and this row
+        // rendered the green badge over a live wedge, while Insights (which
+        // reads the live bit) rendered red and said "open Freshness".
+        renderRow({
+            dataSourceId: 'ds-onset', name: 'Onset Source',
+            aggregationStatus: 'ready', driftState: 'managed',
+            platformMastered: true, projectorCurrent: false,
+        })
+        expect(screen.queryByText('Up to date')).not.toBeInTheDocument()
+        expect(screen.getByText('Connections not up to date')).toBeInTheDocument()
+    })
+
+    it('leaves an unknown projector reading as unknown, never as a wedge', () => {
+        // ``null`` is UNKNOWN — an unversioned source, a graph pinned to no
+        // target, an unreadable store. It must render as neither verdict.
+        renderRow({
+            dataSourceId: 'ds-unknown', name: 'Unknown Source',
+            aggregationStatus: 'ready', driftState: 'inSync',
+            projectorCurrent: null,
+        })
+        expect(screen.queryByText('Connections not up to date')).not.toBeInTheDocument()
+        expect(screen.getByText('Up to date')).toBeInTheDocument()
+    })
+
+    it('warns automation off a live wedge the stamp has not caught up with', () => {
+        expect(automationChip({ driftState: 'managed', projectorCurrent: false })?.label)
+            .toBe("Rebuild won't fix this")
+        // ...and still says nothing when the live reading is unknown.
+        expect(automationChip({ driftState: 'managed', projectorCurrent: null })).toBeNull()
     })
 })

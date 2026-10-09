@@ -265,12 +265,33 @@ async def test_auto_signin_on_or_absent_publishes_nothing_extra(
 
 
 @pytest.mark.asyncio
-async def test_auto_signin_off_on_a_plain_row_stays_unpublished(
+async def test_auto_signin_off_is_published_for_a_row_reading_the_cookie(
     test_client, db_session, registry,
 ):
-    """A row with no browser-driven flow publishes nothing the sign-in
-    page could act on — the flag alone would be a dangling fact."""
+    """A plain row — the corporate cookie read off the request — is one
+    the sign-in page attempts too, with an empty POST, so its opt-out has
+    to reach the page. Nothing else about it is published."""
     await _make_provider(db_session, auto_signin=False)
+
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-gateway")
+    assert entry.get("config") == {"autoSignIn": False}
+
+
+@pytest.mark.asyncio
+async def test_auto_signin_off_on_a_row_the_page_cannot_attempt_stays_unpublished(
+    test_client, db_session, registry,
+):
+    """A handle row whose trigger is switched off reads no cookie and
+    publishes no browser flow — the flag alone would be a dangling fact."""
+    await _make_provider(
+        db_session,
+        auto_signin=False,
+        token_source_key="",
+        authenticate_enabled=False,
+        authenticate_url="https://sso.corp.example/authenticate",
+        authenticate_token_path="token",
+    )
 
     resp = await test_client.get("/api/v1/auth/providers")
     entry = next(p for p in resp.json() if p["slug"] == "corp-gateway")

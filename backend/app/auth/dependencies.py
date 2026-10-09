@@ -222,19 +222,27 @@ async def get_current_user(request: Request) -> User:
             # validate_session already rejected this above — defensive.
             sid = ""
 
-    if sid:
-        try:
-            if await get_revocation_service().is_revoked(sid):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session revoked",
-                )
-        except RevocationBackendError as exc:
-            logger.warning(
-                "Revocation backend unavailable in get_current_user "
-                "(user=%s): %s — honouring JWT", user.id, exc,
-            )
+    if sid and await _tombstoned(sid, user.id, where="get_current_user"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session revoked",
+        )
     return user
+
+
+async def _tombstoned(sid: str, user_id: str, *, where: str) -> bool:
+    """Whether this session was revoked — fail-open, like every check on
+    the ordinary request path: an unreachable backend honours the JWT,
+    whose short lifetime is the floor. ``assert_session_alive_or_503`` is
+    the fail-closed variant for sensitive routes."""
+    try:
+        return await get_revocation_service().is_revoked(sid)
+    except RevocationBackendError as exc:
+        logger.warning(
+            "Revocation backend unavailable in %s (user=%s): %s — "
+            "honouring JWT", where, user_id, exc,
+        )
+        return False
 
 
 async def get_optional_user(request: Request) -> User | None:
@@ -242,8 +250,23 @@ async def get_optional_user(request: Request) -> User | None:
 
     Useful for endpoints that work for both authenticated and anonymous
     users (e.g. created_by attribution that defaults to a sentinel).
+
+    A revoked session is anonymous here, as it is refused everywhere
+    else: signing out, a password reset or a role change has to take
+    effect on these routes on the next request too, not when the access
+    token happens to expire.
     """
-    return await _identity_service(request).validate_session(read_access_cookie(request))
+    token = read_access_cookie(request)
+    user = await _identity_service(request).validate_session(token)
+    if user is None or not token:
+        return user
+    try:
+        sid = decode_token(token).get("sid", "") or ""
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return None
+    if sid and await _tombstoned(sid, user.id, where="get_optional_user"):
+        return None
+    return user
 
 
 async def assert_session_alive_or_503(
@@ -411,17 +434,26 @@ async def _workspace_grants_from_store(
         return {}
     try:
         state = await get_revocation_service().read_session(sid)
-        if state.claims is not None:
-            return PermissionClaims.from_jwt_dict(state.claims).ws_perms
-        logger.warning(
-            "No stored workspace grants for sid=%s; resolving from the "
-            "database. Expected only if the session entry expired.", sid,
-        )
     except Exception as exc:  # noqa: BLE001 — any store failure escalates
         logger.warning(
             "Session store unavailable for sid=%s (%s); resolving "
             "workspace grants from the database.", sid, exc,
         )
+        return await _workspace_grants_from_db(user_id)
+    # The same read carries the tombstone. Honouring it here is what makes
+    # a revocation reach the routes that authorise on claims alone, rather
+    # than only the ones that also resolve the user.
+    if state.revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session revoked",
+        )
+    if state.claims is not None:
+        return PermissionClaims.from_jwt_dict(state.claims).ws_perms
+    logger.warning(
+        "No stored workspace grants for sid=%s; resolving from the "
+        "database. Expected only if the session entry expired.", sid,
+    )
     return await _workspace_grants_from_db(user_id)
 
 

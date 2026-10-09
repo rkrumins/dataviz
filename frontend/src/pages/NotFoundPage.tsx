@@ -7,8 +7,8 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 export function NotFoundPage() {
   useDocumentTitle('Page not found')
   return (
-    <div className="absolute inset-0 flex items-center justify-center bg-canvas">
-      <div className="flex flex-col items-center gap-4 max-w-md text-center">
+    <div className="absolute inset-0 flex overflow-y-auto bg-canvas p-6">
+      <div className="m-auto flex flex-col items-center gap-4 max-w-md text-center">
         <div className="text-7xl font-bold text-ink-faint">404</div>
         <h2 className="text-xl font-semibold text-ink-primary">Page not found</h2>
         <p className="text-sm text-ink-secondary">

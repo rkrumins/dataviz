@@ -194,7 +194,8 @@ async def _run_deep() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 4. Rollup hook: the rebuild-triggered full seed fires on_rollups_stale.      #
+# 4. Rollup hook: a replay hands the rollups to the batch job only when it     #
+#    changed edges it cannot maintain itself — never for a no-op rebuild.     #
 # --------------------------------------------------------------------------- #
 async def _run_rollup_hook() -> None:
     await models.create_schema_and_partitions()
@@ -209,17 +210,21 @@ async def _run_rollup_hook() -> None:
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
                                actor="alice", falkor_graph_name=name)
     gid = G["graph_id"]
+    # No edge-type resolver: the projector cannot tell lineage from containment, so edges
+    # it writes are the batch job's to roll up.
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2, on_rollups_stale=hook)
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("Beta")},
+        {"op": "create", "entity_kind": "edge", "entity_id": "E1", "payload": _edge("A", "B")},
     ], "seed")
     await proj.project_graph(gid)
-    assert fired == [gid], "first projection is itself a full seed and fires the hook"
+    assert fired == [gid], "a first seed that wrote edges it cannot roll up hands them off"
 
     fired.clear()
     assert await svc.request_projection_rebuild(gid) is True
-    await proj.project_graph(gid)                         # projected==0 → clean reseed → fires again
-    assert fired == [gid]
+    await proj.project_graph(gid)                         # nothing differs → nothing written
+    assert fired == [], "a rebuild that changed nothing must not queue an aggregation job"
     await db.dispose_engine()
 
 
@@ -362,7 +367,10 @@ async def _run_holdback_on_count_shortfall() -> None:
     wm = await svc.projection_watermark(gid)
     assert wm["fresh"] is False and wm["last_error"], wm
 
-    # The poll loop must NOT resurrect a deterministic-fail seed (projected==target ⇒ not selected).
+    # The poll loop DOES re-select this graph now — `project_pending` selects on
+    # `projected < main_head_commit_seq` as well as `projected < target`, because pinning
+    # target down used to make the retry unreachable forever (the 14-hour wedge). What must
+    # still hold is that the retry cannot ADVANCE a seed that deterministically fails verify.
     await proj.project_pending()
     assert (await _status(gid))[1] == 0, "project_pending must not advance a held-back seed"
 

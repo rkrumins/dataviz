@@ -10,7 +10,7 @@
  * - Conflict detection and warnings
  */
 
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -27,7 +27,10 @@ import {
     Filter,
     CornerDownRight,
     Info,
-    Loader2
+    Loader2,
+    RotateCw,
+    MoreHorizontal,
+    Check
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -35,12 +38,23 @@ import {
     useEffectiveAssignments
 } from '@/store/referenceModelStore'
 import type { ViewLayerConfig, LayerAssignmentEntry, AssignmentConflict } from '@/types/schema'
+import { buildWizardPlacement, placedByOf, type PlacedBy } from './effectivePlacement'
 import { useContainmentEdgeTypes, useEntityTypes, useSchemaIsLoading } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
 import { useEntityBrowser } from '@/hooks/useEntityBrowser'
-import { useLoadingToast } from '@/components/ui/toast'
+import { useLoadingNotification } from '@/components/ui/notifications'
+import { useFeature } from '@/store/features'
+import {
+    compilePlacementSpec,
+    factsFromGraphNode,
+    isMember,
+    parentContextOf,
+    place,
+    type ParentContext,
+    type PlacementFacts,
+} from '@/lib/placement/placement'
 
 
 // ============================================
@@ -60,8 +74,17 @@ export interface EntityTreeNode {
     parentId?: string
     assignedLayerId?: string
     isInherited?: boolean
+    /** Placed by a layer's rule (or, under the contract, the entity's own stamp)
+     *  rather than by an assignment entry. There is nothing to un-assign — a rule
+     *  is overridden, not removed — so the row offers no remove button, only the
+     *  re-assign dropdown. */
+    isRulePlaced?: boolean
+    /** Contract only: what placed an isRulePlaced node. Absent reads as 'type'. */
+    placedBy?: PlacedBy
     hasConflict?: boolean
     conflictMessage?: string
+    /** A top-level row of the "Orphans only" list. */
+    isOrphan?: boolean
 }
 
 /** One entry of the published browser directory — enough identity for any
@@ -70,6 +93,8 @@ export interface BrowserSnapshotEntry {
     name: string
     type: string
     childCount: number
+    /** Its placement facts — published only with placementContractEnabled on. */
+    facts?: PlacementFacts
 }
 
 /** Live snapshot of everything the entity browser has loaded. Published via
@@ -89,6 +114,9 @@ interface WizardAssignmentTreeProps {
     layers: ViewLayerConfig[]
     /** Canonical flattened urn -> layer assignment map (the wizard's live buffer). */
     assignments?: Record<string, LayerAssignmentEntry>
+    /** The view's effective scope. A curated view never places a root by rule,
+     *  so the "by type" badge must not claim otherwise. */
+    entityScope?: 'all' | 'curated'
     /** Active drop target from the Layer Studio (shows strip indicator) */
     activeTarget?: ActiveTarget | null
     /** Callback when assignment changes */
@@ -271,6 +299,16 @@ function TreeRow({
                 <p className="text-xs text-slate-500 dark:text-slate-400 truncate">{node.type}</p>
             </div>
 
+            {node.isOrphan && (
+                <span
+                    data-testid="orphan-marker"
+                    className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 flex-shrink-0"
+                    title="No parent in the data, though its type normally sits inside another"
+                >
+                    orphan
+                </span>
+            )}
+
             {/* Child Count Badge */}
             {hasChildren && (
                 <span
@@ -346,17 +384,33 @@ function TreeRow({
                     >
                         {node.isInherited ? '↳ ' : ''}{assignedLayer.name}
                     </span>
-                    {/* Remove assignment button */}
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation()
-                            onAssign(node.id, '')
-                        }}
-                        className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-slate-400 hover:text-red-500 transition-colors"
-                        title="Remove assignment"
-                    >
-                        <X className="w-3 h-3" />
-                    </button>
+                    {node.isRulePlaced ? (
+                        /* Placed by the layer's rule (or the entity's stamp). Nothing to
+                           remove — picking another layer overrides it for this entity only. */
+                        <span
+                            data-testid="rule-placed-marker"
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400"
+                            title={node.placedBy === 'rule'
+                                ? 'Placed automatically by a rule on this layer. Assign it elsewhere to override.'
+                                : node.placedBy === 'stamp'
+                                    ? "Placed by the entity's own layer setting. Assign it elsewhere to override."
+                                    : `Placed automatically because this layer covers the ${node.type} type. Assign it elsewhere to override.`}
+                        >
+                            {node.placedBy === 'rule' ? 'by rule' : node.placedBy === 'stamp' ? 'stamped' : 'by type'}
+                        </span>
+                    ) : (
+                        /* Remove assignment button */
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation()
+                                onAssign(node.id, '')
+                            }}
+                            className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-slate-400 hover:text-red-500 transition-colors"
+                            title="Remove assignment"
+                        >
+                            <X className="w-3 h-3" />
+                        </button>
+                    )}
                 </div>
             )}
 
@@ -390,6 +444,7 @@ function TreeRow({
 export function WizardAssignmentTree({
     layers,
     assignments,
+    entityScope,
     onAssignmentChange,
     onBulkAssign,
     onParentMapChange,
@@ -412,8 +467,9 @@ export function WizardAssignmentTree({
         entityTypeDefinitions,
         enabled: !isSchemaLoading,
     })
-    useLoadingToast('wizard-entities', browser.isLoading, 'Loading entities')
-    useLoadingToast('wizard-schema', isSchemaLoading, 'Loading schema')
+    useLoadingNotification('wizard-entities', browser.isLoading, 'Loading entities')
+    useLoadingNotification('wizard-schema', isSchemaLoading, 'Loading schema')
+    const placementContractOn = useFeature('placementContractEnabled')
 
     // Load top-level entities from API when schema is ready.
     useEffect(() => {
@@ -439,6 +495,7 @@ export function WizardAssignmentTree({
                 name: entry.node.displayName,
                 type: entry.node.entityType,
                 childCount: entry.totalChildren,
+                ...(placementContractOn ? { facts: factsFromGraphNode(entry.node) } : {}),
             })
         })
         onBrowserSnapshot({
@@ -455,6 +512,7 @@ export function WizardAssignmentTree({
         browser.topLevelTotalCount,
         browser.topLevelHasMore,
         loadAllTopLevel,
+        placementContractOn,
     ])
 
     // Store hooks (assignment-related — read-only; the tree never writes to the
@@ -481,9 +539,32 @@ export function WizardAssignmentTree({
      *  (explicit OR inherited: an inherited child is, correctly, assigned). */
     const [hideAssigned, setHideAssigned] = useState(false)
     const [selectAllBusy, setSelectAllBusy] = useState(false)
+    /** The "More filters" menu, for power users. Its orphan count: undefined while unknown, null when the server could not count. */
+    const [advancedOpen, setAdvancedOpen] = useState(false)
+    const [orphanTotal, setOrphanTotal] = useState<number | null | undefined>(undefined)
+    const advancedRef = useRef<HTMLDivElement>(null)
 
     const parentRef = useRef<HTMLDivElement>(null)
     const searchInputRef = useRef<HTMLInputElement>(null)
+
+    useEffect(() => {
+        if (!advancedOpen) return
+        const onMouseDown = (e: MouseEvent) => {
+            if (!advancedRef.current?.contains(e.target as Node)) setAdvancedOpen(false)
+        }
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return
+            // Escape closes the menu only; the tree's own Escape (on window) would clear the selection.
+            e.stopPropagation()
+            setAdvancedOpen(false)
+        }
+        document.addEventListener('mousedown', onMouseDown)
+        document.addEventListener('keydown', onKeyDown)
+        return () => {
+            document.removeEventListener('mousedown', onMouseDown)
+            document.removeEventListener('keydown', onKeyDown)
+        }
+    }, [advancedOpen])
 
     // Build entity tree from API-driven browser data (ontology-hierarchical).
     // Type filter is a pure frontend visibility filter using ontology canContain chains.
@@ -499,6 +580,22 @@ export function WizardAssignmentTree({
         [browser.topLevelIds, browser.parentMap]
     )
 
+    // Rule placement, compiled once per layout — the canvas's own resolver.
+    const placeByRule = useMemo(
+        () => buildWizardPlacement(layers, assignments ?? {}, entityScope),
+        [layers, assignments, entityScope],
+    )
+
+    // One Placement Contract (placementContractEnabled): the draft compiled once.
+    // The tree places each node from its own facts and its parent's context, the
+    // coverage meter each root the same way — no backend answer, no legacy rules.
+    const placementSpec = useMemo(
+        () => placementContractOn
+            ? compilePlacementSpec({ layout: { referenceLayout: { layers, assignments: assignments ?? {} } }, content: { entityScope } })
+            : null,
+        [placementContractOn, layers, assignments, entityScope],
+    )
+
     const entityTree = useMemo<EntityTreeNode[]>(() => {
         if (browser.topLevelIds.length === 0) return []
 
@@ -512,7 +609,8 @@ export function WizardAssignmentTree({
             urn: string,
             depth: number,
             parentId?: string,
-            parentEffectiveLayerId?: string
+            parentEffectiveLayerId?: string,
+            parentContext?: ParentContext | null
         ): EntityTreeNode | null => {
             // Prevent duplicates: each URN renders exactly once
             if (visited.has(urn)) return null
@@ -527,26 +625,61 @@ export function WizardAssignmentTree({
                 return null
             }
 
-            // Determine effective assignment (Top-Down)
-            const effectiveAssignment = effectiveAssignments.get(urn)
-            let effectiveLayerId = effectiveAssignment?.layerId ?? manualAssignmentMap.get(urn)
-            let isInherited = effectiveAssignment?.isInherited ?? false
-            if (!effectiveLayerId && parentEffectiveLayerId) {
-                effectiveLayerId = parentEffectiveLayerId
-                isInherited = true
+            let effectiveLayerId: string | undefined
+            let isInherited = false
+            let isRulePlaced = false
+            let placedBy: PlacedBy | undefined
+            let childContext: ParentContext | null = null
+            if (placementSpec) {
+                // Contract: a hand placement cascades, an own rule or stamp beats
+                // a rule-placed parent. A stamp has no entry to remove either.
+                const placed = place(placementSpec, urn, factsFromGraphNode(node), parentContext ? [parentContext] : [])
+                effectiveLayerId = isMember(placed) ? placed.layerId! : undefined
+                isInherited = placed.source === 'inherited'
+                isRulePlaced = placed.source === 'rule' || placed.source === 'stamped'
+                placedBy = placedByOf(placementSpec, placed)
+                childContext = parentContextOf(urn, placed)
+            } else {
+                // Determine effective assignment (Top-Down)
+                const effectiveAssignment = effectiveAssignments.get(urn)
+                effectiveLayerId = effectiveAssignment?.layerId ?? manualAssignmentMap.get(urn)
+                isInherited = effectiveAssignment?.isInherited ?? false
+                if (!effectiveLayerId && parentEffectiveLayerId) {
+                    effectiveLayerId = parentEffectiveLayerId
+                    isInherited = true
+                }
+
+                // Nothing placed it explicitly or by inheritance — so ask the layers'
+                // own type rules, exactly as the canvas will. A layer declaring this
+                // entity's type places it with NO assignment entry to read, and
+                // without this the wizard would call it unassigned while the canvas
+                // rendered it in a column.
+                if (!effectiveLayerId) {
+                    const ruled = placeByRule({ urn, type: node.entityType })
+                    if (ruled.source === 'rule' && ruled.layerId) {
+                        effectiveLayerId = ruled.layerId
+                        isRulePlaced = true
+                    }
+                }
             }
 
             // "Unassigned only": an assigned node drops out together with its
             // subtree (children inherit its layer, so they're assigned too).
-            if (hideAssigned && effectiveLayerId) return null
+            // Not under the contract, where a placement need not cascade.
+            if (hideAssigned && effectiveLayerId && !placementSpec) return null
 
             // Recurse into loaded children only (lazy — children are loaded on expand)
             const children = entry.loaded
                 ? entry.childIds
-                    .map(id => buildNode(id, depth + 1, urn, effectiveLayerId))
+                    .map(id => buildNode(id, depth + 1, urn, effectiveLayerId, childContext))
                     .filter((n): n is EntityTreeNode => n !== null)
                     .sort((a, b) => a.name.localeCompare(b.name))
                 : []
+
+            // Contract: an assigned node stays only as the path to an unassigned
+            // child, or to children not loaded yet when it passes them no layer.
+            const unloadedChildren = entry.loaded ? entry.hasMore : entry.totalChildren > 0
+            if (hideAssigned && effectiveLayerId && children.length === 0 && !(unloadedChildren && !childContext)) return null
 
             const conflict = conflictMap.get(urn)
 
@@ -562,8 +695,12 @@ export function WizardAssignmentTree({
                 parentId,
                 assignedLayerId: effectiveLayerId,
                 isInherited,
+                isRulePlaced,
+                ...(placedBy ? { placedBy } : {}),
                 hasConflict: !!conflict,
                 conflictMessage: conflict?.message,
+                // Tag by the list on screen, not the toggle: old rows stay up until the new list lands.
+                ...(browser.listedOrphans && depth === 0 ? { isOrphan: true } : {}),
             }
         }
 
@@ -575,7 +712,7 @@ export function WizardAssignmentTree({
             .map(urn => buildNode(urn, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
-    }, [browser.nodes, browser.topLevelIds, visibleRootIds, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap, hideAssigned])
+    }, [browser.nodes, browser.topLevelIds, visibleRootIds, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap, hideAssigned, placeByRule, placementSpec, browser.listedOrphans])
 
     // Build child allocation map: for each entity with children, which layers are descendants assigned to?
     const childAllocationMap = useMemo(() => {
@@ -636,8 +773,8 @@ export function WizardAssignmentTree({
     // Flatten tree for virtualized rendering — server handles search/filter,
     // so no client-side matchesSearch/matchesType needed. Insert "Load more"
     // sentinels where browser.hasMore is true (same pattern as LayerColumn).
-    const flattenedNodes = useMemo<(FlatNode | { id: string; isLoadMore: true; parentId?: string; depth: number })[]>(() => {
-        const result: (FlatNode | { id: string; isLoadMore: true; parentId?: string; depth: number })[] = []
+    const flattenedNodes = useMemo<(FlatNode | { id: string; isLoadMore: true; parentId?: string; depth: number; failed?: boolean })[]>(() => {
+        const result: (FlatNode | { id: string; isLoadMore: true; parentId?: string; depth: number; failed?: boolean })[] = []
 
         const traverse = (nodes: EntityTreeNode[]) => {
             nodes.forEach(node => {
@@ -652,14 +789,19 @@ export function WizardAssignmentTree({
                     if (node.children.length > 0) {
                         traverse(node.children)
                     }
-                    // "Load more" sentinel for this parent (from API hasMore)
+                    // "Load more" sentinel for this parent (from API hasMore) — and
+                    // for a parent whose last page FAILED, including its FIRST page:
+                    // an expanded node with nothing under it must say why, not
+                    // look like it has no children.
                     const entry = browser.nodes.get(node.id)
-                    if (entry?.hasMore) {
+                    const failed = browser.failedIds.has(node.id)
+                    if (entry?.hasMore || failed) {
                         result.push({
                             id: `__more:${node.id}`,
                             isLoadMore: true as const,
                             parentId: node.id,
                             depth: node.depth + 1,
+                            failed,
                         })
                     }
                 }
@@ -669,16 +811,18 @@ export function WizardAssignmentTree({
         traverse(entityTree)
 
         // Top-level "load more" sentinel
-        if (browser.topLevelHasMore) {
+        const topFailed = browser.failedIds.has('__top-level')
+        if (browser.topLevelHasMore || topFailed) {
             result.push({
                 id: '__more:top-level',
                 isLoadMore: true as const,
                 depth: 0,
+                failed: topFailed,
             })
         }
 
         return result
-    }, [entityTree, expandedIds, selectedIds, browser.nodes, browser.topLevelHasMore])
+    }, [entityTree, expandedIds, selectedIds, browser.nodes, browser.topLevelHasMore, browser.failedIds])
 
     // Virtualization
     const rowVirtualizer = useVirtualizer({
@@ -697,6 +841,8 @@ export function WizardAssignmentTree({
     const browserRef = useRef(browser)
     browserRef.current = browser
     const autoLoadedRef = useRef<Set<string>>(new Set())
+    // A list of the other mode re-arms it: the list it replaced used up its lengths.
+    useEffect(() => { autoLoadedRef.current.clear() }, [browser.listedOrphans])
     const virtualItems = rowVirtualizer.getVirtualItems()
 
     useEffect(() => {
@@ -708,12 +854,15 @@ export function WizardAssignmentTree({
             const parentId = 'parentId' in row ? row.parentId : undefined
             const key = parentId ?? '__top-level'
             if (b.loadingNodes.has(key)) continue
+            // A failed page waits for a click: auto-retrying would hammer a
+            // server that is failing.
+            if (row.failed) continue
 
-            // Cursor identity — advances with every loaded page.
-            const cursor = parentId
-                ? b.peekNode(parentId)?.nextCursor ?? ''
-                : String(b.topLevelIds.length)
-            const guard = `${key}:${cursor}`
+            // Re-arm only when the LIST grows. Keyed on the page position, a row
+            // that stayed on screen because a filter ("Unassigned only", a type)
+            // hid every row it loaded fired again for every page — an unattended
+            // walk of the whole container. Stalled like that, it waits for a click.
+            const guard = `${key}:${flattenedNodes.length}`
             if (autoLoadedRef.current.has(guard)) continue
             autoLoadedRef.current.add(guard)
 
@@ -727,12 +876,59 @@ export function WizardAssignmentTree({
     // parent, so it can only be placed EXPLICITLY (children inherit). Y comes
     // from the server's total, so it doesn't lie while pages are still loading.
     const coverage = useMemo(() => {
+        if (placementSpec) {
+            // Contract: each root placed exactly as the tree places it. A root has
+            // no parent, so its entry, its stamp or a rule places it; a stale
+            // entry places nothing and falls through to the other two.
+            const perLayer = new Map<string, number>()
+            const bump = (layerId: string) => perLayer.set(layerId, (perLayer.get(layerId) ?? 0) + 1)
+            let totalPlacements = 0
+            placementSpec.explicit.forEach(({ layerId }) => {
+                if (!placementSpec.layerIds.has(layerId)) return
+                bump(layerId)
+                totalPlacements++
+            })
+            let assignedRoots = 0
+            for (const urn of visibleRootIds) {
+                const entry = browser.nodes.get(urn)
+                const placed = place(placementSpec, urn, entry ? factsFromGraphNode(entry.node) : null, [])
+                if (!isMember(placed)) continue
+                assignedRoots++
+                if (placed.source === 'explicit') continue   // counted with the entries
+                bump(placed.layerId!)
+                totalPlacements++
+            }
+            const loadedRoots = visibleRootIds.length
+            const totalRoots = Math.max(browser.topLevelTotalCount, loadedRoots)
+            return {
+                assignedRoots,
+                loadedRoots,
+                totalRoots,
+                partial: loadedRoots < totalRoots,
+                perLayer,
+                totalPlacements,
+                pct: totalRoots > 0 ? Math.round((assignedRoots / totalRoots) * 100) : 0,
+            }
+        }
         const explicit = assignments ?? {}
-        const assignedRoots = visibleRootIds.filter(urn => !!explicit[urn]).length
         const perLayer = new Map<string, number>()
         Object.values(explicit).forEach(a => {
             perLayer.set(a.layerId, (perLayer.get(a.layerId) ?? 0) + 1)
         })
+        // A root a layer's type rule places IS placed — it just carries no
+        // assignment entry. Counting only `explicit` reported "0 / N placed" for
+        // a fully rule-driven layout and hid every column from the bar.
+        let ruleRoots = 0
+        for (const urn of visibleRootIds) {
+            if (explicit[urn]) continue
+            const entry = browser.nodes.get(urn)
+            if (!entry) continue
+            const { layerId, source } = placeByRule({ urn, type: entry.node.entityType })
+            if (source !== 'rule' || !layerId) continue
+            ruleRoots++
+            perLayer.set(layerId, (perLayer.get(layerId) ?? 0) + 1)
+        }
+        const assignedRoots = visibleRootIds.filter(urn => !!explicit[urn]).length + ruleRoots
         const loadedRoots = visibleRootIds.length
         const totalRoots = Math.max(browser.topLevelTotalCount, loadedRoots)
         return {
@@ -741,10 +937,10 @@ export function WizardAssignmentTree({
             totalRoots,
             partial: loadedRoots < totalRoots,
             perLayer,
-            totalPlacements: Object.keys(explicit).length,
+            totalPlacements: Object.keys(explicit).length + ruleRoots,
             pct: totalRoots > 0 ? Math.round((assignedRoots / totalRoots) * 100) : 0,
         }
-    }, [assignments, visibleRootIds, browser.topLevelTotalCount])
+    }, [assignments, visibleRootIds, browser.topLevelTotalCount, browser.nodes, placeByRule, placementSpec])
 
     // Handlers
     // CRITICAL: expandNode() ONLY loads direct children of the clicked node.
@@ -859,6 +1055,9 @@ export function WizardAssignmentTree({
     // selections behind (the old behaviour) meant the next assignment silently
     // placed entities the user thought they'd just let go of.
     const handleSelect = useCallback((id: string, isMulti: boolean) => {
+        // The shortfall describes the set select-all produced. Any other
+        // selection change makes it a statement about something else.
+        setShortfall(0)
         setSelectedIds(prev => {
             const isSelected = prev.has(id)
             const subtree = descendantsOf(id)
@@ -889,6 +1088,7 @@ export function WizardAssignmentTree({
     const handleBulkAssign = useCallback((layerId: string) => {
         const ids = Array.from(selectedIds)
         if (ids.length === 0) return
+        setShortfall(0)
 
         if (onBulkAssign) {
             onBulkAssign(layerId, ids)
@@ -919,6 +1119,9 @@ export function WizardAssignmentTree({
      * child ends up placed, and the "included" chip already says so. Walking a
      * million-node subtree to tick boxes helps nobody.
      */
+    /** Children the bulk loader could not reach, so the banner can say so. */
+    const [shortfall, setShortfall] = useState(0)
+
     const handleSelectAllChildren = useCallback(async () => {
         if (selectedIds.size !== 1 || selectAllBusy) return
         const parentId = Array.from(selectedIds)[0]
@@ -927,6 +1130,13 @@ export function WizardAssignmentTree({
         try {
             const childIds = await browser.loadAllChildren(parentId)
             if (childIds.length === 0) return
+
+            // "Select all N" must mean all N. The bulk loader has a safety stop,
+            // so on a very large container it can hand back fewer than the server
+            // reports — say so rather than let a partial selection be assigned as
+            // if it were the whole thing.
+            const reported = browser.peekNode(parentId)?.totalChildren ?? childIds.length
+            setShortfall(childIds.length < reported ? reported - childIds.length : 0)
 
             setExpandedIds(prev => new Set(prev).add(parentId))
             setSelectedIds(new Set(childIds))
@@ -961,8 +1171,10 @@ export function WizardAssignmentTree({
     // Search is server-side — no client-side auto-expand needed.
     // Results come back as flat root items from the API.
 
-    // Keyboard shortcuts
-    useEffect(() => {
+    // Keyboard shortcuts. A layout effect swaps the listener in the same commit
+    // that paints the selection: a passive one lagged a task behind, so a digit
+    // pressed as "250 selected" appeared assigned the PREVIOUS selection.
+    useLayoutEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             const target = e.target as HTMLElement | null
             // Never hijack typing — search box, rename inputs, quick-assign selects.
@@ -991,6 +1203,12 @@ export function WizardAssignmentTree({
         return () => window.removeEventListener('keydown', handleKeyDown)
     }, [layers, selectedIds, handleBulkAssign])
 
+    // The orphans list's size: the server's count, else "many" while pages remain.
+    const orphansShown = browser.topLevelTotalExact
+        ? browser.topLevelTotalCount
+        : browser.topLevelHasMore ? null : browser.topLevelIds.length
+    const orphansLabel = orphansShown === null ? 'Many orphans' : `${orphansShown} orphan${orphansShown === 1 ? '' : 's'}`
+
     return (
         <div className={cn(
             'flex flex-col h-full rounded-2xl overflow-hidden',
@@ -1015,21 +1233,20 @@ export function WizardAssignmentTree({
                                 </span>
                             ) : `${flattenedNodes.length} entities`} • {selectedIds.size} selected
                         </p>
-                        {!browser.isLoading && browser.topLevelTotalCount > 0 && (
+                        {/* The server's page-local root/orphan split counted only the last
+                            page, so the default line shows just the true total. */}
+                        {!browser.isLoading && (browser.listedOrphans ? (
+                            <p
+                                className="text-[11px] mt-0.5 font-medium text-amber-600 dark:text-amber-400"
+                                title="Counted by the server; “Many” when it could not count them in time"
+                            >
+                                {orphansLabel}
+                            </p>
+                        ) : browser.topLevelTotalCount > 0 && (
                             <p className="text-[11px] text-slate-400 mt-0.5">
-                                {browser.topLevelMetadata.rootTypeCount} top-level
-                                {browser.topLevelMetadata.orphanCount > 0 && (
-                                    <>
-                                        {' · '}
-                                        <span className="text-amber-600 dark:text-amber-400 font-medium">
-                                            {browser.topLevelMetadata.orphanCount} orphan
-                                        </span>
-                                    </>
-                                )}
-                                {' · '}
                                 {browser.topLevelTotalCount} total
                             </p>
-                        )}
+                        ))}
                     </div>
 
                     {conflicts.length > 0 && (
@@ -1161,6 +1378,62 @@ export function WizardAssignmentTree({
                         <Filter className="w-3 h-3" />
                         Unassigned only
                     </button>
+
+                    {/* Advanced filters, kept behind a menu: most people just want the data. */}
+                    <div ref={advancedRef} className="relative">
+                        <button
+                            onClick={() => {
+                                if (!advancedOpen) {
+                                    // Counted only on demand: one request, nothing on a default load.
+                                    setOrphanTotal(undefined)
+                                    browser.countOrphans().then(setOrphanTotal, () => {})
+                                }
+                                setAdvancedOpen(v => !v)
+                            }}
+                            aria-label="More filters"
+                            title="More filters"
+                            aria-haspopup="menu"
+                            aria-expanded={advancedOpen}
+                            className={cn(
+                                'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-colors duration-150 flex items-center gap-1.5',
+                                browser.orphansOnly
+                                    ? 'bg-amber-500 text-white shadow-md'
+                                    : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
+                            )}
+                        >
+                            <MoreHorizontal className="w-3 h-3" />
+                        </button>
+                        {advancedOpen && (
+                            <div
+                                role="menu"
+                                aria-label="More filters"
+                                className="absolute left-0 top-full mt-1 z-20 w-64 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg p-1"
+                            >
+                                <div role="group" aria-label="Advanced">
+                                    <p className="px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                                        Advanced
+                                    </p>
+                                    <button
+                                        role="menuitemcheckbox"
+                                        aria-checked={!!browser.orphansOnly}
+                                        title="Only entities with no parent in the data whose type normally sits inside another — e.g. a Table with no Schema"
+                                        onClick={() => {
+                                            setAdvancedOpen(false)
+                                            browser.setOrphansOnly(!browser.orphansOnly)
+                                        }}
+                                        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                                    >
+                                        <Check className={cn('w-3 h-3 flex-shrink-0', !browser.orphansOnly && 'invisible')} />
+                                        <span className="flex-1 text-left">Orphans only</span>
+                                        <span className="tabular-nums text-slate-400">
+                                            {orphanTotal === undefined ? '…' : orphanTotal === null ? 'many' : orphanTotal.toLocaleString()}
+                                        </span>
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
                     {entityTypes.map(type => (
                         <button
                             key={type}
@@ -1220,6 +1493,16 @@ export function WizardAssignmentTree({
                                         </button>
                                     )
                                 })()}
+
+                                {shortfall > 0 && (
+                                    <span
+                                        className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 shrink-0"
+                                        title="This container is larger than the wizard loads in one go. Place the parent instead — its children follow automatically, however many there are."
+                                    >
+                                        <AlertTriangle className="w-3 h-3" />
+                                        {shortfall.toLocaleString()} more couldn’t be loaded
+                                    </span>
+                                )}
 
                                 <select
                                     className="text-sm bg-white dark:bg-slate-800 border border-blue-200 dark:border-blue-700 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-400 shrink-0"
@@ -1299,9 +1582,13 @@ export function WizardAssignmentTree({
                     ) : (
                         <div className="flex flex-col items-center justify-center h-40 text-slate-400">
                             <Search className="w-10 h-10 mb-2 opacity-50" />
-                            <p className="text-sm font-medium">No entities found</p>
+                            <p className="text-sm font-medium">
+                                {browser.listedOrphans ? 'No orphaned entities found' : 'No entities found'}
+                            </p>
                             <p className="text-xs mt-1 text-center max-w-[260px] text-slate-500">
-                                The graph may be empty or entity types may not match the schema.
+                                {browser.listedOrphans
+                                    ? 'Turn off Orphans only in the ⋯ menu to see everything.'
+                                    : 'The graph may be empty or entity types may not match the schema.'}
                             </p>
                             {searchQuery && (
                                 <button
@@ -1329,6 +1616,41 @@ export function WizardAssignmentTree({
                             if ('isLoadMore' in node && node.isLoadMore) {
                                 const parentId = 'parentId' in node ? node.parentId : undefined
                                 const isLoadingMore = browser.loadingNodes.has(parentId ?? '__top-level')
+                                if (node.failed && !isLoadingMore) {
+                                    // Retry what failed: the first page when nothing
+                                    // loaded yet, otherwise the next one.
+                                    const retry = () => {
+                                        if (!parentId) return void browser.loadMoreTopLevel()
+                                        if (browser.peekNode(parentId)?.loaded) void browser.loadMoreChildren(parentId)
+                                        else void browser.expandNode(parentId)
+                                    }
+                                    return (
+                                        <div
+                                            key={node.id}
+                                            style={{
+                                                position: 'absolute',
+                                                top: 0,
+                                                left: 0,
+                                                width: '100%',
+                                                height: `${virtualRow.size}px`,
+                                                transform: `translateY(${virtualRow.start}px)`
+                                            }}
+                                        >
+                                            <div
+                                                className="flex items-center gap-1"
+                                                style={{ paddingLeft: `${(node.depth ?? 0) * 20 + 32}px` }}
+                                            >
+                                                <button
+                                                    className="flex items-center gap-2 px-3 py-2 text-xs text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-xl transition-colors"
+                                                    onClick={retry}
+                                                >
+                                                    <RotateCw className="w-3.5 h-3.5" />
+                                                    Couldn't load · Retry
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )
+                                }
                                 const entry = parentId ? browser.nodes.get(parentId) : undefined
                                 // Only claim a remaining COUNT when we actually know the total
                                 // (see BrowserNode.totalIsExact — a paged response's
@@ -1337,7 +1659,10 @@ export function WizardAssignmentTree({
                                     ? (entry?.totalIsExact
                                         ? Math.max(0, entry.totalChildren - entry.childIds.length)
                                         : null)
-                                    : Math.max(0, browser.topLevelTotalCount - browser.topLevelIds.length)
+                                    // An uncounted orphans list still offers "Load all", with no number.
+                                    : (browser.listedOrphans && !browser.topLevelTotalExact
+                                        ? null
+                                        : Math.max(0, browser.topLevelTotalCount - browser.topLevelIds.length))
                                 return (
                                     <div
                                         key={node.id}

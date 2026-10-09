@@ -170,10 +170,23 @@ declares per-provider mappings as JSON:
 ```
 
 * Path syntax: dotted JSONPath-lite (`profile.given_name`,
-  `address.country[0]`). No wildcards.
+  `address.country[0]`). No wildcards. Nested membership works the
+  same way: `{"entitlements": {"groups": [...]}}` is reached by the
+  candidate `entitlements.groups` — which every non-SAML kind now
+  carries **by default** — and on the gateway kinds (`backchannel`,
+  `custom_profile`) the container's *name* does not matter at all: one
+  level of every object-valued key is flattened before mapping
+  (`claim_mapper.hoist_nested`; the well-known names keep first pick
+  on a collision, then payload order). Deeper nesting is one dotted
+  candidate in the mapping studio. An empty top-level value never
+  shadows a populated nested one — neither in the hoist nor in the
+  candidate walk.
 * Each field's value is the first non-empty match from its candidate
   list. Empty list / unset key → falls back to the kind's defaults
   (`DEFAULT_OIDC`, `DEFAULT_SAML`, `DEFAULT_CUSTOM`).
+* Group lists scale: 100+ groups per person arrive intact (order kept,
+  DN names never split), and the sign-in reconciler resolves mappings
+  with one `IN` query over the asserted names — never per-group work.
 * `extras` lands two places:
   * `users.metadata_.attributes` — JSON snapshot (canonical raw).
   * `user_external_attributes` rows — indexed projection used by the
@@ -227,16 +240,39 @@ refresh cycle).
 SSO refresh tokens carry the IdP-issued `auth_time` claim. On
 `/refresh`:
 
-* `SSO_SESSION_MAX_AGE_HOURS` exceeded → revoke the family + every
-  live access token via the injected session-killer (Redis
-  reverse-index) + raise `SsoReauthRequired` → router returns 401
-  `{"error":"sso_reauth_required","login_url":"..."}`.
+* `SSO_SESSION_MAX_AGE_HOURS` exceeded → revoke THIS session's family +
+  raise `SsoReauthRequired` → router returns 401
+  `{"error":"sso_reauth_required","login_url":"..."}`. The user's other
+  sessions carry their own `auth_time` and meet the ceiling on their own
+  schedule. (Only an enterprise IdP withdrawing a session on a liveness
+  check ends every session the user holds, via the session-killer.)
 * Frontend's `fetchWithTimeout.tryRefresh` detects this body and
-  navigates via `window.location.href` to the IdP — silent re-auth.
+  navigates via `window.location.href` to the IdP — silent re-auth. A
+  gateway connection with a browser half re-signs in on the page instead;
+  if that fails it lands on `/login` with the reason.
 * OIDC authorize URL pins `max_age=86400` + `prompt=login` on the
   re-auth bounce (belt-and-suspenders at the IdP).
 * SAML AuthnRequest sets `ForceAuthn=true` on the re-auth bounce.
 * Local password sessions are exempt — `auth_time` is NULL.
+
+No session is minted already past the ceiling. At sign-in an `auth_time`
+that would not survive the first renewal is:
+
+* for OIDC and SAML, answered with one bounce back to the IdP with
+  `prompt=login` / `ForceAuthn` (the flow cookie records `force`, so the
+  bounce happens once);
+* for gateway, portal and custom connections — which have no upstream
+  prompt to force — and for an IdP that ignored the forced request,
+  measured from this sign-in instead, recorded as
+  `auth_time_anchored: true` on `user.logged_in`. A missing `auth_time`
+  is treated the same way (`auth_time_asserted: false`) and never refuses
+  the sign-in.
+
+An SSO session past the idle or absolute ceiling
+(`SESSION_IDLE_MAX_HOURS`, `SESSION_ABSOLUTE_MAX_HOURS`) gets the same
+envelope WITHOUT `force=1`, so the IdP's own session decides whether a
+credential is needed — rather than a bare 401 that stranded the user on
+the sign-in page. Password sessions still get the bare 401.
 
 ### 1.7 Linking + manual linking
 
@@ -280,17 +316,25 @@ Singleton row in `app_auth_config`:
 | Toggle | Default | When OFF |
 |---|---|---|
 | `sso_enabled` | true | `/auth/providers` returns `[]`; `/auth/{slug}/*` 404s |
-| `allow_local_login` | true | `POST /auth/login` returns 403 `{"error":"local_login_disabled"}` |
+| `allow_local_login` | true | `POST /auth/login` returns 403 `{"error":"local_login_disabled"}` (and `POST /auth/signup` the same — a password account minted under enforcement would be a dead end). One carve-out: an account marked `is_system_account` (break-glass) still signs in with its password, and unknown emails get the identical 403 so the carve-out is not an account oracle |
 | `allow_jit_provisioning` | true | New IdP subjects with no email match raise `jit_disabled` |
 | `email_first_login` | **false** | `POST /auth/resolve` always answers `{"provider": null}`; the login page is byte-for-byte what it was |
 
 The PATCH endpoint refuses lockout scenarios:
 
 * `allow_local_login=false` is rejected (HTTP 409) when any active
-  admin lacks an SSO identity. Response carries the offending admin
-  list so the operator can fix it.
+  admin lacks an SSO identity **and is not a system account** — a
+  system account keeps password sign-in under enforcement, so it
+  cannot be locked out by the switch and does not block it. Response
+  carries the offending admin list so the operator can fix it.
 * `sso_enabled=false` AND `allow_local_login=false` together is
   rejected — there'd be no way to log in.
+* The companion sweep `POST /admin/sso/config/end-all-sessions`
+  (`dryRun` supported) ends every session — password and SSO — except
+  system accounts', so enforcement can take effect now instead of when
+  the old sessions expire. Unmarking a system account is refused with
+  the same 409 when passwords are off and that admin has no SSO
+  identity: the flag was the last door in.
 
 ### 1.10 Admin lookup + search
 
@@ -332,7 +376,7 @@ Outbox events (consumed by `auth_audit_log` table via the relay):
 | `user.sso_jit_blocked` | JIT refused because `allow_jit_provisioning=false` |
 | `user.sso_unsigned_accepted` | `custom_profile` login accepted an unsigned payload (`trust_unsigned`) |
 | `user.sso_header_accepted` | `custom_profile` login trusted a proxy-injected header |
-| `user.sso_session_expired` | 24h ceiling hit during /refresh |
+| `user.sso_session_expired` | SSO session ended at /refresh: `reason` is `reauth_ceiling` (24h), `idle` or `absolute` |
 | `user.identity.linked` / `user.identity.unlinked` | self-service link/unlink |
 | `user.identity.admin_linked` / `user.identity.admin_unlinked` | admin link/unlink |
 | `idp.provider.{created,updated,deleted}` | IdP provider CRUD |
@@ -401,8 +445,11 @@ from.
   miss from the feature being off, an unknown domain, a disabled provider,
   or malformed input all return the same empty body. Rate limited like
   `/login`, and CSRF-exempt because it is called before any session exists.
-* Additive: an address that matches nothing falls through to the password
-  form and the button row, so a wrong domain mapping cannot strand anyone.
+* Additive: submitting an address that matches nothing says so on the
+  page ("We don't recognise that email's domain") and reveals the
+  password form and the full button row, so a wrong or missing domain
+  mapping cannot strand anyone. While typing, a miss stays silent — only
+  the submit speaks.
 
 ### 1.15 IdP health
 
@@ -812,10 +859,18 @@ Every SSO failure redirects to `/login?ref=<8 hex chars>&sso_error=1`. The
 reason is deliberately withheld from that page — it is admin-only by
 construction and lives in the audit log instead.
 
-Admin → SSO → **Activity** → paste the ref. The `user.sso_login_failed`
-event carries the provider and the precise reason
-(`state_mismatch`, `token_or_idtoken:…`, `saml_validate:…`,
-`sso_login_rejected:jit_disabled`, …).
+Admin → SSO → **Diagnostics** → *Given a reference?* → **Look up**, which opens
+the **Activity** tab with the ref searched (`GET /api/v1/admin/sso/activity`). The
+`user.sso_login_failed` event carries the provider, the precise reason
+(`state_mismatch`, `token_or_idtoken`, `saml_validate`,
+`sso_login_rejected:jit_disabled`, …) and, in its own `detail` field, the
+error behind it. It also records the person when the attempt got far enough
+to know (`email`, `user_id`, `external_id`) and where it came from
+(`client_ip`, `user_agent`, `path`). Open the row to read them.
+
+The same tab's **Sign-in problems** list groups these per person
+(`GET /api/v1/admin/sso/failures`); see *When a sign-in fails* in
+`docs/guide/SSO_OPERATIONS.md`.
 
 The tab needs `system:audit:read` in addition to `system:admin` — the two
 do not imply each other.

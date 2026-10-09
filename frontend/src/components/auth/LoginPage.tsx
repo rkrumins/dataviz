@@ -18,7 +18,8 @@ import {
 import {
     autoPortalAlreadyTried,
     markAutoPortalTried,
-    readReauthFailure,
+    readReauthNotice,
+    REAUTH_COOLDOWN_MS,
 } from '@/services/backchannelReauth'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -103,6 +104,25 @@ function ssoLabel(p: SsoProviderSummary): string {
     return p.buttonLabel?.trim() || `Continue with ${ssoName(p)}`
 }
 
+/** A back-channel connection with no browser half: the server reads the
+ *  corporate session off the request, so an empty POST is the whole
+ *  sign-in — the same one the silent re-sign-in makes. A row that reads no
+ *  cookie refuses that shape, which the caller treats as "nothing here". */
+function readsAmbientSession(p: SsoProviderSummary): boolean {
+    return p.kind === 'backchannel' && !isGatewayProvider(p)
+}
+
+/** Where signing in lands: ``?next=`` — the page the user was on when
+ *  their session ended — when it is unambiguously a path on this site,
+ *  the rule the server's ``_safe_next`` applies to the same value. Anything
+ *  else is ignored rather than guessed at; the caller's default stands. */
+function useReturnPath(): string | null {
+    const [params] = useSearchParams()
+    const raw = params.get('next')
+    if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return null
+    return /[\\\t\n\r]/.test(raw) ? null : raw
+}
+
 /**
  * The provider's mark, or a stand-in for it.
  *
@@ -148,6 +168,7 @@ function SsoButtons({
     showDivider?: boolean
 }) {
     const navigate = useNavigate()
+    const returnPath = useReturnPath()
     const loginWithBrowserProfile = useAuthStore((s) => s.loginWithBrowserProfile)
     const [busySlug, setBusySlug] = useState<string | null>(null)
 
@@ -177,10 +198,10 @@ function SsoButtons({
         setBusySlug(p.slug)
         const ok = await loginWithBrowserProfile(p.slug, payload)
         setBusySlug(null)
-        if (ok) navigate('/', { replace: true })
+        if (ok) navigate(returnPath ?? '/', { replace: true })
     }
 
-    const next = encodeURIComponent('/dashboard')
+    const next = encodeURIComponent(returnPath ?? '/dashboard')
     const customEnabled =
         (import.meta.env.VITE_AUTH_CUSTOM_PROVIDER_ENABLED ?? '')
             .toString()
@@ -496,6 +517,7 @@ function SsoFailureBanner({ reference, onDismiss }: {
  */
 function AlreadySignedIn({ email }: { email: string }) {
     const navigate = useNavigate()
+    const returnPath = useReturnPath()
     const logout = useAuthStore((s) => s.logout)
     const [switching, setSwitching] = useState(false)
 
@@ -510,7 +532,7 @@ function AlreadySignedIn({ email }: { email: string }) {
     }
 
     return (
-        <div className="min-h-screen w-full flex items-center justify-center bg-canvas font-sans p-6">
+        <div className="min-h-full w-full flex items-center justify-center bg-canvas font-sans p-6">
             <div className="glass-panel w-full max-w-[420px] p-8 rounded-[2rem] border-white/20 dark:border-white/5 shadow-2xl text-center">
                 <div className="w-14 h-14 mb-5 mx-auto rounded-2xl bg-gradient-to-br from-accent-lineage to-accent-lineage/80 flex items-center justify-center shadow-lg shadow-accent-lineage/30">
                     <ShieldCheck className="w-7 h-7 text-white" />
@@ -521,7 +543,7 @@ function AlreadySignedIn({ email }: { email: string }) {
                 <div className="mt-6 space-y-3">
                     <button
                         type="button"
-                        onClick={() => navigate('/', { replace: true })}
+                        onClick={() => navigate(returnPath ?? '/', { replace: true })}
                         className="w-full h-12 rounded-xl bg-accent-lineage text-white font-semibold shadow-lg shadow-accent-lineage/20 transition-all active:scale-[0.98] hover:brightness-110 flex items-center justify-center gap-2"
                     >
                         Continue
@@ -562,6 +584,8 @@ export function LoginPage() {
     const [password, setPassword] = useState('')
     const navigate = useNavigate()
     const [params] = useSearchParams()
+    const returnPath = useReturnPath()
+    const afterSignIn = returnPath ?? '/'
 
     const {
         login, error, clearError, isLoading, isAuthenticated, status, user,
@@ -578,13 +602,17 @@ export function LoginPage() {
     // expired, and the automatic recovery could not renew it. Without a
     // reason this page reads as a random logout.
     const [portalError, setPortalError] = useState<string | null>(() => {
-        const failure = readReauthFailure()
+        const failure = readReauthNotice()
         if (!failure) return null
         // The "what next" half is appended at render time, where the
         // page knows whether there is actually anything below to press.
+        // A failure that was only load or the network holds nothing back:
+        // this page's own automatic attempt runs now, and once more when
+        // its hold lapses — say so rather than implying it is over.
         return (
             'Your corporate sign-in could not be renewed automatically.'
             + (failure.reason ? ` ${failure.reason}` : '')
+            + (failure.hold ? '' : ' This page will try again shortly.')
         )
     })
     // Escape hatch out of the email-first flow. Never shown when local
@@ -619,18 +647,71 @@ export function LoginPage() {
     // someone who deliberately clicks: nobody should have to press a
     // button to use a session their machine already holds.
     const autoAttempted = useRef(false)
+    // One more try once the hold below lapses, and whenever the network
+    // comes back: a VPN still connecting when this page loaded is not a
+    // verdict, and nobody should have to notice that and press a button.
+    // Bounded — one timed round per page, and 'online' still respects the
+    // hold — so a gateway that is genuinely down is not polled.
+    const [autoRound, setAutoRound] = useState(0)
+    useEffect(() => {
+        const again = () => {
+            autoAttempted.current = false
+            setAutoRound((n) => n + 1)
+        }
+        const timer = setTimeout(again, REAUTH_COOLDOWN_MS + 1_000)
+        window.addEventListener('online', again)
+        return () => {
+            clearTimeout(timer)
+            window.removeEventListener('online', again)
+        }
+    }, [])
     useEffect(() => {
         if (providers === null || autoAttempted.current) return
         if (isAuthenticated || autoPortalAlreadyTried()) return
 
-        const candidates = providers.filter(
-            (p) => (needsBrowserPayload(p) || isGatewayProvider(p))
-                // The operator's opt-out: the connection still works,
-                // but only when somebody presses its button.
-                && p.config?.autoSignIn !== false,
+        // The operator's opt-out: the connection still works, but only
+        // when somebody presses its button.
+        const eligible = (p: SsoProviderSummary) => p.config?.autoSignIn !== false
+        let candidates = providers.filter(
+            (p) => (needsBrowserPayload(p) || isGatewayProvider(p)) && eligible(p),
         )
+        // A gateway that reads the corporate cookie off the request needs
+        // no browser half — only a POST for the cookie to ride on. It is
+        // considered only when nothing browser-driven is, so a deployment
+        // that already signed in through one of those keeps doing so.
+        if (candidates.length === 0) {
+            candidates = providers.filter(
+                (p) => readsAmbientSession(p) && eligible(p),
+            )
+        }
         if (candidates.length !== 1) return
         const candidate = candidates[0]
+
+        if (readsAmbientSession(candidate)) {
+            autoAttempted.current = true
+            markAutoPortalTried()
+            void loginWithBackchannel(candidate.slug, {}).then((ok) => {
+                if (ok) { navigate(afterSignIn, { replace: true }); return }
+                clearError()
+                // No corporate cookie on this browser — a machine off the
+                // domain, someone not signed in to the portal — or a row
+                // that reads none: the ordinary case, and silent. So is a
+                // failure that was only load; the page tries again later.
+                const code = useAuthStore.getState().lastSsoDenial?.code ?? ''
+                if (
+                    code === 'backchannel_no_session'
+                    || code === 'backchannel_unavailable'
+                    || code.startsWith('http_')
+                ) {
+                    return
+                }
+                setPortalError(
+                    `Signing in with your ${candidate.displayName} `
+                    + 'session did not work.',
+                )
+            })
+            return
+        }
 
         if (isGatewayProvider(candidate)) {
             autoAttempted.current = true
@@ -643,7 +724,7 @@ export function LoginPage() {
             void gatewaySignInBody(candidate)
                 .then((body) => loginWithBackchannel(candidate.slug, body))
                 .then((ok) => {
-                    if (ok) { navigate('/', { replace: true }); return }
+                    if (ok) { navigate(afterSignIn, { replace: true }); return }
                     // A server refusal lands in the store's error — the
                     // form's banner — for an attempt nobody asked for.
                     // Move it beside the button that retries it, with
@@ -665,7 +746,7 @@ export function LoginPage() {
         autoAttempted.current = true
         markAutoPortalTried()
         void loginWithBrowserProfile(candidate.slug, payload).then((ok) => {
-            if (ok) { navigate('/', { replace: true }); return }
+            if (ok) { navigate(afterSignIn, { replace: true }); return }
             clearError()
             setPortalError(
                 `Signing in with your ${candidate.displayName} session `
@@ -673,7 +754,7 @@ export function LoginPage() {
             )
         })
     }, [providers, isAuthenticated, loginWithBrowserProfile,
-        loginWithBackchannel, navigate, clearError])
+        loginWithBackchannel, navigate, clearError, afterSignIn, autoRound])
 
     // The collision modal's one state, fed from BOTH arrival paths: the
     // redirect flow's ``?error_code=unsafe_auto_link&email=...`` (which
@@ -708,7 +789,7 @@ export function LoginPage() {
         try {
             const body = await gatewaySignInBody(p)
             if (await loginWithBackchannel(p.slug, body)) {
-                navigate('/', { replace: true })
+                navigate(afterSignIn, { replace: true })
                 return
             }
             const denial = useAuthStore.getState().lastSsoDenial
@@ -723,7 +804,11 @@ export function LoginPage() {
                 })
                 return
             }
-            setPortalError(`Could not sign in with ${p.displayName}.`)
+            // The reference is what an administrator looks the reason up by.
+            setPortalError(
+                `Could not sign in with ${p.displayName}`
+                + (denial?.ref ? ` (reference ${denial.ref}).` : '.'),
+            )
         } catch (err) {
             // Say which step failed rather than navigating into a
             // sign-in that was never going to work. The likeliest causes
@@ -736,14 +821,15 @@ export function LoginPage() {
                     : `Could not reach ${p.displayName}.`,
             )
         }
-    }, [loginWithBackchannel, navigate])
+    }, [loginWithBackchannel, navigate, afterSignIn])
 
     useEffect(() => {
         clearError()
     }, [clearError])
 
     // Debounced so it fires once the address looks finished, not on every
-    // keystroke. A miss is silent by design — see /auth/resolve.
+    // keystroke. A miss HERE is silent — it fires mid-typing. The submit
+    // path speaks on a miss instead (see handleSubmit).
     //
     // Gated on the posture: without this it fired on every deployment,
     // including the ~99% with email-first off, where the endpoint can only
@@ -775,7 +861,14 @@ export function LoginPage() {
     // email-first off. A page with a form the server might refuse still
     // beats a page with nothing on it.
     const allowLocal = context?.allowLocalLogin ?? true
-    const showPasswordForm = allowLocal && (!emailFirst || forcePassword)
+    // Break-glass: with passwords off the form is hidden, and the
+    // deployment's system account still needs its door. `?password=1`
+    // reveals the local form without advertising it on the page —
+    // revealing it grants nothing, because the server refuses every
+    // account that is not marked as a system account.
+    const breakGlass = params.get('password') === '1'
+    const showPasswordForm = breakGlass
+        || (allowLocal && (!emailFirst || forcePassword))
     // Email-first leads with the routed provider and tucks the button row
     // behind a disclosure — otherwise it removes neither the coin flip nor
     // the topology disclosure it exists to remove.
@@ -797,39 +890,63 @@ export function LoginPage() {
     const portalHasAffordance = showPasswordForm
         || (visibleProviders?.length ?? 0) > 0 || routed != null
 
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault()
-        if (showPasswordForm) {
-            if (!email || !password || isLoading) return
-            const ok = await login(email, password)
-            if (ok) navigate('/', { replace: true })
-            return
-        }
-        // Email-first renders no password field, so the guard above
-        // turned every Enter press into a silent no-op. Route the
-        // address instead — what the debounced resolve does, forced
-        // now. A miss stays silent by design (see /auth/resolve); the
-        // "enter your work email" hint is already on screen.
-        if (isLoading || !email.includes('@')) return
-        const target = routed ?? await authService.resolveEmailDomain(email)
-            .then((r) => r.provider ?? null)
-            .catch(() => null)
-        if (!target) return
+    const routeTo = (target: SsoProviderSummary) => {
         if (isGatewayProvider(target)) {
             void gatewaySignIn(target)
             return
         }
         window.location.assign(
             `/api/v1/auth/${encodeURIComponent(target.slug)}/login`
-            + `?next=${encodeURIComponent('/dashboard')}`,
+            + `?next=${encodeURIComponent(returnPath ?? '/dashboard')}`,
         )
+    }
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault()
+        if (showPasswordForm) {
+            if (isLoading || !email) return
+            if (!password) {
+                // Enter with only the email typed. When the domain
+                // routes to a connection — possible here only under
+                // email-first with the password form revealed — go via
+                // SSO: opening the password field must not cost the
+                // Enter-routes behavior.
+                if (routed) routeTo(routed)
+                return
+            }
+            const ok = await login(email, password)
+            if (ok) navigate(afterSignIn, { replace: true })
+            return
+        }
+        // Email-first renders no password field, so the guard above
+        // turned every Enter press into a silent no-op. Route the
+        // address instead — what the debounced resolve does, forced now.
+        if (isLoading || !email.includes('@')) return
+        const target = routed ?? await authService.resolveEmailDomain(email)
+            .then((r) => r.provider ?? null)
+            .catch(() => null)
+        if (!target) {
+            // A miss used to be a silent return — and with the password
+            // form and button row both tucked behind disclosures under
+            // email-first, Enter did nothing at all. Say what happened
+            // and reveal every way in. (A domain routes only when the
+            // connection lists it under Email domains.)
+            setPortalError(
+                "We don't recognise that email's domain. Choose how to "
+                + 'sign in below.',
+            )
+            if (allowLocal) setForcePassword(true)
+            setShowAllProviders(true)
+            return
+        }
+        routeTo(target)
     }
 
     // Avoid flashing the form to a user whose cookie is still being
     // checked.
     if (status === 'idle' || status === 'loading') {
         return (
-            <div className="min-h-screen w-full flex items-center justify-center bg-canvas">
+            <div className="min-h-full w-full flex items-center justify-center bg-canvas">
                 <div className="w-8 h-8 border-2 border-ink-muted/30 border-t-accent-lineage rounded-full animate-spin" />
             </div>
         )
@@ -842,7 +959,7 @@ export function LoginPage() {
     }
 
     return (
-        <div className="relative min-h-screen w-full flex items-center justify-center overflow-hidden bg-canvas font-sans">
+        <div className="relative min-h-full w-full flex items-center justify-center py-8 overflow-hidden bg-canvas font-sans">
             {collision && (
                 <CollisionModal
                     email={collision.email}
@@ -896,6 +1013,11 @@ export function LoginPage() {
                         <h1 className="text-3xl font-bold tracking-tight text-ink mb-2">
                             <span className="gradient-text">{brand.appName}</span>
                         </h1>
+                        {brand.description && (
+                            <p className="text-[13px] text-ink-muted text-center max-w-xs leading-snug mb-3">
+                                {brand.description}
+                            </p>
+                        )}
                         <p className="text-sm text-ink-secondary text-center">
                             {brand.loginTagline}
                         </p>
@@ -1018,7 +1140,7 @@ export function LoginPage() {
                             </button>
                         ) : (
                         <a
-                            href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent('/dashboard')}`}
+                            href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent(returnPath ?? '/dashboard')}`}
                             className="group mt-4 flex items-center justify-center gap-2 w-full h-12 rounded-xl bg-accent-lineage text-white text-sm font-semibold shadow-sm shadow-accent-lineage/25 hover:brightness-110 hover:shadow-md hover:shadow-accent-lineage/30 hover:-translate-y-px active:translate-y-0 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
                         >
                             {/* Through ssoLabel, so a connection with no

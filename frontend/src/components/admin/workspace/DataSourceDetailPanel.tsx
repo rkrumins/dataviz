@@ -708,7 +708,7 @@ export function DataSourceDetailPanel({
 // Permission-gated edit/delete buttons. Workspace data-source
 // mutations need ``workspace:datasource:manage`` on the specific
 // workspace; without it the buttons are hidden so a viewer doesn't
-// click into a 403 toast.
+// click into a 403 notification.
 function DataSourceActions({
     wsId, onEdit, onDelete, onDeletePermanent,
 }: {

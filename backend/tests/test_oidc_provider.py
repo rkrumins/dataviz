@@ -223,3 +223,62 @@ def _async(value):
     async def _coro():
         return value
     return _coro()
+
+
+@pytest.mark.asyncio
+async def test_the_token_post_carries_the_resolved_tls_verify(
+    monkeypatch, rsa_key, public_jwks,
+):
+    """The one credentialed client built outside outbound.py must still
+    honor the deployment trust anchor — a corporate-CA'd token endpoint
+    would otherwise fail AFTER discovery succeeded through the guarded
+    path."""
+    import ssl as _ssl
+
+    import certifi
+
+    import backend.auth_service.providers.oidc as oidc_mod
+
+    provider = OidcProvider(_settings())
+    monkeypatch.setattr(
+        provider, "_discovery",
+        lambda: _async({"token_endpoint": f"{_ISSUER}/token"}),
+    )
+
+    async def _jwks(*, force=False):
+        return public_jwks
+
+    monkeypatch.setattr(provider, "_load_jwks", _jwks)
+
+    captured: dict = {}
+    signed = _sign(rsa_key)
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"access_token": "at", "id_token": signed}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            captured.update(k)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(oidc_mod.httpx, "AsyncClient", _Client)
+
+    monkeypatch.setenv("SSO_OUTBOUND_TLS_CA_CERTS", certifi.where())
+    await provider.fetch_identity(code="abc", code_verifier="v", nonce="nonce-1")
+    assert isinstance(captured["verify"], _ssl.SSLContext)
+
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS")
+    await provider.fetch_identity(code="abc", code_verifier="v", nonce="nonce-1")
+    assert captured["verify"] is True

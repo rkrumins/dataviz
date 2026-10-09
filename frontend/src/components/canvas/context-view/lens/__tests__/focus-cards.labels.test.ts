@@ -25,4 +25,10 @@ describe('edgeLabelFor', () => {
   it('says "relationship" when there is no type at all', () => {
     expect(edgeLabelFor('')).toBe('relationship')
   })
+
+  it('reads the system AGGREGATED type in plain English, over the ontology name', () => {
+    const info = new Map([['AGGREGATED', { label: 'Aggregated', description: 'A synthetic aggregated lineage edge.' }]])
+    expect(edgeLabelFor('AGGREGATED', info)).toBe('Combined flow')
+    expect(edgeLabelFor('AGGREGATED')).toBe('Combined flow')
+  })
 })

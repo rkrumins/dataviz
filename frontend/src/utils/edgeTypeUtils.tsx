@@ -12,6 +12,7 @@ import type { LineageEdge } from '@/store/canvas'
 import type { RelationshipTypeSchema } from '@/types/schema'
 import { normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import { generateColorFromType } from '@/lib/type-visuals'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 
 export { normalizeEdgeType }
 import {
@@ -103,14 +104,44 @@ function getDefaultAnimated(_type: string, isContainment: boolean): boolean {
 }
 
 /**
- * Determine default stroke style
+ * Stroke styles this app owns, for system edge types whose stored ontology
+ * definition it cannot restate.
+ *
+ * `AGGREGATED` is written by the aggregation worker and seeded into every data
+ * source's ontology add-only, so a wrong seeded value can never be corrected at
+ * the source for a data source that already exists (one live ontology declares
+ * it `solid`). Every AGGREGATED edge is a roll-up by construction, and the
+ * canvas draws roll-ups dashed — `edgeDashArray` dashes them on geometry, before
+ * it ever looks at a type. Left to the ontology, the legend and the Flows panel
+ * drew a SOLID sample for a line the canvas draws dashed. The database keeps its
+ * value; this module owns the dash.
+ *
+ * Only the dash. Colour and animation stay the ontology's to decide, as does
+ * every non-system type's stroke — a declared `dashed`/`dotted`/`solid` is
+ * honoured exactly as written.
  */
-function getDefaultStrokeStyle(type: string, isContainment: boolean): 'solid' | 'dashed' | 'dotted' {
+const SYSTEM_EDGE_STROKE_STYLE: Readonly<Record<string, 'solid' | 'dashed' | 'dotted'>> = {
+    AGGREGATED: 'dashed',
+}
+
+/** The stroke style this app owns for an edge type id, or null when it has no opinion
+ *  and the ontology's declared stroke should stand. Case-insensitive on the id.
+ *
+ *  Exported for the ontology editor's line-style advisory, which describes what the
+ *  CANVAS draws: reading the declared value there would name AGGREGATED as a solid
+ *  twin of every other solid type, when the canvas dashes it. */
+export function appOwnedStrokeStyle(edgeType: string): 'solid' | 'dashed' | 'dotted' | null {
+    return SYSTEM_EDGE_STROKE_STYLE[(edgeType ?? '').toUpperCase()] ?? null
+}
+
+/**
+ * Determine default stroke style — the fallback branch only, for a type the
+ * ontology has never heard of. (A system type's dash is applied later, to both
+ * branches, from SYSTEM_EDGE_STROKE_STYLE.)
+ */
+function getDefaultStrokeStyle(_type: string, isContainment: boolean): 'solid' | 'dashed' | 'dotted' {
     // Containment edges are typically dashed
     if (isContainment) return 'dashed'
-
-    // Aggregated edges are dashed
-    if (type.toUpperCase() === 'AGGREGATED') return 'dashed'
 
     // Most lineage edges are solid
     return 'solid'
@@ -160,9 +191,9 @@ export function getEdgeTypeDefinition(
 ): EdgeTypeDefinition {
     const schemaType = getEdgeTypeFromSchema(edgeType, relationshipTypes)
 
-    if (schemaType) {
-        // Use schema definition
-        return {
+    const definition: EdgeTypeDefinition = schemaType
+        ? {
+            // Use schema definition
             type: schemaType.id.toUpperCase(),
             label: schemaType.name,
             description: schemaType.description || `Edge type: ${schemaType.name}`,
@@ -171,10 +202,26 @@ export function getEdgeTypeDefinition(
             animated: schemaType.visual.animated,
             icon: getDefaultIcon(schemaType.id), // Could be enhanced to use schema icon if available
         }
-    }
+        // Create default definition
+        : createDefaultEdgeTypeDefinition(edgeType, containmentEdgeTypes, ontologyMetadata)
 
-    // Create default definition
-    return createDefaultEdgeTypeDefinition(edgeType, containmentEdgeTypes, ontologyMetadata)
+    // What this app owns about a system type (the AGGREGATED roll-up) beats both the
+    // ontology's own definition and the generated fallback. Applied here, once, so
+    // neither branch can miss it, and so every reader — the canvas, the edge legend,
+    // the Flows panel — is told the same thing. Precedence, highest first:
+    //   1. this app, for the system type's wording and its dash;
+    //   2. the ontology's declared visual;
+    //   3. the generated default, for a type the ontology has never heard of.
+    // Everything not listed on lines 1 — colour, animation, and every non-system
+    // type's stroke — is whatever the branch already decided.
+    const copy = edgeTypeCopy(definition.type)
+    const ownedStrokeStyle = appOwnedStrokeStyle(definition.type)
+    if (!copy && !ownedStrokeStyle) return definition
+    return {
+        ...definition,
+        ...(copy ? { label: copy.label, description: copy.description } : null),
+        ...(ownedStrokeStyle ? { strokeStyle: ownedStrokeStyle } : null),
+    }
 }
 
 /**

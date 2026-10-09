@@ -40,8 +40,8 @@ class _FakeGraph:
 
 
 class _MinClient:
-    """Just enough FalkorDB client for the full-seed path to reach _apply: the RETURN-1 connectivity
-    probe and the GRAPH.DELETE drop both need to succeed so the run suspends at the (hung) apply."""
+    """Just enough FalkorDB client for the full-seed path to reach _apply: the RETURN-1
+    connectivity probe must succeed so the run suspends at the (hung) apply."""
     async def query(self, *a, **k):
         return None
 
@@ -98,6 +98,16 @@ async def _run(monkeypatch, hang_at: str, projected=3, target=5) -> _FakePS:
     async def fake_compute_changes(s, graph, main_id, from_seq, to_seq):
         return [], [], [], []
     monkeypatch.setattr(proj, "_compute_changes", fake_compute_changes)
+
+    # A full seed reconciles in place: what Postgres says and what FalkorDB holds,
+    # both empty here, so the (empty) apply is the next suspension point.
+    async def fake_expected_projection(s, graph, main_id, to_seq, level_map):
+        return {}, {}, {}
+    monkeypatch.setattr(proj, "_expected_projection", fake_expected_projection)
+
+    async def fake_scan_projection(client):
+        return {}, {}, {}, set(), []
+    monkeypatch.setattr(proj, "_scan_projection", fake_scan_projection)
 
     started = asyncio.Event()
 

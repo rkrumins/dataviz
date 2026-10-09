@@ -8,7 +8,7 @@
  * Refactored from AppShell + App.tsx to support route-based navigation.
  */
 import { useEffect, useState } from 'react'
-import { Outlet, Navigate, useNavigate } from 'react-router-dom'
+import { Outlet, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { AlertTriangle, Home } from 'lucide-react'
 import { TopBar } from './TopBar'
 import { GlobalAnnouncementBanner } from './GlobalAnnouncementBanner'
@@ -25,8 +25,9 @@ import { listViews, viewToViewConfig } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useBackendRecovery } from '@/hooks/useBackendRecovery'
 import { useAppliedTheme } from '@/hooks/useAppliedTheme'
-import { ViewEditorContext, useViewEditorModal } from './viewEditorContext'
-import { ToastContainer } from '@/components/ui/toast'
+import { useApplyLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
+import { ViewEditorContext, useViewEditorModal, type ViewEditorOpenOptions } from './viewEditorContext'
+import { NotificationStack } from '@/components/ui/notifications'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
 import { useFeature } from '@/store/features'
 import { TourOverlay } from '@/features/tour/TourOverlay'
@@ -39,6 +40,7 @@ export { useViewEditorModal }
 export function AppLayout() {
   const status = useAuthStore((s) => s.status)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const location = useLocation()
   // Selector subscriptions (not whole-store) so this always-mounted shell
   // only re-renders when these specific fields change, not on every
   // unrelated preference write (sidebar collapse, pinned views, …).
@@ -56,9 +58,9 @@ export function AppLayout() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [viewEditorOpen, setViewEditorOpen] = useState(false)
   const [editingViewId, setEditingViewId] = useState<string | undefined>()
-  const [initialScope, setInitialScope] = useState<{ workspaceId?: string; dataSourceId?: string }>({})
+  const [initialScope, setInitialScope] = useState<ViewEditorOpenOptions>({})
 
-  const openViewEditor = (viewId?: string, options?: { workspaceId?: string; dataSourceId?: string }) => {
+  const openViewEditor = (viewId?: string, options?: ViewEditorOpenOptions) => {
     setEditingViewId(viewId)
     setInitialScope(options ?? {})
     setViewEditorOpen(true)
@@ -105,6 +107,10 @@ export function AppLayout() {
     document.documentElement.classList.toggle('reduce-motion', reducedMotion)
   }, [reducedMotion])
 
+  // The reader's lineage direction colours onto <html> — every surface that
+  // colours incoming / outgoing lineage reads them from there.
+  useApplyLineageDirectionColors()
+
   // Global "?" shortcut toggles the Help drawer — ignored while typing in a
   // field so it never steals a literal question mark.
   useEffect(() => {
@@ -135,7 +141,10 @@ export function AppLayout() {
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace />
+    // With the way back: a session that ended mid-task signs in again
+    // onto the same page, not the home screen.
+    const here = location.pathname + location.search
+    return <Navigate to={here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`} replace />
   }
 
   return (
@@ -174,10 +183,13 @@ export function AppLayout() {
           onComplete={() => closeViewEditor()}
           initialWorkspaceId={initialScope.workspaceId}
           initialDataSourceId={initialScope.dataSourceId}
+          journey={initialScope.journey}
+          importFile={initialScope.importFile}
+          importIntoViewId={initialScope.importIntoViewId}
         />
 
         <HelpPanel />
-        <ToastContainer />
+        <NotificationStack />
         <AccessDeniedModal />
 
         {/* Guided tours — experimental, gated by the toursEnabled feature flag */}
@@ -199,8 +211,8 @@ function BootLoader() {
 function PageError({ error, onReset }: { error: Error; onReset: () => void }) {
   const navigate = useNavigate()
   return (
-    <div className="w-full h-full flex items-center justify-center bg-canvas">
-      <div className="flex flex-col items-center gap-4 max-w-lg text-center">
+    <div className="w-full h-full flex overflow-y-auto bg-canvas p-6">
+      <div className="m-auto flex flex-col items-center gap-4 max-w-lg text-center">
         <div className="w-14 h-14 rounded-full bg-red-100 dark:bg-red-950/40 flex items-center justify-center">
           <AlertTriangle className="w-7 h-7 text-red-500" />
         </div>

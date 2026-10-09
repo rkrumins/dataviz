@@ -187,3 +187,35 @@ def test_retry_at_focus_runs_with_ample_budget():
     ))
     assert p.expand_calls["n"] == 4  # first BFS + focus-level retry
     assert result.effective_level == 2  # retried at the focus's own level
+
+
+# ── a shed chain walk is a 429, never "every chain dropped" ─────────
+
+
+async def _shed(*a, **kw):
+    from backend.common.adapters import ProviderBusy
+
+    raise ProviderBusy("falkordb", "the graph server's query queue is full")
+
+
+def test_a_trace_lets_a_shed_chain_walk_out():
+    from backend.common.adapters import ProviderBusy
+
+    p = _trace_provider(expand_delay_s=0.0)
+    p._compute_and_store_ancestors_bulk = _shed
+    with pytest.raises(ProviderBusy):
+        _run(p.trace_at_level(
+            "urn:x", level=0, upstream_depth=1, downstream_depth=1,
+            lineage_edge_types=["FLOWS_TO"], containment_edge_types=["HAS"],
+            max_nodes=100, timeout_ms=60_000,
+        ))
+
+
+def test_containment_edges_let_a_shed_chain_walk_out():
+    from backend.common.adapters import ProviderBusy
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p._redis = None
+    p._compute_and_store_ancestors_bulk = _shed
+    with pytest.raises(ProviderBusy):
+        _run(p._fetch_containment_edges(["urn:p", "urn:c"], ["HAS"]))

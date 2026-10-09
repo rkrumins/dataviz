@@ -14,7 +14,7 @@ import { motion } from 'framer-motion'
 import { useQueryClient } from '@tanstack/react-query'
 import { CheckCircle2, Loader2, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { RefreshScope } from '@/services/freshnessService'
@@ -30,7 +30,7 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
     onClose: () => void
 }) {
     const qc = useQueryClient()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     // The host keys this component on open, so each open remounts with these
     // defaults — no reset effect needed.
     const [scope, setScope] = useState<RefreshScope>('auto')
@@ -42,12 +42,12 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
     const { data: batch } = useRefreshBatch(batchId, isOpen)
     const done = batch?.state === 'done'
 
-    // Refresh the fleet table + toast once the batch finishes.
+    // Refresh the fleet table + notify once the batch finishes.
     useEffect(() => {
         if (!done) return
         void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
-        showToast('success', 'Fleet refresh dispatched — rebuilds continue in the background.')
-    }, [done, qc, showToast])
+        notify('success', 'Fleet refresh dispatched — rebuilds continue in the background.')
+    }, [done, qc, notify])
 
     // A scope switch can never inherit a prior confirmation.
     useEffect(() => { setConfirming(false) }, [scope])

@@ -48,7 +48,7 @@ export interface UseSemanticZoomOptions {
   /** Schema entity types with hierarchy levels */
   schemaEntityTypes: EntityTypeWithLevel[]
   /** Load children callback */
-  loadChildren: (nodeId: string) => Promise<void>
+  loadChildren: (nodeId: string) => Promise<unknown>
   /** Enable/disable semantic zoom */
   enabled: boolean
 }

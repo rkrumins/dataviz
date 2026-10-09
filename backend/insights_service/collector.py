@@ -39,6 +39,7 @@ from backend.app.registry.provider_registry import provider_registry
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.top_level_cache import (
     TOP_LEVEL_MATERIALIZE_LIMIT,
+    assigned_entity_types,
     build_top_level_payload,
     consume_dirty_flag,
     containment_digest,
@@ -168,6 +169,9 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
             edge_count=int(stats.get("edgeCount", 0) or 0),
             entity_type_counts=json.dumps(entity_counts),
             edge_type_counts=json.dumps(edge_counts),
+            # Absent on a provider with no property-name concept, and None
+            # when the probe could not answer. Neither overwrites a reading.
+            property_key_count=stats.get("propertyKeyCount"),
             lane="poll",
         )
         await _stamp_poll_success(session, envelope.data_source_id)
@@ -226,6 +230,7 @@ async def materialize_top_level(
             digest = containment_digest(
                 getattr(resolved, "containment_edge_types", None) or [],
                 getattr(resolved, "root_entity_types", None) or [],
+                assigned_entity_types(resolved),
             )
             if not should_rematerialize(
                 stored_payload, fresh_stats=stats, digest=digest, dirty=dirty,
@@ -267,6 +272,7 @@ async def materialize_top_level(
                 post_digest = containment_digest(
                     getattr(post_resolved, "containment_edge_types", None) or [],
                     getattr(post_resolved, "root_entity_types", None) or [],
+                    assigned_entity_types(post_resolved),
                 )
                 if post_digest != digest:
                     logger.warning(
@@ -398,11 +404,30 @@ async def collect_deep(envelope: StatsJobEnvelope) -> None:
             await _log_counts_parity(provider, schema_stats, envelope.data_source_id)
 
     node_count = schema_stats.total_nodes
+    # The attribute-name count rides along, and it has to. This payload is
+    # written over the SHARED provider stats cache below, and per-asset
+    # discovery reads that cache rather than the store — so a 4-key payload
+    # here erased a real reading, discovery's get_stats returned None for it,
+    # and the assets tab said "not measured yet" until the next lane that
+    # happened to carry it. GraphSchemaStats has no property-key field, so it
+    # is asked of the provider directly; the call is memoised for 60s and the
+    # probe on the changed-counts path above has usually just warmed it.
+    property_key_count = None
+    _pkc = getattr(provider, "property_key_count", None)
+    if _pkc is not None:
+        try:
+            property_key_count = await _pkc()
+        except Exception:
+            # Best-effort: None means "not measured", which the whole chain
+            # already distinguishes from zero. Never fail the poll for it.
+            property_key_count = None
+
     stats_payload = {
         "nodeCount": node_count,
         "edgeCount": schema_stats.total_edges,
         "entityTypeCounts": {s.id: s.count for s in schema_stats.entity_type_stats},
         "edgeTypeCounts": {s.id: s.count for s in schema_stats.edge_type_stats},
+        "propertyKeyCount": property_key_count,
     }
 
     # Write-through prime of the provider-side stats cache so per-asset
@@ -543,6 +568,7 @@ async def probe_counts(envelope: StatsJobEnvelope) -> None:
             edge_count=int(stats.get("edgeCount", 0) or 0),
             entity_type_counts=json.dumps(entity_counts),
             edge_type_counts=json.dumps(edge_counts),
+            property_key_count=stats.get("propertyKeyCount"),
             probed=True,
             lane="probe",
         )

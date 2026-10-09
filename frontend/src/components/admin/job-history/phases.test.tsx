@@ -47,3 +47,197 @@ describe('PhaseStepper', () => {
         expect(container).toBeEmptyDOMElement()
     })
 })
+
+// ── the run's own step ledger ────────────────────────────────────────
+//
+// Four segments derived from ``currentPhase`` is all a run without a ledger
+// can offer: the phase names the pipeline emits are the only four it knows,
+// and the durations under them only exist once the run is over. A run WITH a
+// ledger keeps the same stepper and fills it in — every stage of the run
+// including the two the pipeline never names, each one's progress within
+// itself, and the durations live rather than at the end.
+
+const _step = (over: Record<string, unknown> & { id: string }) => ({
+    state: 'pending', started_at: null, ended_at: null, secs: 0, visits: 0,
+    done: null, total: null, unit: null, waiting_for: null, ...over,
+}) as never
+
+describe('PhaseStepper over a step ledger', () => {
+    const ledger = [
+        _step({ id: 'preparing', state: 'done', secs: 12 }),
+        _step({ id: 'extracting', state: 'done', secs: 200, done: 500_000, total: 500_000, unit: 'lineage edges' }),
+        _step({ id: 'computing', state: 'done', secs: 18 }),
+        _step({
+            id: 'reconciling', state: 'running', secs: 0,
+            started_at: new Date().toISOString(), done: 3, total: 12, unit: 'scan ranges',
+        }),
+        _step({ id: 'applying' }),
+        _step({ id: 'finalizing' }),
+    ]
+
+    it('keeps the stepper and shows every stage of the run', () => {
+        render(<PhaseStepper currentPhase="reconciling" runStats={{ steps: ledger }} status="running" />)
+        for (const label of ['Prepare', 'Extract', 'Compute', 'Reconcile', 'Apply', 'Finish']) {
+            expect(screen.getByText(label)).toBeInTheDocument()
+        }
+    })
+
+    it('says what the stage it is on means and how far through it is', () => {
+        render(<PhaseStepper currentPhase="reconciling" runStats={{ steps: ledger }} status="running" />)
+        const now = screen.getByTestId('step-now')
+        expect(now.textContent).toContain('aggregated edge already stored')
+        expect(now.textContent).toContain('3 of 12 scan ranges')
+        expect(now.textContent).toContain('9 left')
+    })
+
+    it('shows the finished stages’ durations while the run is still going', () => {
+        // The four-segment fallback can only show these once the run is over:
+        // the pipeline reports per-phase timings in its final result.
+        render(<PhaseStepper currentPhase="reconciling" runStats={{ steps: ledger }} status="running" />)
+        expect(screen.getByText('12s')).toBeInTheDocument()
+        expect(screen.getByText('3m 20s')).toBeInTheDocument()
+    })
+
+    it('names the stage a failed run died in', () => {
+        const died = [
+            _step({ id: 'preparing', state: 'done', secs: 12 }),
+            _step({ id: 'extracting', state: 'failed', secs: 44, done: 120, total: 900, unit: 'lineage edges' }),
+            _step({ id: 'computing' }),
+        ]
+        render(<PhaseStepper currentPhase={null} runStats={{ steps: died }} status="failed" />)
+        expect(screen.getByText('Extract').className).toContain('text-red-400')
+        expect(screen.queryByTestId('step-now')).toBeNull()
+    })
+
+    it('says a parked stage is waiting, and what for', () => {
+        const parked = [
+            _step({
+                id: 'extracting', state: 'waiting', secs: 30,
+                started_at: new Date().toISOString(), waiting_for: 'retry 1/3',
+            }),
+        ]
+        render(<PhaseStepper currentPhase="extracting" runStats={{ steps: parked }} status="running" />)
+        expect(screen.getByTestId('step-now').textContent).toContain('waiting — retry 1/3')
+    })
+})
+
+
+// ── this run against the last one ────────────────────────────────────────
+
+describe('PhaseStepper against a previous run', () => {
+    const ledger = (over: Record<string, unknown>[] = []) => [
+        _step({ id: 'preparing', state: 'done', secs: 12 }),
+        _step({ id: 'extracting', state: 'done', secs: 100 }),
+        _step({ id: 'computing', state: 'done', secs: 10 }),
+        _step({ id: 'reconciling', state: 'done', secs: 40 }),
+        _step({ id: 'applying', state: 'done', secs: 600 }),
+        _step({ id: 'finalizing', state: 'done', secs: 8 }),
+        ...(over as never[]),
+    ]
+    const previous = {
+        steps: [
+            _step({ id: 'preparing', state: 'done', secs: 12 }),
+            _step({ id: 'extracting', state: 'done', secs: 100 }),
+            _step({ id: 'computing', state: 'done', secs: 10 }),
+            _step({ id: 'reconciling', state: 'done', secs: 40 }),
+            _step({ id: 'applying', state: 'done', secs: 200 }),
+            _step({ id: 'finalizing', state: 'done', secs: 8 }),
+        ],
+    }
+
+    it('marks the stage that got materially slower', () => {
+        render(
+            <PhaseStepper
+                currentPhase={null} status="completed"
+                runStats={{ steps: ledger() }} previousRunStats={previous}
+            />,
+        )
+        expect(screen.getByText('↑200%')).toBeInTheDocument()
+        // …and says nothing about the five stages that did not move.
+        expect(screen.queryByText('↑0%')).toBeNull()
+    })
+
+    it('says nothing at all without a previous run to compare against', () => {
+        render(
+            <PhaseStepper
+                currentPhase={null} status="completed" runStats={{ steps: ledger() }}
+            />,
+        )
+        expect(screen.queryByText(/↑|↓/)).toBeNull()
+    })
+
+    it('warns when the running stage is well past its own last time', () => {
+        const running = [
+            _step({ id: 'extracting', state: 'done', secs: 100 }),
+            _step({
+                id: 'applying', state: 'running', secs: 0,
+                started_at: new Date(Date.now() - 520_000).toISOString(),
+            }),
+        ]
+        render(
+            <PhaseStepper
+                currentPhase="applying" status="running"
+                runStats={{ steps: running }} previousRunStats={previous}
+            />,
+        )
+        const slip = screen.getByTestId('stage-slip')
+        expect(slip.textContent).toContain('Apply has been running')
+        expect(slip.textContent).toContain('last run\u2019s took 3m 20s')
+        expect(slip.textContent).toContain('2.6× longer')
+    })
+
+    it('stays quiet while the running stage is merely running', () => {
+        const running = [
+            _step({
+                id: 'applying', state: 'running', secs: 0,
+                started_at: new Date(Date.now() - 180_000).toISOString(),
+            }),
+        ]
+        render(
+            <PhaseStepper
+                currentPhase="applying" status="running"
+                runStats={{ steps: running }} previousRunStats={previous}
+            />,
+        )
+        expect(screen.queryByTestId('stage-slip')).toBeNull()
+    })
+})
+
+
+describe('where the wall clock went', () => {
+    const finished = [
+        _step({ id: 'preparing', state: 'done', secs: 100 }),
+        _step({ id: 'extracting', state: 'done', secs: 300 }),
+        _step({ id: 'computing', state: 'done', secs: 20 }),
+        _step({ id: 'applying', state: 'done', secs: 580 }),
+    ]
+
+    it('shows each stage\u2019s share of a finished run', () => {
+        render(<PhaseStepper currentPhase={null} status="completed" runStats={{ steps: finished }} />)
+        const strip = screen.getByTestId('stage-shares')
+        expect(strip.textContent).toContain('Prepare 10%')
+        expect(strip.textContent).toContain('Extract 30%')
+        expect(strip.textContent).toContain('Apply 58%')
+        // Two percent is not worth a legend entry.
+        expect(strip.textContent).not.toContain('Compute')
+    })
+
+    it('says nothing while the run is still going', () => {
+        const running = [
+            _step({ id: 'extracting', state: 'done', secs: 300 }),
+            _step({ id: 'applying', state: 'running', secs: 0, started_at: new Date().toISOString() }),
+        ]
+        render(<PhaseStepper currentPhase="applying" status="running" runStats={{ steps: running }} />)
+        expect(screen.queryByTestId('stage-shares')).toBeNull()
+    })
+
+    it('says nothing for a run that only ever reached one stage', () => {
+        render(
+            <PhaseStepper
+                currentPhase={null} status="failed"
+                runStats={{ steps: [_step({ id: 'preparing', state: 'failed', secs: 9 })] }}
+            />,
+        )
+        expect(screen.queryByTestId('stage-shares')).toBeNull()
+    })
+})

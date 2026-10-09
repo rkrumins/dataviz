@@ -17,6 +17,7 @@ from backend.app.auth.password import hash_password
 from backend.app.db.repositories import user_repo
 from backend.auth_service.cookies import (
     ACCESS_COOKIE_NAME,
+    ACCESS_EXPIRY_COOKIE_NAME,
     CSRF_COOKIE_NAME,
     REFRESH_COOKIE_NAME,
 )
@@ -109,6 +110,275 @@ async def test_me_without_cookie_returns_401(test_client: AsyncClient):
     test_client.cookies.delete(ACCESS_COOKIE_NAME)
     me = await test_client.get("/api/v1/auth/me")
     assert me.status_code == 401
+
+
+# ── /me heals a lost CSRF cookie ─────────────────────────────────────
+#
+# Nothing else mints ``nx_csrf`` outside a rotation, so a reload — all
+# GETs — used to change nothing: a session whose CSRF cookie was
+# evicted (a sibling deployment's sign-out sweeps the shared parent
+# domain) kept failing every write. The bootstrap GET is the one moment
+# the server knows the session is valid before any write happens.
+
+def _csrf_set_cookies(resp) -> list[str]:
+    # httpx spells it get_list; starlette spells it getlist.
+    read = getattr(resp.headers, "get_list", None) or resp.headers.getlist
+    return [
+        h for h in read("set-cookie")
+        if h.startswith(f"{CSRF_COOKIE_NAME}=")
+    ]
+
+
+async def _login_cookie_user(test_client, db_session) -> None:
+    await _seed(db_session)
+    login = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "cookie@example.com", "password": _PASSWORD},
+    )
+    assert login.status_code == 200
+
+
+async def test_me_re_mints_a_missing_csrf_cookie(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    from backend.auth_service.core.tokens import decode_token
+    from backend.auth_service.csrf import verify_csrf_token
+
+    await _login_cookie_user(test_client, db_session)
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+
+    me = await test_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    minted = _csrf_set_cookies(me)
+    assert len(minted) == 1
+    # The healed token is bound to THIS session's sid — a cookie any
+    # sibling could satisfy would defeat the double-submit binding.
+    value = minted[0].split(";", 1)[0].split("=", 1)[1]
+    sid = decode_token(test_client.cookies.get(ACCESS_COOKIE_NAME)).get("sid")
+    assert verify_csrf_token(value, sid) is True
+
+
+async def test_me_leaves_a_valid_csrf_cookie_alone(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    # No gratuitous rotation: re-minting on every GET would widen the
+    # header/cookie skew window the client already races.
+    await _login_cookie_user(test_client, db_session)
+
+    me = await test_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert _csrf_set_cookies(me) == []
+
+
+def test_the_heal_replaces_a_cookie_minted_for_another_session():
+    """The sid-mismatch branch, unit-shaped: the flows in this test
+    environment mint no ``sid``, so the case cannot arise end to end
+    here — but a sid-carrying deployment must not keep accepting a
+    cookie the middleware is about to refuse."""
+    from fastapi import Response
+    from starlette.requests import Request
+
+    from backend.auth_service.api.router import _heal_csrf_cookie
+    from backend.auth_service.core.tokens import create_access_token
+    from backend.auth_service.csrf import mint_csrf_token, verify_csrf_token
+
+    access = create_access_token(
+        "usr_1", "a@example.com", "user", extra={"sid": "sess_alice"},
+    )
+    planted = mint_csrf_token("sess_mallory")
+    request = Request({
+        "type": "http",
+        "headers": [(
+            b"cookie",
+            f"{ACCESS_COOKIE_NAME}={access}; "
+            f"{CSRF_COOKIE_NAME}={planted}".encode(),
+        )],
+    })
+    response = Response()
+    _heal_csrf_cookie(request, response)
+
+    minted = _csrf_set_cookies(response)
+    assert len(minted) == 1
+    value = minted[0].split(";", 1)[0].split("=", 1)[1]
+    assert verify_csrf_token(value, "sess_alice") is True
+
+    # And the converse: a cookie minted for THIS sid is left alone.
+    ok = Request({
+        "type": "http",
+        "headers": [(
+            b"cookie",
+            f"{ACCESS_COOKIE_NAME}={access}; "
+            f"{CSRF_COOKIE_NAME}={mint_csrf_token('sess_alice')}".encode(),
+        )],
+    })
+    untouched = Response()
+    _heal_csrf_cookie(ok, untouched)
+    assert _csrf_set_cookies(untouched) == []
+
+
+async def test_me_does_not_mint_for_anonymous(test_client: AsyncClient):
+    test_client.cookies.delete(ACCESS_COOKIE_NAME)
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+    me = await test_client.get("/api/v1/auth/me")
+    assert me.status_code == 401
+    assert _csrf_set_cookies(me) == []
+
+
+# ── GET /auth/csrf heals the cookie on demand, without rotating ──────
+#
+# The heal reachable on its own route, so a write that 403s ``csrf_failed``
+# can repair the cookie in place instead of rotating the whole session —
+# which is rate-limited, runs the session ceilings, and can sign the user
+# out. It re-mints only a missing or mis-bound cookie and leaves a valid
+# one alone (``_heal_csrf_cookie``), and 401s when there is no live session
+# to heal against so the client falls through to the refresh/login path.
+
+
+async def test_csrf_endpoint_mints_a_missing_cookie(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    from backend.auth_service.core.tokens import decode_token
+    from backend.auth_service.csrf import verify_csrf_token
+
+    await _login_cookie_user(test_client, db_session)
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.status_code == 200, resp.text
+    minted = _csrf_set_cookies(resp)
+    assert len(minted) == 1
+    # Bound to THIS session's sid, exactly as /me heals it — a cookie any
+    # sibling could satisfy would defeat the double-submit binding.
+    value = minted[0].split(";", 1)[0].split("=", 1)[1]
+    sid = decode_token(test_client.cookies.get(ACCESS_COOKIE_NAME)).get("sid")
+    assert verify_csrf_token(value, sid) is True
+
+
+async def test_csrf_endpoint_leaves_a_valid_cookie_alone(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    # No rotation, and no gratuitous re-mint: an already-valid cookie is
+    # returned untouched, so a concurrent write's in-flight header cannot
+    # be invalidated out from under it.
+    await _login_cookie_user(test_client, db_session)
+
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.status_code == 200
+    assert _csrf_set_cookies(resp) == []
+
+
+async def test_csrf_endpoint_names_the_environment_it_healed_for(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch
+):
+    # The cookie this heals is named after the deployment
+    # (``nx_csrf_<env>``), and the page reads it by name. A page that never
+    # learned the suffix — an SSO sign-in completed on the page, which
+    # never runs the /me bootstrap — re-read the unscoped name after every
+    # heal and 403'd forever. The heal's own answer names the environment,
+    # so the repair can always finish itself.
+    from backend.auth_service.api import router as auth_router
+
+    await _login_cookie_user(test_client, db_session)
+
+    monkeypatch.setattr(auth_router, "AUTH_ENVIRONMENT_ID", "production")
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True, "environment_id": "production"}
+
+    monkeypatch.setattr(auth_router, "AUTH_ENVIRONMENT_ID", "")
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.json() == {"ok": True, "environment_id": None}
+
+
+async def test_csrf_endpoint_without_session_401s_and_mints_nothing(
+    test_client: AsyncClient
+):
+    # Nothing to heal against — the client must escalate to a rotation or
+    # a fresh login rather than loop here.
+    test_client.cookies.delete(ACCESS_COOKIE_NAME)
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.status_code == 401
+    assert _csrf_set_cookies(resp) == []
+
+
+async def test_csrf_endpoint_evicts_a_foreign_cookie(test_client: AsyncClient):
+    # A cookie from another deployment can never be healed here; it is
+    # classified and evicted, same as on /me, so the client stops retrying
+    # a repair that cannot succeed.
+    test_client.cookies.clear()
+    resp = await test_client.get(
+        "/api/v1/auth/csrf", cookies={ACCESS_COOKIE_NAME: _foreign_token()}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "session_foreign"
+
+
+# ── a refused refresh ends the session in the browser too ────────────
+#
+# Every refusal called ``clear_session_cookies(response)`` and then RAISED —
+# and FastAPI drops the injected response's headers on a raise, so none of
+# those deletions ever reached the browser. The access cookie survived its
+# own session's end: a failed silent re-sign-in landed on /login, /auth/me
+# accepted the surviving cookie, and the page said "You're already signed
+# in" instead of why the session had ended.
+
+
+def _cleared(resp) -> set[str]:
+    """The cookie names this response deletes."""
+    names: set[str] = set()
+    for header in resp.headers.get_list("set-cookie"):
+        low = header.lower()
+        if "max-age=0" in low or "expires=thu, 01 jan 1970" in low:
+            names.add(header.split("=", 1)[0])
+    return names
+
+
+_SESSION_COOKIES = {
+    ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME, CSRF_COOKIE_NAME,
+    ACCESS_EXPIRY_COOKIE_NAME,
+}
+
+
+async def test_a_refused_refresh_clears_every_session_cookie(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    await _login_cookie_user(test_client, db_session)
+    # A genuine token whose family has since been revoked.
+    stale = test_client.cookies.get(REFRESH_COOKIE_NAME)
+    await test_client.post("/api/v1/auth/logout")
+
+    resp = await test_client.post(
+        "/api/v1/auth/refresh", cookies={REFRESH_COOKIE_NAME: stale},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Refresh token invalid or expired"
+    assert _SESSION_COOKIES <= _cleared(resp)
+
+
+async def test_a_foreign_refresh_token_is_evicted(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    await _login_cookie_user(test_client, db_session)
+
+    resp = await test_client.post(
+        "/api/v1/auth/refresh", cookies={REFRESH_COOKIE_NAME: "not-a-token"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "session_foreign"
+    assert _SESSION_COOKIES <= _cleared(resp)
+
+
+async def test_a_refresh_with_no_token_clears_them_too(test_client: AsyncClient):
+    test_client.cookies.clear()
+
+    resp = await test_client.post("/api/v1/auth/refresh")
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Missing refresh token"
+    assert _SESSION_COOKIES <= _cleared(resp)
 
 
 # ── refresh rotation ─────────────────────────────────────────────────
@@ -374,3 +644,95 @@ async def test_diagnostics_reports_a_foreign_cookie(test_client: AsyncClient):
     assert body["activeKid"] in body["acceptedKids"]
     # No key material is ever exposed.
     assert "secret" not in resp.text.lower()
+
+
+# ── "am I signed in" agrees with "can I make requests" ───────────────
+#
+# ``get_current_user`` refuses a session whose sid has been revoked; /me and
+# /csrf did not. A session ended upstream — every sid tombstoned — kept
+# answering /me with 200, so the sign-in page said "You're already signed
+# in" to someone every other request refused.
+
+
+def _with_sid(monkeypatch) -> None:
+    """Tokens here carry no ``sid`` — the harness has no claims resolver,
+    and production's always adds one. Give them the one it would."""
+    from backend.app.main import app
+
+    async def _claims(_session, _user_id):
+        return {"sid": "sid-under-test"}
+
+    monkeypatch.setattr(app.state.identity_service, "_claims_resolver", _claims)
+
+
+def _revoke(monkeypatch, *, revoked: set[str]) -> list[str]:
+    from backend.app.main import app
+
+    asked: list[str] = []
+
+    async def _checker(sid: str) -> bool:
+        asked.append(sid)
+        return sid in revoked
+
+    monkeypatch.setattr(
+        app.state.identity_service, "_revocation_checker", _checker,
+    )
+    return asked
+
+
+async def test_me_refuses_a_revoked_session(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+):
+    _with_sid(monkeypatch)
+    await _login_cookie_user(test_client, db_session)
+    asked = _revoke(monkeypatch, revoked={"sid-under-test"})
+
+    resp = await test_client.get("/api/v1/auth/me")
+
+    assert asked == ["sid-under-test"]
+
+    assert resp.status_code == 401
+    # Not a sign-out: a revoked sid is also how a role change forces the
+    # next request to re-mint its claims, so the refresh cookie must
+    # survive for that renewal.
+    assert REFRESH_COOKIE_NAME not in _cleared(resp)
+
+
+async def test_the_csrf_heal_refuses_a_revoked_session(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+):
+    _with_sid(monkeypatch)
+    await _login_cookie_user(test_client, db_session)
+    _revoke(monkeypatch, revoked={"sid-under-test"})
+
+    resp = await test_client.get("/api/v1/auth/csrf")
+
+    assert resp.status_code == 401
+
+
+async def test_a_revocation_store_outage_fails_open(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+):
+    # The same posture as ``get_current_user``: a Redis incident must not
+    # sign everyone out; the access token's own expiry is the floor.
+    from backend.app.main import app
+
+    _with_sid(monkeypatch)
+    await _login_cookie_user(test_client, db_session)
+
+    async def _down(_sid: str) -> bool:
+        raise ConnectionError("redis is down")
+
+    monkeypatch.setattr(app.state.identity_service, "_revocation_checker", _down)
+
+    assert (await test_client.get("/api/v1/auth/me")).status_code == 200
+
+
+async def test_a_live_session_is_still_signed_in(
+    test_client: AsyncClient, db_session: AsyncSession, monkeypatch,
+):
+    _with_sid(monkeypatch)
+    await _login_cookie_user(test_client, db_session)
+    _revoke(monkeypatch, revoked={"some-other-sid"})
+
+    assert (await test_client.get("/api/v1/auth/me")).status_code == 200

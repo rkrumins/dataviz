@@ -2,7 +2,7 @@
 
 > **Audience & scope:** integrators and backend/frontend engineers calling the Versioned Graph over
 > HTTP. This is the contract; for the run/test harness see [`../VERSIONING_E2E.md`](../VERSIONING_E2E.md),
-> for behavior semantics see [03 · Branching, Commits & Merge](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md).
+> for behavior semantics see [03 · Branching, Commits & Merge](03-branching-commits-merge.md).
 
 **TL;DR.** Two workspace-scoped FastAPI routers own everything. The **versioning router**
 (`/api/v1/{ws_id}/versioning`) is the *only* path between a client and the `graphver` Postgres store —
@@ -55,7 +55,7 @@ Service domain exceptions are translated centrally by `_domain_errors()` (`versi
 | `AccessDenied` | **403** | `{type:"access_denied", message}` |
 | `ApprovalRequired` | **409** | `{type:"approval_required", pending:[…]}` |
 | `NotUpToDate` | **409** | `{type:"not_up_to_date", branchId, behindBy, message}` |
-| `PullRequestExists` | **409** | `{type:"pull_request_exists", prId, branchId, title, message}` — the branch already has a live PR ([03 §3.8](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md)); `prId` is the one that exists, so route the user *to* it |
+| `PullRequestExists` | **409** | `{type:"pull_request_exists", prId, branchId, title, message}` — the branch already has a live PR ([03 §3.8](03-branching-commits-merge.md)); `prId` is the one that exists, so route the user *to* it |
 | `ConcurrencyError` | **409** | `{type:"integrity", message}` |
 | `ValueError` | **404** | `str(message)` |
 
@@ -100,7 +100,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`. "Gate" is the requ
 | `GET · POST · DELETE .../branches/{bid}/members[…]` (`:1243/1254/1268`) | `_READ` / `_MANAGE` / `_MANAGE` | Shared-branch collaborators: `{subjectType:"user\|group", subjectId, role:"viewer\|editor\|maintainer"}`. |
 | `PATCH /graphs/{gid}/branches/{bid}` (`:1365`) | `_MANAGE` | `{name?, description?, isShared?}` (owner/maintainer); `""` clears. |
 | `POST .../branches/{bid}/abandon` (`:1354`) | `_MANAGE` | Discard the draft → `BranchResponse`. |
-| `POST .../branches/{bid}/rebase` | `_MANAGE` | "Pull latest `main` into the draft." `{resolutions?}` → `{clean, conflicts, changes, incoming, baseCommitSeq, alreadyUpToDate}`; `clean:false` → resolve and resubmit. **`changes` ≠ `incoming`**: `changes` is how *your own* edits were rewritten onto the new base (usually nothing); `incoming` is what actually arrived from `main` — `{commitIds, commitCount, contributors, stats, fromSeq, toSeq}`. A clean pull always writes a `pull` commit ([03 §3.7](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md)). |
+| `POST .../branches/{bid}/rebase` | `_MANAGE` | "Pull latest `main` into the draft." `{resolutions?}` → `{clean, conflicts, changes, incoming, baseCommitSeq, alreadyUpToDate}`; `clean:false` → resolve and resubmit. **`changes` ≠ `incoming`**: `changes` is how *your own* edits were rewritten onto the new base (usually nothing); `incoming` is what actually arrived from `main` — `{commitIds, commitCount, contributors, stats, fromSeq, toSeq}`. A clean pull always writes a `pull` commit ([03 §3.7](03-branching-commits-merge.md)). |
 
 ### 2.4 Changes → checkpoint → publish
 | Method · Path | Gate | Purpose / key fields |
@@ -118,7 +118,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`. "Gate" is the requ
 | `POST /graphs/{gid}/projection/reconcile` (`:1456`) | `_MANAGE` | `{deep?}` → `DriftReportModel`. Request-scoped full scan; concurrent → 409; read-layer failure → 503. |
 | `POST /graphs/{gid}/commits/{cid}/revert` (`:1488`) | `_MANAGE` | Apply the inverse of a `main` commit as a new `revert` commit. `{message?}` → `{commitId}`. Conflict-guarded (409 if a later commit touched the same entities). |
 
-See [04 · Projection & Cache](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md) for what these actually do.
+See [04 · Projection & Cache](04-projection-and-cache.md) for what these actually do.
 
 ### 2.6 State, history & diff
 | Method · Path | Gate | Purpose |
@@ -147,27 +147,34 @@ See [04 · Projection & Cache](https://github.com/rkrumins/dataviz/blob/main/doc
 | Method · Path | Gate | Purpose |
 |---|---|---|
 | `POST /graphs/{gid}/bulk-ingest` (`:1826`) | `_MANAGE` | ndjson body → one `import` commit; invalid lines reported, not fatal; idempotent on `idempotencyKey`. Day-0 / large-delta seeding. |
-| `POST /graphs/{gid}/sync` (`:1859`) | `_MANAGE` | ndjson snapshot into `main`, `strategy: merge \| external_wins`, **3-way merge** (untouched drops cascade to containment subtree); idempotent. The authoritative re-sync path (see [10](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/10-authoritative-sources-datahub-openmetadata.md)). |
+| `POST /graphs/{gid}/sync` (`:1859`) | `_MANAGE` | ndjson snapshot into `main`, `strategy: merge \| external_wins`, **3-way merge** (untouched drops cascade to containment subtree); idempotent. The authoritative re-sync path (see [10](10-authoritative-sources-datahub-openmetadata.md)). |
 
 ### 2.10 Imports & exports
-See [08 · Import / Export](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/08-import-export.md) for the pipeline; the endpoints:
+See [08 · Import / Export](08-import-export.md) for the pipeline; the endpoints:
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `POST /graphs/{gid}/imports` (`:1982`) | `_MANAGE` | `?format&reconcileMode(upsert\|replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status:"running"}`. Opens/append a draft, streams to the object store, dispatches `run_import` in the background. |
+| `POST /graphs/{gid}/imports` (`:1982`) | `_MANAGE` | `?format&reconcileMode(upsert\|replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status}`. Opens/append a draft, streams to the object store, then starts the job: `status` is `running` when it runs in this process, `pending` when it is queued for the versioning worker (`GRAPHVER_TRANSFER_INPROCESS=0`). |
 | `GET /graphs/{gid}/imports` (`:2018`) | `_READ` | Import job history. |
 | `GET /graphs/{gid}/imports/template` (`:2030`) | `_READ` | `?format` → a prepopulated starter file. (Declared **before** `/{job_id}` so the literal wins.) |
-| `GET /graphs/{gid}/imports/{job_id}` (`:2053`) | `_READ` | Job status (camelCase). |
+| `POST /graphs/{gid}/imports/uploads` | `_MANAGE` | Start a resumable upload: `{fileName, size, format}` → **201** `{uploadId, fileName, size, format, partBytes, parts, received: [], jobId: null}`. 413 when the file is too large for its format (10 GiB for NDJSON/CSV/TSV, 100 MB for JSON/xlsx). |
+| `PUT /graphs/{gid}/imports/uploads/{uploadId}/parts/{n}` | `_MANAGE` | Part `n` as the raw body; it must hold exactly its share (`partBytes`, the last the rest), else 422. Sending it again replaces it. → `{part, size}`. |
+| `GET /graphs/{gid}/imports/uploads/{uploadId}` | `_MANAGE` | The upload, with `received`: the parts stored whole. 404 for another user's upload or one swept (a day). |
+| `POST /graphs/{gid}/imports/uploads/{uploadId}/complete` | `_MANAGE` | `?reconcileMode&branchId&viewId` → **202** as `POST /imports`; the import reads the parts in order. 409 while a part is missing; asking again answers with the same job. |
+| `GET /graphs/{gid}/imports/{job_id}` (`:2053`) | `_READ` | Job status (camelCase). `queuedAhead`: for a job queued for the versioning worker, how many jobs were queued before it; `null` otherwise. |
 | `GET /graphs/{gid}/imports/{job_id}/preview` (`:2066`) | `_READ` | `{job, summary, sample, previewDownloadUrl, rejectedDownloadUrl}`. |
-| `POST /graphs/{gid}/exports` (`:2087`) | `_READ` | `?format&asOfSeq&viewId&branchId&props&ids&types&idempotencyKey` → **202** `{jobId, resultUri, status}`. |
-| `GET /graphs/{gid}/exports · /{job_id}` (`:2121/2131`) | `_READ` | Export job list / status. |
-| `GET /graphs/{gid}/exports/{job_id}/download` (`:2144`) | `_READ` | `StreamingResponse`; 409 if not `completed`. |
+| `GET /graphs/{gid}/exports/plan` | `_READ` + `graphExportEnabled` | `?format&asOfSeq&viewId&branchId&ids&types` → what the export would hold, before downloading: `{nodes, edges, exact, empty, formatLimit, view:{placements, found, entities}, asOfSeq, branchId}`. Counts are `null` when they take longer than `GRAPH_EXPORT_PLAN_BUDGET_SECS` to count. |
+| `GET /graphs/{gid}/exports/stream` | `_READ` + `graphExportEnabled` | Same params plus `props&filename` → the file, **streamed as it is written** from one pinned commit (flat memory at any size; exempt from the request timeout). Waits for a turn (`GRAPH_EXPORT_CONCURRENCY` exports stream at once per pod) for up to `GRAPH_EXPORT_SLOT_WAIT_SECS`, then **429** + `Retry-After`; **422** `EXCEL_ROW_LIMIT` for an xlsx a sheet can't hold. For scripts: the Export dialog has the workers prepare the file (`POST /exports`). |
+| `GET /{ws}/graph/export/plan · /stream` | `_READ` + `graphExportEnabled` | `?dataSourceId&format[&props&filename]` → the same for a data source **without** version control: its live graph, read from the provider (a cold copy whose rows carry URNs, no entity ids). Counts come from the provider's statistics. |
+| `POST /graphs/{gid}/exports` | `_READ` + `graphExportEnabled` | `?format&asOfSeq&viewId&branchId&props&ids&types&filename&idempotencyKey` → **202** `{jobId, resultUri, status}`. The workers write the same records into the object store, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB): what the Export dialog does for a data source with version control. `filename` (no extension) names the download. |
+| `GET /graphs/{gid}/exports · /{job_id}` | `_READ`, and the export's draft and view readable | The export jobs the caller may read / one job: `queuedAhead` while it waits; while it runs, `summary` says how far it has got (`nodes` and `edges` this pass, `passes`, `bytes` written); once finished, `kept` says whether its file is still there to download (a day). An export of a draft or a view the caller can't read is a 404, and left out of the list. |
+| `GET /graphs/{gid}/exports/{job_id}/download` | as above + `graphExportEnabled` | The finished file, as a download that resumes: `Content-Length`, `Accept-Ranges: bytes`, `ETag`, `Last-Modified`; a `Range` → **206** with `Content-Range` (one range; several get the whole file), an `If-Range` naming another file → the whole file, a range past the end → **416**. Never compressed; exempt from the request timeout. 409 if not `completed`, 404 once swept. |
 
 > **Limitation.** The export **row/type scoping** params (`ids`/`types`) are wired end-to-end on the
-> backend (`create_export → create_export_job → ExportWorker`), but the ExportDialog / client service
+> backend (the plan, the stream and the job), but the ExportDialog / client service
 > send only `format`, `viewId`, `branchId`, and `props` — so row-scoped export is **reachable over
 > HTTP but not surfaced in the UI**. Whole-DS, view-scoped, branch-vs-published, and extra-`props`
-> columns are exercised everywhere. Details in [08 · Import / Export](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/08-import-export.md).
+> columns are exercised everywhere. Details in [08 · Import / Export](08-import-export.md).
 
 ### 2.11 Forks
 | Method · Path | Gate | Purpose |
@@ -277,7 +284,7 @@ A `branchId` query param (`graph.py:70`) is threaded into
 `ContextEngine.for_workspace(..., branch_id=branchId)` (`graph.py:92`). Every `/graph` read/write built
 on this dependency automatically targets a **draft overlay** when `?branchId=br_…` is present, and
 `main` otherwise. Omit it → main; pass `"main"` → explicit main. See
-[04 · read providers](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md).
+[04 · read providers](04-projection-and-cache.md).
 
 ### Per-branch cache scoping (`graph.py:155-205`)
 `_cache_scope` includes `branch_id` → `CacheScope(ws, ds, branch)` (`graph.py:167`), so draft reads
@@ -302,13 +309,13 @@ is the one atomic, server-merged commit the canvas uses. It:
 > **Decision — patch semantics live in the service, not the client.** `update` ops carry only the
 > changed fields plus a `base_version` OCC token; the service PATCHes onto current state (or raises a
 > 409 on a same-field clash). This removed a whole class of silent field-loss on merge — see
-> [03 · update = PATCH](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md).
+> [03 · update = PATCH](03-branching-commits-merge.md).
 
 ### Ontology pushdown
 `_resolve_containment_types` (`graph.py:1629`) supplies live containment types for the delete cascade;
 `_resolve_ontology_rules` (`graph.py:1641`) supplies the rich `OntologyRules`, **`fail_closed`** for
 blank models (422 `ontology_required` / 503 `ontology_unavailable`). See
-[05 · Ontology Governance](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/05-ontology-governance.md).
+[05 · Ontology Governance](05-ontology-governance.md).
 
 ### Cascade preview & bootstrap/resync
 - `GET /nodes/{urn}/delete-impact?branchId=…` (`graph.py:1804`) previews the containment subtree + all
@@ -323,7 +330,7 @@ blank models (422 `ontology_required` / 503 `ontology_unavailable`). See
   report proves the copy — full detail in [`../VERSIONING_E2E.md`](../VERSIONING_E2E.md) §3.
 - `POST /resync` (`graph.py:281`) — authoritative re-sync (`strategy: merge | external_wins`) via the
   service's 3-way merge; refuses above `GRAPHVER_RESYNC_MAX_ENTITIES` (default 250,000) with
-  `422 graph_too_large_to_sync`. See [10](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/10-authoritative-sources-datahub-openmetadata.md).
+  `422 graph_too_large_to_sync`. See [10](10-authoritative-sources-datahub-openmetadata.md).
 
 > **Limitation — v1 trace is gone.** `POST /api/v1/{ws}/graph/trace` returns **410** with an RFC 8594
 > `Sunset` header (`graph.py:288-301`); use `POST /api/v2/{ws}/graph/trace`.
@@ -333,11 +340,11 @@ blank models (422 `ontology_required` / 503 `ontology_unavailable`). See
 ## Related chapters
 
 - **The big-picture architecture** → [Overview & Architecture](/docs/versioning-overview)
-- **Behavior of every write** → [03 · Branching, Commits & Merge](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/03-branching-commits-merge.md)
-- **What the projection/watermark/rebuild routes do** → [04 · Projection & Cache](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/04-projection-and-cache.md)
-- **The 422 ontology contract** → [05 · Ontology Governance](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/05-ontology-governance.md)
-- **How the frontend calls all of this** → [07 · Frontend Integration](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/07-frontend-integration.md)
-- **Import/export endpoints in depth** → [08 · Import / Export](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/08-import-export.md)
+- **Behavior of every write** → [03 · Branching, Commits & Merge](03-branching-commits-merge.md)
+- **What the projection/watermark/rebuild routes do** → [04 · Projection & Cache](04-projection-and-cache.md)
+- **The 422 ontology contract** → [05 · Ontology Governance](05-ontology-governance.md)
+- **How the frontend calls all of this** → [07 · Frontend Integration](07-frontend-integration.md)
+- **Import/export endpoints in depth** → [08 · Import / Export](08-import-export.md)
 - **The RBAC role taxonomy behind the `_READ` / `_MANAGE` gates** → [RBAC](/docs/rbac)
 - **Run/test harness & smoke script** → [End-to-End Testing Guide](/docs/versioning-e2e)
-- **Glossary & suite index** → [README](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/README.md)
+- **Glossary & suite index** → [README](README.md)

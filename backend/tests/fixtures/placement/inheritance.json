@@ -1,0 +1,589 @@
+{
+  "cases": [
+    {
+      "name": "explicit-cascades-down-the-chain",
+      "summary": "PLACE tier 2: an explicit entry cascades by hand to children and on to grandchildren (inheritedFrom names the direct parent).",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p" }, { "urn": "c" }, { "urn": "g" }],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "c", "target": "g", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "g": { "layerId": "a", "source": "inherited", "inheritedFrom": "c" }
+      }
+    },
+    {
+      "name": "hand-chain-beats-own-rule-and-stamp",
+      "summary": "Decision 2 / PLACE tier 2 before tiers 5-6: a child of a hand-placed parent inherits even when its own type rule or stamp names another layer.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["table"] }
+            ],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "folder" },
+        { "urn": "c", "entityType": "table" },
+        { "urn": "d", "entityType": "folder", "layerAssignment": "b" }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "d", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "d": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" }
+      }
+    },
+    {
+      "name": "hand-cascade-passes-through-inherited-nodes",
+      "summary": "PLACE tier 2: a node that inherited by hand passes a hand cascade on, so a grandchild still beats its own rule.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["table"] }
+            ],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "folder" },
+        { "urn": "m", "entityType": "schema" },
+        { "urn": "g", "entityType": "table" }
+      ],
+      "edges": [
+        { "source": "p", "target": "m", "edgeType": "CONTAINS" },
+        { "source": "m", "target": "g", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "m": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "g": { "layerId": "a", "source": "inherited", "inheritedFrom": "m" }
+      }
+    },
+    {
+      "name": "own-rule-beats-rule-placed-parent",
+      "summary": "Decision 2 / PLACE tier 6 before tier 7: a child's own rule beats the soft cascade of a rule-placed parent, at every level.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["domain"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["table"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "domain" },
+        { "urn": "c", "entityType": "table" },
+        { "urn": "g", "entityType": "domain" }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "c", "target": "g", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "c": { "layerId": "b", "source": "rule", "ruleId": "_type_b_table" },
+        "g": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" }
+      }
+    },
+    {
+      "name": "own-stamp-beats-rule-placed-parent",
+      "summary": "Decision 2 / PLACE tier 5 before tier 7: a child's own stamp beats the soft cascade of a rule-placed parent.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["domain"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p", "entityType": "domain" }, { "urn": "c", "entityType": "folder", "layerAssignment": "b" }],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "c": { "layerId": "b", "source": "stamped" }
+      }
+    },
+    {
+      "name": "own-rule-beats-stamped-parent",
+      "summary": "Decision 2 / PLACE tier 6 before tier 7: a stamped parent cascades only softly, so the child's own rule wins.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["table"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p", "entityType": "folder", "layerAssignment": "b" }, { "urn": "c", "entityType": "table" }],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": {
+        "p": { "layerId": "b", "source": "stamped" },
+        "c": { "layerId": "a", "source": "rule", "ruleId": "_type_a_table" }
+      }
+    },
+    {
+      "name": "unclaimed-child-inherits-rule-chain",
+      "summary": "PLACE tier 7: a child no rule claims inherits its rule-placed parent's layer, and passes the soft cascade on.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": { "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["domain"] }], "assignments": {} }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "domain" },
+        { "urn": "m", "entityType": "attribute" },
+        { "urn": "c", "entityType": "attribute" }
+      ],
+      "edges": [
+        { "source": "p", "target": "m", "edgeType": "CONTAINS" },
+        { "source": "m", "target": "c", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "m": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "m" }
+      }
+    },
+    {
+      "name": "unclaimed-child-inherits-stamped-parent",
+      "summary": "PLACE tier 7: a child with no stamp or rule of its own inherits a stamped parent's layer.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p", "entityType": "folder", "layerAssignment": "b" }, { "urn": "c", "entityType": "folder" }],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": {
+        "p": { "layerId": "b", "source": "stamped" },
+        "c": { "layerId": "b", "source": "inherited", "inheritedFrom": "p" }
+      }
+    },
+    {
+      "name": "soft-chain-resumes-from-the-nearest-rule",
+      "summary": "PLACE tier 7: an unclaimed grandchild inherits from its direct parent's own rule placement, not from the grandparent.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["domain"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["table"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "domain" },
+        { "urn": "c", "entityType": "table" },
+        { "urn": "g", "entityType": "column" }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "c", "target": "g", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "c": { "layerId": "b", "source": "rule", "ruleId": "_type_b_table" },
+        "g": { "layerId": "b", "source": "inherited", "inheritedFrom": "c" }
+      }
+    },
+    {
+      "name": "rule-inherits-from-parent-false",
+      "summary": "PLACE tier 6 cascade: a rule with inheritsFromParent false passes nothing, so unclaimed descendants are none; a child with its own rule is unaffected.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "rp", "priority": 1, "entityTypes": ["domain"], "inheritsFromParent": false }]
+              },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["table"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "domain" },
+        { "urn": "c", "entityType": "attribute" },
+        { "urn": "g", "entityType": "attribute" },
+        { "urn": "t", "entityType": "table" }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "c", "target": "g", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "t", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "rp" },
+        "c": { "source": "none" },
+        "g": { "source": "none" },
+        "t": { "layerId": "b", "source": "rule", "ruleId": "_type_b_table" }
+      }
+    },
+    {
+      "name": "rule-inherits-from-parent-true-or-null-cascades",
+      "summary": "COMPILE cascadesSoft = inheritsFromParent !== false: true and null both cascade softly to unclaimed children.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [
+                  { "id": "rt", "priority": 1, "entityTypes": ["domain"], "inheritsFromParent": true },
+                  { "id": "rn", "priority": 1, "entityTypes": ["system"], "inheritsFromParent": null }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "domain" },
+        { "urn": "c", "entityType": "attribute" },
+        { "urn": "q", "entityType": "system" },
+        { "urn": "d", "entityType": "attribute" }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "q", "target": "d", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "rt" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "q": { "layerId": "a", "source": "rule", "ruleId": "rn" },
+        "d": { "layerId": "a", "source": "inherited", "inheritedFrom": "q" }
+      }
+    },
+    {
+      "name": "inherits-from-parent-false-does-not-stop-a-hand-chain",
+      "summary": "PLACE tier 2 before tier 6: a node under a hand-placed parent inherits without consulting its rule, so that rule's inheritsFromParent false cannot break the hand chain.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              {
+                "id": "a",
+                "name": "A",
+                "order": 0,
+                "entityTypes": [],
+                "rules": [{ "id": "rp", "priority": 1, "entityTypes": ["domain"], "inheritsFromParent": false }]
+              },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "g": { "layerId": "b", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "g", "entityType": "folder" },
+        { "urn": "p", "entityType": "domain" },
+        { "urn": "c", "entityType": "attribute" }
+      ],
+      "edges": [
+        { "source": "g", "target": "p", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "g": { "layerId": "b", "source": "explicit" },
+        "p": { "layerId": "b", "source": "inherited", "inheritedFrom": "g" },
+        "c": { "layerId": "b", "source": "inherited", "inheritedFrom": "p" }
+      }
+    },
+    {
+      "name": "gate-curated-child-unplaced",
+      "summary": "PLACE tier 1 cascade: an explicit entry with inheritsChildren false passes nothing, so in curated scope its child is none.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": false } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p" }, { "urn": "c" }],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": { "p": { "layerId": "a", "source": "explicit" }, "c": { "source": "none" } }
+    },
+    {
+      "name": "gate-open-child-falls-to-own-rule",
+      "summary": "PLACE tier 1 cascade: below a gated entry in open scope a child falls to its own rule, and a child with no rule is none.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["table"] }
+            ],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": false } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "folder" },
+        { "urn": "c", "entityType": "table" },
+        { "urn": "d", "entityType": "folder" }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "d", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c": { "layerId": "b", "source": "rule", "ruleId": "_type_b_table" },
+        "d": { "source": "none" }
+      }
+    },
+    {
+      "name": "gate-blocks-even-the-soft-cascade",
+      "summary": "PLACE tier 1 cascade: a gated explicit node passes no cascade at all, not even the soft one its own type rule would have given.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["domain"] }],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": false } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p", "entityType": "domain" }, { "urn": "c", "entityType": "attribute" }],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": { "p": { "layerId": "a", "source": "explicit" }, "c": { "source": "none" } }
+    },
+    {
+      "name": "gate-is-the-direct-parents-own-entry",
+      "summary": "PLACE tiers: only the direct parent's own entry gates; a grandparent's hand chain does not skip over a gated parent.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "g": { "layerId": "a", "inheritsChildren": true },
+              "p": { "layerId": "b", "inheritsChildren": false }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "g" }, { "urn": "p" }, { "urn": "h" }],
+      "edges": [
+        { "source": "g", "target": "p", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "h", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "g": { "layerId": "a", "source": "explicit" },
+        "p": { "layerId": "b", "source": "explicit" },
+        "h": { "source": "none" }
+      }
+    },
+    {
+      "name": "nearest-explicit-entry-wins",
+      "summary": "PLACE tier 1 before tier 2: a child's own entry beats its parent's hand cascade, and its own children inherit from it.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "p": { "layerId": "a", "inheritsChildren": true },
+              "c": { "layerId": "b", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p" }, { "urn": "c" }, { "urn": "g" }],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "c", "target": "g", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c": { "layerId": "b", "source": "explicit" },
+        "g": { "layerId": "b", "source": "inherited", "inheritedFrom": "c" }
+      }
+    },
+    {
+      "name": "unplaced-parent-passes-nothing",
+      "summary": "PLACE_ALL ctx: a parent placed nowhere offers no context; the child uses its own rule and passes a soft cascade on.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] }],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "folder" },
+        { "urn": "c", "entityType": "dataset" },
+        { "urn": "d", "entityType": "column" }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "c", "target": "d", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "source": "none" },
+        "c": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset" },
+        "d": { "layerId": "a", "source": "inherited", "inheritedFrom": "c" }
+      }
+    },
+    {
+      "name": "stale-parent-entry-gate-ignored",
+      "summary": "PLACE stale: a stale entry is absent, its inheritsChildren false included; the stale node inherits by hand and cascades by hand.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": {
+              "g": { "layerId": "a", "inheritsChildren": true },
+              "p": { "layerId": "gone", "inheritsChildren": false }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "g" }, { "urn": "p" }, { "urn": "c" }],
+      "edges": [
+        { "source": "g", "target": "p", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "g": { "layerId": "a", "source": "explicit" },
+        "p": { "layerId": "a", "source": "inherited", "inheritedFrom": "g", "staleExplicit": true },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" }
+      }
+    },
+    {
+      "name": "inherits-children-null-or-missing-cascades",
+      "summary": "COMPILE explicit: inheritsChildren !== false, so null or a missing key cascades by hand.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": null }, "q": { "layerId": "a" } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p" }, { "urn": "c" }, { "urn": "q" }, { "urn": "d" }],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "q", "target": "d", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "q": { "layerId": "a", "source": "explicit" },
+        "d": { "layerId": "a", "source": "inherited", "inheritedFrom": "q" }
+      }
+    },
+    {
+      "name": "stale-node-placed-by-rule-cascades-soft",
+      "summary": "PLACE stale: a stale node placed by its rule still cascades softly; staleExplicit belongs to that node only and is not inherited.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": ["domain"] }],
+            "assignments": { "p": { "layerId": "gone", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p", "entityType": "domain" }, { "urn": "c", "entityType": "attribute" }],
+      "edges": [{ "source": "p", "target": "c", "edgeType": "CONTAINS" }],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain", "staleExplicit": true },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" }
+      }
+    }
+  ]
+}

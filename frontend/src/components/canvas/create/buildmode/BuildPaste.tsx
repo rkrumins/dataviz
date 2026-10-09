@@ -6,7 +6,10 @@
  * used. Each previewed row shows its inferred TYPE and its type-derived
  * target column, from the SAME `typeId → layerId` map the Grid's Layer
  * column uses (`buildTypeLayerMap` over the view's own `useLayers()`), so
- * Paste placement always agrees with Outline/Grid. Rows with issues (illegal
+ * Paste placement always agrees with Outline/Grid. Flag-on (One Placement
+ * Contract), a top-level row shows `contractRowLayer` instead, the call Apply
+ * makes, and a nested row, which follows its parent unless its own layer rule
+ * claims it, shows no column. Rows with issues (illegal
  * type/nesting) are shown clearly and excluded — along with any descendant
  * under them, since their real parent never lands — from the count and the
  * add (mirrors `useHierarchyOutline.stageRows`'s cascading skip).
@@ -25,6 +28,7 @@ import type { EntityTypeSchema } from '@/types/schema'
 import { parseIndentedOutline, type OutlineParseContext, type ParsedOutlineRow } from '../outlineParser'
 import type { BuildOntologyCtx } from './validateBuildRows'
 import { buildTypeLayerMap } from './resolveRowLayer'
+import type { ContractRowLayer } from './BuildPanel'
 import { makeRow, type BuildRow } from './buildRow'
 import { useBuildRowsStore } from './buildRowsStore'
 
@@ -35,6 +39,8 @@ export interface BuildPasteProps {
    *  level — feeds `parseIndentedOutline`'s `rootParentType` so the preview's
    *  legality matches the panel's own scope banner. */
   rootParentType: string | null
+  /** Flag-on: the layer Apply draws a top-level row in (`BuildPanelProps.contractRowLayer`). */
+  contractRowLayer?: ContractRowLayer
 }
 
 const PLACEHOLDER = 'Sales Domain\n  Customers Platform\n    Orders Dataset'
@@ -82,7 +88,7 @@ function TypeChip({ type }: { type?: EntityTypeSchema }) {
   )
 }
 
-export function BuildPaste({ ctx, typeById, rootParentType }: BuildPasteProps) {
+export function BuildPaste({ ctx, typeById, rootParentType, contractRowLayer }: BuildPasteProps) {
   const [text, setText] = useState('')
   const rawRows = useBuildRowsStore((s) => s.rows)
   const setRows = useBuildRowsStore((s) => s.setRows)
@@ -145,7 +151,9 @@ export function BuildPaste({ ctx, typeById, rootParentType }: BuildPasteProps) {
         <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-1.5 space-y-0.5">
           {parsed.map((row, i) => {
             const type = row.typeId ? typeById.get(row.typeId) : undefined
-            const targetLayerId = row.typeId ? typeLayerMap.get(row.typeId.toLowerCase()) : undefined
+            const targetLayerId = contractRowLayer
+              ? (row.depth === 0 && row.typeId ? contractRowLayer(row) : undefined)
+              : row.typeId ? typeLayerMap.get(row.typeId.toLowerCase()) : undefined
             const targetLayerName = targetLayerId ? layerNameById.get(targetLayerId) : undefined
             const ownIssue = row.issues[0]
             const excluded = !included[i]

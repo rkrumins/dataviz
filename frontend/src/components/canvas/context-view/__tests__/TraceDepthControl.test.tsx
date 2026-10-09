@@ -12,7 +12,7 @@
  * the view over a flow already in hand, instantly, with no refetch.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { TraceDepthControl } from '../TraceDepthControl'
 import { usePreferencesStore } from '@/store/preferences'
 
@@ -49,6 +49,21 @@ describe('TraceDepthControl — the one depth rule', () => {
     fireEvent.click(screen.getByRole('button', { name: /all hops/i }))
     expect(onChange).toHaveBeenCalledWith('upstream', 25)
     expect(onChange).toHaveBeenCalledWith('downstream', 25)
+  })
+
+  it('wears the lineage direction pair: upstream is in, downstream is out', () => {
+    render(<TraceDepthControl upstreamDepth={3} downstreamDepth={7} onChange={vi.fn()} />)
+    const trigger = screen.getByRole('button', { name: /^depth/i })
+    expect(within(trigger).getByText('3').getAttribute('class')).toMatch(/\btext-lineage-in\b/)
+    expect(within(trigger).getByText('7').getAttribute('class')).toMatch(/\btext-lineage-out\b/)
+    expect(trigger.querySelector('.lucide-arrow-up')!.getAttribute('class')).toMatch(/\btext-lineage-in\b/)
+    expect(trigger.querySelector('.lucide-arrow-down')!.getAttribute('class')).toMatch(/\btext-lineage-out\b/)
+
+    fireEvent.click(trigger)
+    expect(screen.getByText('Upstream').getAttribute('class')).toMatch(/\btext-lineage-in\b/)
+    expect(screen.getByText('Downstream').getAttribute('class')).toMatch(/\btext-lineage-out\b/)
+    expect(screen.getByLabelText('Upstream depth slider').getAttribute('class')).toMatch(/\bbg-lineage-in\/15\b/)
+    expect(screen.getByLabelText('Downstream depth slider').getAttribute('class')).toMatch(/\bbg-lineage-out\/15\b/)
   })
 
   it('clamps a typed value to the walked ceiling', () => {

@@ -104,3 +104,72 @@ async def test_get_top_level_count_query_raises_on_connection_failure(monkeypatc
     monkeypatch.setattr(p, "_ro_query", _ro_query)
     with pytest.raises(ConnectionError):
         await p.get_top_level_or_orphan_nodes(include_child_count=False)
+
+
+# ── _is_query_memory_error ───────────────────────────────────────────────
+#
+# QUERY_MEM_CAPACITY exhaustion arrives as a generic ResponseError (no
+# distinct class), so it is matched by message like _is_missing_graph_error.
+# Getting this wrong in either direction is costly: a false negative sends a
+# deterministic failure back through the retry budget and the breaker, and a
+# false positive would treat a real maxmemory OOM as a shrinkable query.
+
+
+_QUERY_MEM = ResponseError("Query's mem consumption exceeded capacity")
+
+
+def test_query_memory_error_detected_bare():
+    from backend.app.providers.falkordb_provider import _is_query_memory_error
+    assert _is_query_memory_error(_QUERY_MEM)
+
+
+def test_query_memory_error_detected_through_cause_chain():
+    """The signal routinely arrives wrapped — the pipeline re-raises through
+    its own guards and the breaker relabels it further up."""
+    from backend.app.providers.falkordb_provider import _is_query_memory_error
+    try:
+        try:
+            raise _QUERY_MEM
+        except ResponseError as inner:
+            raise RuntimeError("aggregation pipeline on g failed") from inner
+    except RuntimeError as outer:
+        assert _is_query_memory_error(outer)
+
+
+# ── _is_query_timeout_error ──────────────────────────────────────────────
+#
+# Every query goes out with TIMEOUT = budget − 500 ms, so a slow query is
+# aborted by the SERVER and arrives as a generic ResponseError — not as the
+# client-side asyncio.TimeoutError. A consumer listening for the client
+# error alone never sees a real timeout.
+
+
+def test_query_timeout_error_detected_bare_and_through_cause_chain():
+    from backend.app.providers.falkordb_provider import _is_query_timeout_error
+    assert _is_query_timeout_error(ResponseError("Query timed out"))
+    assert _is_query_timeout_error(ResponseError("Query's execution time exceeded the limit"))
+    try:
+        try:
+            raise ResponseError("Query timed out")
+        except ResponseError as inner:
+            raise RuntimeError("aggregation pipeline on g failed") from inner
+    except RuntimeError as outer:
+        assert _is_query_timeout_error(outer)
+
+
+def test_connection_and_memory_errors_are_not_query_timeouts():
+    from backend.app.providers.falkordb_provider import _is_query_timeout_error
+    assert not _is_query_timeout_error(_CONN_REFUSED)
+    assert not _is_query_timeout_error(_QUERY_MEM)
+    assert not _is_query_timeout_error(_EMPTY_KEY)
+
+
+def test_instance_level_oom_is_not_a_query_memory_error():
+    """maxmemory exhaustion is a different ceiling with a different fix —
+    narrowing the query cannot help, so it must NOT enter the shrink ladder."""
+    from backend.app.providers.falkordb_provider import _is_query_memory_error
+    assert not _is_query_memory_error(
+        ResponseError("OOM command not allowed when used memory > 'maxmemory'.")
+    )
+    assert not _is_query_memory_error(_EMPTY_KEY)
+    assert not _is_query_memory_error(_CONN_REFUSED)

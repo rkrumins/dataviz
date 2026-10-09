@@ -14,6 +14,10 @@ Two regressions pinned here:
   it is attempted in one call or sequentially. The docstrings used to
   claim only the simultaneous case was blocked; these tests pin that
   both orders are.
+
+* On a DB whose seed migration never ran, the GET reports version 0 but
+  the PATCH used to create the row at 1, so every save that sent the
+  loaded ``expectedVersion`` came back 409.
 """
 import dataclasses
 import re
@@ -177,3 +181,39 @@ async def test_the_other_sequential_order_is_refused_as_well(
     blocked = await test_client.patch(CONFIG, json={"allowLocalLogin": False})
     assert blocked.status_code == 409, blocked.text
     assert blocked.json()["detail"]["error"] == "both_login_modes_disabled"
+
+
+# ── optimistic version on an unseeded DB ─────────────────────────────
+
+@pytest.mark.asyncio
+async def test_first_save_on_unseeded_db_uses_the_loaded_version(
+    test_client: AsyncClient,
+):
+    loaded = await test_client.get(CONFIG)
+    assert loaded.status_code == 200
+    assert loaded.json()["version"] == 0
+
+    first = await test_client.patch(
+        CONFIG, json={"allowJitProvisioning": False, "expectedVersion": 0},
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["version"] == 1
+
+    second = await test_client.patch(
+        CONFIG, json={"allowJitProvisioning": True, "expectedVersion": 1},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_version_after_a_save_returns_409(test_client: AsyncClient):
+    saved = await test_client.patch(
+        CONFIG, json={"allowJitProvisioning": False, "expectedVersion": 0},
+    )
+    assert saved.status_code == 200, saved.text
+
+    stale = await test_client.patch(
+        CONFIG, json={"allowJitProvisioning": True, "expectedVersion": 0},
+    )
+    assert stale.status_code == 409

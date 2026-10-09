@@ -173,7 +173,7 @@ This is the authoritative system of record and the single most important thing t
 | Edition / tier | **Enterprise Plus**, `db-perf-optimized-N-16` (**16 vCPU / 128 GB**) + data cache |
 | Storage | **1 TB SSD** (≈27% used at target; IOPS scale with size) |
 | HA | **Regional** (synchronous standby in a second zone — automatic failover) |
-| Replicas | **1 in-region read replica** (wired to the app `READONLY` pool — offloads heavy versioned diffs, exports, audits) + **1 cross-region replica** (DR) |
+| Replicas | **1 in-region read replica** (not used by the app today — every pool role, `READONLY` included, connects to `MANAGEMENT_DB_URL`; routing reads to a replica is future work) + **1 cross-region replica** (DR) |
 | Connectivity | Private IP / PSC only, TLS required; app connects via the Cloud SQL connector or private DNS |
 | Backups | Automated daily + **PITR (7-day WAL)**; cross-region replica doubles as DR |
 
@@ -204,7 +204,7 @@ One HA instance carries both schemas for launch (A4). The `graphver` split (§5.
 
 - `DB_POOL_PRE_PING=true` (default) — a Cloud SQL failover surfaces as a **~5 s blip** (stale connections detected and replaced), not stuck sockets.
 - Regional HA is **synchronous** → **zero RPO** on zonal failover; the standby promotes automatically, the private IP is unchanged, so no app repoint.
-- The read replica is **asynchronous** — the `READONLY` pool tolerates seconds of lag (it serves diffs/exports/audits, never authoritative reads).
+- The read replica is **asynchronous**. The app does not read from it today (the `READONLY` pool connects to the primary like every other role), so its lag affects only what you point at it yourself.
 
 ### 5.4 Connection management under horizontal scale (the section that must always balance)
 
@@ -233,7 +233,7 @@ GRAPHVER_POOL_SIZE=6       GRAPHVER_POOL_MAX_OVERFLOW=3
 
 **Session-mode pooling does NOT solve the multiplication.** SQLAlchemy holds `pool_size` connections open (idle between requests); a *session*-mode pooler pins a server backend for each held connection's lifetime, so server connections ≈ the ~2,400 held client connections. No reduction — you'd still exhaust `max_connections`.
 
-**Only transaction-mode pooling multiplexes**, because it returns the backend to the pool *after each transaction*. The ~2,400 client connections are idle ~99% of the time and collapse onto a small server pool sized by *concurrent-in-transaction* count. (Safe here: the web tier's transactions are ms-scale; the long-hold exception — `GRAPH_READ` across a 30 s trace — holds an *app-side* connection during awaited provider I/O, which is not an open DB transaction.)
+**Only transaction-mode pooling multiplexes**, because it returns the backend to the pool *after each transaction*. The ~2,400 client connections are idle ~99% of the time and collapse onto a small server pool sized by *concurrent-in-transaction* count. (The web tier's transactions are ms-scale, with one exception: a graph request's `GRAPH_READ` session stays *idle in transaction* for the whole request, FalkorDB call included, so a transaction pooler can't multiplex it. Size the server pool for concurrent graph requests; see `docs/SCALING_CONCURRENT_USERS.md` §4.5.)
 
 > **Required app setting.** Transaction/statement-mode pooling with asyncpg needs server-side prepared statements disabled, or they collide across multiplexed backends (`prepared statement "__asyncpg_stmt_N__" already exists`). Set **`DB_POOLER_MODE=transaction`** on every backend tier; `db/engine.py` then passes `statement_cache_size=0` to asyncpg. This is verified correct for SQLAlchemy 2.0 (whose asyncpg dialect routes prepared-statement caching *through* asyncpg's `statement_cache_size` — there is no separate dialect knob) and is exactly what GCP documents for asyncpg behind Cloud SQL Managed Connection Pooling. Leave it **unset** for dev / direct connections so prepared statements (the query-plan-cache win) stay on.
 
@@ -318,19 +318,38 @@ Node `n4-highmem-8` (8 vCPU / 64 GB), requests ≈ limits (the pod owns the node
 
 ```conf
 cluster-enabled yes
-cluster-node-timeout 5000
+cluster-node-timeout 15000            # a busy node is not a dead node; 5s started elections during heavy rebuilds
 cluster-require-full-coverage no      # a dead shard must not take down reads on the other two
 cluster-migration-barrier 1
-maxmemory 40gb                        # ~62% of the 64 GB node; the rest covers fork COW, replica buffers, query memory
+maxmemory 32gb                        # sized by the rule below, not by a share of the node
 maxmemory-policy noeviction           # Redis must never silently evict a graph key; eviction is the app's job (budgets below)
 appendonly yes
 appendfsync everysec
 save 3600 1                           # hourly RDB floor; the DR CronJob triggers explicit BGSAVE
-repl-backlog-size 256mb
+repl-backlog-size 1gb                 # the catch-up window; a rebuild fills 256mb in seconds and forces full resyncs
 repl-diskless-sync yes
+repl-timeout 300                      # a full resync of a large shard takes longer than a minute
+client-output-buffer-limit replica 2gb 1gb 300   # overflow drops the replica and forces a full resync under the same load
 ```
 
-FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  CACHE_SIZE 40  QUERY_MEM_CAPACITY 2147483648  TIMEOUT_MAX 120000  MAX_QUEUED_QUERIES 150` — `THREAD_COUNT 6` (of 8) reserves cores for Redis I/O + AOF rewrite + replication; `QUERY_MEM_CAPACITY` 2 GiB bounds a runaway Cypher query. PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 6× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. Liveness `initialDelaySeconds: 60` (RDB load of a full shard is minutes).
+FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  OMP_THREAD_COUNT 1  CACHE_SIZE 40  QUERY_MEM_CAPACITY 1073741824  TIMEOUT_MAX 120000  TIMEOUT_DEFAULT 30000  MAX_QUEUED_QUERIES 150  EFFECTS_THRESHOLD 0`.
+
+- `THREAD_COUNT 6` (of 8) reserves cores for Redis I/O, AOF rewrite and replication; `OMP_THREAD_COUNT 1` stops one query spawning a thread per core inside the engine.
+- **The memory numbers come from the sizing rule, not from a share of the node.** Every term below is charged inside the SAME 56 GiB container limit — replication included:
+
+  | Term | Figure | GiB |
+  | :--- | :--- | ---: |
+  | Dataset | `1.25 × 32gb` | 40.0 |
+  | Query memory | `6 × 1.3 × 1gb` | 7.8 |
+  | Replication backlog | `repl-backlog-size 1gb` | 1.0 |
+  | Replica output buffers | `2 replicas × 2gb hard` | 4.0 |
+  | Server overhead | instance ≥ 32 GiB | 1.0 |
+  | **Needed** | | **53.8** |
+
+  Two pairings that do **not** fit: `maxmemory 40gb` with a 2 GiB per-query ceiling needs **66.6 GiB** even ignoring replication (these were the shipped values before this was checked, so a shard under load could be OOM-killed while every figure inside Redis looked healthy); and a 1.5 GiB ceiling needs **57.7 GiB** once the replication buffers are counted. Raising replication buffers is a memory decision, not only a durability one. Check what each shard currently holds before lowering `maxmemory`. Full rule and worked examples: `FALKORDB_DEPLOYMENT.md` § *Sizing: the ceilings share ONE budget*.
+- `EFFECTS_THRESHOLD 0` makes writes replicate as a compact change log instead of being **re-run on each replica's main thread** — the mechanism that took whole shards down during rebuilds (`FALKORDB_DEPLOYMENT.md` §5aa).
+
+PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 8× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. Liveness `initialDelaySeconds: 60` with `timeoutSeconds: 10` and `failureThreshold: 6` — a node busy applying replication is not a dead process, and the readiness probe already takes it out of rotation.
 
 ### 7.3 Mandatory application settings in cluster mode
 
@@ -340,12 +359,12 @@ FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  CACHE_SIZE 40  QUER
 | `FALKORDB_CLUSTER_NODES` | 3 shard-0 pod DNS names | Any three seeds; the client discovers the rest |
 | `REDIS_CACHE_*` (legacy `CACHE_REDIS_URL`) | `synodic-redis-cache` (§6) | **Required** — the provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and (per ADR-020/ADR-022) refuses to co-locate on FalkorDB |
 | `GRAPHVER_FALKOR_BUDGETS` / `GRAPHVER_FALKOR_MAX_RESIDENT` | ≈ shard `maxmemory` × 0.8 per provider | Turns on cold-graph eviction so residency tracks the ~40M working set, not the full 45M+growth corpus |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | `true` (default) | Constant-memory, crash-resumable aggregation instead of full-graph in-memory accumulation |
+| `AGGREGATION_SHARD_RESERVE_PCT` | `20` (default) | Share of a shard's `maxmemory` a rebuild must leave free: the write budget reads the owning shard's `used_memory` before storing rollups and refuses, naming the shortfall, rather than filling it |
 | `GRAPHVER_READ_MAX_LAG` | `0` (strict) — small `>0` acceptable during bulk imports | Governs FalkorDB-vs-Cloud-SQL read-freshness fallback |
 
 ### 7.4 Placement & rebuild
 
-Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monitor per-shard `used_memory`; on skew, **move graphs** (drop + rebuild-from-Cloud-SQL onto the target shard), never live-reshard hot slots. The registry + rebuild-from-Postgres makes moves cheap. Full-cluster data loss is **acceptable by design** — every graph reseeds from Cloud SQL; RDB snapshots only shorten the rebuild.
+Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monitor per-shard `used_memory`; on skew, **move graphs** (drop + rebuild-from-Cloud-SQL onto the target shard), never live-reshard hot slots. The aggregation rebuild reads that same `used_memory` against `maxmemory` on the owning shard before it writes rollups (`docs/AGGREGATION_PIPELINE.md`), so a shard nearing its reserve shows up first as a refused rebuild that names the shard — the cue to move a graph. The registry + rebuild-from-Postgres makes moves cheap. Full-cluster data loss is **acceptable by design** — every graph reseeds from Cloud SQL; RDB snapshots only shorten the rebuild.
 
 ---
 
@@ -378,7 +397,7 @@ Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monito
 | Memorystore | memory, evictions (cache) / rejected-writes (coord) | coord evictions **any**; cache OOM |
 | GKE | pod restarts (falkordb pool), PDB violations, HPA at ceiling | any / sustained-at-max |
 
-> **The single most important gap to close first** (see [TECHNICAL_DEBT §6.2](./TECHNICAL_DEBT.md)): the app currently *collects* these counters but has **no `/metrics` scrape endpoint**. Wire Prometheus/GCP Managed Prometheus export before this topology goes live — resilience you can't observe fails silently.
+> **The single most important gap to close first** (see [TECHNICAL_DEBT §1.4](./TECHNICAL_DEBT.md)): the app now *exports* these counters on a `/metrics` endpoint, but it is **off by default and nothing scrapes it or alerts on it**. Turn it on and wire Prometheus/GCP Managed Prometheus scraping and alerts before this topology goes live — resilience you can't observe fails silently.
 
 ---
 
@@ -419,7 +438,7 @@ Phased; each gate verifiable before the next.
 **Before this is truly production-ready, close these (they are outside the overlay):**
 1. **Enable Managed Connection Pooling on the Cloud SQL instance** (transaction mode) — the app-side `DB_POOLER_MODE=transaction` is necessary but not sufficient; the pooler itself is instance config (§5.4).
 2. **FalkorDB is the single base StatefulSet, not the 3-shard Redis Cluster** of §7 — stand that up on the tainted node pool for real read-layer HA/throughput.
-3. **Egress hardening (SSRF):** add a `default-deny-egress` NetworkPolicy + explicit allows to the Cloud SQL / Memorystore / FalkorDB CIDRs and the connection-tester allowlist (see [TECHNICAL_DEBT §6.2](./TECHNICAL_DEBT.md)). Left open here so first deploy connects; tighten once endpoints are known.
+3. **Egress hardening (SSRF):** add a `default-deny-egress` NetworkPolicy + explicit allows to the Cloud SQL / Memorystore / FalkorDB CIDRs and the connection-tester allowlist (see [TECHNICAL_DEBT §1.2](./TECHNICAL_DEBT.md)). Left open here so first deploy connects; tighten once endpoints are known.
 4. **TLS in transit (Cloud SQL):** enable SSL on the Cloud SQL instance, then switch the DSN to enforce it (asyncpg `ssl`). *(Redis TLS is no longer open — per-role `REDIS_{STREAMS,CACHE}_TLS_*` + cert-Secret mounts on `/certs/streams`/`/certs/cache` already ship in the base manifests (ADR-022); flip `REDIS_STREAMS_TLS_ENABLED`/`REDIS_CACHE_TLS_ENABLED=true` and mount the CA to enable it.)*
 
 ---
@@ -443,5 +462,4 @@ Phased; each gate verifiable before the next.
 | `GRAPHVER_FALKOR_BUDGETS` / `_MAX_RESIDENT` | projection worker | ≈ shard `maxmemory` × 0.8 per provider |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | projection worker | `8` |
 | `GRAPHVER_READ_MAX_LAG` | web tiers | `0` (strict) |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | workers | `true` |
 | `IMPORT_COMMIT_WINDOW` | import worker | `50000` |

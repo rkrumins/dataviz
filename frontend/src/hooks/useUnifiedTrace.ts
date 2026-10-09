@@ -20,6 +20,7 @@ import type {
     TraceV2Result, TraceV2Request,
 } from '@/providers/GraphDataProvider'
 import type { TraceMeta } from '@/services/traceApi'
+import { lookupRetryDelayMs } from '@/config/polling'
 import { mapWithConcurrency } from '@/lib/concurrency'
 import { useCanvasStore } from '@/store/canvas'
 import { recordEvent } from '@/services/telemetryService'
@@ -290,6 +291,14 @@ const DEFAULT_CONFIG: TraceConfig = {
 // Zustand Store
 // ============================================
 
+/** Bumped whenever a trace's drills are dropped (cleared, or another trace
+ *  started): a drill still out then writes nothing. */
+let traceGeneration = 0
+
+/** Why a drill is cut the same way every time it is asked: a cap. The
+ *  server's own list (graph_cache._DETERMINISTIC_CUTS). */
+const DETERMINISTIC_CUTS = new Set(['max_nodes', 'degree_cap', 'orphan', 'truncated'])
+
 export const useTraceStore = create<TraceState>((set, get) => ({
     status: 'idle',
     error: null,
@@ -305,6 +314,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
 
     setFocus: (nodeId) => {
         if (nodeId === null) {
+            traceGeneration += 1
             set({ focusId: null, result: null, status: 'idle', drilldowns: new Map(), addedEdgeIds: new Set() })
         } else {
             set({ focusId: nodeId })
@@ -324,6 +334,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
         const { config } = get()
 
         // New trace clears any drilldowns and tracked edges from a previous focus.
+        traceGeneration += 1
         set({ status: 'loading', error: null, focusId: nodeId, drilldowns: new Map(), addedEdgeIds: new Set() })
 
         try {
@@ -473,40 +484,62 @@ export const useTraceStore = create<TraceState>((set, get) => ({
         // drill flow keeps working. Without this fallback, a single
         // backend bug in /trace/expand-batch silently breaks the trace
         // (the user sees only the level-0 skeleton with no way to drill).
-        const callPerEdge = async (): Promise<TraceV2Result | null> => {
+        // Only the pairs that answered are cached as drilled: one that failed
+        // is asked again on the next expand.
+        let drilled = uncached
+        const callPerEdge = async (concurrency = 6): Promise<TraceV2Result | null> => {
             if (typeof provider.expandAggregated !== 'function') return null
             // Bounded fan-out (6, matching the browser's HTTP/1.1 per-origin
             // cap): the previous unbounded Promise.allSettled fired one
             // /trace/expand per pair with NO cap — the exact storm the
             // batch endpoint exists to prevent, re-created on its fallback.
-            const settled = await mapWithConcurrency(uncached, 6, p => provider.expandAggregated!({
+            const settled = await mapWithConcurrency(uncached, concurrency, p => provider.expandAggregated!({
                 sourceUrn: p.sourceUrn,
                 targetUrn: p.targetUrn,
                 nextLevel: p.nextLevel,
                 lineageEdgeTypes: config.lineageEdgeTypes.length > 0 ? config.lineageEdgeTypes : null,
                 includeContainmentEdges: config.includeContainmentEdges,
             }))
+            drilled = uncached.filter((_, i) => settled[i].status === 'fulfilled')
             const ok = settled
                 .filter((s): s is PromiseFulfilledResult<TraceV2Result> => s.status === 'fulfilled')
                 .map(s => s.value)
             return ok.length > 0 ? mergeDrilldownResults(ok) : null
         }
 
+        // A 429 here has already been asked again by the transport: the
+        // store is shedding. Drilling every pair at once would put that many
+        // more reads on it, so the batch is asked once more after the
+        // backoff. Shed again, the pairs are asked one at a time, two at
+        // most, each retrying its own 429: one shed pair no longer costs the
+        // lines of the rest.
+        const isShed = (err: unknown) => (err as { status?: number } | null)?.status === 429
+        const pause = (err: unknown) => new Promise<void>(resolve => setTimeout(resolve,
+            Math.max(lookupRetryDelayMs(1), (err as { retryAfterMs?: number }).retryAfterMs ?? 0)))
+        const askBatch = () => provider.expandAggregatedBatch!({
+            pairs: uncached,
+            lineageEdgeTypes: config.lineageEdgeTypes.length > 0 ? config.lineageEdgeTypes : null,
+            includeContainmentEdges: config.includeContainmentEdges,
+        })
+        // A trace cleared or replaced while this was out is not written into.
+        const generation = traceGeneration
+        const current = () => generation === traceGeneration
+
         let merged: TraceV2Result | null = null
         try {
             if (typeof provider.expandAggregatedBatch === 'function') {
                 try {
-                    merged = await provider.expandAggregatedBatch({
-                        pairs: uncached,
-                        lineageEdgeTypes: config.lineageEdgeTypes.length > 0 ? config.lineageEdgeTypes : null,
-                        includeContainmentEdges: config.includeContainmentEdges,
+                    merged = await askBatch().catch(async (err: unknown) => {
+                        if (!isShed(err)) throw err
+                        await pause(err)
+                        return askBatch()
                     })
                 } catch (err) {
                     // Log the batch failure but don't abort — drill back via per-edge.
                     console.warn('[trace] expand-batch failed, falling back to per-edge expand:', err)
-                    merged = await callPerEdge()
+                    merged = await callPerEdge(isShed(err) ? 2 : 6)
                     if (!merged) {
-                        set({ error: err instanceof Error ? err.message : 'Failed to expand aggregated edges (batch)' })
+                        if (current()) set({ error: err instanceof Error ? err.message : 'Failed to expand aggregated edges (batch)' })
                         return null
                     }
                 }
@@ -514,6 +547,14 @@ export const useTraceStore = create<TraceState>((set, get) => ({
                 merged = await callPerEdge()
                 if (!merged) return null
             }
+            if (!current()) return null
+
+            // An answer cut short for a reason that is not a cap lost some
+            // pair for now (failover, a breaker, a deadline), and it does not
+            // say which. Its lines are drawn, but no pair is cached, so the
+            // next expand asks again. A cap cuts the same way every time.
+            if (merged?.truncated && merged.truncationReason != null
+                && !DETERMINISTIC_CUTS.has(merged.truncationReason)) drilled = []
 
             // Cache the merged response under each (s, t, nextLevel) key so
             // future calls for the same pair are no-ops. The cached entry per
@@ -521,7 +562,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
             // the lookup contract identical to single-edge expand.
             const next = new Map(get().drilldowns)
             if (merged) {
-                for (const p of uncached) {
+                for (const p of drilled) {
                     const key = drilldownKey(p.sourceUrn, p.targetUrn, p.nextLevel)
                     next.set(key, merged)
                 }
@@ -547,6 +588,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
         // Note: addedEdgeIds is intentionally *not* cleared here. The canvas
         // reads it after clearTrace to know which edges to remove from the
         // store, then clears it explicitly via the action below.
+        traceGeneration += 1
         set({
             focusId: null,
             result: null,
@@ -574,6 +616,7 @@ export const useTraceStore = create<TraceState>((set, get) => ({
     },
 
     reset: () => {
+        traceGeneration += 1
         set({
             status: 'idle',
             error: null,

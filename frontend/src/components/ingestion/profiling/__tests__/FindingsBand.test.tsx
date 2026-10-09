@@ -16,10 +16,12 @@ vi.mock('@/hooks/useProfilingAccess', () => ({
 }))
 
 const getFindings = vi.fn()
+const acknowledgeMany = vi.fn()
 vi.mock('@/services/profilingService', () => ({
     profilingService: {
         getFindings: (...a: unknown[]) => getFindings(...a),
         acknowledge: vi.fn().mockResolvedValue({}),
+        acknowledgeMany: (...a: unknown[]) => acknowledgeMany(...a),
     },
 }))
 
@@ -42,18 +44,36 @@ function finding(over: Partial<Finding> = {}): Finding {
 }
 
 function renderIt() {
+    return renderBand('ds_a')
+}
+
+/** The board's mount: no source, so the band covers everything the caller
+ *  can see. Its own helper because `renderUnscoped()` would fall through
+ *  to the default and silently test the scoped case instead. */
+function renderUnscoped() {
+    return renderBand(undefined)
+}
+
+function renderBand(dataSourceId: string | undefined) {
     const client = new QueryClient({
         defaultOptions: { queries: { retry: false, gcTime: 0 } },
     })
     return render(
         <QueryClientProvider client={client}>
-            <FindingsBand dataSourceId="ds_a" />
+            <FindingsBand dataSourceId={dataSourceId} />
         </QueryClientProvider>,
     )
 }
 
 describe('FindingsBand', () => {
-    beforeEach(() => getFindings.mockReset())
+    beforeEach(() => {
+        getFindings.mockReset()
+        acknowledgeMany.mockReset()
+        acknowledgeMany.mockResolvedValue({
+            alerts: [], total: 1, openCount: 0, offset: 0, limit: 50,
+            platform_wide: false, acknowledged: 1,
+        })
+    })
 
     it('leads with what is outstanding', async () => {
         getFindings.mockResolvedValue({
@@ -119,5 +139,82 @@ describe('FindingsBand', () => {
         const { container } = renderIt()
         await waitFor(() => expect(getFindings).toHaveBeenCalled())
         await waitFor(() => expect(container.textContent).toBe(''))
+    })
+})
+
+describe('FindingsBand — marking a whole set seen', () => {
+    beforeEach(() => {
+        getFindings.mockReset()
+        acknowledgeMany.mockReset()
+        acknowledgeMany.mockResolvedValue({
+            alerts: [], total: 3, openCount: 0, offset: 0, limit: 50,
+            platform_wide: true, acknowledged: 47,
+        })
+    })
+
+    const open = (over = {}) => ({
+        alerts: [finding()], total: 3, openCount: 47, offset: 0, limit: 50,
+        platform_wide: true, ...over,
+    })
+
+    it('clears one source immediately — its blast radius is on screen', async () => {
+        getFindings.mockResolvedValue(open())
+        renderIt()
+        await userEvent.click(
+            await screen.findByRole('button', { name: /mark all seen/i }),
+        )
+        await waitFor(() => expect(acknowledgeMany).toHaveBeenCalledTimes(1))
+        // React Query hands the mutationFn a second context argument.
+        expect(acknowledgeMany).toHaveBeenCalledWith(
+            expect.objectContaining({ dataSourceId: 'ds_a', openOnly: true }),
+            expect.anything(),
+        )
+        expect(screen.queryByText(/clears them for everyone/i)).not.toBeInTheDocument()
+    })
+
+    it('asks first when the press covers every source it can see', async () => {
+        getFindings.mockResolvedValue(open())
+        renderUnscoped()
+        await userEvent.click(
+            await screen.findByRole('button', { name: /mark all seen/i }),
+        )
+        // Nothing has happened yet.
+        expect(acknowledgeMany).not.toHaveBeenCalled()
+        // ...and the two non-obvious consequences are both stated.
+        const dialog = await screen.findByRole('dialog')
+        expect(dialog).toHaveTextContent(/clears them for everyone/i)
+        expect(dialog).toHaveTextContent(/lets retention delete them/i)
+    })
+
+    it('counts what it will actually clear, not what is on the page', async () => {
+        // The band fetches 50 and the verb clears ALL of them. Quoting
+        // findings.length would understate what the button does — here, "1"
+        // against the 47 it is about to acknowledge.
+        getFindings.mockResolvedValue(open())
+        renderUnscoped()
+        await userEvent.click(
+            await screen.findByRole('button', { name: /mark all seen/i }),
+        )
+        expect(await screen.findByRole('dialog')).toHaveTextContent(
+            /mark 47 findings seen/i,
+        )
+    })
+
+    it('offers nothing to clear when nothing is open', async () => {
+        getFindings.mockResolvedValue(open({ alerts: [], openCount: 0 }))
+        renderIt()
+        await screen.findByText(/nothing outstanding/i)
+        expect(
+            screen.queryByRole('button', { name: /mark all seen/i }),
+        ).not.toBeInTheDocument()
+    })
+
+    it('stays off the history tab, where it would be ambiguous', async () => {
+        getFindings.mockResolvedValue(open())
+        renderIt()
+        await userEvent.click(await screen.findByRole('button', { name: 'All' }))
+        await waitFor(() => expect(
+            screen.queryByRole('button', { name: /mark all seen/i }),
+        ).not.toBeInTheDocument())
     })
 })

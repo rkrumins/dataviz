@@ -13,6 +13,7 @@ import {
     type DataSourceGroup,
     type GroupSortKey,
 } from './DataSourceGroupCard'
+import { useGraphPlacements } from '../shared/useGraphStoreTopology'
 
 // ── Failure Correlation ──────────────────────────────────────────────
 
@@ -104,6 +105,10 @@ export const JobHistoryGroupedView = memo(function JobHistoryGroupedView({
         const built = buildGroups(jobs, dsLookup, allDataSources)
         return sortGroups(built, sortKey)
     }, [jobs, dsLookup, allDataSources, sortKey])
+
+    // Which shard each of these sources is on — ONE request for the page,
+    // not one per card. A group card without it just shows no chip.
+    const { data: placements } = useGraphPlacements(groups.map(g => g.dataSourceId))
 
     // Auto-expand groups with active jobs on first render
     const didAutoExpand = useRef(false)
@@ -247,6 +252,7 @@ export const JobHistoryGroupedView = memo(function JobHistoryGroupedView({
                             purgeConfirm={purgeConfirm}
                             setPurgeConfirm={setPurgeConfirm}
                             actionLoading={actionLoading}
+                            placement={placements?.placements?.[group.dataSourceId] ?? null}
                         />
                     ))}
                 </AnimatePresence>

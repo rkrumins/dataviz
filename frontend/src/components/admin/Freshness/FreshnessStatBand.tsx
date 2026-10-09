@@ -11,9 +11,10 @@
  * tile's number equals the rows it reveals. When ``summary`` is null (fleet too
  * large to summarise), the band renders nothing.
  */
-import { AlertTriangle, CheckCircle2, Database, Layers, Loader2, MinusCircle, Waves } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Database, Layers, Loader2, MinusCircle, PauseCircle, Waves } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FreshnessSummary } from '@/services/freshnessService'
+import { DRIFT_SPEC } from './DriftStateBadge'
 import type { StatusFacet } from './freshnessTriage'
 
 interface Accent {
@@ -39,6 +40,10 @@ const ACCENTS: Record<string, Accent> = {
     // besides, because those two hues are close enough that colour alone must
     // never be what tells them apart.
     rose: { chip: 'bg-rose-500/15 text-rose-500', value: 'text-rose-600 dark:text-rose-400', activeRing: 'border-rose-500/60 ring-rose-500/30', restTint: 'bg-rose-500/[0.04] border-rose-500/25' },
+    // The one tile that only appears when it has something to say, so it is
+    // allowed to be the loudest thing in the band: a full red border and a
+    // tint two steps warmer than Drifting's, which it sits next to.
+    red: { chip: 'bg-red-500/15 text-red-500', value: 'text-red-600 dark:text-red-400', activeRing: 'border-red-500/60 ring-red-500/30', restTint: 'bg-red-500/[0.07] border-red-500/40' },
 }
 
 function Tile({
@@ -97,8 +102,28 @@ export function FreshnessStatBand({ summary, activeFacet, onToggle }: {
 
     const coverage = summary.total > 0 ? Math.round((summary.cacheStamped / summary.total) * 100) : 0
 
+    // The only conditional tile in the band. A permanent "0 connections not up
+    // to date" would be noise on every healthy fleet, and this state is rare
+    // and red; it earns its place by appearing. It also stays rendered while
+    // it is the active facet, so clearing a filter never removes the control
+    // that set it.
+    const stalled = summary.projectionStalled ?? 0
+    const showStalled = stalled > 0 || activeFacet === 'projectionStalled'
+    // Same rule for the second conditional tile: a permanent "0 held" would
+    // be noise, and a pause is something an operator chose — it earns its
+    // tile by existing, and stays while it is the active facet.
+    const held = summary.held ?? 0
+    const showHeld = held > 0 || activeFacet === 'held'
+    const wideCols = (['wide:grid-cols-7', 'wide:grid-cols-8', 'wide:grid-cols-9'] as const)[
+        (showStalled ? 1 : 0) + (showHeld ? 1 : 0)
+    ]
+
     return (
-        <div role="group" aria-label="Fleet summary" className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 wide:grid-cols-7 gap-3">
+        <div
+            role="group"
+            aria-label="Fleet summary"
+            className={cn('grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3', wideCols)}
+        >
             <Tile
                 icon={Layers} label="Total sources" value={summary.total.toLocaleString()}
                 accent={ACCENTS.indigo} active={activeFacet === ''}
@@ -109,6 +134,29 @@ export function FreshnessStatBand({ summary, activeFacet, onToggle }: {
                 accent={ACCENTS.emerald} active={activeFacet === 'ready'}
                 onToggle={() => toggle('ready')}
             />
+            {/* Ahead of Drifting, because it outranks it: a drifting source
+                is serving stale rolled-up connections, this one is serving
+                none. Never folded INTO Drifting — that tile's remedy is a
+                rebuild, and a rebuild does not restart a projector. The two
+                sit adjacent in red and rose, so the icon (Unplug vs Waves)
+                and the full label carry the distinction. */}
+            {showStalled && (
+                <Tile
+                    icon={DRIFT_SPEC.projectionStalled.Icon}
+                    label={DRIFT_SPEC.projectionStalled.label}
+                    value={stalled.toLocaleString()}
+                    accent={ACCENTS.red} active={activeFacet === 'projectionStalled'}
+                    onToggle={() => toggle('projectionStalled')}
+                    // Plain ``text-ink-muted``, no alpha: it is a bare var()
+                    // token, so a ``/70`` suffix would emit no rule at all and
+                    // this line would render invisible.
+                    secondary={
+                        <p className="mt-2 text-[10px] text-ink-muted leading-snug">
+                            Rolled-up connections are missing — a rebuild won't fix it
+                        </p>
+                    }
+                />
+            )}
             <Tile
                 icon={Waves} label="Drifting" value={(summary.drifting ?? 0).toLocaleString()}
                 accent={ACCENTS.rose} active={activeFacet === 'drifting'}
@@ -136,6 +184,21 @@ export function FreshnessStatBand({ summary, activeFacet, onToggle }: {
                 accent={ACCENTS.slate} active={activeFacet === 'notBuilt'}
                 onToggle={() => toggle('notBuilt')}
             />
+            {/* Slate, like Not built: a hold is quiet by design. It is NOT
+                part of Needs attention — the operator paused these to get
+                them out of that count. */}
+            {showHeld && (
+                <Tile
+                    icon={PauseCircle} label="Automation held" value={held.toLocaleString()}
+                    accent={ACCENTS.slate} active={activeFacet === 'held'}
+                    onToggle={() => toggle('held')}
+                    secondary={
+                        <p className="mt-2 text-[10px] text-ink-muted leading-snug">
+                            Paused or stopped by an operator — still watched, not rebuilt
+                        </p>
+                    }
+                />
+            )}
             <Tile
                 icon={Database} label="Cache coverage" value={`${coverage}%`}
                 accent={ACCENTS.violet} active={activeFacet === 'cacheStamped'}

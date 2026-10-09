@@ -22,14 +22,18 @@ export const QUICK_SUGGESTIONS = [
 // ───────────────────────────────────────────────────────────────────────────────
 // Category Colors (Search Results)
 // ───────────────────────────────────────────────────────────────────────────────
-export type SearchResultCategory = 'Workspace' | 'Data Source' | 'View' | 'Template' | 'Semantic Layer'
+export type SearchResultCategory =
+    | 'Page' | 'Workspace' | 'Data Source' | 'View' | 'Template' | 'Semantic Layer' | 'Setting' | 'Doc'
 
 export const CATEGORY_COLORS: Record<SearchResultCategory, string> = {
+    Page: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
     Workspace: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
     'Data Source': 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
     View: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
     Template: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
     'Semantic Layer': 'bg-cyan-500/10 text-cyan-500 border-cyan-500/20',
+    Setting: 'bg-slate-500/10 text-slate-500 border-slate-500/20',
+    Doc: 'bg-teal-500/10 text-teal-500 border-teal-500/20',
 }
 
 // ───────────────────────────────────────────────────────────────────────────────

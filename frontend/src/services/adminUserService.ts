@@ -1,9 +1,18 @@
 /**
  * Admin User Service — manage user accounts, roles, and approvals.
  */
-import { authFetch } from './apiClient'
+import { authFetch, authFetchPage } from './apiClient'
 
 const ADMIN_USERS_API = '/api/v1/admin/users'
+
+/** One linked SSO identity as the admin list carries it. */
+export interface AdminUserIdentityRef {
+    providerId: string
+    slug: string
+    displayName: string
+    kind: string
+    lastLoginAt: string | null
+}
 
 export interface AdminUserResponse {
     id: string
@@ -19,6 +28,57 @@ export interface AdminUserResponse {
     /** Still holding a shipped default password, and required to
      *  change it before it can do anything else. */
     mustChangePassword: boolean
+    /** How the account signs in: a usable password (the disabled
+     *  sentinel counts as none)… */
+    hasPassword: boolean
+    /** …where the account came from (local_signup | sso_jit | invite |
+     *  admin_created | admin_linked)… */
+    signupSource: string | null
+    /** …and the SSO identities linked to it, with which IdP each is. */
+    identities: AdminUserIdentityRef[]
+    /** Break-glass: keeps password sign-in under SSO enforcement, and
+     *  forced sign-out sweeps skip it. */
+    isSystemAccount: boolean
+    /** Last successful sign-in of any kind (password, invite, OIDC, SAML,
+     *  portal, Enterprise Gateway, silent gateway re-sign-in). The three
+     *  activity stamps are null until it happens after tracking began, and
+     *  absent from older servers. */
+    lastLoginAt?: string | null
+    /** Last time the account had the app open (its last authenticated
+     *  request), to 5-minute resolution. */
+    lastSeenAt?: string | null
+    /** Last action that counts toward Activity analytics (opened a view,
+     *  searched/traced, exported/published, edited a view), to 5-minute
+     *  resolution. */
+    lastActiveAt?: string | null
+}
+
+/** The admin user list's sortable columns. The server sorts by what each
+ *  column shows (the resolved display name, the role or its default);
+ *  never-seen / never-signed-in accounts sort last either way. */
+export type AdminUserSort =
+    | 'name' | 'email' | 'status' | 'role' | 'createdAt' | 'lastSeenAt' | 'lastLoginAt'
+
+export interface ListUsersParams {
+    status?: string
+    /** Matched server-side against name, email, user id, role and the
+     *  linked sign-in providers. */
+    search?: string
+    sort?: AdminUserSort
+    order?: 'asc' | 'desc'
+    limit: number
+    offset?: number
+}
+
+/** Counts across every account — the list itself is paged. */
+export interface AdminUserStats {
+    total: number
+    pending: number
+    active: number
+    suspended: number
+    /** Platform admins: super_admin + org_admin. */
+    admins: number
+    resetRequested: number
 }
 
 export interface ResetTokenResponse {
@@ -123,9 +183,22 @@ export interface CreateInviteOptions {
 }
 
 export const adminUserService = {
-    listUsers(status?: string): Promise<AdminUserResponse[]> {
-        const params = status ? `?status=${encodeURIComponent(status)}` : ''
-        return authFetch<AdminUserResponse[]>(`${ADMIN_USERS_API}${params}`)
+    /** One page of accounts, searched and sorted server-side. ``total`` is
+     *  how many match across EVERY page — never infer it from the page. */
+    listUsers(params: ListUsersParams): Promise<{ items: AdminUserResponse[]; total: number }> {
+        const query = new URLSearchParams({
+            limit: String(params.limit),
+            offset: String(params.offset ?? 0),
+        })
+        if (params.status) query.set('status', params.status)
+        if (params.search?.trim()) query.set('search', params.search.trim())
+        if (params.sort) query.set('sort', params.sort)
+        if (params.order) query.set('order', params.order)
+        return authFetchPage<AdminUserResponse>(`${ADMIN_USERS_API}?${query}`)
+    },
+
+    getStats(): Promise<AdminUserStats> {
+        return authFetch<AdminUserStats>(`${ADMIN_USERS_API}/stats`)
     },
 
     approveUser(userId: string): Promise<{ detail: string }> {
@@ -161,10 +234,31 @@ export const adminUserService = {
         })
     },
 
+    /** Sign someone out of every browser and device, leaving the account
+     *  as it is — they can sign straight back in. */
+    endSessions(userId: string): Promise<{ detail: string }> {
+        return authFetch<{ detail: string }>(`${ADMIN_USERS_API}/${userId}/sessions/revoke`, {
+            method: 'POST',
+        })
+    },
+
     suspendUser(userId: string): Promise<{ detail: string }> {
         return authFetch<{ detail: string }>(`${ADMIN_USERS_API}/${userId}/suspend`, {
             method: 'POST',
         })
+    },
+
+    /** Mark or unmark the break-glass flag. */
+    setSystemAccount(
+        userId: string, isSystemAccount: boolean,
+    ): Promise<AdminUserResponse> {
+        return authFetch<AdminUserResponse>(
+            `${ADMIN_USERS_API}/${userId}/system-account`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ isSystemAccount }),
+            },
+        )
     },
 
     reactivateUser(userId: string): Promise<{ detail: string }> {

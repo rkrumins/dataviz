@@ -5,12 +5,16 @@
 > gaps, and the prioritized roadmap. Nothing here is aspirational marketing; every limit traces to
 > code.
 
+**Re-checked against the code on 2026-10-09 (`42cae50`).**
+
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
 case**. Interactive edits and publishes are `O(change)`, not `O(graph)`. The remaining sharp edges are
-deliberately-deferred scale items — a full-graph Merkle rebuild on *draft* checkpoints, an `O(N·E)`
-FalkorDB full seed, an in-process import dispatcher, no GC/retention, and a partitioning key that
-doesn't help a single hot collaborative graph. Read this chapter before betting a large production
-workload on it.
+deliberately-deferred scale items — a full-graph Merkle rebuild on *draft* checkpoints, pulls and
+forks; a full re-projection that still holds the graph's ids in memory; import and export jobs that
+start over when interrupted; no retention inside a live graph; and a partitioning key that doesn't
+help a single hot collaborative graph. Re-sync, separately, runs a bounded merge that has not been
+proven on a graph the bootstrap worker wrote ([11](11-resync-at-any-scale.md)). Read this chapter
+before betting a large production workload on it.
 
 ---
 
@@ -50,77 +54,82 @@ These were real hotspots that were fixed and measured (see [03](03-branching-com
 | Read `main` (fresh) | `O(neighborhood)` in FalkorDB | hot path |
 | Read `main` (lagging) / draft / as-of | `O(neighborhood)` compose in Postgres | + `O(delta)` overlay for drafts |
 | Incremental projection window | `O(window)` MERGE/DELETE | idempotent |
-| **Full FalkorDB seed** | **`O(N·E)`**, in-memory compose | §4.2 |
+| **Full re-projection** | `O(N + E)` narrow ids in memory; payloads fetched only for rows it writes | §4.2 |
 | Reconcile (drift scan) | `O(N)` streamed, bounded memory | operator tool |
 
 ## 4. The sharp edges (`O(graph)` hotspots)
 
 ### 4.1 Draft checkpoints do a full-graph Merkle rebuild
-Non-fork `main` gets an **incremental** persisted Merkle root, but **draft checkpoints and fork
-`main`s** call the full `_merkle_root` build over the entire composed state on *every* commit
+Non-fork `main` gets an **incremental** persisted Merkle root, but **draft checkpoints, pulls of
+`main` into a draft, fork creation and fork `main`s** call the full `_merkle_root` build over the
+entire composed state on *every* commit
 (cross-branch copy-on-write Merkle is explicitly a "later step"). This is the next `O(graph)` hotspot
 after `_state_as_of`/`_kind_map_multi` were fixed — it makes a one-entity checkpoint on a large draft
 `O(graph)`. See [03](03-branching-commits-merge.md).
 
 > **Limitation.** A checkpoint on a draft of a multi-million-entity graph pays a full-graph hash walk.
-> Fine at current scale; a keyset/CoW upgrade is the fix (§7).
+> Fine at current scale; a keyset/CoW upgrade is the fix (§10).
 
-### 4.2 The FalkorDB full seed is in-memory (write cost fixed 2026-07)
-A full seed composes the **entire live state in memory** via `_state_as_of`. Its per-edge endpoint
-lookup was `MATCH (a {urn}) MATCH (b {urn}) MERGE …` — unlabeled, a full node scan per row and
-`O(N·E)` overall; since 2026-07 every endpoint MATCH is label-anchored (a per-label URN index seek,
-labels resolved from committed `entityType`s) and every projector query carries an explicit
-server-side timeout, so the WRITE side now scales with `E·log N`. The remaining limitation is the
-in-memory composition itself: the drift **reconciler** already streams in bounded batches
-(`reconcile._stream_pg_nodes`), but the projector's seed path does not, and its own comment flags the
-SKIP/LIMIT scan as "`O(n²/batch)` — acceptable at current scale; upgrade to keyset if a graph
-outgrows it." See [04](04-projection-and-cache.md).
+### 4.2 A full re-projection holds the graph's ids in memory
+
+A full replay no longer composes the live state through `_state_as_of`. It reconciles FalkorDB in
+place (`_reconcile_in_place` in `projection.py`): it reads narrow heads with no payloads, scans
+FalkorDB in internal-id pages, diffs off the event loop, fetches payloads only for the rows it must
+write, and never drops the graph. Since 2026-07 every endpoint MATCH is label-anchored and every
+projector query carries an explicit server-side timeout, so the write side scales with `E·log N`.
+What remains is memory: the diff still holds whole-graph maps of small tuples, `O(N + E)`, rather
+than streaming by keyset. (The "`O(n²/batch)` — upgrade to keyset if a graph outgrows it" comment
+belongs to the drift reconciler, `reconcile.py`, not to the projector.) See
+[04](04-projection-and-cache.md).
 
 ## 5. Wired-but-dormant machinery
 
 | Feature | State | Consequence |
 |---------|-------|-------------|
-| **Per-provider RAM-budget eviction** | Daemon wired in both worker paths but **off by default** (`FALKOR_MAX_RESIDENT=0`; gated by `falkor_eviction_configured()`) | FalkorDB caches are **unbounded per provider** until an operator sets `GRAPHVER_FALKOR_MAX_RESIDENT`/`GRAPHVER_FALKOR_BUDGETS`. Called out in code as "the riskiest scale bet." |
+| **Per-provider RAM-budget eviction** | The loop always starts, in both worker paths. Each provider's budget is its `falkorMaxResident` setting, falling back to `GRAPHVER_FALKOR_MAX_RESIDENT`/`GRAPHVER_FALKOR_BUDGETS`; a budget of 0 skips it | FalkorDB caches are still **unbounded per provider** by default: no manifest, chart or compose file sets a budget, and no screen sets `falkorMaxResident`. `falkor_eviction_configured()` has no callers. Called out in code as "the riskiest scale bet." |
 | **Ephemeral time-travel pool** | `EPHEMERAL_POOL_MAX_GRAPHS`/`EPHEMERAL_TTL_SECS`/`TRACE_LEASE_TTL_SECS` exist with **zero call sites** | Time-travel is served from Postgres (`_state_as_of` / `materialize_state(as_of_seq=…)`), not a dedicated FalkorDB pool. The active read lease uses `LEASE_TTL`, not `TRACE_LEASE_TTL_SECS`. |
 
 ## 6. Correctness & operational gaps
 
-- **No GC / retention anywhere.** Superseded version rows, committed `working_changes`, and Merkle leaf
-  buckets accrue forever (Merkle already shows ~7× row amplification in dev). There is no compaction,
-  TTL, or archival path. This is the single biggest *durability-cost* gap.
+- **No retention inside a live graph.** Superseded version rows, committed `working_changes`, and
+  Merkle leaf buckets accrue forever (Merkle already shows ~7× row amplification in dev). There is no
+  compaction, TTL, or archival path for a live graph. This is the single biggest *durability-cost*
+  gap. (Two sweeps now exist around it: a deleted data source gets a 30-day undo window and then a
+  windowed purge of its six version tables, and import/export artifacts and staged import rows are
+  swept.)
 - **`HASH(graph_id)` partitioning helps many graphs, not one hot graph.** All of a single collaborative
   graph's rows hash to **one partition**, so the busiest graph gets **zero** partition-pruning benefit.
   The key is **immutable-after-data** — decide before loading production data whether a composite key
   (e.g. `(graph_id, entity_id)`) is needed. See [02](02-data-model.md).
-- **The standalone projection worker lacks the `on_rollups_stale` hook.** A full-seed / stale-window /
-  heal-reseed on a deployment running *only* the standalone worker leaves `:AGGREGATED` rollups stale
-  until a **manual** aggregation rebuild — whereas the in-process worker and interactive path
-  self-heal. This is the biggest behavioral difference between the two projector wirings. See
-  [04](04-projection-and-cache.md).
 - **Read-freshness is computed two ways.** `ContextEngine` uses strict `projected ≥ committed`; the
   neighbors endpoint applies `READ_MAX_LAG`. They coincide at the default `READ_MAX_LAG=0`; a non-zero
   lag would make the two surfaces disagree on when to serve FalkorDB vs Postgres.
-- **Incremental rollups carry no hierarchy `level` stamp.** So level-scoped aggregation can't be
-  reconciled incrementally; a bulk window (`> _MOVE_EDGE_CAP=1000`) or an overlap punts to `"stale"` →
-  full rebuild. See [04](04-projection-and-cache.md).
+- **A large or overlapping projection window still rebuilds rollups in full.** A window over
+  `PROJECTION_ROLLUP_INLINE_CAP` (50,000) or an overlap punts to `"stale"` → full rebuild. See
+  [04](04-projection-and-cache.md).
 - **`gv:<id>` urn fallback can mint phantoms.** A node that *should* carry a `urn` but doesn't projects
   under a synthetic `gv:<entity_id>` key with a WARN — an explicit "FalkorDB ⊄ Postgres" signal for
   reconciliation, not a handled case.
-- **Reconcile's sorted-merge assumes ASCII collation parity.** It relies on FalkorDB string ordering
-  matching Postgres `COLLATE "C"` — true for ASCII ids; non-ASCII ids could mis-align the diff (needs a
-  keyset upgrade with a shared collation).
-- **Credential rotation needs a process restart** — the provider registry memoizes provider rows for
-  the process lifetime.
+- **Check-sync's sorted merge assumes ASCII collation parity.** The drift reconciler's deep verify
+  relies on FalkorDB string ordering matching Postgres `COLLATE "C"` — true for ASCII ids; non-ASCII
+  ids could mis-align the diff (needs a keyset upgrade with a shared collation). The projector's own
+  replay is keyed by `(label, urn)` and does not depend on it.
 
-## 7. Security / authorization open question
+**Closed since this chapter was written:** the standalone projection worker now carries the
+`on_rollups_stale` hook, so a full seed, a stale window or a heal-reseed queues the rollup rebuild on
+either wiring; incremental rollups now carry level and depth stamps (`sourceLevel`, `targetLevel`,
+`sourceDepth`, `targetDepth`, `levelDigest`); and a provider edit is broadcast to the web process
+and the aggregation and versioning workers, so credential rotation no longer needs a restart there
+unless the broadcast is missed. (The stats service and the control plane do not listen yet —
+[TECHNICAL_DEBT.md](../TECHNICAL_DEBT.md) §2.3.)
 
-> **Limitation (product decision needed).** The versioning endpoints require
-> `workspace:datasource:manage` for writes, but the `/graph/changes` path and other `graph.py`
-> mutation endpoints use `get_optional_user` (no hard authz gate). Since a graph write becomes an
-> audited commit, this asymmetry should be resolved deliberately — either gate `/changes` to `manage`
-> or make the relaxed policy explicit. See [06](06-api-reference.md).
+## 7. Security / authorization — closed
 
-*(Endpoint source/target type validation on the `/changes` path is now enforced server-side via the
+The asymmetry this section used to flag is resolved: `/graph/changes` and every other `graph.py`
+mutation route now require `workspace:datasource:manage` (`require_ws_manage`), alongside edit mode,
+and `get_optional_user` only names the actor. See [06](06-api-reference.md).
+
+*(Endpoint source/target type validation on the `/changes` path is also enforced server-side via the
 rich `validate_entities_rich` gate — see [05](05-ontology-governance.md) — closing an earlier
 frontend-only gap.)*
 
@@ -128,25 +137,35 @@ frontend-only gap.)*
 
 See [08](08-import-export.md) for detail; the load-bearing ones:
 
-- **In-process `BackgroundTasks` dispatch, not a real async dispatcher.** A `uvicorn --reload` (or a
-  crash) mid-import/export kills the job and leaves its summary null. A Redis/Postgres dispatcher is a
-  designed slot-in behind the same call.
-- **Export doesn't stream the read.** It `materialize_state`s the whole state then streams the write —
-  fine for human-scale exports, not 5M+ (swap `materialize_state` → keyset streaming).
-- **Object store is local-only** (`LocalFsObjectStore`); S3/GCS raise `NotImplementedError`; the
-  `presigned` upload path is modeled but unbacked. JSON/xlsx adapters are buffered, not streamed.
+- **An interrupted job starts over.** Jobs queue in Postgres and run on the versioning worker
+  (`GRAPHVER_TRANSFER_INPROCESS=0`, as the compose and Kubernetes manifests set it), or in the web
+  process by default — which is where the Helm chart leaves them. Either way, a process that stops mid-import/export takes the job with it: it
+  is reported `failed` once silent for `JOB_STALE_AFTER_SECS`, and runs again from the start.
+- **A 50 GB export takes hours.** An export reads one snapshot a page at a time, in flat memory at any
+  size, and the Export dialog has the workers write it to the object store, then downloads it in
+  pieces that resume. One export runs on one worker, at about 10 MB a second as NDJSON and 3.5 as
+  CSV (two passes): nothing splits it across workers yet. `GRAPH_EXPORT_MAX_BYTES` caps it at 50 GiB.
+- **No native cloud client yet**: artifacts live in the management database (`DatabaseObjectStore`,
+  shared by every API pod), or as files on a mount every pod shares, which can be a bucket's FUSE
+  mount (`OBJECT_STORE_BACKEND=local`); S3/GCS clients raise `NotImplementedError`; the `presigned`
+  upload path is modeled but unbacked; uploads go through the backend instead, in resumable pieces.
+  JSON and xlsx *exports* now stream; JSON and xlsx *imports* are still read whole, which the client
+  caps at 100 MiB.
 - **Row-scoped export is API-only — not surfaced in the UI.** The backend export options (`props`,
   row-scope `ids`/`types`, view-scope, branch-vs-published, as-of) are wired consistently end-to-end
   (`create_export` → `create_export_job` packs an `options` dict → `ExportWorker`). The **ExportDialog
   / client service send only `format`, `viewId`, `branchId`, and `props`**, so row-scoped export
-  (`ids`/`types`) is reachable over HTTP but not exposed in the UI — a small frontend follow-up. (An
+  (`ids`/`types`) and as-of export (`asOfSeq`) are reachable over HTTP but not exposed in the UI — a
+  small frontend follow-up. (An
   earlier static-analysis pass suspected a `TypeError` in this plumbing; it is **not** present in the
   current tree — the three layers' kwargs align.)
 
 ## 9. Operational tunables
 
-Every knob lives in `backend/app/services/versioning/config.py` and is env-overridable. The
-**immutable-after-data** ones (changing them after rows exist corrupts hashes/partitions) are marked ⚠.
+Almost every knob lives in `backend/app/services/versioning/config.py` and is env-overridable; the
+export limits live in `import_export/stream.py` and the FalkorDB write/read timeouts in
+`projection.py`. The **immutable-after-data** ones (changing them after rows exist corrupts
+hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
@@ -154,7 +173,7 @@ Every knob lives in `backend/app/services/versioning/config.py` and is env-overr
 | ⚠ `GRAPHVER_PARTITIONS` | `64` | HASH partition count for append-only tables |
 | ⚠ `GRAPHVER_MERKLE_DEPTH` | `4` | Merkle trie depth (16^depth buckets) |
 | ⚠ `GRAPHVER_HASH_ALGO` / `_DIGEST_SIZE` | `blake2b` / `32` | content + Merkle hash |
-| `GRAPHVER_PROJECTION_INPROCESS` | off (on in dev compose) | run the projector inside viz-service |
+| `GRAPHVER_PROJECTION_INPROCESS` | off | run the projector inside viz-service; Compose and Kubernetes run the standalone versioning worker instead |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | `8` | graphs projected per poll pass |
 | `GRAPHVER_READ_MAX_LAG` | `0` | staleness a read tolerates before Postgres fallback |
 | `GRAPHVER_PROJECTION_VERIFY` | on | post-projection count reconcile + bounded heal |
@@ -165,26 +184,42 @@ Every knob lives in `backend/app/services/versioning/config.py` and is env-overr
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `commit_seq`-collision retry budget |
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
 | `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `50000` / `5000` | import windowing / inline-vs-async threshold |
+| `GRAPHVER_TRANSFER_INPROCESS` | on | run imports and exports in the web process; Compose and Kubernetes set `0` to use the versioning worker |
+| `JOB_STALE_AFTER_SECS` | `900` | silence after which a running import/export job is reported `failed` |
+| `OBJECT_STORE_BACKEND` | `database` | where import/export artifacts live: `database` or `local` (a shared mount) |
+| `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | `50000` | largest projection window whose rollups are maintained incrementally |
+| `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | largest graph a re-sync may attempt; `0` disables the guard ([11](11-resync-at-any-scale.md)) |
+| `GRAPHVER_BOOTSTRAP_MERKLE_MAX` | `1000000` | above this, an enable-VC copy defers the Merkle root rather than building it in memory |
+| `GRAPHVER_PURGE_GRACE_DAYS` | `30` | undo window before a deleted data source's version history is purged |
 
 ## 10. Roadmap (prioritized)
 
-1. **Incremental cross-branch Merkle** — remove the full-graph rebuild on draft checkpoints & fork
-   mains (§4.1).
-2. **Keyset-streaming full seed & export** — bounded-memory `O(N)` for 5M+ graphs (§4.2, §8).
-3. **Real async import/export dispatcher** — replace `BackgroundTasks` with a durable Redis/Postgres
-   queue so a reload can't kill a job (§8).
-4. **GC / retention** — compaction/TTL for superseded versions, committed `working_changes`, Merkle
-   buckets (§6).
-5. **Partitioning decision** — settle the `graph_id`-only key before production data lands (§6).
-6. **Close the projector wiring gap** — give the standalone worker (or a proxy-mode HTTP control plane)
-   the `on_rollups_stale` trigger (§6).
-7. **Resolve the `/changes` authz asymmetry** (§7) and **surface row-scoped export in the ExportDialog**
-   (§8).
-8. **Enable the eviction budget in production config** and unify the two read-freshness definitions
-   (§5, §6).
+Status as of 2026-10-09 in brackets.
+
+1. **Prove re-sync identity on a bootstrapped graph** — the test [11](11-resync-at-any-scale.md)
+   describes: bootstrap a small graph with the real worker, re-sync the unchanged source, assert
+   almost nothing changes. *(Open. The bounded merge it guards is already live.)*
+2. **Incremental cross-branch Merkle** — remove the full-graph rebuild on draft checkpoints, pulls,
+   fork creation and fork mains (§4.1). *(Open.)*
+3. **Keyset-streaming full re-projection & export** — bounded-memory `O(N)` for 5M+ graphs (§4.2,
+   §8). *(Export done: it streams in flat memory. Re-projection reconciles in place but still holds
+   `O(N + E)` ids.)*
+4. **Durable async import/export** — *(Largely done: jobs queue in Postgres, claimed with
+   `SKIP LOCKED` by the versioning worker. Still open: resuming an interrupted job instead of starting
+   over.)*
+5. **Retention** — compaction/TTL for superseded versions, committed `working_changes`, Merkle
+   buckets (§6). *(Open for live graphs; deleted data sources are purged.)*
+6. **Partitioning decision** — settle the `graph_id`-only key before production data lands (§6).
+   *(Open.)*
+7. **Surface row-scoped and as-of export in the ExportDialog** (§8). *(Open.)*
+8. **Set an eviction budget in production config** and unify the two read-freshness definitions
+   (§5, §6). *(Open: nothing sets a budget.)*
 9. **Full lifecycle validation story test** — the designed `test_versioning_full_lifecycle.py`
    (alice/bob/carol drafts → isolation → disjoint auto-merge → same-field conflict → ontology attacks
-   → time-travel → tombstone retrieval → audited revert).
+   → time-travel → tombstone retrieval → audited revert). *(Open.)*
+
+**Done since the last revision of this list:** the projector wiring gap (the standalone worker's
+rollup hook, §6) and the `/changes` authorization asymmetry (§7).
 
 ---
 

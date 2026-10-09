@@ -268,7 +268,7 @@ async def test_run_import_skips_layout_write_without_view_id(monkeypatch):
         return {"added": 1}
 
     class _FakeWorker:
-        def __init__(self, svc, store, scope=None, ontology=None):
+        def __init__(self, svc, store, scope=None, ontology=None, facts=True):
             self.created_node_facts = [_node("e", "urn:e")]
             self.batch_edge_facts = []
 
@@ -304,7 +304,7 @@ async def test_run_import_calls_layout_write_with_view_id(monkeypatch):
         return {"added": 2}
 
     class _FakeWorker:
-        def __init__(self, svc, store, scope=None, ontology=None):
+        def __init__(self, svc, store, scope=None, ontology=None, facts=True):
             self.created_node_facts = [_node("e", "urn:e")]
             self.batch_edge_facts = []
 

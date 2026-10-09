@@ -4,9 +4,10 @@
 
 Please report security vulnerabilities privately rather than opening a public issue.
 
-Use GitHub's **private vulnerability reporting**: go to the
-[Security tab](https://github.com/rkrumins/dataviz/security) → **Report a vulnerability**.
-This opens a private advisory visible only to the maintainers.
+Use the repository's **private vulnerability reporting**: open its **Security** tab and
+choose **Report a vulnerability**. This opens a private advisory visible only to the
+maintainers. Issues already known and tracked are listed in
+[the pentest scope](../docs/security/PENTEST_SCOPE.md) (§7), so check there first.
 
 Please include:
 

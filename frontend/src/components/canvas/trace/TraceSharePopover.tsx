@@ -42,9 +42,10 @@ export interface TraceSharePopoverProps extends TraceShareSummary {
   triggerRef: React.RefObject<HTMLElement | null>
 }
 
+// Up / down wear the product's lineage direction pair (lib/lineageDirectionColors.ts).
 const MODE = {
-  up: { Icon: ArrowUpLeft, tone: 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/10', name: 'Root cause' },
-  down: { Icon: ArrowDownRight, tone: 'text-amber-600 dark:text-amber-400 bg-amber-500/10', name: 'Impact' },
+  up: { Icon: ArrowUpLeft, tone: 'text-lineage-in bg-lineage-in/10', name: 'Root cause' },
+  down: { Icon: ArrowDownRight, tone: 'text-lineage-out bg-lineage-out/10', name: 'Impact' },
   both: { Icon: GitBranch, tone: 'text-violet-600 dark:text-violet-400 bg-violet-500/10', name: 'Full lineage' },
 } as const
 

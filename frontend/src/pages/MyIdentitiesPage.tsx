@@ -27,7 +27,7 @@ import { AlertCircle, Fingerprint, Link2, Plus, Unlink2 } from 'lucide-react'
 import {
     AccountCard, AccountShell, EmptyState, useAccountIdentity,
 } from '@/components/account/AccountShell'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import {
@@ -54,7 +54,7 @@ export function MyIdentitiesPage() {
 
 function IdentitiesContent() {
     const { passwordSet, identities, refresh } = useAccountIdentity()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const [providers, setProviders] = useState<SsoProviderSummary[]>([])
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -96,7 +96,7 @@ function IdentitiesContent() {
             const body = await gatewaySignInBody(p)
             await loginWithBackchannel(p.slug, body)
             await refresh()
-            showToast('success', `${p.displayName} linked`)
+            notify('success', `${p.displayName} linked`)
             // The link can change what SSO-governed groups grant; pick
             // the new claims up now rather than at the next rotation.
             try {
@@ -117,7 +117,7 @@ function IdentitiesContent() {
         try {
             await authService.unlinkMyIdentity(identity.id)
             await refresh()
-            showToast('success', `${identity.provider.displayName} unlinked`)
+            notify('success', `${identity.provider.displayName} unlinked`)
             setConfirming(null)
         } catch (err) {
             setError((err as Error).message)

@@ -102,10 +102,16 @@ back to reactive 401 refresh, and an idle tab issues no request to take a 401 wi
 session lapses in precisely the way the keepalive exists to prevent — and the symptom is
 "`nx_access` is never replaced", with nothing in any log.
 
-The name is now scoped. The client learns the suffix from `environment_id` on the
-`GET /auth/me` response — the bootstrap call, which resolves before the keepalive is
-allowed to start — and falls back to the unscoped name when the field is absent, so a
-mid-rollout tab and a single-deployment install both keep working. Discovery failing is
+The name is now scoped. The client learns the suffix from `environment_id`, which every
+response that establishes, rotates or heals a session carries — `/login`, `/refresh`,
+`/me`, every SSO completion that answers in JSON, an invited signup, and the CSRF heal
+`GET /auth/csrf` — and falls back to the unscoped name until one answers, so a
+mid-rollout tab and a single-deployment install both keep working.
+
+It used to be `GET /auth/me` alone, on the premise that the bootstrap call precedes any
+write. An SSO sign-in completed on the page (the Enterprise Gateway, a portal) never makes
+it, so its tab read the unscoped `nx_csrf`, found nothing, and sent every write without its
+CSRF token — graph reads included, which are POSTs — until a reload. Discovery failing is
 survivable by construction: the scheduler already treats "no published expiry" as
 "probe again in 60s" rather than as an error.
 
@@ -226,13 +232,24 @@ across replicas stay authenticated.
 
 ### A CSRF failure repairs itself
 
-`nx_csrf` is re-minted by every rotation, so a session that is still valid can always fix a
-missing or stale CSRF cookie by refreshing once. Nothing used to do that: a 403 does not
-trigger the refresh path the way a 401 does, so a lost cookie meant every write failed
-indefinitely.
+`nx_csrf` can go missing while the session stays perfectly valid — a sibling deployment's
+sign-out sweeps the shared parent domain, or the cookie is cleared by hand — and until it
+is restored every write 403s. The page cannot fix it locally: the token is bound to the
+session's `sid` under a server secret, and the `sid` lives in the HttpOnly access cookie
+the page cannot read, so only the server can mint a correctly bound one.
 
-The backend now answers a CSRF failure with a structured body, matching the shape
-`requires()` uses for a permission denial:
+The repair is `GET /api/v1/auth/csrf` — the same heal a page reload runs on `/auth/me`, on
+its own route. It re-mints the cookie against the live access token **without rotating the
+session**. That distinction matters: the earlier repair rotated the whole session (`POST
+/auth/refresh`) to restore one cookie, which is per-session rate-limited and runs the
+session ceilings, so a repair could trip the SSO / idle / absolute ceiling and sign the
+user out — and when it merely failed transiently it left the 403 stranded until the user
+manually refreshed the page. A heal has none of those failure modes; a rotation is now only
+the fallback, taken when there is no live session to heal against (the access token lapsed
+too), which re-mints the cookie as a side effect.
+
+The backend answers a CSRF failure with a structured body, matching the shape `requires()`
+uses for a permission denial:
 
 ```json
 {"detail": {"error": "csrf_failed", "cookie_present": false,
@@ -240,10 +257,11 @@ The backend now answers a CSRF failure with a structured body, matching the shap
 ```
 
 `cookie_present` distinguishes the two causes — an absent cookie is the server's doing
-(eviction, expiry), an absent header is the client's. On `csrf_failed` the SPA refreshes
-once and retries the write; only if that fails does it surface an error, and it no longer
-routes the failure through the access-denied modal, which blamed a permission the user
-holds.
+(eviction, expiry), an absent header is the client's. On `csrf_failed` the SPA heals the
+cookie in place and retries the write once; only if that fails does it surface an error, and
+it no longer routes the failure through the access-denied modal, which blamed a permission
+the user holds. The cookie is also healed pre-emptively at bootstrap and before any write
+when it is already known to be missing.
 
 ---
 
@@ -305,7 +323,7 @@ whenever `AUTH_COOKIE_SECURE=true` (§6).
 | Everyone logged out after a redeploy | `JWT_SECRET_KEY` changed with no retired key | `activeKid` differs from before the deploy | Populate `JWT_SECRET_KEY_PREVIOUS` (§4) |
 | Auth flaps — some requests fine, some 401 | Replicas disagree on the signing key mid-rollout | `activeKid` differs between pods | Same fix; restart pods so the fleet converges |
 | **Login returns 200 but you land back on `/login`, and no cookie is ever stored** | `AUTH_COOKIE_SECURE=true` on a plain-HTTP host — browsers discard `Secure` cookies over HTTP **silently**, with no console error | `secureCookieWouldBeDropped: true` | Serve the host over HTTPS, or set `AUTH_COOKIE_SECURE=false` for an HTTP-only environment |
-| Every POST 403s with a CSRF error | `nx_csrf` missing or not echoed | `sessionCookiesPresented.csrf` is `absent` | The SPA now refreshes once and retries on `csrf_failed`, so a persistent failure means the refresh is failing too. Usually the `Secure`-over-HTTP case above; otherwise check the `X-CSRF-Token` header is being sent |
+| Every POST 403s with a CSRF error | `nx_csrf` missing or not echoed | `sessionCookiesPresented.csrf` is `absent` | The SPA now heals the cookie in place (`GET /auth/csrf`) and retries on `csrf_failed`, so a *persistent* failure means the heal is failing too — the cookie the server sets is not the one the page reads back. Usually the `Secure`-over-HTTP case above, or a stale `environment_id` making the page read the wrong scoped name; otherwise check the `X-CSRF-Token` header is being sent |
 | SSO login loops back to the IdP | Handshake cookie lost between redirect and callback | `AUTH_COOKIE_SAMESITE` must be `lax`, not `strict` | Leave `AUTH_COOKIE_SAMESITE` at `lax` |
 
 `secureCookieWouldBeDropped` deserves emphasis: it produces *exactly* the same user-visible
@@ -330,6 +348,7 @@ easy to hit on `.local` hostnames that have no certificate.
 | `AUTH_COOKIE_DOMAIN` | *(unset — host-only)* | Set only to deliberately share a session across subdomains. |
 | `AUTH_COOKIE_SAMESITE` | `lax` | `strict` breaks the SSO redirect handshake. |
 | `SSO_SESSION_MAX_AGE_HOURS` | `24` | Re-auth ceiling for SSO sessions; local password sessions are exempt. |
+| `SSO_OUTBOUND_TLS_CA_CERTS` | (none) | PEM CA bundle every outbound SSO call verifies against — set it when gateways/IdPs sit behind a corporate CA. |
 
 ---
 
