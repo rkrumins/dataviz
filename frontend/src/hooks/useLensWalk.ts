@@ -122,7 +122,7 @@ export interface WalkEntry {
 export interface LensWalkData {
     /** This session's entry for `urn`'s walk, or null if never touched. */
     walkFor: (urn: string) => WalkEntry | null
-    /** Re-kick a failed (or unsupported, harmlessly) initial fetch. */
+    /** Re-kick a failed (status 'error') or unsupported (harmlessly) initial fetch. A first page that failed behind kept coarse cells is retried by `retryWalk`. */
     retry: (focusUrn: string) => void
     /** Fetch one further hop from `cardUrn` (up or down), seeded from the
      *  lineage-participating leaves the view found under it. PRECONDITION:

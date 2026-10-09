@@ -800,6 +800,7 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
       state.failFine = false
       act(() => { result.current.retryWalk('a'); result.current.retryWalk('a') })
       expectFineCalls(traceClosure, 2)                                           // a double click is ONE request
+      expect(result.current.walkProgressFor('a')?.phase).toBe('seeding')
       expect(fineCalls(traceClosure)[1]![0]).toEqual({
         urn: 'a', direction: 'both', upstreamDepth: 1, downstreamDepth: 1, maxNodes: WALK_FIRST_PAGE_NODES,
       })
