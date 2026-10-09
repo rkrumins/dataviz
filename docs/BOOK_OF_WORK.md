@@ -4,6 +4,11 @@ Living backlog for the Context View lineage canvas. Captures what shipped on
 `claude/canvas-lineage-edges-disappear-bhstlt`, the engineering invariants that
 work established, and the prioritized road ahead.
 
+**Status re-checked against the code on 2026-10-09 (`42cae50`).** Of the fifteen
+items this backlog carried, seven have shipped, three are partly done and five
+are open; see [Backlog status](#backlog-status). What is still open is under
+[Still open](#still-open).
+
 ---
 
 ## Governing invariants (hard-won — do not regress)
@@ -32,7 +37,7 @@ work established, and the prioritized road ahead.
 
 ---
 
-## Shipped on this branch (reference)
+## Shipped on `claude/canvas-lineage-edges-disappear-bhstlt` (reference)
 
 | Area | Outcome |
 |---|---|
@@ -58,87 +63,79 @@ work established, and the prioritized road ahead.
 
 ---
 
-## P1 — Committed next
+## Backlog status
 
-### 1. Horizontal navigation component ("Layer Strip")
-**Problem:** with many layers the only horizontal navigation is raw
-scrolling; nothing shows where you are or lets you jump.
-**Direction:** a slim docked strip (bottom-center of the canvas frame, sticky
-— never in content space) with one chip per layer (color dot + name +
-loaded count), current-viewport window highlighted, click-to-jump
-(smooth-scroll the column into view), drag-to-pan. In edit mode the strip
-ends with the existing "+ add layer" affordance so creation stays one
-deliberate action. Fit-to-width lives on the strip too. This subsumes the
-"scroll forever" concern: scroll extent is already truthful (fixed); the
-strip makes long canvases *navigable*.
-**Effort:** M. **Value:** high (orientation + navigation for every user).
+Paths are under `frontend/src/components/canvas/context-view/` unless noted.
 
-### 2. Resizable layer columns
-**Problem:** fixed 320px expanded width truncates long names and wastes
-space on sparse layers.
-**Direction:** drag handle on the column's right edge; min 260 / max 560px;
-double-click resets. Width persisted per layer in the view layout (draft
-persists via existing `persistReferenceLayout`; published views read-only
-default). `computeFitZoom` and the geometry registry already read live
-rects, so no math changes — only the width constant becomes per-layer.
-**Effort:** S–M. **Value:** high for wide/technical names.
+| # | Item | Status | Where it lives |
+|---|---|---|---|
+| 1 | Layer Strip | Shipped | `LayerStrip.tsx` — one chip per layer, click-to-jump, drag-to-scrub, the add-layer affordance, and Fit. Chips show no loaded count, and the strip hides while a trace is open |
+| 2 | Resizable layer columns | Shipped | `LayerColumn.tsx` — 260–560 px; double-click the handle, or *Reset width*, to go back |
+| 3 | Collapsible Display Settings sections | Shipped | `DisplaySettingsPopover.tsx`, `LineageDisplayPopover.tsx` — open state persisted, active value shown inline (Edge Density shows its mode, not the budget) |
+| 4 | Anchor Rail 1.5 — hover with linger | Shipped | `LineageFlowOverlay.tsx` — follows hover after 250 ms and lingers 1.5 s; the bridge is time only. The rail now docks as off-screen trays above and below a column |
+| 4b | Column widths in the view definition | Shipped | A draft drag saves `layer.width` through `persistReferenceLayout`; localStorage (`nx-layer-widths`) stays the viewer's override |
+| 5 | Rail phase 2 — ambient top-K | Open | The rail collects partners of a focused entity only |
+| 6 | Rail phase 3 — badges into rail overflow, per-column popover | Open | Left/right badges are still separate; overflow goes to the Lens |
+| 7 | Root pagination beyond 200 | Shipped | `frontend/src/hooks/useGraphHydration.ts` (`loadMoreRoots`) — 200 is now a page, not a cap; `GET /graph/nodes/top-level` pages by cursor ([TOP_LEVEL_NODES_PERFORMANCE.md](TOP_LEVEL_NODES_PERFORMANCE.md)) |
+| 8 | External-degree backend endpoint | Shipped, different design | `POST /api/v1/{ws_id}/graph/nodes/degree` — see [FOLLOW_UP_EXTERNAL_DEGREE.md](FOLLOW_UP_EXTERNAL_DEGREE.md) |
+| 9 | Display Settings per-section reset + budget slider in the header | Partial | The budget slider is in the header Display menu whenever the mode isn't *All Edges*; one Reset covers the Canvas group. No per-section reset, and the lineage settings have none |
+| 10 | WebGL "Show all" layer | Open | |
+| 11 | Minimap | Open on the canvas | The Lens graph view has one; the Layer Strip's position rail is the canvas's one-dimensional map |
+| 12 | Re-expand session cache | Open | Collapse still prunes and re-expand refetches, softened by a 30 s client cache for children and a 1 h Redis one |
+| 13 | Long-haul dashed edge quieting | Partial | Roll-up dashes draw solid once a board passes 200 lines; nothing targets lines that span many layers |
+| 14 | Lens depth/filters | Partial | One hop / full flow, and direction and entity-type filters; the 1/2/3 depth control was retired. No edge-type filter, no pin-to-compare |
 
-### 3. Collapsible Display Settings sections
-**Problem:** the popover now scrolls vertically and is capped — hard to
-scan.
-**Direction:** yes — accordion sections (Zoom & Layout / Lineage / Density &
-Chrome), persisted open/closed state, section headers show the active value
-inline (e.g. "Lineage · Adaptive · budget 800") so a collapsed section still
-communicates its state — consistent with the "toggles narrate their state"
-principle.
-**Effort:** S. **Value:** medium (daily-touched surface).
+---
 
-### 4. Anchor Rail phase 1.5 — hover with linger
-Hover-scoped rail (not just selection) with a ~300ms linger + hover-bridge
-so moving the pointer toward a chip doesn't dismiss it. Unlocks zero-click
-"where does this go" while browsing.
-**Effort:** S. **Value:** high.
+## Shipped since this backlog was written
 
-### 4b. Column widths in the view definition (backend persistence)
-Custom layer widths currently persist per-browser (localStorage). Promote
-them into the view layout (`referenceLayout` → per-layer `width`), saved via
-the existing `persistReferenceLayout` path in draft mode and read by all
-viewers of a published view — a curated view then ships its column widths to
-every consumer. Keep localStorage as the viewer-local override.
-**Effort:** S–M (schema field + save/read wiring). **Value:** medium-high
-for shared curated views.
+| Area | Outcome |
+|---|---|
+| Multi-entity trace | ⌘/Ctrl- and Shift-click build a selection; **Trace N entities** (or `T`) traces up to 25 as one picture, each partner measured from its nearest origin (`frontend/src/hooks/useCanvasTraceWalk.ts`); `F` opens the Lens on the whole selection |
+| Trace on the canvas | The trace overlay draws on the canvas without writing the canvas store (`frontend/src/hooks/useTraceOverlay.ts`); an earlier design that merged trace data into the store was reverted |
+| Share links | `?trace=` for a single-entity trace, and a Lens share code. A combined trace cannot be shared yet |
+| Lens rework | A toolbar for direction, density, wires, walk and steps, and a graph view with a minimap |
+| Orphaned entities | **Display → Advanced → Orphaned entities…** lists entities missing the parent their type implies, with Reveal and, on a draft, Place in layer (`OrphansDrawer.tsx`) |
+| Relationship drawer and partner trays | Clicking a line opens its relationship; off-screen partners dock in trays above and below the column |
+| Line styling | Lineage ports, marker sides, direction colours, frosted cards and line motion (`LineageDisplayPopover.tsx`) |
+| Placement contract (preview) | One placement rule shared with the server, behind `placementContractEnabled`, off by default |
+| Layer fold (preview) | Behind `canvasLayerFoldEnabled`, off by default (`useLayerFold.ts`) |
 
-## P2 — Near-term
+---
 
-5. **Anchor Rail phase 2 — ambient top-K** per column in Adaptive mode
-   (budget-ranked, scroll-settle damping, incumbent stickiness).
-6. **Rail phase 3** — fold left/right badges into rail overflow; searchable
-   per-column popover.
-7. **Root pagination beyond 200** — the initial per-layer root load caps at
-   200 with no root-level load-more (children are properly paginated; roots
-   are not). Needed before any source exceeds 200 roots in one layer.
-8. **External-degree backend endpoint** (`docs/FOLLOW_UP_EXTERNAL_DEGREE.md`)
-   — the only true fix for "no lineage vs lineage outside this view" in
-   curated views.
-9. **Display Settings: per-section reset** + surfacing the edge budget
-   slider when Adaptive is active from the header menu.
+## Still open
 
-## P3 — Later / research
+The original item numbers are kept so the history above stays readable.
 
-10. **WebGL "Show all" layer** for full-set rendering beyond the DOM ceiling.
-11. **Minimap** (2D overview). Re-evaluate after the Layer Strip ships — the
-    strip may cover 80% of the need.
-12. **Re-expand session cache** — collapse currently prunes + refetches on
-    re-expand (deliberate); a session cache would make re-expansion instant.
-13. **Long-haul dashed edge quieting pass.**
-14. **Lens depth/filters** (2-hop, edge-type filters, pin-to-compare).
+### Near-term
+
+- **#5 Anchor Rail phase 2 — ambient top-K** per column in Adaptive mode
+  (budget-ranked, scroll-settle damping, incumbent stickiness).
+- **#6 Rail phase 3** — fold left/right badges into rail overflow; searchable
+  per-column popover.
+- **#9 Display Settings: per-section reset**, the lineage settings included —
+  they have no reset at all. (The edge-budget slider in the header menu
+  shipped.)
+
+### Later / research
+
+- **#10 WebGL "Show all" layer** for full-set rendering beyond the DOM ceiling.
+- **#11 Minimap** on the canvas. The Layer Strip covers horizontal orientation;
+  re-evaluate whether a 2D overview is still needed.
+- **#12 Re-expand session cache** — collapse currently prunes + refetches on
+  re-expand (deliberate); a session cache would make re-expansion instant.
+- **#13 Long-haul dashed edge quieting** for lines that span many layers.
+- **#14 Lens filters** — edge-type filters and pin-to-compare. (Direction and
+  entity-type filters shipped; the 1/2/3 depth control was retired in
+  favour of one hop / full flow.)
 
 ---
 
 ## Discoverability notes (answered questions)
 
 - **Focus / Lens entry points (all live today):** right-click → "Focus
-  Connections" (`F` shown); Entity Drawer → Focus button; `f` key;
-  Anchor Rail "+N more · Open lens"; status chip "Open lens"; Frame pill.
+  Connections" (`F` shown); Entity Drawer → Focus button; `f` key (on a
+  multi-selection, the whole selection); the rail's "N more in the lens";
+  status chip "Open lens"; Frame pill.
 - **Frame entry points:** Frame pill on selection; Lens footer "Reveal all
   on canvas". Both land in framed-mode chrome (named state, Exit, Esc hint).

@@ -186,7 +186,7 @@ stateDiagram-v2
 
 ## ADR-006: SQLite for Development, PostgreSQL for Production
 
-**Status:** Accepted
+**Status:** Superseded — the SQLite branch was removed. The management database is PostgreSQL in every environment, and a non-`postgresql+asyncpg://` URL is rejected at startup (`backend/app/db/engine.py`). Retained here for historical context.
 **Date:** 2025 Q4
 **Context:** Need zero-setup development experience while maintaining production-grade database support.
 
@@ -660,11 +660,11 @@ Admin visibility: `GET /admin/redis/config` (resolved config + per-field provena
 | # | Decision | Status | Risk Level |
 |---|----------|--------|------------|
 | 001 | Three-entity model (evolved to four with CatalogItem — see ADR-013) | Accepted | Low |
-| 002 | Dual FastAPI services | Accepted | Medium |
+| 002 | Dual FastAPI services | Superseded (ADR-018) | — |
 | 003 | Ontology-driven edge classification | Accepted | Low |
 | 004 | Immutable published ontologies | Accepted | Low |
 | 005 | ProviderRegistry singleton | Accepted | Medium (scaling) |
-| 006 | SQLite dev / PostgreSQL prod | Accepted | Medium (misuse) |
+| 006 | SQLite dev / PostgreSQL prod | Superseded (PostgreSQL only) | — |
 | 007 | Zustand over Redux | Accepted | Low |
 | 008 | Fernet credential encryption | Accepted | Medium (key mgmt) |
 | 009 | Schema-driven frontend rendering | Accepted | Low |

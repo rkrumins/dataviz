@@ -96,7 +96,7 @@ return whenever a word trips you up.
 | **Neo4j** | A supported enterprise graph database. |
 | **DataHub** | A supported metadata/catalog source. |
 | **Spanner** | A supported cloud graph database backend. |
-| **PostgreSQL / SQLite** | The platform's own management database (prod / local dev). |
+| **PostgreSQL** | The platform's own management database, in every environment. |
 
 ---
 

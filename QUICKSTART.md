@@ -8,8 +8,8 @@ There are three ways to run the platform. This guide covers the compose-based pa
 - **Self-host** (containers on a VM) — `./deploy.sh up` (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 - **Quickstart** (zero-config demo) — `docker compose -f docker-compose.quickstart.yml up`, described as Option A below.
 
-> [!TIP]
-> First time here? **Option A (Quickstart)** is the shortest path to a running UI — one command, everything pre-seeded.
+> [!WARNING]
+> **Option A (Quickstart) does not boot today.** Its compose file points the API at a baked-in SQLite database, and the backend accepts only PostgreSQL (see the note under Option B); its published signing key is also refused at startup. Use **Option B** until it is fixed — tracked in [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md) §2.1.
 
 ---
 
@@ -31,6 +31,9 @@ docker compose version
 ---
 
 ## Option A — Quickstart (Recommended)
+
+> [!WARNING]
+> Does not boot today — see the warning at the top of this page.
 
 Everything is pre-loaded — no database setup, no seeding, no configuration. One command.
 

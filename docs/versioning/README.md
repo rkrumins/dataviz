@@ -118,7 +118,7 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 
 ---
 
-## Status & scale snapshot (as of branch `claude/affectionate-fermi-ii373`)
+## Status & scale snapshot (as of 2026-10-09, `42cae50`)
 
 - **Store.** `graphver` Postgres schema: 6 high-cardinality **append-only** tables
   (`commits`, `node_versions`, `edge_versions`, `entity_heads`, `merkle_nodes`, `working_changes`)
@@ -126,15 +126,21 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
   `branch_members`, `merge_requests`, `projection_state`, `jobs`, `import_rows`) unpartitioned.
 - **Hashing.** Content + Merkle hashing is **blake2b** (32-byte), length-prefixed; Merkle trie depth
   **4** (16⁴ = 65,536 leaf buckets). Both are **immutable-after-data**.
-- **Code footprint.** `GraphVersioningService` ≈ **5,056** lines; the REST surface ≈ **2,562**;
-  the projector ≈ **941**; plus the provider layer, import/export vertical, and a
-  `frontend/src/features/versioning/` module. Covered by ~**60** backend integration test files.
+- **Code footprint.** `GraphVersioningService` ≈ **6,822** lines; the REST surface ≈ **3,615**
+  (plus `graph_export.py` and the `versioning_gate.py` flag gate); the projector ≈ **2,132** (plus
+  `projection_reconcile.py`); the enable-VC bootstrap worker ≈ **1,518**; the data-source purge
+  worker ≈ **604**; the import/export vertical ≈ **3,180**; plus the provider layer and a
+  `frontend/src/features/versioning/` module. Covered by **72** `test_versioning_*` integration
+  test files.
 - **Read routing.** `main` fresh → live **FalkorDB**; `main` lagging (just after a merge) → Postgres
   composition (read-your-writes); a **draft** → `DraftOverlayProvider`; **as-of** / historical →
   Postgres snapshot.
-- **Deployment.** The projection worker runs **in-process** (`GRAPHVER_PROJECTION_INPROCESS=1`, set in
-  the dev compose) or as a **standalone** process (`python -m backend.app.services.versioning`). The
-  browser never touches Postgres directly — everything is API-only.
+- **Deployment.** Compose and the Kubernetes manifests run the **standalone** versioning worker
+  (`python -m backend.app.services.versioning`), which hosts projection, "Enable version control"
+  jobs, the data-source purge and reaper, and import/export jobs. `GRAPHVER_PROJECTION_INPROCESS=1`
+  runs the same loops inside viz-service, for a single-node install. The Helm chart has neither, so
+  those loops do not run there ([TECHNICAL_DEBT.md](../TECHNICAL_DEBT.md) §1.5). The browser never
+  touches Postgres directly — everything is API-only.
 - **External sources.** Today graphs are predominantly **managed** (FalkorDB-backed, human-authored).
   **DataHub / OpenMetadata federation is designed-in** — the provider-capability seam, `source_mode`,
   graph `kind`, and authoritative `sync_ingest` all exist — **but not yet wired to those connectors**
@@ -142,8 +148,10 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 
 > **Honesty note.** This subsystem is feature-complete and test-covered for the managed,
 > single-node case, with several deliberately deferred scale items (checkpoint Merkle CoW,
-> keyset-streaming full seed, a real async import dispatcher, GC/retention) and a handful of known
-> gaps. Chapter 09 is the consolidated, candid list — read it before making production commitments.
+> keyset-streaming re-projection, resumable imports and exports, retention inside a live graph) and
+> a handful of known gaps — the sharpest being a re-sync path not yet proven on a bootstrapped graph
+> ([11](11-resync-at-any-scale.md)). Chapter 09 is the consolidated, candid list — read it before
+> making production commitments.
 
 ---
 
@@ -174,9 +182,10 @@ tables + semantics) and the code:
    old bootstrap's behaviour). Derived artifacts (`:AGGREGATED`, `_GVRollupMeta`, `_AggMeta`,
    `_Projection`) are never imported.
 
-Chapter 09's "keyset-streaming full seed" item is now **half-done**: the *bootstrap* streams;
-the *projector's* full reseed (`_compute_changes` at `from_seq<=0`) still materializes state in
-memory — bootstrap simply never triggers it.
+Chapter 09's keyset-streaming item has moved further since: the *bootstrap* and *exports*
+stream, and the *projector's* full replay reconciles FalkorDB in place from narrow heads instead of
+composing state through `_compute_changes` — though it still holds the graph's ids in memory
+(09 §4.2). Bootstrap's finalize still fast-forwards the projection rather than reseeding.
 
 ---
 

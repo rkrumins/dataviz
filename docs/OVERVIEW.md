@@ -34,7 +34,7 @@ The starting point for understanding {brand} — what it is, the problem it solv
 | **Projection Mode** | How aggregated lineage edges are stored. `in_source` writes them in the original graph; `dedicated` creates a separate projection graph to preserve source data integrity. |
 | **Granularity** | Level of detail in lineage visualization. Can be aggregated (domain → table) or fine-grained (column-level). |
 | **Containment Hierarchy** | Parent-child relationships between entities (e.g., Domain contains Dataset contains SchemaField). |
-| **Three-Layer Ontology Resolution** | How ontologies are assembled: system defaults + workspace-assigned definitions + provider-introspected types. Cached for 5 minutes. |
+| **Three-Layer Ontology Resolution** | How ontologies are assembled: system defaults + workspace-assigned definitions + provider-introspected types. Cached, and invalidated on every pod whenever an ontology or its assignment changes (5-minute backstop). |
 
 ---
 
@@ -281,7 +281,7 @@ Organize complex graphs into meaningful layers. The Layer Studio provides a thre
 
 - **Workspace = team/project context:** Each workspace binds providers, ontologies, and graph names
 - **Data source scoping:** Views are scoped to `{workspaceId}/{dataSourceId}` -- no cross-tenant data leaks
-- **Role-based access:** Admin, user, viewer roles with JWT-based enforcement
+- **Role-based access:** Eight built-in roles plus custom roles, bound to users or groups per workspace, with per-view sharing (see [RBAC.md](RBAC.md))
 - **Provider sharing:** One infrastructure provider serves multiple workspaces without credential duplication
 
 ### 6. Enterprise Data Catalog
@@ -309,7 +309,7 @@ Organize complex graphs into meaningful layers. The Layer Studio provides a thre
 
 - **Context View:** Layer-organized, curated exploration with a **Layer Strip**, **resizable layer columns**, and one-page-ahead pagination
 - **Lineage Lens:** Ego-graph overlay — click a node to see immediate upstream/downstream neighbors grouped by type, regardless of canvas scale
-- **External-degree signal:** A "lineage outside this view" chip driven by total lineage degree per node (`POST /{ws_id}/graph/nodes/degree`)
+- **External-degree signal:** Total lineage degree per node (`POST /{ws_id}/graph/nodes/degree`) drives each card's lineage ports; curated views also count the partners that sit outside the view
 - **Anchor Rail:** Keeps the focal entity stable as columns paginate and resize
 
 ---
@@ -379,7 +379,7 @@ graph TB
     end
 
     subgraph Data["Data Layer"]
-        MgmtDB[(Management DB<br/>SQLite / PostgreSQL)]
+        MgmtDB[(Management DB<br/>PostgreSQL)]
         FDB[(FalkorDB)]
         Neo[(Neo4j)]
         DH[(DataHub)]
@@ -389,7 +389,7 @@ graph TB
     DE --> Canvas
     PA --> Admin
 
-    Frontend -->|JWT| VizSvc
+    Frontend -->|Session cookie| VizSvc
 
     VizSvc --> Ontology
     VizSvc --> Registry
@@ -414,27 +414,29 @@ For detailed architecture documentation, see:
 
 ## Current State & Roadmap
 
+*As of 2026-10-09. `PLAN.md` at the repository root is the one-page version; the [technical-debt register](TECHNICAL_DEBT.md) is what is wrong today.*
+
 ### Current State: Shipped Platform
 
-The platform is past MVP. The four-entity core, the ontology system, the interactive canvas, and — most recently — **graph versioning with full change control** are all shipped and in use.
+The platform is past MVP. The four-entity core, the ontology system, the interactive canvas, graph versioning with full change control, single sign-on, and analytics are all shipped and in use.
 
 ```mermaid
 timeline
     title {brand} Delivered Capabilities
     section Core (Shipped)
         Architecture      : Four-entity model (Provider + CatalogItem + Ontology + Workspace)
-                          : Pluggable providers (FalkorDB default, Neo4j, DataHub, Spanner Graph, Mock)
+                          : Pluggable providers (FalkorDB default, Neo4j, Spanner Graph, DataHub connectivity)
                           : Workspace-centric API
         Lineage Engine    : Multi-directional trace (upstream/downstream/both)
                           : Granularity aggregation (column → table → domain)
                           : Containment hierarchy traversal
-                          : Aggregated edge materialization
+                          : Aggregated edge materialization with automatic reconciliation
         Ontology System   : Versioned definitions with publish/clone lifecycle
                           : Three-layer resolution (system + assigned + introspected)
                           : Impact analysis and coverage checking
-        Auth & Users      : JWT authentication with Argon2id
-                          : Signup with admin approval (default OFF)
-                          : Role-based + workspace-scoped access
+        Auth & Users      : Argon2id passwords and HttpOnly cookie sessions with CSRF protection
+                          : Eight built-in roles, custom roles, group bindings
+                          : Signup with admin approval (default OFF) and invite links
         Data Catalog      : CatalogItem abstraction (Provider → CatalogItem → DataSource)
                           : Permission-controlled asset registration
                           : Impact analysis before deletion
@@ -443,39 +445,51 @@ timeline
                           : Schema-driven GenericNode rendering
                           : Persona toggle (business/technical)
         Lineage Lens      : Lineage Lens / Context View
-                          : External-degree signal + curated-view chip (POST /nodes/degree)
+                          : External-degree signal (POST /nodes/degree)
                           : Layer Strip + resizable layer columns
-                          : Anchor Rail + one-page-ahead pagination
+                          : Anchor Rail + root pagination past 200 per layer
+        Trace & Search    : Trace up to 25 entities as one picture
+                          : Advanced Search and Display Rules with view libraries
     section Change Control (Shipped)
         Versioning        : Drafts, review & merge (PR-style), publish
                           : Revert ("Undo this change") + restore ("Restore to this point")
                           : Version-control admin master switch
                           : Resumable async enable-VC bootstrap job with integrity report
                           : Verified on a 7.7M-entity graph
+        Import & Export   : Imports up to 10 GB and exports up to 50 GB, off the web servers
+                          : Views that move between environments with their history
+    section Enterprise (Shipped)
+        Identity          : SSO via OIDC, SAML 2.0, portal and gateway handoffs
+                          : JIT provisioning and IdP-group role mapping
+        Insight           : Analytics (growth, engagement, content, health)
+                          : White-label branding
+        Operations        : Web, worker and control-plane tiers on Kubernetes with autoscaling
+                          : Sharded FalkorDB cluster option
     section Forward-Looking
+        Hardening         : Production safeguards on in every shipped config
+                          : Metrics scraped and alerted on
+        Views             : Server-side membership for the placement contract
         Integrations      : Additional provider adapters (Apache Atlas, dbt, Airflow)
-                          : Real-time lineage ingestion (event streaming)
-        Enterprise        : SSO (SAML2 / OIDC)
-                          : Workspace-level access-control policies
-                          : GraphQL API layer
-        Scale-out         : Horizontal scale (WEB/WORKER/CONTROLPLANE tiers) when load justifies
+                          : Event-streaming lineage ingestion
+        Collaboration     : Comments and annotations
 ```
 
 ### Forward-Looking Work
 
-The following items are **not yet shipped** and remain genuinely forward-looking:
+| Area | Item | Status |
+|------|------|--------|
+| Hardening | The register's §1: production safeguards on in shipped configs, the connection-tester SSRF, FalkorDB persistence on Kubernetes, metrics scraped and alerted on, complete Kubernetes deploy paths, and a setup script that cannot overwrite live secrets | Next — see [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md), which sets the order |
+| Views | Server-side membership, so `placementContractEnabled` can default on | Next — the placement contract ships as a preview behind that flag |
+| Versioning | Re-sync above 250,000 entities, version control beyond FalkorDB, retention and incremental Merkle for drafts | Planned — [Versioning: Scale, Limits & Roadmap](versioning/09-scale-limits-and-roadmap.md) |
+| Integrations | Additional provider adapters (Apache Atlas, dbt, Airflow) | Not started |
+| Integrations | DataHub beyond connectivity | Not started — the adapter answers ping, stats and basic lineage only |
+| Integrations | Event-streaming lineage ingestion | Partly covered — a drift probe notices an external load within about a minute, and a refresh endpoint takes push notice ([External Change Notification](features/external-change-notification.md)) |
+| Enterprise | API tokens and service accounts for automation | Not started — scripts sign in with a password |
+| Enterprise | GraphQL API layer | Not started — `backend/app/graphql/types.py` is an unused sketch |
+| Enterprise | A general access-policy engine | Not started — workspace-scoped roles, group bindings, custom roles and per-view grants cover most needs today |
+| Collaboration | Comments and annotations | Not started — change proposals ship as versioning pull requests with reviewers |
 
-| Area | Item | Rationale |
-|------|------|-----------|
-| Integrations | Additional provider adapters (Apache Atlas, dbt, Airflow) | Broader ecosystem coverage |
-| Integrations | Real-time lineage ingestion (event streaming) | Live pipeline monitoring |
-| Enterprise | SSO (SAML2 / OIDC) — see [SSO.md](SSO.md) | Enterprise auth requirements |
-| Enterprise | Workspace-level access-control policies | Finer-grained tenant isolation |
-| Enterprise | GraphQL API layer | Alternative query interface |
-| Scale-out | Horizontal scale-out (WEB/WORKER/CONTROLPLANE roles) | Deferred until load justifies — see [architecture-when-scaling.md](architecture-when-scaling.md) |
-| Collaboration | Comments, annotations, change proposals | Team workflow |
-
-> Process roles (`SYNODIC_ROLE`: WEB, WORKER, CONTROLPLANE, DEV) exist today; the single-process **DEV** all-in-one role is the standard deployment shape, with the multi-tier split available when scale demands it.
+> Every shipped deployment runs the process split: web, worker and control-plane processes (`SYNODIC_ROLE`), plus the versioning worker and the stats service, as separate services in Compose and on Kubernetes, where they autoscale. The single-process `dev` role is only the fallback when `SYNODIC_ROLE` is unset — for example, uvicorn run on the host. The end-state items still open are in [architecture-when-scaling.md](architecture-when-scaling.md).
 
 ---
 
@@ -485,15 +499,20 @@ The following items are **not yet shipped** and remain genuinely forward-looking
 
 - **Architecture is right:** The four-entity model (Provider + CatalogItem + Ontology + Workspace), provider abstraction, and ontology system are well-designed for the target use cases
 - **Ontology system is powerful:** Versioning, impact analysis, and three-layer resolution provide genuine schema governance
-- **Change control is shipped:** Graph versioning (drafts, review & merge, publish, revert, restore) plus the version-control master switch and a resumable enable-VC bootstrap job — verified on a 7.7M-entity graph
-- **Exploration is differentiated:** Canvas-first exploration with persona toggle, Lineage Lens / Context View, external-degree signals, the Layer Strip, and the Anchor Rail put this ahead of static lineage tools
+- **Change control is shipped:** Graph versioning (drafts, review & merge, publish, revert, restore) plus the version-control master switch, a resumable enable-VC bootstrap job verified on a 7.7M-entity graph, and imports and exports at tens of gigabytes
+- **Exploration is differentiated:** Canvas-first exploration with persona toggle, Lineage Lens / Context View, multi-entity trace, external-degree signals, the Layer Strip, and the Anchor Rail put this ahead of static lineage tools
+- **Identity is enterprise-ready:** SSO over OIDC and SAML 2.0, HttpOnly cookie sessions with CSRF protection, and RBAC with custom roles and group bindings
 - **Multi-tenant from day one:** Workspace isolation is architectural, not bolted on
 
 ### Areas for Improvement
 
-- **Security defaults still need production hardening:** Credential encryption is optional in dev, JWT is stored in localStorage, and the default admin password must be rotated before production
-- **Legacy migration ongoing:** Some dual code paths remain from the pre-workspace era
-- **Horizontal scale-out not yet built:** The platform runs single-process (DEV role); the WEB/WORKER/CONTROLPLANE split is designed but deferred until load justifies it
+- **Production safeguards are not switched on:** The checks exist and are tested, but they key off `ENV=production`, which no shipped deployment config sets
+- **Observability:** Metrics are exported but off by default, and nothing scrapes or alerts on them
+- **Unproven at scale:** No load or chaos run has been recorded, and two FalkorDB manifest defects on Kubernetes have not been checked
+- **Deployment parity:** The Helm chart lacks the versioning worker and other pieces the Kubernetes manifests have, and the zero-config quickstart does not boot
+- **Legacy code:** The pre-workspace connection path is unreachable dead code still waiting to be deleted
+
+Each of these is an entry, with evidence, in the [technical-debt register](TECHNICAL_DEBT.md).
 
 ### Honest State
 
@@ -501,11 +520,13 @@ The following items are **not yet shipped** and remain genuinely forward-looking
 |-----------|--------|-------|
 | Architecture | Strong | Four-entity model, provider abstraction, workspace isolation, catalog governance |
 | Ontology System | Strong | Versioning, impact analysis, drift detection |
-| Change Control | Strong | Graph versioning shipped (drafts, merge, publish, revert, restore); enable-VC bootstrap verified at 7.7M entities |
-| Frontend UX | Strong | Canvas, persona, Lineage Lens, Layer Strip, Anchor Rail, guided onboarding |
-| Backend API | Solid | 50+ endpoints, clear REST patterns |
-| Security | Needs Work | JWT in localStorage, optional encryption in dev, rotate default admin password |
-| Scale-out | Deferred | Single-process today; multi-tier design ready when needed |
+| Change Control | Strong | Graph versioning shipped (drafts, merge, publish, revert, restore); enable-VC bootstrap verified at 7.7M entities; re-sync guarded above 250,000 entities |
+| Frontend UX | Strong | Canvas, persona, Lineage Lens, multi-entity trace, Layer Strip, Anchor Rail, guided onboarding |
+| Backend API | Solid | About 500 endpoints, clear REST patterns |
+| Identity | Strong | SSO, cookie sessions with CSRF protection, RBAC with custom roles and group bindings |
+| Security posture | Needs Work | Strong controls that shipped configs do not switch on; connection-tester SSRF open |
+| Operability | Needs Work | Metrics off by default and unalerted; Helm chart behind the Kubernetes manifests |
+| Scale-out | Deployed, unmeasured | Three tiers on Kubernetes with autoscaling; no recorded load test |
 
 ---
 
@@ -535,24 +556,26 @@ graph TB
 ## Getting Started
 
 ### Prerequisites
-- Python 3.11+
-- Node.js 20+
-- Docker (for FalkorDB)
+- Python 3.13+ (the container images use 3.14)
+- Node.js 20.19+ or 22.12+ (the image and `frontend/.nvmrc` use 24)
+- Docker (for PostgreSQL, Redis and FalkorDB)
 
 ### Quick Start
 
 ```bash
-# 1. Clone the repository
+# 1. Clone the repository and create the dev env file
 git clone <repo-url> && cd synodic
+cp .env.example .env.dev
 
-# 2. Start FalkorDB
-docker compose up -d
+# 2. Start PostgreSQL, Redis and FalkorDB in Docker
+./dev.sh infra
 
 # 3. Install backend dependencies
 pip install -r backend/requirements.txt
 
-# 4. Start Visualization Service
-GRAPH_PROVIDER=falkordb uvicorn backend.app.main:app --port 8000 --reload
+# 4. Start Visualization Service against that infra
+set -a && source .env.dev && set +a
+uvicorn backend.app.main:app --port 8000 --reload
 
 # 5. Install frontend dependencies
 cd frontend && npm install
@@ -561,21 +584,25 @@ cd frontend && npm install
 npm run dev
 ```
 
-Open http://localhost:5173 and log in with the bootstrap admin credentials (check startup logs).
+Open http://localhost:5173 and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env.dev`. A password published in this repository, like the example file's, has to be changed at first sign-in. `./dev.sh` with no argument runs the whole stack in containers instead — see [SETUP.md](SETUP.md).
 
 ### Environment Variables
 
-See [BACKEND.md](BACKEND.md#6-startup-lifecycle) for the full environment variable reference.
+See [BACKEND.md](BACKEND.md#8-startup-lifecycle) for the full environment variable reference.
 
 Key variables for production:
 ```bash
+ENV=production                                                        # Required — turns on the production safeguards
 MANAGEMENT_DB_URL=postgresql+asyncpg://user:pass@host:5432/synodic  # Required
 CREDENTIAL_ENCRYPTION_KEY=<fernet-key>                                # Required
 JWT_SECRET_KEY=<random-32-chars>                                      # Required
+AGGREGATION_INTERNAL_TOKEN=<random-48-chars>                          # Required — authenticates the control plane
 CORS_ALLOWED_ORIGINS=https://your-domain.com                          # Required
 ADMIN_EMAIL=admin@your-org.com                                        # Recommended
 ADMIN_PASSWORD=<strong-random-password>                                # Recommended
 ```
+
+> **Warning:** Without `ENV=production`, the production-only checks — the 15-minute token cap, shared replay caches, credential encryption, the control-plane token, and readiness on shared revocation — only log a warning. None of the shipped deployment configs set it yet; see [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §1.1.
 
 ---
 
@@ -586,4 +613,5 @@ ADMIN_PASSWORD=<strong-random-password>                                # Recomme
 - [Decisions](/docs/decisions) — the ADRs behind the four-entity model and beyond
 - [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
 - [Technical Debt](/docs/technical-debt) — known risks and the remediation plan
-- [Architecture When Scaling](/docs/scaling-architecture) — the deferred horizontal-scale plan
+- [Architecture When Scaling](/docs/scaling-architecture) — the deployed three-tier split, and the end-state items still open
+- [Versioning: Scale, Limits & Roadmap](/docs/versioning-scale-and-roadmap) — the versioned store's limits and roadmap

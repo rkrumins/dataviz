@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { GitBranch, MessageCircle, CheckCircle2 } from 'lucide-react'
+import { BookOpen, MessageCircle, CheckCircle2 } from 'lucide-react'
 import { Section } from '@/components/layout/Section'
 import { Button } from '@/components/ui/Button'
 import { AnimatedCounter } from '@/components/ui/AnimatedCounter'
@@ -69,8 +69,8 @@ export function CallToAction() {
 
           {/* CTAs */}
           <div className="flex flex-wrap justify-center gap-4">
-            <Button href="https://github.com" icon={<GitBranch size={16} />}>
-              Star on GitHub
+            <Button href="/docs" icon={<BookOpen size={16} />}>
+              Read the docs
             </Button>
             <Button variant="secondary" href="https://discord.gg" icon={<MessageCircle size={16} />}>
               Join Discord
