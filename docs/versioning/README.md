@@ -72,6 +72,11 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 | 09 | [Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md) | Measured wins, O(graph) hotspots, dormant machinery, honest gaps, roadmap | assess production-readiness |
 | 10 | [Authoritative Sources — DataHub / OpenMetadata](10-authoritative-sources-datahub-openmetadata.md) | Managed vs federated, the existing seam, sync-as-commit, curation-as-overlay | plan external-catalog integration |
 | 11 | [Re-sync at Any Scale](11-resync-at-any-scale.md) | Why re-sync costs 2 GB to compute 808 changes, the measured numbers, and the design that removes the size guard | fix `sync_ingest`'s O(graph) memory |
+| 12 | [Streaming Ingestion](12-streaming-ingestion.md) | *Design spec.* Kafka/OpenLineage delta ingestion: `apply_source_delta`, exactly-once fence, field-policy coexistence with humans, compaction | build or operate continuous ingestion |
+| 13 | [Access & Review](13-access-and-review.md) | *Design spec.* Draft visibility and membership, `datasource:publish`, protected main, head-bound approvals, bypass audit | work on authorization or reviews |
+| 14 | [Graph Lifecycle v2](14-graph-lifecycle-v2.md) | *Design spec.* External FalkorDB → versioned: preflight, lossless convert, platform-owned keys, cutover, drift, release, detach, purge | convert or manage a graph's lifecycle |
+| 15 | [Shared Contracts](15-shared-contracts.md) | Principals, permissions, migration chain, error codes, gate and lock order binding 12–14 | implement any of 12–14 |
+| 16 | [Go-Live Review (2026-10)](16-go-live-review-2026-10.md) | Verified review findings, requirement scorecard, end-to-end flow walkthrough | assess go-live readiness |
 
 **Suggested paths.** *Architect / evaluator:* 01 → 03 → 09 → 10. *Backend engineer:* 02 → 03 → 04
 → 05. *Frontend engineer:* 01 → 07 → 06. *Operator / SRE:* 04 → 09.
