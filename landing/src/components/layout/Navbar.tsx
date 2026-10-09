@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Menu, GitBranch } from 'lucide-react'
+import { Menu, BookOpen } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { ThemeToggle } from '@/components/ui/ThemeToggle'
 import { Button } from '@/components/ui/Button'
@@ -87,11 +87,11 @@ export function Navbar() {
             <ThemeToggle />
             <Button
               variant="ghost"
-              href="https://github.com"
+              href="/docs"
               className="hidden sm:inline-flex text-xs px-3 py-2"
-              icon={<GitBranch size={16} />}
+              icon={<BookOpen size={16} />}
             >
-              Star
+              Docs
             </Button>
             <Button href="#contact" className="hidden sm:inline-flex text-xs px-4 py-2">
               Request Demo

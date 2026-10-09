@@ -215,8 +215,8 @@ export const docEntries: DocEntry[] = [
   {
     slug: 'scaling-architecture',
     section: 'architecture',
-    title: 'Scaling Architecture (Future)',
-    description: 'Deferred horizontal-scale plan — not yet active',
+    title: 'Scaling Architecture',
+    description: 'The deployed three-tier split, and the end-state items still open',
     importFn: () => import('@docs/architecture-when-scaling.md?raw'),
   },
   {
@@ -347,11 +347,74 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/versioning/01-overview-and-architecture.md?raw'),
   },
   {
+    slug: 'versioning-data-model',
+    section: 'versioning',
+    title: 'Versioning: Data Model',
+    description: 'The graphver Postgres schema — version rows, head pointers, partitioning and hashing',
+    importFn: () => import('@docs/versioning/02-data-model.md?raw'),
+  },
+  {
+    slug: 'versioning-branching-and-merge',
+    section: 'versioning',
+    title: 'Versioning: Branching, Commits & Merge',
+    description: 'Drafts, publish, forks and pull requests, the 3-way merge, and the concurrency model',
+    importFn: () => import('@docs/versioning/03-branching-commits-merge.md?raw'),
+  },
+  {
+    slug: 'versioning-projection-and-cache',
+    section: 'versioning',
+    title: 'Versioning: Projection & Cache',
+    description: 'How committed main becomes a rebuildable FalkorDB read cache, and how it stays fresh',
+    importFn: () => import('@docs/versioning/04-projection-and-cache.md?raw'),
+  },
+  {
+    slug: 'versioning-ontology-governance',
+    section: 'versioning',
+    title: 'Versioning: Ontology Governance',
+    description: 'How the assigned ontology is enforced at the commit boundary on every write path',
+    importFn: () => import('@docs/versioning/05-ontology-governance.md?raw'),
+  },
+  {
     slug: 'versioning-api-reference',
     section: 'versioning',
     title: 'Versioning: API Reference',
     description: 'The REST contract for the versioning and draft-aware graph routers',
     importFn: () => import('@docs/versioning/06-api-reference.md?raw'),
+  },
+  {
+    slug: 'versioning-frontend-integration',
+    section: 'versioning',
+    title: 'Versioning: Frontend Integration',
+    description: 'How the canvas drives versioning — edit mode as a draft, branch-scoped reads, the Save pipeline',
+    importFn: () => import('@docs/versioning/07-frontend-integration.md?raw'),
+  },
+  {
+    slug: 'versioning-import-export',
+    section: 'versioning',
+    title: 'Versioning: Import / Export',
+    description: 'Bulk import and export as the draft flow at scale — pipeline, identity, formats and limits',
+    importFn: () => import('@docs/versioning/08-import-export.md?raw'),
+  },
+  {
+    slug: 'versioning-scale-and-roadmap',
+    section: 'versioning',
+    title: 'Versioning: Scale, Limits & Roadmap',
+    description: 'What is measured, where the sharp edges are, and the prioritized roadmap',
+    importFn: () => import('@docs/versioning/09-scale-limits-and-roadmap.md?raw'),
+  },
+  {
+    slug: 'versioning-authoritative-sources',
+    section: 'versioning',
+    title: 'Versioning: Authoritative Sources',
+    description: 'Managed vs federated sources, and how external catalogs re-sync as commits',
+    importFn: () => import('@docs/versioning/10-authoritative-sources-datahub-openmetadata.md?raw'),
+  },
+  {
+    slug: 'versioning-resync-at-any-scale',
+    section: 'versioning',
+    title: 'Versioning: Re-sync at Any Scale',
+    description: 'The design that makes provider re-sync memory-bounded so its size guard can go',
+    importFn: () => import('@docs/versioning/11-resync-at-any-scale.md?raw'),
   },
   {
     slug: 'versioning-e2e',
@@ -366,6 +429,20 @@ export const docEntries: DocEntry[] = [
     title: 'Versioning: Deep-Dive Index',
     description: 'Directory into the full versioning reference suite',
     importFn: () => import('@docs/versioning/README-index.md?raw'),
+  },
+  {
+    slug: 'versioning-guide',
+    section: 'versioning',
+    title: 'Versioning: Suite Guide & Glossary',
+    description: 'Reading paths through the suite, the glossary, and the status snapshot',
+    importFn: () => import('@docs/versioning/README.md?raw'),
+  },
+  {
+    slug: 'versioning-drafts-and-merge',
+    section: 'versioning',
+    title: 'Versioning: Draft Lineage & Merge Notes',
+    description: 'Engineering notes on the draft read overlay, and the merge data-loss fix and repair',
+    importFn: () => import('@docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md?raw'),
   },
 
   // Security & Identity
@@ -486,13 +563,13 @@ export const faqEntries: FAQEntry[] = [
     category: 'General',
     question: 'What databases does {brand} support?',
     answer:
-      '{brand} supports **FalkorDB** (default, Redis-protocol graph DB), **Neo4j**, and **DataHub** as graph providers. The management database uses **PostgreSQL** in production or **SQLite** for local development.',
+      '{brand} supports **FalkorDB** (default, Redis-protocol graph DB), **Neo4j**, and **Google Cloud Spanner Graph** as graph providers, plus a connectivity-level **DataHub** adapter. The management database is **PostgreSQL** in every environment.',
   },
   {
     category: 'General',
     question: 'Is {brand} open source?',
     answer:
-      'Yes. {brand} is open source and available on GitHub. Contributions, issues, and feature requests are welcome.',
+      'Yes. {brand} is open source. Contributions, issues, and feature requests are welcome; the [Setup Guide](/docs/setup) gets a development environment running.',
   },
 
   // Setup
@@ -570,7 +647,7 @@ export const faqEntries: FAQEntry[] = [
     category: 'Architecture',
     question: 'What is the tech stack?',
     answer:
-      'Frontend: **React 19 + TypeScript + Vite + Tailwind CSS**. Backend: **Python 3.13 + FastAPI + SQLAlchemy 2.0 async**, with schema migrations managed by **Alembic**. Graph DB: **FalkorDB** (default). Management DB: **PostgreSQL** (production) / SQLite (local dev fallback). Cache/session store: a dedicated **Redis**. State: **Zustand**. Visualization: **React Flow**.',
+      'Frontend: **React 19 + TypeScript + Vite + Tailwind CSS**. Backend: **Python 3.13 + FastAPI + SQLAlchemy 2.0 async**, with schema migrations managed by **Alembic**. Graph DB: **FalkorDB** (default). Management DB: **PostgreSQL**, in every environment. Cache/session store: a dedicated **Redis**. State: **Zustand**. Visualization: **React Flow**.',
   },
 
   // Troubleshooting

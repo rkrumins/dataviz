@@ -131,8 +131,8 @@ Two rules that are not optional:
 | `chain-replay` | `upgrade --no-fast-path` from empty | A migration that cannot tolerate the state `create_all` left behind — the legacy route live databases are still on |
 
 All three then run `verify-schema`, which fails when the ORM declares a table or column the
-database lacks, and warns on the 44 known `server_default` differences catalogued in
-[TECHNICAL_DEBT.md §2.4](TECHNICAL_DEBT.md).
+database lacks, and warns on the known `server_default` differences catalogued in
+[TECHNICAL_DEBT.md §3.1](TECHNICAL_DEBT.md).
 
 `forward-migrate` is the one worth understanding. A green "upgrade head on an empty database"
 proves the chain does not crash — not that any migration in it does anything, because on a

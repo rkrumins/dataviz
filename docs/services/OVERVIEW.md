@@ -36,13 +36,13 @@ The services documented in this section:
 The process role is selected by the `SYNODIC_ROLE` environment variable. It
 controls which subsystems the FastAPI lifespan starts.
 
-> **Important:** The same image runs as every role — `SYNODIC_ROLE` alone decides which subsystems boot. A misconfigured value falls back to `dev` (all-in-one), so verify the role in each deployed process; the `controlplane` role is a singleton and must not be run twice.
+> **Important:** The same image runs as every role — `SYNODIC_ROLE` alone decides which subsystems boot. A misconfigured value falls back to `dev` (all-in-one), so verify the role in each deployed process. The `controlplane` role may run as more than one replica — production runs two — because each of its loops is single-flight on its own.
 
 | Role (`SYNODIC_ROLE`) | Starts | Notes |
 |-----------------------|--------|-------|
 | `web` | HTTP API, auth, reads, lightweight writes | Fully stateless; scale horizontally. |
 | `worker` | Aggregation execution, heavy provider I/O | Consumes the aggregation job stream. |
-| `controlplane` | Scheduler, outbox relay, crash recovery | Singleton. Applies Alembic migrations on deploy. |
+| `controlplane` | Scheduler, outbox relay, crash recovery | HA-safe: each loop is single-flight, so production runs two replicas. Schema migrations belong to the separate `synodic-upgrade` job. |
 | `dev` | All-in-one | Default; runs every subsystem in one process for local development. |
 
 Two subsystems run outside the FastAPI process entirely:
@@ -67,7 +67,7 @@ Backing stores are shared across roles:
 
 - **Graph providers:** FalkorDB (default, Redis-protocol), Neo4j, DataHub,
   Google Cloud Spanner Graph.
-- **Management DB:** PostgreSQL in production, SQLite for the local quickstart.
+- **Management DB:** PostgreSQL, in every environment.
 - **Cache / session / streams:** Redis.
 
 ## Runtime topology
@@ -138,8 +138,7 @@ the health of these services to platform administrators.
 ## Limitations
 
 - Role separation is cooperative, not enforced: a misconfigured `SYNODIC_ROLE`
-  falls back to `dev`, which starts every subsystem. Running two `controlplane`
-  processes is unsupported (the control plane is a singleton).
+  falls back to `dev`, which starts every subsystem.
 - The insights service and the versioning worker lanes are separate processes;
   status endpoints served by the web tier reflect only what that process can see
   locally (see the Insights page for the split-process caveat).

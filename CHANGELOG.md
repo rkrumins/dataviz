@@ -96,6 +96,48 @@ loaded every created entity's payload. It now reads them page by page.
 
 ---
 
+## [Unreleased] — Docs that stay inside the deployment, and a debt register that matches the code
+
+### Changed
+
+**The in-app docs no longer send readers to GitHub.** Wherever a doc linked to one the reader did
+not carry, the link was an absolute URL into the public repository, which on a deployment that cannot
+reach it led nowhere. Those links are relative now, and the pages they pointed at — versioning
+chapters 02–05 and 07–11, the versioning suite guide and glossary, and the draft-lineage notes — are
+in the reader under **Versioning**. A relative link with an `#anchor`, or one that climbs out of its
+folder (`../DATA_ARCHITECTURE.md`), now opens in the reader too; both used to open a new tab on a page
+that did not exist. The docs tests check links with the reader's own resolver, and fail if a doc, a
+guide or an FAQ answer links anywhere on GitHub again.
+
+**Nothing else points at public GitHub either.** The landing site's GitHub buttons — in the
+navigation, the open-source call to action and the footer — open the docs at `/docs`, the way its
+other links already route into the app. `SECURITY.md` describes private vulnerability reporting
+without a URL and links the known-issues list in the repository. The Helm chart no longer names a
+home page, the FAQ no longer sends readers to GitHub, and the ingress-nginx chart repository and the
+FalkorDB module download in the deploy notes are variables you point at a source your cluster can
+reach.
+
+**The technical-debt register, the roadmap and the status pages were re-verified against the code.**
+`docs/TECHNICAL_DEBT.md` was last checked on 2026-08-25 and had drifted: four of its items had
+closed, four had changed shape, and eleven risks were missing. `PLAN.md`, the overview's roadmap and
+maturity sections, the canvas book of work, the scaling plan (the three-tier split it called
+deferred is deployed), and the versioning chapters' status and roadmap sections now say what the
+code does. `SPEC.md` is marked as the historical design it is.
+
+### Known limitations
+
+- **No shipped deployment config sets `ENV=production`**, so the production-only safeguards — the
+  15-minute token cap, shared replay caches, credential encryption, the control-plane token, and
+  readiness on shared revocation — only log a warning. Set it yourself until the configs do
+  (`docs/TECHNICAL_DEBT.md` §1.1).
+- **The zero-config quickstart does not boot.** The README and `QUICKSTART.md` now say so (§2.1).
+- **The kustomize manifests apply no schema migrations**; run the upgrade by hand before rolling out
+  a release that carries one (§1.5).
+- Repository files outside the in-app reader, such as `QUICKSTART.md` and `loadtest/README.md`, are
+  named rather than linked from the docs it carries.
+
+---
+
 ## [Unreleased] — One placement rule for every view surface (preview)
 
 ### Added
@@ -3299,7 +3341,7 @@ graph_too_large_to_sync`, quoting the item count and the memory it would need. R
 OOM on every axis — an OOM kills unrelated requests and explains nothing.
 
 The design that removes the guard entirely is written out in
-[`docs/versioning/11-resync-at-any-scale.md`](https://github.com/rkrumins/dataviz/blob/main/docs/versioning/11-resync-at-any-scale.md).
+[`docs/versioning/11-resync-at-any-scale.md`](docs/versioning/11-resync-at-any-scale.md).
 
 **Enabling version control is FalkorDB-only.** Other providers are refused with a clear `422`.
 

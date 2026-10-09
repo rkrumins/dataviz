@@ -10,17 +10,17 @@ Pick the path that matches what you're doing:
 |------------|------|---------|
 | Edit source with hot-reload | [Contributor](#1-contributor--edit-source-locally) | `./dev.sh` |
 | Run it on a VM | [Self-host](#2-self-host--run-on-a-vm) | `./deploy.sh up` |
-| Take a quick look | [Quickstart](#3-quickstart--zero-config-demo) | `docker compose -f docker-compose.quickstart.yml up` |
+| Take a quick look | [Quickstart](#3-quickstart--zero-config-demo) (does not boot today) | `docker compose -f docker-compose.quickstart.yml up` |
 
 ## Three paths to get running
 
 ### 1. Contributor — edit source locally
 
-Backend/frontend from source with hot-reload; infra in Docker.
+Everything in containers, with the backend and frontend source bind-mounted for hot-reload. `./dev.sh infra` starts only Postgres, Redis and FalkorDB, for running the apps on the host.
 
 ```bash
 cp .env.example .env.dev
-./dev.sh              # generates a signing key, starts infra, prints next steps
+./dev.sh              # generates a signing key, starts the stack, prints the URLs
 ```
 
 Full guide: [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
@@ -50,12 +50,12 @@ Access:
 - API docs: http://localhost:8000/docs
 - Login: `admin@nexuslineage.local` / `admin123`
 
-> [!NOTE]
-> The quickstart ships pre-seeded SQLite and FalkorDB baked into the images — no `.env`, no seeding. It is for evaluation only; the Contributor and Self-host paths use PostgreSQL.
+> [!WARNING]
+> **The quickstart does not boot today.** It points the API at a baked-in SQLite database, and the backend has accepted only PostgreSQL for some time; its published signing key is also refused at startup. Use the Contributor or Self-host path until it is fixed — see [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md) §2.1.
 
 ## Diagnostics
 
-Both runners ship with `doctor`, `status`, and `repair` subcommands — they check environment, ports, role/db state, and orphan containers. If something feels off:
+Both runners ship with a `doctor` subcommand that checks environment, ports, role/db state, and orphan containers; `./deploy.sh status` and `./dev.sh ps` show what is running. If something feels off:
 
 ```bash
 ./dev.sh doctor       # local dev
@@ -70,8 +70,9 @@ Start here, then follow the trail for whatever you're doing.
 |----------|----------------|
 | [QUICKSTART.md](QUICKSTART.md) | Get running locally with sample data |
 | [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | Contributor guide — architecture, roles, aggregation internals |
-| [SPEC.md](SPEC.md) | Technical specification — data models, rule engine, API contract |
+| [SPEC.md](SPEC.md) | The original design specification — historical; much of it was never built as written |
 | [PLAN.md](PLAN.md) | What's built today and what's next |
+| [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md) | Known risks, with evidence, and the order to fix them |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [docs/SETUP.md](docs/SETUP.md) | Environment setup reference |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Self-host operator guide |

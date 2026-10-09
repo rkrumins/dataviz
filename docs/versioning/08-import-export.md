@@ -360,8 +360,8 @@ pipeline, staging, reconcile, and diff never change when a format is added. The 
 |--------|---------|-----------|-------|
 | `ndjson` | `NdjsonAdapter` | ✅ | One JSON object per line — the canonical large-scale format |
 | `csv` / `tsv` | `DelimitedAdapter` | ✅ | Quote-aware via stdlib `csv`; cells must not contain raw newlines (nested values go in `properties_json`) |
-| `json` | `JsonAdapter` | ❌ (buffered) | A single `[{…}]` array — human-scale only |
-| `xlsx` | `XlsxAdapter` (lazy) | ❌ (buffered) | A real workbook; needs `openpyxl`, registered lazily so a missing lib never breaks the others |
+| `json` | `JsonAdapter` | Export ✅, import ❌ (read whole) | A single `[{…}]` array — human-scale only for import; the client caps the file at 100 MiB |
+| `xlsx` | `XlsxAdapter` (lazy) | Export ✅, import ❌ (read whole) | A real workbook; needs `openpyxl`, registered lazily so a missing lib never breaks the others. Export writes rows into the zip as they come, in flat memory |
 
 **Encoding robustness.** `decode_bytes` (`formats.py:31-42`) strips a UTF-8 BOM (Excel "CSV UTF-8")
 and falls back UTF-8 → cp1252 so Windows/Excel exports never crash the import; `_lines`
