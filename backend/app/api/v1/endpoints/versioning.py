@@ -46,12 +46,9 @@ from backend.app.db.repositories import data_source_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
-# Blank-model provisioning lives with the rest of managed-source provisioning; the graph-name
-# suggestion helpers are re-exported for the callers and tests that import them from here.
+# Blank-model provisioning lives with the rest of managed-source provisioning.
 from backend.app.services.managed_sources import (
-    _NUMBERED_SUFFIX_RE,  # noqa: F401
     _graph_name_availability,
-    _next_free_graph_name,  # noqa: F401
     assert_provider_usable,
     claim_graph_name,
     create_managed_data_source,

@@ -902,7 +902,7 @@ async def create_source_from_package(
             raise HTTPException(status_code=409, detail=exc.detail)
         except Exception:
             logger.exception("new source from package %s: the version store failed (ds=%s)",
-                             upload_id, ds.id)
+                             record["uploadId"], ds.id)
             # Only what THIS request made, and only while nothing stands on it: a data source found
             # here is someone's earlier attempt, and one with a graph has a job to give up instead.
             if created and await svc.get_graph_by_data_source(ds.id) is None:
@@ -919,7 +919,8 @@ async def create_source_from_package(
         await ie.store.put_stream(uploads.upload_key(record, _NEW_SOURCE_HINT), _bytes_of(
             json.dumps({**answer, "workspaceId": body.workspaceId}).encode("utf-8")))
     except Exception:                                   # a hint: the data source is the record
-        logger.warning("could not note the new source on upload %s", upload_id, exc_info=True)
+        logger.warning("could not note the new source on upload %s", record["uploadId"],
+                       exc_info=True)
     if not created:
         response.status_code = 200
     return answer

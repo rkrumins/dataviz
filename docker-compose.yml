@@ -764,8 +764,9 @@ services:
     image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
     command: ["server", "/data"]
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # No default login: set both in .env (the password 8+ characters).
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
     ports:
       - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
     volumes:
@@ -783,7 +784,7 @@ services:
     profiles: ["s3"]
     image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z@sha256:cfc83108c3abb371f8fb84d99c1fdc88f8c237e022409b0081fb7c0a3be634dd
     environment:
-      MC_HOST_local: http://${MINIO_ROOT_USER:-minioadmin}:${MINIO_ROOT_PASSWORD:-minioadmin}@minio:9000
+      MC_HOST_local: http://${MINIO_ROOT_USER:-}:${MINIO_ROOT_PASSWORD:-}@minio:9000
     command: ["mb", "--ignore-existing", "local/${MINIO_BUCKET:-synodic}"]
     depends_on:
       minio:

@@ -596,11 +596,12 @@ without passing through an API worker.
   `PUT …/parts/{n}` instead, and so does every part after it: a misconfigured bucket slows an upload
   down rather than breaking it.
 
-**Locally.** `docker compose --profile s3 up -d minio minio-init` starts MinIO on `localhost:9000`
-with the bucket `synodic`. The compose images don't carry boto3, so run the backend outside them to
+**Locally.** Set `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` (8+ characters) in `.env`; MinIO has
+no default login here. `docker compose --profile s3 up -d minio minio-init` then starts MinIO on
+`localhost:9000` with the bucket `synodic`. The compose images don't carry boto3, so run the backend outside them to
 use it: `pip install -r backend/requirements-s3.txt`, then set `OBJECT_STORE_BACKEND=s3`,
 `OBJECT_STORE_S3_BUCKET=synodic`, `OBJECT_STORE_S3_ENDPOINT_URL=http://localhost:9000`,
-`OBJECT_STORE_S3_ADDRESSING=path` and `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY=minioadmin`. The opt-in
+`OBJECT_STORE_S3_ADDRESSING=path`, and `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` to that user and password. The opt-in
 tests run against it: `OBJECT_STORE_S3_TEST_ENDPOINT=http://localhost:9000 python -m pytest -q
 tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 

@@ -219,8 +219,8 @@ async def _randomized(svc, seed, monkeypatch) -> str:
     pair, (schemas, tables, columns, lineage) = await _twins(svc)
     clean = not variant.startswith("strict") or (seed // 5) % 2 == 1
     for ops in _batches(rng, schemas, tables, columns, lineage, clean=clean):
-        await _same(*(lambda g=g, d=d: svc.apply_ops(graph_id=g, branch_id=d, actor="alice", ops=ops,
-                                                     containment_edge_types=CONT)
+        await _same(*(lambda g=g, d=d, ops=ops: svc.apply_ops(graph_id=g, branch_id=d, actor="alice",
+                                                              ops=ops, containment_edge_types=CONT)
                       for g, d in pair))
     rules = {"canon": CANON, "strict_rules": STRICT}.get(variant)
     if variant.startswith("strict"):

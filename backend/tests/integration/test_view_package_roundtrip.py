@@ -349,7 +349,7 @@ async def _new_source_run(root: str, monkeypatch) -> None:
         try:
             await handle.select_graph(key).delete()
         except Exception:
-            pass
+            pass                                        # best effort: the key may not exist
         await pool.disconnect()
         await db.dispose_engine()
         await close_db()
