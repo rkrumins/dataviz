@@ -410,6 +410,12 @@ class TraceClosureResult(TraceResult):
     # lane, 'fine' when a coarse request fell back to the degree-exact
     # walk, None from providers that predate the field.
     grain: Optional[Literal["fine", "coarse"]] = None
+    # Lineage edges this page left out because the node at their far end has
+    # no usable identity (no `urn`, or one that is not text) — nothing can
+    # draw, search or trace such a node. NOT a truncation: the page is still
+    # complete for every partner that can be addressed. Counted per response
+    # over the anchors it walked, so a client merging pages takes the max.
+    unresolved_edges: int = Field(0, alias="unresolvedEdges")
 
 
 class TraceResultV2(TraceResult):
