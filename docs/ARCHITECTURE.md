@@ -18,7 +18,7 @@ This is the system-design reference: how the frontend, backend, semantic layer, 
 
 ## System Overview
 
-{brand} is composed of three primary layers: a **React 19 frontend**, a **FastAPI backend service**, and **pluggable graph data providers** (FalkorDB, Neo4j, DataHub, Spanner Graph, Mock).
+{brand} is composed of three primary layers: a **React 19 frontend**, a **FastAPI backend service**, and **pluggable graph data providers** (FalkorDB, Neo4j, Spanner Graph, and a connectivity-level DataHub adapter).
 
 ```mermaid
 graph TB
@@ -39,7 +39,7 @@ graph TB
     end
 
     subgraph Storage["Data Layer"]
-        MgmtDB[(Management DB<br/>SQLite / PostgreSQL)]
+        MgmtDB[(Management DB<br/>PostgreSQL)]
         FDB[(FalkorDB<br/>Redis Protocol)]
         Neo4j[(Neo4j)]
         DH[(DataHub<br/>GraphQL)]
@@ -221,7 +221,6 @@ graph LR
         NP[Neo4jProvider]
         DP[DataHubProvider]
         SP[SpannerGraphProvider]
-        MP[MockProvider]
     end
 
     AuthR --> Services
@@ -240,7 +239,6 @@ graph LR
     PR2 --> NP
     PR2 --> DP
     PR2 --> SP
-    PR2 --> MP
 
 ```
 
@@ -382,8 +380,8 @@ Authorization separates **global-tier roles** (organization-wide) from **workspa
 
 ### Scalability Considerations
 
-- **ProviderRegistry per-worker isolation**: Each Uvicorn worker gets its own `ProviderRegistry` instance. Config changes in one worker are not visible to others. Future: Redis-backed shared cache.
-- **SQLite limitation**: SQLite is for development only. **Production MUST use PostgreSQL** (`MANAGEMENT_DB_URL=postgresql://...`). SQLite has no concurrent write support.
+- **Per-process provider caches**: Each process keeps its own provider cache. A provider edit is broadcast over Redis, and the web, aggregation-worker and versioning-worker processes drop their copies; the stats service and the control plane do not listen yet ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §2.3).
+- **PostgreSQL only**: There is no SQLite branch. Any `MANAGEMENT_DB_URL` that is not a `postgresql+asyncpg://` URL is rejected at startup, in every environment.
 
 ---
 
@@ -394,7 +392,7 @@ graph TB
     subgraph Dev["Development (Local)"]
         Vite[Vite Dev Server<br/>:5173]
         Uvicorn1[Uvicorn<br/>backend.app :8000]
-        SQLite[(SQLite<br/>nexus_core.db)]
+        PGDev[(PostgreSQL<br/>Docker :5432)]
         Docker[Docker<br/>FalkorDB :6379]
     end
 
@@ -406,7 +404,7 @@ graph TB
     end
 
     Vite -->|proxy| Uvicorn1
-    Uvicorn1 --> SQLite
+    Uvicorn1 --> PGDev
     Uvicorn1 --> Docker
 
     Static -->|nginx| Gunicorn1
@@ -463,7 +461,7 @@ synodic/
 │   │   ├── db/                       # Engine, models, repositories
 │   │   ├── middleware/               # Security headers, logging, request ID
 │   │   ├── ontology/                 # Service, resolver, defaults, adapters
-│   │   ├── providers/                # FalkorDB, Neo4j, Mock implementations
+│   │   ├── providers/                # FalkorDB provider, provider manager, versioned + draft wrappers
 │   │   ├── registry/                 # ProviderRegistry singleton
 │   │   └── services/                 # ContextEngine, AssignmentEngine
 │   ├── common/                       # Shared kernel
@@ -531,7 +529,7 @@ synodic/
 | **Encryption** | cryptography | >=41.0.0 | Fernet for credentials |
 | **Graph DB (Primary)** | FalkorDB | >=1.4.0 | Redis-based graph |
 | **Graph DB (Alt)** | Neo4j | >=5.14.0 | Enterprise graph |
-| **Management DB** | SQLite / PostgreSQL | - | Metadata storage |
+| **Management DB** | PostgreSQL | 16+ | Metadata storage |
 
 ---
 
@@ -609,7 +607,7 @@ docker compose down -v
 
 ### Kubernetes Deployment
 
-A basic Kubernetes deployment targeting a namespace called `synodic`. These manifests assume container images are pushed to a registry (e.g., `ghcr.io/rkrumins/synodic`).
+A basic Kubernetes deployment targeting a namespace called `synodic`, for illustration. The maintained manifests are the kustomize base and overlays in `deploy/k8s/` and the Helm chart in `deploy/helm/dataviz/`. These examples assume container images are pushed to a registry you control, written `<registry>` below.
 
 #### Namespace & ConfigMap
 
@@ -678,7 +676,7 @@ spec:
     spec:
       containers:
         - name: viz-service
-          image: ghcr.io/rkrumins/synodic/viz-service:latest
+          image: <registry>/viz-service:latest
           ports:
             - containerPort: 8000
           envFrom:
@@ -742,7 +740,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: ghcr.io/rkrumins/synodic/frontend:latest
+          image: <registry>/frontend:latest
           ports:
             - containerPort: 80
           resources:

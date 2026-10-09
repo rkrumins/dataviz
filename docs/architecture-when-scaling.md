@@ -1,56 +1,67 @@
-# Architecture when scaling — deferred horizontal-scale plan
+# Architecture when scaling — the three-tier split, and what is still open
 
-> **Status:** **Future architecture, not active scope.** This document
-> captures the design we'd execute *when* operational load justifies
-> horizontal scale-out. Today {brand} runs as a single process with
-> one Postgres v16 — that's the right shape for current scale.
->
-> Original location: this lived as "Phase 6" of the schema-optimization
-> plan. The cleanup pass extracted it to its own doc to make the active
-> backlog reflect what's *actually being built*, not what *might* be
-> built later. The plan kept Phase 6 as scoped work, which created
-> pressure to start building distributed-systems machinery for a
-> deployment shape that doesn't exist.
+> **Status (2026-10-09): the three-tier split is deployed.** Every shipped
+> deployment runs web, worker and control-plane processes as separate
+> services, plus a versioning worker and a stats service: Compose, the
+> Kubernetes manifests (with autoscaling, and a two-replica control plane in
+> the production overlay), and the Helm chart, which lags the manifests
+> ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §1.5). This document began as the
+> deferred plan for that split — "Phase 6" of the schema-optimization plan —
+> and is now its design record plus the end-state items that have not
+> happened. [Scaling for Concurrent Users](SCALING_CONCURRENT_USERS.md) is the
+> operating guide for what runs today.
 
-**Who it's for:** platform engineers evaluating *whether* and *how* to move
-off single-process — read the [trigger conditions](#when-this-becomes-real)
-first; if none apply, this is reference-only.
+**Who it's for:** platform engineers changing the deployment topology. Read
+[What is deployed](#what-is-deployed) and [What is still open](#what-is-still-open)
+first; the sections after them are the original design, corrected where the
+build went another way.
 
-**What you'll find here:** the trigger conditions, the three-tier design,
-the mandatory Redis split, the stateless-web mandate, connection and
-migration handling, operator-visible breaking changes, and a verification
-checklist for when the work is funded.
+**What you'll find here:** the deployed tiers, the open end-state items, the
+three-tier design, the Redis split, the stateless-web mandate, connection and
+migration handling, operator-visible changes, and a verification checklist.
 
-## When this becomes real
+## What is deployed
 
-Trigger conditions — any one of these flips this from "design notes" to
-"funded work":
+| Kubernetes deployment | `SYNODIC_ROLE` | Base | Production overlay |
+|---|---|---|---|
+| `viz-service` | `web` | 2 replicas; HPA 2–8 on CPU and memory | 3 replicas; HPA 3–12 |
+| `aggregation-worker` | `worker` | 2 replicas; HPA 2–10 on CPU | 3 replicas; HPA 3–20 |
+| `aggregation-controlplane` | `controlplane` | 1 replica | 2 replicas |
+| `versioning-worker` | `worker` | 1 replica | 1 replica |
+| `stats-service` | none set | 1 replica | 1 replica |
+| `frontend` | — | 2 replicas; HPA 2–6 on CPU | 3 replicas; HPA 3–8 |
 
-1. P99 latency on the web tier consistently exceeds the SLO under
-   normal load (i.e., one process can no longer keep up).
-2. A single aggregation job's runtime starves the rest of the API for
-   tens of seconds at a time, even with the Phase 0 checkpoint
-   coalescing in place.
-3. A real customer commitment requires multi-replica HA (RTO < ~5
-   minutes) that one process cannot provide.
-4. Operations need to deploy without dropped requests (rolling
-   restart) and the existing single-process restart window is no longer
-   acceptable.
+Compose runs the same services, one replica each. The `production-cluster`
+overlay adds a sharded FalkorDB cluster. The single-process `dev` role is the
+fallback when `SYNODIC_ROLE` is unset — uvicorn run on the host, for example —
+not a deployment shape.
 
-Until then: don't build any of this. Module-level dicts work fine for
-one process. The InProcessDispatcher works fine for one process. There
-is no advantage to Redis / control-plane / role-gating in a deployment
-that has nothing to coordinate.
+## What is still open
 
-## What changes if we do build it
+- **Autoscaling on the real limit.** The worker scales on CPU, not on stream
+  lag, and nothing scales on FalkorDB query threads, which is the actual
+  ceiling ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §2.6).
+- **Metrics nobody scrapes.** The exporter exists as `GET /api/v1/metrics`, off
+  by default; no deployment turns it on or ships scrape config and alerts
+  (§1.4 of the register).
+- **Migrations on the kustomize path.** Compose and Helm run the
+  `synodic-upgrade` job; the kustomize manifests do not (§1.5).
+- **The shared-state modules.** `SharedCache`, `DistributedLock` and the Redis
+  client-usage lint below were never written; see
+  [Code the design called for](#code-the-design-called-for).
+- **Read replicas.** Every role still uses `MANAGEMENT_DB_URL`.
+- **Per-tenant rate limiting.** A per-workspace token bucket exists and is off
+  by default; there is no per-account limit (§2.2).
 
-Three deployment tiers, all from the same image, gated by env var:
+## The three tiers
+
+Three deployment tiers, all from the same image, gated by env var. As designed:
 
 | Tier | Replicas | Workers per replica | Roles |
 |---|---|---|---|
 | `synodic-web` | N (autoscale on CPU/RPS) | M (`UVICORN_WORKERS`, default 4) | HTTP API, auth, reads, lightweight writes |
-| `synodic-worker` | K (autoscale on Redis stream lag) | 1 process, `WORKER_CONCURRENCY` async tasks | Aggregation execution, heavy provider I/O |
-| `synodic-controlplane` | 1 (`replicas: 1`, `strategy: Recreate`) | 1 | Scheduler, outbox relay, crash recovery, Alembic runner |
+| `synodic-worker` | K (designed to autoscale on Redis stream lag; deployed on CPU) | 1 process, `WORKER_CONCURRENCY` async tasks | Aggregation execution, heavy provider I/O |
+| `synodic-controlplane` | 1 as designed; production runs 2 | 1 | Scheduler, outbox relay, crash recovery (Alembic moved to the `synodic-upgrade` job) |
 
 Same code, different `SYNODIC_ROLE ∈ {web, worker, controlplane}` env var
 gates which subsystems start in `lifespan()`.
@@ -65,8 +76,8 @@ graph TB
     subgraph Worker["synodic-worker (K replicas)"]
         WK["Aggregation execution<br/>heavy provider I/O"]
     end
-    subgraph CP["synodic-controlplane (1 replica, Recreate)"]
-        C["Scheduler · outbox relay<br/>crash recovery · Alembic"]
+    subgraph CP["synodic-controlplane (1–2 replicas)"]
+        C["Scheduler · outbox relay<br/>crash recovery"]
     end
 
     subgraph Infra["Shared Infrastructure"]
@@ -87,9 +98,9 @@ graph TB
 
 ```
 
-> **Caution:** This topology is the **end-state design, not what runs today**. Building it before a [trigger condition](#when-this-becomes-real) is met means operating distributed-systems machinery for a deployment shape that doesn't exist. Until then, the single-process `dev` role is correct.
+> **Note:** This is the shape that runs today, with two differences: the worker autoscales on CPU rather than stream lag, and the production control plane runs two replicas whose loops are each single-flight, rather than one replica under `Recreate`. Schema migrations run in the separate `synodic-upgrade` job.
 
-## Mandatory infrastructure (when it's time)
+## Infrastructure
 
 - **Postgres v16+** — already enforced today.
 - **Cache Redis (`REDIS_CACHE_*`, legacy `CACHE_REDIS_URL`)** — vanilla Redis with
@@ -121,8 +132,10 @@ registered via the `providers` table — **never** part of platform
 infrastructure. The platform makes no assumptions about which graph
 backend operators run.
 
-**Current state (2026-07) — one instance, deliberately.** In production today
-Streams + Pub/Sub + Cache share **one** MemoryStore with `maxmemory-policy
+**Current state (2026-10).** The production overlay points the two roles at
+separate Memorystore instances (`REDIS_STREAMS_HOST` and `REDIS_CACHE_HOST` in
+`deploy/k8s/overlays/production/patches/managed-data-tier.yaml`). Elsewhere
+Streams + Pub/Sub + Cache may share **one** instance with `maxmemory-policy
 volatile-lru`, and that is correct: Streams carry no TTL so they are never
 evicted, `MAXLEN` bounds them, and the high-volume cache (all TTL'd) is evicted
 first — a cache flood cannot evict coordination data. The `allkeys-lru` vs
@@ -130,7 +143,7 @@ first — a cache flood cannot evict coordination data. The `allkeys-lru` vs
 by pointing `CACHE_REDIS_URL` at a second instance. Triggers and steps:
 [Redis Topology & Decoupling runbook](DATA_ARCHITECTURE.md#redis-topology--decoupling).
 
-**Landed since this plan was written:** the standalone worker tier (WS1.1), the
+**Landed since this plan was written:** the three-tier deployment itself, the standalone worker tier (WS1.1), the
 control-plane **state-sync consumer group** (ADR-017, replacing the per-replica
 Pub/Sub listener), **control-plane internal auth** (ADR-019), and
 **dedicated-Redis ↔ FalkorDB decoupling** (ADR-020) are implemented. The
@@ -141,8 +154,8 @@ remaining/steady-state design.
 
 Every module-level mutable state moves to Redis or is eliminated:
 
-- `_test_cache`, `_test_inflight` in [providers.py](../backend/app/api/v1/endpoints/providers.py) → Redis-backed `SharedCache`.
-- `_providers: dict` and negative cache in [provider_registry.py](../backend/app/registry/provider_registry.py) → Redis-backed signal store; per-process driver pooling stays.
+- `_test_cache`, `_test_inflight` in `backend/app/api/v1/endpoints/providers.py` → Redis-backed `SharedCache`.
+- `_providers: dict` and negative cache in `backend/app/registry/provider_registry.py` → Redis-backed signal store; per-process driver pooling stays. (As built, the live path is `ProviderManager`, which keeps a per-process cache and drops entries on a Redis invalidation broadcast; the legacy registry survives for the stats service — [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §2.3.)
 - `InProcessDispatcher._active_tasks` → web tier always uses an outbox-based dispatcher; the actual aggregation runs in the worker tier.
 - `AggregationScheduler` does NOT start in the web tier — control-plane only.
 - `recover_interrupted_jobs()` runs in the control-plane only, batched ≤10 dispatches/sec to avoid flood-on-restart.
@@ -158,22 +171,22 @@ Every module-level mutable state moves to Redis or is eliminated:
 
 ## Control-plane tier
 
-- Single replica (`replicas: 1, strategy: Recreate`). No leader election needed; k8s guarantees no two pods at once via `Recreate`.
+- As designed, a single replica under `Recreate`. As built, the base and staging run one replica and production runs two, with no leader election: each loop is single-flight on its own — drift probes by a Redis claim, the reconcile sweep by a Postgres advisory lock — and the scheduler no longer touches a graph, so a second replica can at worst count a retry twice. The Helm chart pins one replica with `Recreate`.
 - Roles enabled by `SYNODIC_ROLE=controlplane`:
   - `OutboxRelay` lifespan task — drains `outbox_events` → Redis Streams.
   - `AggregationScheduler` — the stale-marker reconciler (and, without a job-bus Redis, the stale-job watchdog). It makes no provider call: drift detection is the probe scheduler + reconcile sweeper.
   - `recover_interrupted_jobs()` — runs once at startup (rate-limited).
   - `provider_registry.start_polling()` — periodic provider health write-back.
-- Reads/writes Postgres + Redis; no inbound HTTP. K8s probe via `/internal/controlplane/health`.
+- Reads/writes Postgres + Redis, and serves the internal `:8091` API that viz-service proxies aggregation calls to — job trigger, cancel, purge, settings — authenticated by `AGGREGATION_INTERNAL_TOKEN` (ADR-019).
 
-## New code we'd write (when scaling)
+## Code the design called for
 
 - `backend/common/adapters/redis_endpoint.py` (shipped) — sole owner of Redis client construction, one resolver per role: CACHE (`REDIS_CACHE_*`) and STREAMS (`REDIS_STREAMS_*`).
-- `backend/app/cache/shared.py` — `SharedCache` interface (`RedisSharedCache` for prod, `InProcessSharedCache` for `SYNODIC_ROLE=dev`).
-- `backend/app/locks/distributed.py` — `DistributedLock` async context manager. `SET NX EX` + TTL renewal in a background task; releases via Lua script for atomic check-and-del. Falls back to `asyncio.Lock` in dev.
-- `backend/app/runtime/role.py` — `SynodicRole` enum + `current_role()` + `validate_redis_topology()`. `lifespan()` consults at every gate point.
-- `backend/scripts/migration_runner.py` — usable as either control-plane lifespan call or standalone k8s Job.
-- Static guarantee: `scripts/check_redis_client_usage.py` CI lint. Walks the codebase, fails if any module imports `aioredis`/`redis` outside `runtime/redis_clients.py`. Makes accidental cross-wiring impossible to ship.
+- `backend/app/cache/shared.py` (not written) — `SharedCache` interface (`RedisSharedCache` for prod, `InProcessSharedCache` for `SYNODIC_ROLE=dev`).
+- `backend/app/locks/distributed.py` (not written) — `DistributedLock` async context manager. `SET NX EX` + TTL renewal in a background task; releases via Lua script for atomic check-and-del. Falls back to `asyncio.Lock` in dev.
+- `backend/app/runtime/role.py` (shipped) — `SynodicRole` enum + `current_role()` + `validate_redis_topology()`. `lifespan()` consults at every gate point.
+- `backend/scripts/migration_runner.py` (superseded) — the `synodic-upgrade` service (`backend/scripts/upgrade.py`) took this role, as a Compose one-shot or a Helm hook Job.
+- Static guarantee (not written): `scripts/check_redis_client_usage.py` CI lint. Walks the codebase, fails if any module imports `aioredis`/`redis` outside `runtime/redis_clients.py`. Makes accidental cross-wiring impossible to ship.
 
 ## Connection management
 
@@ -197,8 +210,8 @@ Every module-level mutable state moves to Redis or is eliminated:
 
 ## Observability
 
-- New `/internal/metrics` endpoint (Prometheus exposition format, admin-auth gated). Exposes:
-  - DB pool stats per tier (today: shipped via [db_metrics.py](../backend/app/middleware/db_metrics.py)).
+- New `/internal/metrics` endpoint (Prometheus exposition format, admin-auth gated). Shipped instead as `GET /api/v1/metrics`, behind `METRICS_ENABLED` and a token and off by default; nothing scrapes it yet ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §1.4). Designed to expose:
+  - DB pool stats per tier (today: JSON at `/internal/metrics/db`, from `backend/app/middleware/db_metrics.py`).
   - Redis stream lag (`XLEN` vs. consumer-group last-id) on `aggregation.jobs`.
   - Outbox backlog size.
   - Active aggregation jobs by status.
@@ -207,7 +220,7 @@ Every module-level mutable state moves to Redis or is eliminated:
 
 ## Breaking changes (operator-visible)
 
-When this work happens:
+Designed before the split shipped, and kept as the record of intent. Item 5 did not happen as written: the legacy registry still runs beside `ProviderManager` ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §3.3).
 
 1. `MANAGEMENT_DB_URL` already enforced as `postgresql+asyncpg://` — no change.
 2. The CACHE and STREAMS roles (`REDIS_CACHE_*`, `REDIS_STREAMS_*`) are configured independently; as shipped they may share one instance on `volatile-lru`, and splitting them is config-only.
@@ -218,6 +231,8 @@ When this work happens:
 
 ## Verification checklist
 
+None of these has been run as a recorded test yet ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §1.7).
+
 - `SYNODIC_ROLE=web` + 3 replicas behind nginx → POST `/aggregate/trigger` 100× concurrent: exactly 1 × 2xx, 99 × 409.
 - Kill 1 of 3 web replicas mid-request → load balancer routes; no requests dropped.
 - Run 2 worker replicas → 50 jobs queued in stream; both consume from `synodic-workers` group; no double-processing.
@@ -226,11 +241,6 @@ When this work happens:
 - `redis-cli FLUSHALL` mid-load → web tier degrades gracefully (cache misses, dedup falls back to per-process); control-plane logs degraded; outbox backlog grows but no data loss in Postgres.
 - Postgres failover → web tier sees ~5s of 5xx then recovers (`pool_pre_ping` catches dead conns); workers re-establish; outbox replays unprocessed events.
 - `helm upgrade` of web tier → zero dropped requests; control-plane untouched; workers untouched.
-
-## Estimated scope when triggered
-
-- Roughly 4–7 days of focused work for the platform changes.
-- Plus deployment-platform work (helm chart, k8s manifests, Redis provisioning, monitoring dashboards) — out of scope for the platform team.
 
 ## Open design questions (resolve when starting)
 
@@ -242,8 +252,8 @@ When this work happens:
 
 ## Related
 
-- [Architecture](/docs/architecture) — the current single-process system design this plan would evolve
+- [Architecture](/docs/architecture) — the system design these tiers run
 - [Data Architecture](/docs/data-architecture) — the Redis Topology & Decoupling runbook for the deploy-only cache split
 - [Decisions](/docs/decisions) — ADR-017/019/020, the decoupling work already landed toward this design
 - [Services Overview](/docs/services-overview) — the `SYNODIC_ROLE` topology (WEB, WORKER, CONTROLPLANE, DEV)
-- [Technical Debt](/docs/technical-debt) — the per-worker cache-isolation and data-tier HA gaps this plan addresses
+- [Technical Debt](/docs/technical-debt) — the open deployment, observability and capacity items behind this page

@@ -585,12 +585,12 @@ The **Context View** (a.k.a. the Lineage Lens experience) is **shipped**. It pro
 | `lens/LensSkeleton.tsx`, `lens/ControlTip.tsx`, `lens/ViewControl.tsx`, `lens/LensStatusBar.tsx`, `lens/useToolbarOverflow.ts` | | The picture's ghost under the first fetch; explain-on-hover popovers; the header's category chips (a chip names the category and its current value and opens a `role=menu` of `menuitemradio` options with meanings — Radix Popover above the Lens); the footer status bar (gestures as keycaps, the wire legend, live board facts); the chips row's fold into a More menu on narrow windows (`fitToolbar`, measured widths, priority `TOOLBAR_ORDER`). Tests choose options through `src/test/lensView.ts` (`chooseView`, `viewValue`) |
 | `hooks/useTraceOverlay.ts`, `hooks/lib/traceViewModel.ts`, `trace/TraceDockNoticeStrip.tsx` | | The canvas trace overlay: seeds from the focus side, opens host paths to partner cards (partners stay closed with counts, `≈N flows` until raw lands), never writes the canvas store; dock strips for the checkpoint (Continue) and failures (Try again) |
 | `LayerStrip` | `components/canvas/context-view/LayerStrip.tsx` | Horizontal strip of layer headers across the top of the canvas — layer navigation, counts, and add-layer affordance |
-| `LayerColumn` | `components/canvas/context-view/LayerColumn.tsx` | Layer-based column layout with **resizable columns** — a right-edge resize handle sets a per-layer custom width, persisted to `nx-layer-widths` in localStorage. Renders one-page-ahead paginated items |
+| `LayerColumn` | `components/canvas/context-view/LayerColumn.tsx` | Layer-based column layout with **resizable columns** — a right-edge resize handle sets a per-layer custom width; on a draft it saves into the view (`layer.width`, through `persistReferenceLayout`), and `nx-layer-widths` in localStorage keeps a viewer's own override. Renders one-page-ahead paginated items |
 | `AddLayerColumn` | `components/canvas/context-view/AddLayerColumn.tsx` | Inline "add a layer" column affordance |
 | `anchorRail` | `components/canvas/context-view/anchorRail.ts` | **Anchor Rail** — keeps the focal/anchor entity stable while columns paginate and resize |
 | `LineageFlowOverlay` | `components/canvas/context-view/LineageFlowOverlay.tsx` | Flow visualization overlay drawn across layer columns |
 
-**Curated-view "lineage outside this view" cue:** the canvas fetches total lineage degree per URN via `useExternalDegrees` (backed by `POST /{ws_id}/graph/nodes/degree`) and subtracts each node's loaded (internal) degree, surfacing a chip when a node has links beyond the current view.
+**Lineage ports and the "outside this view" cue:** the canvas fetches total lineage degree per URN via `useExternalDegrees` (backed by `POST /{ws_id}/graph/nodes/degree`), and those totals drive each card's lineage ports. The curated-view chip, the per-card cue and the Preview action count the partners the canvas places outside the view (shown when `showMissingConnectionIndicators` is on); they do not subtract loaded degree from the totals.
 
 ---
 
@@ -604,7 +604,7 @@ Beyond the key hooks listed in Section 6, the codebase includes:
 | `useDataSourceSchema` | Load ontology for active data source |
 | `useGraphSchema` | Low-level graph API schema introspection |
 | `useGraphHydration` | Converts backend GraphNode/GraphEdge to canvas types. Tracks hydration phases: idle, roots, edges, children, complete. Provides `toCanvasNode()`, `toCanvasEdge()`, `claimedFeedTypes()`, `feedAfter()` |
-| `useExternalDegrees` | Fetches total lineage degree (in/out) per URN via `POST /{ws_id}/graph/nodes/degree`; powers the Context View's "lineage outside this view" chip by comparing external totals against internally loaded degree |
+| `useExternalDegrees` | Fetches total lineage degree (in/out) per URN via `POST /{ws_id}/graph/nodes/degree`, 400 URNs per request after an 800 ms settle; the totals drive the Context View cards' lineage ports |
 | `useLogicalNodes` | Manage layer-to-node mappings (CRUD) |
 | `useLayerAssignment` | Handle entity-to-layer assignment logic |
 | `useHighlightState` | Track highlighted/traced/dimmed nodes |

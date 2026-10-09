@@ -91,9 +91,15 @@ kubectl apply -k deploy/k8s
 kubectl apply -k deploy/k8s/stores
 ```
 
-The control plane is a singleton that runs Alembic and owns the
-`aggregation` schema; `viz/worker/stats` have a `wait-for-controlplane`
-initContainer so they don't start until it's healthy.
+The control plane owns the `aggregation` schema, which it creates at startup
+outside Alembic; `viz/worker/stats` have a `wait-for-controlplane`
+initContainer so they don't start until it's healthy. Nothing in these
+manifests applies Alembic migrations — the Helm chart runs them as a
+pre-upgrade hook, and Compose as a one-shot service. Until the kustomize base
+gets the same job, apply them by hand with the new release's image
+(`python -m backend.scripts.upgrade upgrade`) before rolling it out; the API
+reports not-ready (`schema_mismatch`) until you do. See
+[docs/TECHNICAL_DEBT.md](../docs/TECHNICAL_DEBT.md) §1.5.
 
 ## 6. DNS & verification
 

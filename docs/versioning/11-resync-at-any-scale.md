@@ -1,8 +1,16 @@
 # 11 · Re-sync at any scale
 
-> **Status: designed, not built.** A size guard (`GRAPHVER_RESYNC_MAX_ENTITIES`, default
-> 250,000) currently refuses what would not survive. This chapter is how that guard gets
-> deleted. It exists so the next person does not have to re-derive any of it.
+> **Status (2026-10-09): partly built, and not yet proven.** The bounded merge this chapter
+> designs — hash-discard of unchanged rows, per-batch identity lookup from the stored heads,
+> deletion by absence against the set of external ids, and a merge over only the touched set —
+> is the live `sync_ingest` (the `# BOUNDED.` block in
+> `backend/app/services/versioning/service.py`). Not built: the bootstrapped-graph identity
+> test the warning section below calls the whole test, without which the live path is
+> unverified on real graphs; streaming the provider snapshot, which is still read into one
+> list with a whole-snapshot URN map; the `resync` worker job; and `import_rows` staging. A
+> size guard (`GRAPHVER_RESYNC_MAX_ENTITIES`, default 250,000) still refuses what would not
+> survive. This chapter is how that guard gets deleted. It exists so the next person does not
+> have to re-derive any of it.
 
 ## The problem, measured
 
@@ -145,6 +153,10 @@ not an afterthought.
 4. Move it onto the worker as a `resync` job (202 + progress + resumable).
 5. Stage the id set into `import_rows` for the unbounded case.
 6. Delete the guard, the knob, the 422 and the guard's tests.
+
+As of 2026-10-09, 1 and 2 are done — though 2 is unproven until the bootstrapped-graph test
+below exists, which belongs before everything else that is left. No re-measurement of the live
+version against the 478k graph is recorded. 4, 5 and 6 have not started.
 
 ---
 

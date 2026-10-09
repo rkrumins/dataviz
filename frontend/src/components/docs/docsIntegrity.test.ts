@@ -13,7 +13,7 @@ import {
   keyJourneys,
   guideFaqs,
 } from '@/components/guide/guideConfig'
-import { filenameMap } from './MarkdownComponents'
+import { filenameMap, rewriteDocLink } from './MarkdownComponents'
 
 /**
  * Documentation integrity — the guard against re-drift.
@@ -43,9 +43,9 @@ const EXTRA_GUIDE_ROUTES = new Set<string>([])
 // absolute GitHub URLs (…/blob/main/docs/versioning/02-…md), which are external.
 const DOC_LINK = /(?<=^|[("'\s>])\/docs\/([a-z0-9-]+)(?=$|[)#"'\s<])/g
 const GUIDE_LINK = /(?<=^|[("'\s>])\/guide\/([a-z0-9-]+)(?=$|[)#"'\s<])/g
-// Relative markdown link, e.g. ](./FILE.md#anchor) or ](sub/FILE.md). The char
-// class excludes ':' so absolute http(s) URLs never match.
-const MD_LINK = /\]\(\s*\.?\/?([A-Za-z0-9_./-]+\.md)(?:#[^)]*)?\s*\)/g
+// Relative markdown link, e.g. ](./FILE.md#anchor), ](sub/FILE.md) or
+// ](../FILE.md). The char class excludes ':' so absolute http(s) URLs never match.
+const MD_LINK = /\]\(\s*([A-Za-z0-9_./-]+\.md(?:#[^)\s]*)?)\s*\)/g
 
 function collectDeadLinks(content: string, where: string, errors: string[]): void {
   for (const m of content.matchAll(DOC_LINK)) {
@@ -86,6 +86,20 @@ describe('docs manifest integrity', () => {
   })
 })
 
+describe('rewriteDocLink', () => {
+  it('follows a relative link the way it resolves on disk, keeping its anchor', () => {
+    expect(rewriteDocLink('DECISIONS.md#adr-018')).toBe('/docs/decisions#adr-018')
+    expect(rewriteDocLink('../DATA_ARCHITECTURE.md')).toBe('/docs/data-architecture')
+    expect(rewriteDocLink('docs/versioning/11-resync-at-any-scale.md')).toBe(
+      '/docs/versioning-resync-at-any-scale',
+    )
+    // Exact paths only: another folder's README is not the versioning one.
+    expect(rewriteDocLink('../examples/search-and-rules/README.md')).toBe(
+      '../examples/search-and-rules/README.md',
+    )
+  })
+})
+
 describe('docs content integrity', () => {
   it('every doc markdown loads, is non-empty, and its in-app links resolve', async () => {
     const errors: string[] = []
@@ -115,16 +129,27 @@ describe('docs content integrity', () => {
     expect(errors).toEqual([])
   })
 
-  it('relative .md links in registered docs route in-app (present in filenameMap)', async () => {
+  it('relative .md links in registered docs route in-app (resolve through filenameMap)', async () => {
     const errors: string[] = []
     for (const e of docEntries) {
       const content = (await e.importFn()).default
       for (const m of content.matchAll(MD_LINK)) {
-        const base = m[1].split('/').pop() as string
-        if (!(base in filenameMap)) {
+        if (!rewriteDocLink(m[1]).startsWith('/docs/')) {
           errors.push(`docs/${e.slug}: relative link "${m[1]}" is not in filenameMap → 404 in-app`)
         }
       }
+    }
+    expect(errors).toEqual([])
+  })
+
+  it('docs and guides link to each other relatively, never to the repository on GitHub', async () => {
+    // A deployment serves these pages itself and may not reach github.com. A
+    // relative link works there and in the repository alike; register the
+    // target instead of linking its GitHub copy.
+    const errors: string[] = []
+    for (const e of [...docEntries, ...guideEntries]) {
+      const content = (await e.importFn()).default
+      if (content.includes('github.com/rkrumins/dataviz')) errors.push(e.slug)
     }
     expect(errors).toEqual([])
   })
