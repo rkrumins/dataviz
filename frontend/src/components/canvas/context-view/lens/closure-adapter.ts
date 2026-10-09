@@ -112,6 +112,11 @@ export interface LensWalkModel {
     /** Resume point for the FOCUS's own capped contents ("s:<urn>"), or
      *  null when fully seeded. Advanced only by focus-anchored merges. */
     readonly seedCursor: string | null
+    /** Lineage edges the server left out because their other end has no
+     *  URN — the MAX over the walk's fine pages (each page counts per
+     *  response, so two pages can count one edge). Never partiality.
+     *  Optional (absent = 0). */
+    readonly unresolvedEdges?: number
 }
 
 /** The zero-value walk model a hook starts from before any response has
@@ -132,6 +137,7 @@ export function emptyWalkModel(focusUrn: string): LensWalkModel {
         truncationReason: null,
         seedTruncated: false,
         seedCursor: null,
+        unresolvedEdges: 0,
     }
 }
 
@@ -169,6 +175,8 @@ export function toLensClosure(
             : null,
         seedTruncated: (res.seedCursor ?? null) !== null,
         seedCursor: res.seedCursor ?? null,
+        // A coarse page always reports 0; it counts nothing the fine pages do.
+        unresolvedEdges: res.grain === 'coarse' ? 0 : (res.unresolvedEdges ?? 0),
     }
 }
 
@@ -295,6 +303,9 @@ export function mergeClosures(
         truncationReason: failed ? incoming.truncationReason : (owed ? (incoming.truncationReason ?? model.truncationReason ?? 'max_nodes') : null),
         seedTruncated: seedCursor !== null,
         seedCursor,
+        // MAX, never a sum: each page counts per response, so two pages of
+        // one walk can count the same hidden edge (and a max stays idempotent).
+        unresolvedEdges: Math.max(model.unresolvedEdges ?? 0, incoming.unresolvedEdges ?? 0),
     }
 }
 
@@ -335,6 +346,7 @@ export function unionWalkModels(models: readonly LensWalkModel[]): LensWalkModel
     let truncated = false
     let seedTruncated = false
     let truncationReason: string | null = null
+    let unresolvedEdges = 0
 
     for (const m of models) {
         for (const n of m.nodes) nodes.set(n.urn, n)
@@ -358,6 +370,7 @@ export function unionWalkModels(models: readonly LensWalkModel[]): LensWalkModel
         truncated = truncated || m.truncated
         seedTruncated = seedTruncated || m.seedTruncated
         truncationReason = truncationReason ?? m.truncationReason
+        unresolvedEdges = Math.max(unresolvedEdges, m.unresolvedEdges ?? 0)
     }
 
     return {
@@ -377,6 +390,7 @@ export function unionWalkModels(models: readonly LensWalkModel[]): LensWalkModel
         // The union has no single focus whose contents could be resumed; each
         // seed's own cursor is drained by the driver on its own model.
         seedCursor: null,
+        ...(unresolvedEdges > 0 ? { unresolvedEdges } : {}),
     }
 }
 
