@@ -769,7 +769,6 @@ export function viewToViewConfig(view: View): ViewConfiguration {
             visibleRelationshipTypes: [],
             defaultDepth: 5,
             maxDepth: 10,
-            rootEntityTypes: ['domain'],
         },
         layout: cfg.layout ?? {
             type: (view.viewType ?? 'graph') as any,

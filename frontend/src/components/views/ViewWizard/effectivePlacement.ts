@@ -12,7 +12,8 @@
  * So this does NOT reimplement placement. It calls the very pair the canvas
  * calls — `buildLayerRules` (hooks/lib/resolveRootLayer.ts) and
  * `resolveLayerAssignment` (providers/GraphDataProvider.ts) — in the same
- * explicit-then-rule order as `resolveRootLayer`. Two consequences worth knowing:
+ * explicit-then-rule order as `resolveRootLayer`. Two consequences worth knowing
+ * (flag off):
  *
  *   • When two layers declare the same entity type, the LATER layer wins, because
  *     generated rules are priced `layer.order * 10 + idx` and the resolver sorts
@@ -26,6 +27,10 @@
  * Only ROOT-level entities need this. Containment children never consult rules —
  * they hard-inherit their parent's layer.
  *
+ * With placementContractEnabled on, `contract` places through the One Placement
+ * Contract (lib/placement) instead: first layer wins, types fold case, a stale
+ * entry falls through, and stamps, tags and properties count.
+ *
  * No React — safe to unit test in isolation.
  */
 import type { LayerAssignmentEntry, ViewContentConfig, ViewLayerConfig } from '@/types/schema'
@@ -37,22 +42,49 @@ import {
 } from '@/providers/GraphDataProvider'
 import { buildLayerRules } from '@/hooks/lib/resolveRootLayer'
 import { deriveEntityScope, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
+import {
+  compilePlacementSpec,
+  isMember,
+  place,
+  type CompiledPlacementSpec,
+  type PlacementFacts,
+  type PlacementResult,
+  type PlacementSource,
+} from '@/lib/placement/placement'
 
-/** How an entity ended up in its layer. */
-export type PlacementSource = 'explicit' | 'rule' | 'none'
+/** How an entity ended up in its layer. The legacy resolver answers only
+ *  explicit, rule or none; the contract any source. */
+export type { PlacementSource }
+
+/** What placed a member that holds no entry (contract only): its own stamp,
+ *  a rule on entity types alone, or any other rule. */
+export type PlacedBy = 'type' | 'rule' | 'stamp'
 
 export interface Placement {
   /** Absent when nothing places this entity — it would render nowhere. */
   layerId?: string
   source: PlacementSource
+  /** Contract only, on a stamped or rule placement. */
+  placedBy?: PlacedBy
 }
 
 export interface PlaceableEntity {
   urn: string
   type: string
+  /** Its full facts (stamp, tags, properties) — read by the contract only. */
+  facts?: PlacementFacts
 }
 
 const NOWHERE: Placement = { source: 'none' }
+
+/** A contract placement's PlacedBy, read from the rule its ruleId names.
+ *  Undefined unless it is stamped or placed by a rule. */
+export function placedByOf(spec: CompiledPlacementSpec, placed: PlacementResult): PlacedBy | undefined {
+  if (placed.source === 'stamped') return 'stamp'
+  if (placed.source !== 'rule') return undefined
+  const rule = spec.rules.find(r => r.id === placed.ruleId && r.layerId === placed.layerId)
+  return rule?.types && !rule.tags && !rule.glob && rule.checks.length === 0 ? 'type' : 'rule'
+}
 
 /**
  * Build a resolver for one draft layout. Layers are sorted by `order` first, the
@@ -72,7 +104,23 @@ export function buildWizardPlacement(
    * Defaults to the same derivation `deriveEntityScope` uses.
    */
   entityScope?: 'all' | 'curated',
+  /** placementContractEnabled: place through the One Placement Contract. */
+  contract = false,
 ): (entity: PlaceableEntity) => Placement {
+  if (contract) {
+    // The draft compiled once, as the canvas compiles the saved view, and each
+    // entity placed as a root (no parents). Fallback is display only: unplaced.
+    const spec = compilePlacementSpec({ layout: { referenceLayout: { layers, assignments } }, content: { entityScope } })
+    return (entity: PlaceableEntity): Placement => {
+      const facts = entity.facts ?? { urn: entity.urn, entityType: entity.type, tags: [], properties: {} }
+      const placed = place(spec, entity.urn, facts, [])
+      const placedBy = placedByOf(spec, placed)
+      return isMember(placed)
+        ? { layerId: placed.layerId!, source: placed.source, ...(placedBy ? { placedBy } : {}) }
+        : { source: placed.source }
+    }
+  }
+
   const sortedLayers = [...layers].sort((a, b) => a.order - b.order)
   // Sorted ONCE here, not per entity: this resolver runs across every scanned
   // top-level entity and re-sorting each time measured ~8.7ms per 50,000.

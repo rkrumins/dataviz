@@ -748,6 +748,26 @@ async def _gate_node_ordering(session: AsyncSession, reference_layout: dict) -> 
     return strip_node_ordering(reference_layout)
 
 
+async def check_layer_rules(
+    session: AsyncSession, reference_layout: Any, previous_layout: Any,
+) -> None:
+    """Refuse (``ValueError``; the endpoints map it to 422) a NEW or CHANGED layer rule
+    that can never match, while the placement contract is on
+    (``placementContractEnabled``). Off, every rule is accepted exactly as before.
+
+    Both layouts are BARE referenceLayouts. A rule stored earlier and sent back
+    unchanged always passes: the canvas rewrites the whole layout on every gesture,
+    and an older view's inert rule must not block a drag that never touched it.
+    """
+    from backend.app.services.view_placement import contract_enabled, inert_rule_errors
+
+    if not await contract_enabled(session):
+        return
+    errors = inert_rule_errors(reference_layout, previous_layout)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+
 async def update_view_layout(
     session: AsyncSession,
     view_id: str,
@@ -763,7 +783,8 @@ async def update_view_layout(
     view's display rules (see ``_keep_display_rules``).
 
     Raises ``ValueError`` if an assignment names a ``layerId`` that isn't
-    one of the submitted layers' ids (the endpoint maps this to a 422).
+    one of the submitted layers' ids (the endpoint maps this to a 422), or
+    if ``check_layer_rules`` refuses a new or changed layer rule.
     """
     result = await session.execute(
         select(ViewORM).where(ViewORM.id == view_id).with_for_update()
@@ -776,6 +797,7 @@ async def update_view_layout(
     if not isinstance(config, dict):
         config = {}
     previous_layout = _base_reference_layout(config)
+    await check_layer_rules(session, req.reference_layout, previous_layout)
     layout = config.get("layout")
     if not isinstance(layout, dict):
         layout = {}
@@ -928,7 +950,8 @@ async def update_overlay_layout(
     None if the view doesn't exist.
 
     Raises ValueError (→ 422) if an assignment names an unknown ``layerId``,
-    matching :func:`update_view_layout`."""
+    matching :func:`update_view_layout`, or if ``check_layer_rules`` refuses a
+    new or changed layer rule (compared with the draft's current layout)."""
     result = await session.execute(select(ViewORM).where(ViewORM.id == view_id))
     row = result.scalar_one_or_none()
     if not row:
@@ -936,6 +959,12 @@ async def update_overlay_layout(
 
     # Validate BEFORE any write so a bad request never mutates the overlay.
     _validate_layer_refs(req.reference_layout)
+    existing = await get_overlay(session, view_id, branch_id)
+    await check_layer_rules(
+        session, req.reference_layout,
+        json.loads(existing.reference_layout or "{}") if existing is not None
+        else _base_reference_layout(_load_config(row)),
+    )
 
     overlay = await ensure_overlay(session, view_id, branch_id)
 

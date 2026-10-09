@@ -1544,6 +1544,15 @@ async def get_top_level_nodes(
         "asc", alias="sortDirection", pattern="^(asc|desc)$",
         description="Sort direction on displayName. Cursors are direction-bound.",
     ),
+    orphansOnly: bool = Query(
+        False,
+        description=(
+            "Only orphans: top-level instances of types the data source's ontology "
+            "declares as containable (non-root), e.g. a Table with no Schema. "
+            "entityTypes narrows within them. totalCount is exact, or null when the "
+            "count timed out."
+        ),
+    ),
     engine: ContextEngine = Depends(get_context_engine),
     # R-H3 bulkhead: held across the materialized-serve miss → FalkorDB read;
     # isolate from the WEB pool so a slow provider can't starve auth/nav.
@@ -1562,6 +1571,11 @@ async def get_top_level_nodes(
     The response's ``rootTypeCount`` and ``orphanCount`` fields let the UI
     distinguish the two classes (e.g. an "orphan" badge in the wizard tree).
 
+    ``orphansOnly=true`` keeps only the second class: ``entityTypes`` becomes
+    the ontology's declared non-root types (narrowed by any requested ones),
+    resolved before every cache layer so the payload filter, count side-cache
+    and page cache all key on that list. No such type means an empty page.
+
     Containment edge types are resolved from the ontology bound to the active
     data source. If the ontology has no containment edges configured and no
     ``CONTAINMENT_EDGE_TYPES`` env override is present, the provider raises
@@ -1574,6 +1588,12 @@ async def get_top_level_nodes(
     ``/nodes/top-level`` and return 404 for a non-existent URN.
     """
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
+
+    if orphansOnly:
+        # Resolved before every cache layer so each one keys on the real list.
+        entityTypes = await engine.orphan_entity_types(entityTypes)
+        if not entityTypes:
+            return TopLevelNodesResult(nodes=[], totalCount=0, hasMore=False, nextCursor=None)
 
     scope = _cache_scope(engine)
 

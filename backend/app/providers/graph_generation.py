@@ -12,7 +12,9 @@ Rebuilds no longer drop (the projector reconciles in place). Whatever still does
 eviction, purge — bumps ``falkorgen:<graph>`` on the job-bus Redis, and every provider
 checks it before a query (at most once per interval) and clears its handles' tables when
 it moved. Pull, not push: a process that missed a message, or started after it, still
-converges within one interval.
+converges within one interval. A drop that bumps nothing — an external loader, a script, a
+flush — is caught by the provider comparing its handle's tables with the server's catalogue
+(append-only while a graph lives) at most every CATALOGUE_CHECK_INTERVAL_S.
 """
 from __future__ import annotations
 
@@ -29,6 +31,10 @@ CHECK_INTERVAL_S = 2.0
 #: The read rides a user's query: a slow or unreachable bus must cost that query at most
 #: this, never the client's multi-second socket timeouts. A timed-out read changes nothing.
 READ_TIMEOUT_S = 0.25
+#: How often a provider checks its handle's id tables against the graph's catalogue on the
+#: server, for drops nothing here hears about (an external loader, a script's GRAPH.DELETE, a
+#: flush). Up to three O(#types) FalkorDB reads, so rarer than the generation read.
+CATALOGUE_CHECK_INTERVAL_S = 10.0
 _TTL_S = 30 * 24 * 3600
 
 

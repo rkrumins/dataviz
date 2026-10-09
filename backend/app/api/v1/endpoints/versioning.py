@@ -517,6 +517,24 @@ async def _live_containment_types(
         return []
 
 
+async def _live_containment_map(
+    session: AsyncSession, workspace_id: Optional[str], data_source_id: Optional[str],
+) -> Dict[str, bool]:
+    """The CURRENT ontology's containment edge types WITH their direction (``{TYPE: child is
+    source}``), for the placement contract's view-scoped import roots. Best-effort like
+    :func:`_live_containment_types`: {} on failure."""
+    try:
+        from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+        from backend.app.ontology.service import LocalOntologyService
+        from backend.app.services.view_placement import containment_from_ontology
+        ont = LocalOntologyService(SQLAlchemyOntologyRepository(session))
+        resolved = await ont.resolve(workspace_id=workspace_id, data_source_id=data_source_id)
+        return containment_from_ontology(resolved)
+    except Exception:
+        logger.exception("containment-direction resolution failed (ws=%s ds=%s)", workspace_id, data_source_id)
+        return {}
+
+
 async def _pr_containment_types(svc, session, ws_id, pr) -> List[str]:
     """Containment edge types for a PR's hierarchical diff, resolved from the **base** graph's
     data source (the side the merge lands on)."""
@@ -2437,7 +2455,8 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
     from backend.app.db.models import ViewORM
     from backend.app.db.repositories import view_repo
     from backend.app.services.versioning.import_export.import_worker import (
-        compute_import_root_assignments)
+        compute_import_root_assignments, contract_import_root_assignments)
+    from backend.app.services.view_placement import PlacementSpec, contract_enabled
     from backend.common.models.management import ViewLayoutUpdateRequest
 
     async with get_async_session() as session:
@@ -2451,9 +2470,14 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
         if not isinstance(raw, dict) or not raw.get("layers"):
             return {"added": 0}                          # no layers → nowhere to place the roots
         existing = raw.get("assignments") if isinstance(raw.get("assignments"), dict) else {}
-        cont = await _live_containment_types(session, ws, ds)
-        new_entries = compute_import_root_assignments(
-            created_nodes, batch_edges, cont, raw.get("layers"), existing)
+        if await contract_enabled(session):
+            new_entries = contract_import_root_assignments(
+                created_nodes, batch_edges, PlacementSpec.from_config(config),
+                await _live_containment_map(session, ws, ds), raw.get("layers"), existing)
+        else:
+            cont = await _live_containment_types(session, ws, ds)
+            new_entries = compute_import_root_assignments(
+                created_nodes, batch_edges, cont, raw.get("layers"), existing)
         if not new_entries:
             return {"added": 0}
         merged = {**existing, **new_entries}

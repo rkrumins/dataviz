@@ -9,6 +9,124 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — One placement rule for every view surface (preview)
+
+### Added
+
+**One placement contract, behind the `placementContractEnabled` flag (off by default).** Which layer
+of a view an entity is in used to be decided separately by the server compute, the canvas, the
+wizard, Layer Studio, the trace overlay, search badges, Build Mode and import, and they disagreed:
+entities jumped columns when the server answer arrived, the wizard preview contradicted the canvas,
+and property and condition rules placed nothing. With the flag on, all of those surfaces use one
+contract — a Python reference and a TypeScript twin held equal by a shared corpus of 140+ cases in
+required CI. Rules are the AND of their criteria and finally work for tags, URN globs,
+`propertyMatch` and conditions; the first layer wins a tie; types match whatever their case; a child
+whose own type a layer claims is shown in that layer with the *Placed* path tag, while hand
+placements still carry their subtree. Creating a view, or saving its layers, with a new or changed
+rule that can never match is refused with a message naming it (`PUT /views/{id}`, which the wizard
+uses to save a view's details, does not check rules). See `docs/services/ASSIGNMENTS.md`.
+
+**`python -m backend.scripts.placement_dry_run`** reports, per saved view, what turning the flag on
+would change and why, before anyone sees it.
+
+**Orphaned entities, for power users.** An orphan is an entity whose type the ontology says sits
+inside another (a Table inside a Schema) but which has no parent in the data. Most people just want
+to see the data, so nothing changes on the board, in the default lists or in the status chips.
+Power users find orphans in two places:
+
+- In the wizard's and Layer Studio's entity browser, the **⋯ More filters** button after *Unassigned
+  only* has an **Advanced** section with **Orphans only**. It lists every orphan, with the server's
+  exact count (or "many" when the count could not finish in time), and they stay assignable like any
+  other entity.
+- On the Context View canvas, the **Display** menu has an **Advanced** section with **Orphaned
+  entities…**. It opens a side panel with each orphan's name, type and layer in this view, a
+  **Reveal** button, and **Place in layer** on a draft.
+
+`GET /graph/nodes/top-level` takes `orphansOnly=true` (see `docs/TOP_LEVEL_NODES_PERFORMANCE.md`).
+Orphans work the same with `placementContractEnabled` on or off.
+
+### Fixed
+
+- **The entity browser's total.** Its "N top-level · M orphan" line counted only the last page
+  loaded. It now shows the true total ("N total").
+- **Paging the stored top-level list.** On large data sources, paging skipped same-named entities at
+  a page boundary. It now pages by name and URN like the live query, and old cursors still work.
+- **Moves in a draft.** An existing entity given a new parent in a draft was not listed under that
+  parent until the draft was published, and a top-level one stayed at the top level. It is now
+  listed under its new parent.
+- **Totals from version history.** Reads served from version history (just after a merge, or as-of)
+  reported a too-low top-level total when they had not scanned everything. They now report none, so
+  there the browser may show no total and its coverage bar counts only loaded rows until the count
+  is known, as it already does when the live count times out.
+
+### Upgrading
+
+- Nothing changes until an admin turns the flag on. Before that, run the dry run and follow the
+  runbook in `docs/services/ASSIGNMENTS.md`. Turning the flag off again rewrites no view.
+
+### Known limitations
+
+- With the flag on, the canvas, trace and search still read containment as source = parent, so
+  `BELONGS_TO` children can be placed differently there than on the server.
+- Export, scoped replace, the search Layer filter, open-view type feeds and column totals keep
+  today's rules until server-side membership (the next phase).
+- The browser cannot tell a whole-number float from an integer, so a text rule on a whole-number
+  float from 1e15 up to 2^53, or a rule value stored as an integer of 2^53 or more, can place an
+  entity differently on the canvas than on the server.
+- Reads served from version history (just after a merge, or as-of) still page the top-level list by
+  name, so same-named entities at a page boundary can be skipped there.
+- On those reads, *Orphans only* can be slow on very large graphs: it scans every containable
+  entity.
+- In a draft that deletes top-level entities that are not orphans, the orphan total is low by that
+  number.
+- A top-level entity given a parent in a draft (an orphan being fixed, for example) moves under that
+  parent, but top-level totals, the default list's included, still count it until the draft is
+  published.
+- An entity moved from one parent to another in a draft is still listed under its old parent too
+  until the draft is published.
+- An entity orphaned only inside a draft (its parent link removed there) is not listed until the
+  draft is published.
+
+---
+
+## [Unreleased] — Every page scrolls
+
+### Fixed
+
+**The sign-in page, and every page like it, scrolls when the window is shorter than the page.**
+On a window shorter than the sign-in card, the single sign-on buttons and everything under the
+form (*Forgot your password?*, *Sign up*, *Documentation*, the version line) were out of reach,
+and nothing showed there was more. The app shell never let the document scroll and clipped
+whatever a page drew below the window. The same happened on sign-up, both password-reset pages,
+the invitation page, the dev and portal sign-in pages, and the forced password change, where the
+submit button is the only way forward. These pages now scroll, and a page opened from a scrolled
+one starts at its top.
+
+**Signed-in pages that clipped instead of scrolling.** The Review Center had no scroll area at
+all, and the Administration menu ran off the bottom of a 1080p screen with no way to reach Single
+Sign-On, Audit Log or its footer. On short windows, landscape phones and at 200% zoom, Ingestion
+(including its Jobs tab), Analytics and Semantic Layers squeezed their content to nothing under
+their pinned headers. They now keep at least 10rem for it and scroll the whole page when the
+header does not leave that. The access-denied and feature-off panels, the 404 page, the error
+screens and the access-revoked notice now scroll instead of cutting off their top or bottom.
+
+**On phones, the app fits the visible screen.** The shell used `100vh`, which on a phone is the
+height with the browser's toolbar hidden, so the bottom of every page sat behind the toolbar. It
+now uses the dynamic viewport height where the browser supports it.
+
+### Known limitations
+
+- Dialogs and drawers were not part of this sweep. A few with no height cap (the docs search, the
+  permissions dialog, the sign-in account-collision notice) can still run off a very short window.
+- On narrow screens (a phone held upright, or a small laptop at 200% zoom), the main navigation
+  stays expanded and takes most of the width. Pages with their own side rail (Administration,
+  Semantic Layers) then push content off the right edge, Ingestion → Freshness wraps its sticky
+  filter bar over the table, and on a phone the top bar's search box wraps over the page.
+  Collapsing the navigation fixes this. It is a width problem, which this change does not
+  address.
+- The list in Admin → Features sets its maximum height from the window, not from the space left
+  under the banners, so while a banner shows its last row can sit below the fold.
+
 ## [Unreleased] — Branding that saves, combined traces, and time for very large graphs
 
 ### Added

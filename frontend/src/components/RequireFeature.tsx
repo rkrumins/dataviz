@@ -60,26 +60,29 @@ export function RequireFeature({
 
     if (explain) {
         return (
-            <div className="flex min-h-[60vh] items-center justify-center p-8">
-                <div className="max-w-md text-center">
-                    <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-glass-border bg-black/[0.03] dark:bg-white/[0.05]">
-                        <PowerOff className="h-6 w-6 text-ink-muted" />
-                    </div>
-                    <h2 className="text-base font-bold text-ink">
-                        {title ?? 'This feature is turned off'}
-                    </h2>
-                    <p className="mt-1.5 text-sm leading-relaxed text-ink-muted">
-                        {message ??
-                            'An administrator has disabled this capability for your deployment. Ask an admin to enable it if you need it.'}
-                    </p>
-                    <div className="mt-4 flex flex-col items-center gap-3">
-                        {guideSlug && <DocsLink slug={guideSlug} />}
-                        <Link
-                            to="/"
-                            className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-muted hover:text-ink transition-colors"
-                        >
-                            <ArrowLeft className="h-3.5 w-3.5" /> Back to dashboard
-                        </Link>
+            <div className="h-full overflow-y-auto">
+                {/* Its own scroller: this can render straight into AppLayout's <main>, which clips. */}
+                <div className="flex min-h-[60vh] items-center justify-center p-8">
+                    <div className="max-w-md text-center">
+                        <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-glass-border bg-black/[0.03] dark:bg-white/[0.05]">
+                            <PowerOff className="h-6 w-6 text-ink-muted" />
+                        </div>
+                        <h2 className="text-base font-bold text-ink">
+                            {title ?? 'This feature is turned off'}
+                        </h2>
+                        <p className="mt-1.5 text-sm leading-relaxed text-ink-muted">
+                            {message ??
+                                'An administrator has disabled this capability for your deployment. Ask an admin to enable it if you need it.'}
+                        </p>
+                        <div className="mt-4 flex flex-col items-center gap-3">
+                            {guideSlug && <DocsLink slug={guideSlug} />}
+                            <Link
+                                to="/"
+                                className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-muted hover:text-ink transition-colors"
+                            >
+                                <ArrowLeft className="h-3.5 w-3.5" /> Back to dashboard
+                            </Link>
+                        </div>
                     </div>
                 </div>
             </div>

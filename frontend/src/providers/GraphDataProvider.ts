@@ -495,6 +495,10 @@ export interface NodePage {
     nodes: GraphNode[]
     hasMore: boolean
     nextOffset: number
+    /** How many rows the whole query matches: sent with a FIRST page, best-effort.
+     *  null/absent = unknown (a later page, a draft with changes, an older server,
+     *  a count over its time budget). */
+    totalCount?: number | null
 }
 
 export interface EdgeQuery {
@@ -751,6 +755,11 @@ export interface TopLevelNodesQuery {
     /** Server-side sort direction on displayName (default 'asc'). Cursors are
      *  direction-bound — never replay a cursor with the other direction. */
     sortDirection?: 'asc' | 'desc'
+    /** Only orphans: top-level instances of types the ontology declares as
+     *  containable (non-root). entityTypes narrows within them. Every node
+     *  returned is an orphan; totalCount is exact, or null when the count
+     *  timed out. */
+    orphansOnly?: boolean
 }
 
 export interface TopLevelNodesResult {
@@ -761,9 +770,10 @@ export interface TopLevelNodesResult {
     totalCount: number | null
     hasMore: boolean
     nextCursor: string | null
-    /** How many of `totalCount` are ontology-root instances. */
+    /** How many nodes on THIS PAGE are ontology-root instances (not a total). */
     rootTypeCount: number
-    /** How many are orphans of non-root types (missing containment in-edge). */
+    /** How many nodes on THIS PAGE are orphans of non-root types (missing
+     *  containment in-edge; not a total). */
     orphanCount: number
 }
 

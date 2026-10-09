@@ -46,7 +46,7 @@ export function ForgotPasswordPage() {
     }
 
     return (
-        <div className="relative min-h-screen w-full flex items-center justify-center overflow-hidden bg-canvas font-sans">
+        <div className="relative min-h-full w-full flex items-center justify-center py-8 overflow-hidden bg-canvas font-sans">
             {/* Animated Background */}
             <div className="absolute inset-0 pointer-events-none overflow-hidden">
                 <motion.div

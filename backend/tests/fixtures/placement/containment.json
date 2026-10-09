@@ -1,0 +1,559 @@
+{
+  "cases": [
+    {
+      "name": "belongs-to-defaults-child-to-parent",
+      "summary": "CONTAINMENT child_is_source: BELONGS_TO with a null direction points child->parent, while CONTAINS with a null direction points parent->child.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "d": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null, "BELONGS_TO": null } },
+      "nodes": [{ "urn": "d" }, { "urn": "t" }, { "urn": "u" }],
+      "edges": [
+        { "source": "t", "target": "d", "edgeType": "BELONGS_TO" },
+        { "source": "d", "target": "u", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "d": { "layerId": "a", "source": "explicit" },
+        "t": { "layerId": "a", "source": "inherited", "inheritedFrom": "d" },
+        "u": { "layerId": "a", "source": "inherited", "inheritedFrom": "d" }
+      }
+    },
+    {
+      "name": "ontology-direction-flips-parentage",
+      "summary": "CONTAINMENT child_is_source: target-to-source and child-to-parent make the edge source the child, whatever the edge type.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "PART_OF": "target-to-source", "MEMBER_OF": "child-to-parent" } },
+      "nodes": [{ "urn": "p" }, { "urn": "c1" }, { "urn": "c2" }],
+      "edges": [
+        { "source": "c1", "target": "p", "edgeType": "PART_OF" },
+        { "source": "c2", "target": "p", "edgeType": "MEMBER_OF" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c1": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "c2": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" }
+      }
+    },
+    {
+      "name": "belongs-to-parent-to-child-is-honoured",
+      "summary": "CONTAINMENT child_is_source: an explicit parent-to-child direction makes BELONGS_TO's source the parent.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "t": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "BELONGS_TO": "parent-to-child" } },
+      "nodes": [{ "urn": "t" }, { "urn": "d" }],
+      "edges": [{ "source": "t", "target": "d", "edgeType": "BELONGS_TO" }],
+      "expect": {
+        "t": { "layerId": "a", "source": "explicit" },
+        "d": { "layerId": "a", "source": "inherited", "inheritedFrom": "t" }
+      }
+    },
+    {
+      "name": "belongs-to-source-to-target-is-the-default",
+      "summary": "CONTAINMENT child_is_source: source-to-target is the resolver default, not a choice, so BELONGS_TO stays child->parent.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "d": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "BELONGS_TO": "source-to-target" } },
+      "nodes": [{ "urn": "t" }, { "urn": "d" }],
+      "edges": [{ "source": "t", "target": "d", "edgeType": "BELONGS_TO" }],
+      "expect": {
+        "t": { "layerId": "a", "source": "inherited", "inheritedFrom": "d" },
+        "d": { "layerId": "a", "source": "explicit" }
+      }
+    },
+    {
+      "name": "belongs-to-bidirectional-is-child-to-parent",
+      "summary": "CONTAINMENT child_is_source: bidirectional falls to the default, so BELONGS_TO stays child->parent.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "d": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "BELONGS_TO": "bidirectional" } },
+      "nodes": [{ "urn": "t" }, { "urn": "d" }],
+      "edges": [{ "source": "t", "target": "d", "edgeType": "BELONGS_TO" }],
+      "expect": {
+        "t": { "layerId": "a", "source": "inherited", "inheritedFrom": "d" },
+        "d": { "layerId": "a", "source": "explicit" }
+      }
+    },
+    {
+      "name": "belongs-to-target-to-source-system-spelling",
+      "summary": "CONTAINMENT child_is_source: the system ontology's BELONGS_TO direction target-to-source makes the source the child.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "d": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "BELONGS_TO": "target-to-source" } },
+      "nodes": [{ "urn": "t" }, { "urn": "d" }],
+      "edges": [{ "source": "t", "target": "d", "edgeType": "BELONGS_TO" }],
+      "expect": {
+        "t": { "layerId": "a", "source": "inherited", "inheritedFrom": "d" },
+        "d": { "layerId": "a", "source": "explicit" }
+      }
+    },
+    {
+      "name": "other-containment-types-keep-source-as-parent",
+      "summary": "CONTAINMENT child_is_source: for any type other than BELONGS_TO, source-to-target, bidirectional and parent-to-child all keep the source as the parent.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": "source-to-target", "HAS": "bidirectional", "OWNS": "parent-to-child" } },
+      "nodes": [{ "urn": "p" }, { "urn": "c1" }, { "urn": "c2" }, { "urn": "c3" }],
+      "edges": [
+        { "source": "p", "target": "c1", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "c2", "edgeType": "HAS" },
+        { "source": "p", "target": "c3", "edgeType": "OWNS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c1": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "c2": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "c3": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" }
+      }
+    },
+    {
+      "name": "unspecified-direction-and-edge-type-case",
+      "summary": "CONTAINMENT: edge types are compared upper-cased (has_child is HAS_CHILD), and edges whose type is not a containment type give no parent.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "HAS_CHILD": null } },
+      "nodes": [{ "urn": "p" }, { "urn": "c" }, { "urn": "d" }],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "has_child" },
+        { "source": "p", "target": "d", "edgeType": "FEEDS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "d": { "source": "none" }
+      }
+    },
+    {
+      "name": "lower-case-belongs-to-edge-is-child-to-parent",
+      "summary": "CONTAINMENT: the upper-cased edge type decides the BELONGS_TO default, so a belongs_to edge with no direction is child->parent.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "d": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "BELONGS_TO": null } },
+      "nodes": [{ "urn": "t" }, { "urn": "d" }],
+      "edges": [{ "source": "t", "target": "d", "edgeType": "belongs_to" }],
+      "expect": {
+        "t": { "layerId": "a", "source": "inherited", "inheritedFrom": "d" },
+        "d": { "layerId": "a", "source": "explicit" }
+      }
+    },
+    {
+      "name": "multi-parent-hand-parents-smallest-urn-and-ambiguous",
+      "summary": "PLACE tier 2 multi-parent: among hand-cascading parents the smallest URN wins (not the lower layer), and ambiguousParent is set because they name different layers.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "p1": { "layerId": "b", "inheritsChildren": true },
+              "p2": { "layerId": "a", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p1" }, { "urn": "p2" }, { "urn": "x" }],
+      "edges": [
+        { "source": "p2", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p1", "target": "x", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p1": { "layerId": "b", "source": "explicit" },
+        "p2": { "layerId": "a", "source": "explicit" },
+        "x": { "layerId": "b", "source": "inherited", "inheritedFrom": "p1", "ambiguousParent": true }
+      }
+    },
+    {
+      "name": "multi-parent-ambiguity-counts-distinct-layers",
+      "summary": "PLACE ambiguousParent: set only when deciding-tier parents name two or more distinct layer ids; two parents in the same layer are not ambiguous.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "p1": { "layerId": "a", "inheritsChildren": true },
+              "p2": { "layerId": "a", "inheritsChildren": true },
+              "p3": { "layerId": "b", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p1" }, { "urn": "p2" }, { "urn": "p3" }, { "urn": "x" }, { "urn": "y" }],
+      "edges": [
+        { "source": "p1", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p2", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p3", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p1", "target": "y", "edgeType": "CONTAINS" },
+        { "source": "p2", "target": "y", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p1": { "layerId": "a", "source": "explicit" },
+        "p2": { "layerId": "a", "source": "explicit" },
+        "p3": { "layerId": "b", "source": "explicit" },
+        "x": { "layerId": "a", "source": "inherited", "inheritedFrom": "p1", "ambiguousParent": true },
+        "y": { "layerId": "a", "source": "inherited", "inheritedFrom": "p1" }
+      }
+    },
+    {
+      "name": "multi-parent-skips-unplaced-and-gated",
+      "summary": "PLACE_ALL ctx: only parents that pass a cascade count; an unplaced and a gated parent are skipped, so the one hand parent decides and nothing is ambiguous.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "p1": { "layerId": "a", "inheritsChildren": false },
+              "p2": { "layerId": "b", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p0" }, { "urn": "p1" }, { "urn": "p2" }, { "urn": "x" }],
+      "edges": [
+        { "source": "p2", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p1", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p0", "target": "x", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p0": { "source": "none" },
+        "p1": { "layerId": "a", "source": "explicit" },
+        "p2": { "layerId": "b", "source": "explicit" },
+        "x": { "layerId": "b", "source": "inherited", "inheritedFrom": "p2" }
+      }
+    },
+    {
+      "name": "multi-parent-hand-beats-soft-whatever-the-urn",
+      "summary": "PLACE tier-aware multi-parent (corpus case 34 flipped): a hand-placed parent beats a rule-placed parent whose URN sorts first, and the soft parent does not make it ambiguous.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["domain"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "p2": { "layerId": "b", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p1", "entityType": "domain" },
+        { "urn": "p2", "entityType": "folder" },
+        { "urn": "x", "entityType": "attribute" }
+      ],
+      "edges": [
+        { "source": "p2", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p1", "target": "x", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p1": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "p2": { "layerId": "b", "source": "explicit" },
+        "x": { "layerId": "b", "source": "inherited", "inheritedFrom": "p2" }
+      }
+    },
+    {
+      "name": "multi-parent-soft-parents-by-urn",
+      "summary": "PLACE tier 7 multi-parent: among soft parents the smallest URN wins whatever its layer order; different layers are ambiguous, the same layer is not, and an own rule beats both.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["domain"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["system"] },
+              { "id": "c", "name": "C", "order": 2, "entityTypes": ["table"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p1", "entityType": "system" },
+        { "urn": "p2", "entityType": "domain" },
+        { "urn": "p3", "entityType": "domain" },
+        { "urn": "x", "entityType": "attribute" },
+        { "urn": "y", "entityType": "table" },
+        { "urn": "z", "entityType": "attribute" }
+      ],
+      "edges": [
+        { "source": "p1", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p2", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p1", "target": "y", "edgeType": "CONTAINS" },
+        { "source": "p2", "target": "y", "edgeType": "CONTAINS" },
+        { "source": "p2", "target": "z", "edgeType": "CONTAINS" },
+        { "source": "p3", "target": "z", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p1": { "layerId": "b", "source": "rule", "ruleId": "_type_b_system" },
+        "p2": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "p3": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "x": { "layerId": "b", "source": "inherited", "inheritedFrom": "p1", "ambiguousParent": true },
+        "y": { "layerId": "c", "source": "rule", "ruleId": "_type_c_table" },
+        "z": { "layerId": "a", "source": "inherited", "inheritedFrom": "p2" }
+      }
+    },
+    {
+      "name": "multi-parent-urn-order-is-by-code-point",
+      "summary": "PLACE multi-parent: the smallest URN is by code point (Python str order), not by UTF-16 unit, so U+FF01 sorts before U+1F600 although the emoji's surrogate unit is the smaller one.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "p\ud83d\ude00": { "layerId": "a", "inheritsChildren": true },
+              "p\uff01": { "layerId": "b", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "p\ud83d\ude00" }, { "urn": "p\uff01" }, { "urn": "x" }],
+      "edges": [
+        { "source": "p\ud83d\ude00", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p\uff01", "target": "x", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p\ud83d\ude00": { "layerId": "a", "source": "explicit" },
+        "p\uff01": { "layerId": "b", "source": "explicit" },
+        "x": { "layerId": "b", "source": "inherited", "inheritedFrom": "p\uff01", "ambiguousParent": true }
+      }
+    },
+    {
+      "name": "multi-parent-ambiguity-counts-only-the-deciding-tier",
+      "summary": "PLACE ambiguousParent: only parents at the deciding (hand) tier are counted; a soft parent in a third layer neither wins nor adds ambiguity.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] },
+              { "id": "c", "name": "C", "order": 2, "entityTypes": ["domain"] }
+            ],
+            "assignments": {
+              "p2": { "layerId": "a", "inheritsChildren": true },
+              "p3": { "layerId": "b", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p1", "entityType": "domain" },
+        { "urn": "p2", "entityType": "folder" },
+        { "urn": "p3", "entityType": "folder" },
+        { "urn": "x", "entityType": "attribute" },
+        { "urn": "y", "entityType": "attribute" }
+      ],
+      "edges": [
+        { "source": "p1", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p2", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p3", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "p1", "target": "y", "edgeType": "CONTAINS" },
+        { "source": "p2", "target": "y", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p1": { "layerId": "c", "source": "rule", "ruleId": "_type_c_domain" },
+        "p2": { "layerId": "a", "source": "explicit" },
+        "p3": { "layerId": "b", "source": "explicit" },
+        "x": { "layerId": "a", "source": "inherited", "inheritedFrom": "p2", "ambiguousParent": true },
+        "y": { "layerId": "a", "source": "inherited", "inheritedFrom": "p2" }
+      }
+    },
+    {
+      "name": "containment-cycle-edges-ignored",
+      "summary": "PLACE_ALL cycles: edges inside a strongly connected component (a1<->b1) and self-loops are dropped; a child hanging off the cycle still inherits.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "a1": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "a1" }, { "urn": "b1" }, { "urn": "c" }, { "urn": "s" }],
+      "edges": [
+        { "source": "a1", "target": "b1", "edgeType": "CONTAINS" },
+        { "source": "b1", "target": "a1", "edgeType": "CONTAINS" },
+        { "source": "a1", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "s", "target": "s", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "a1": { "layerId": "a", "source": "explicit" },
+        "b1": { "source": "none" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "a1" },
+        "s": { "source": "none" }
+      }
+    },
+    {
+      "name": "cycle-edge-from-a-hand-placed-node-is-ignored",
+      "summary": "PLACE_ALL cycles: a hand-placed node on a cycle does not cascade along the cycle (its partner uses its own rule), but it still cascades to a child off the cycle.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["domain"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": { "q": { "layerId": "b", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "domain" },
+        { "urn": "q", "entityType": "folder" },
+        { "urn": "r", "entityType": "attribute" }
+      ],
+      "edges": [
+        { "source": "p", "target": "q", "edgeType": "CONTAINS" },
+        { "source": "q", "target": "p", "edgeType": "CONTAINS" },
+        { "source": "q", "target": "r", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "rule", "ruleId": "_type_a_domain" },
+        "q": { "layerId": "b", "source": "explicit" },
+        "r": { "layerId": "b", "source": "inherited", "inheritedFrom": "q" }
+      }
+    },
+    {
+      "name": "three-node-cycle-with-an-outside-parent",
+      "summary": "PLACE_ALL cycles: all edges of the x->y->z->x component are dropped while an edge from outside (g->y) and an edge out of it (x->t) are kept.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "g": { "layerId": "a", "inheritsChildren": true },
+              "x": { "layerId": "b", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [{ "urn": "g" }, { "urn": "x" }, { "urn": "y" }, { "urn": "z" }, { "urn": "t" }],
+      "edges": [
+        { "source": "x", "target": "y", "edgeType": "CONTAINS" },
+        { "source": "y", "target": "z", "edgeType": "CONTAINS" },
+        { "source": "z", "target": "x", "edgeType": "CONTAINS" },
+        { "source": "g", "target": "y", "edgeType": "CONTAINS" },
+        { "source": "x", "target": "t", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "g": { "layerId": "a", "source": "explicit" },
+        "x": { "layerId": "b", "source": "explicit" },
+        "y": { "layerId": "a", "source": "inherited", "inheritedFrom": "g" },
+        "z": { "source": "none" },
+        "t": { "layerId": "b", "source": "inherited", "inheritedFrom": "x" }
+      }
+    },
+    {
+      "name": "same-pair-two-directions-forms-a-cycle",
+      "summary": "CONTAINMENT + PLACE_ALL cycles: p CONTAINS c and p BELONGS_TO c make each the other's parent, a cycle, so both edges are dropped.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [{ "id": "a", "name": "A", "order": 0, "entityTypes": [] }],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null, "BELONGS_TO": null } },
+      "nodes": [{ "urn": "p" }, { "urn": "c" }],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "c", "edgeType": "BELONGS_TO" }
+      ],
+      "expect": { "p": { "layerId": "a", "source": "explicit" }, "c": { "source": "none" } }
+    }
+  ]
+}

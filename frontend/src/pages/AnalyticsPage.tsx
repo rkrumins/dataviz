@@ -116,7 +116,7 @@ export function AnalyticsPage() {
     }
 
     return (
-        <div className="absolute inset-0 flex flex-col animate-in fade-in duration-500">
+        <div className="absolute inset-0 flex flex-col overflow-x-hidden overflow-y-auto animate-in fade-in duration-500">
             <div className="shrink-0">
                 <PageContainer gutter="shell" className="pt-8">
                     <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
@@ -192,11 +192,15 @@ export function AnalyticsPage() {
                 </PageContainer>
             </div>
 
+            {/* Never shorter than 10rem: on a window too short for the header
+                as well, the whole page scrolls instead. `relative` keeps the
+                charts' sr-only labels inside this scroller; positioned against
+                the page root, they stretched its scroll range far past the end. */}
             <div
                 role="tabpanel"
                 id={`analytics-panel-${activeTab}`}
                 aria-labelledby={`analytics-tab-${activeTab}`}
-                className="flex-1 min-h-0 overflow-y-auto"
+                className="relative flex-1 min-h-40 overflow-y-auto"
             >
                 <PageContainer gutter="shell" className="py-6 pb-20">
                     {/* One notice at the top, not a caveat beside every

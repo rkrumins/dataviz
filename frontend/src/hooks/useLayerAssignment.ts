@@ -21,6 +21,10 @@ import { useBranchCreatedDelta } from './useBranchCreatedDelta'
 import { buildLayerRules, resolveRootLayer } from './lib/resolveRootLayer'
 import { rootComparators, childComparator, effectiveSortMode } from './lib/rootSort'
 import { resolveEntityName } from '@/lib/entityDisplayName'
+import type { CompiledPlacementSpec, PlacementResult } from '@/lib/placement/placement'
+import { placeCanvasNodes, withSessionPlacements } from './lib/placeCanvasNodes'
+
+const NO_CHAINS: ReadonlyMap<string, readonly string[]> = new Map()
 
 // ============================================
 // Types
@@ -67,6 +71,14 @@ export interface UseLayerAssignmentOptions {
    * can't be an ephemeral state.
    */
   sortOverrides?: ReadonlyMap<string, LayerNodeSortAlgo>
+  /**
+   * One Placement Contract (flag-on): when set, lib/placement places every loaded node — session
+   * drags overlaid as explicit entries — and the chain below (backend answer, rule loop, top-down
+   * traversal) is skipped.
+   */
+  placementSpec?: CompiledPlacementSpec | null
+  /** Flag-on only: containment chains of loaded nodes whose parent is not loaded (usePlacementChains). */
+  placementChains?: ReadonlyMap<string, readonly string[]>
 }
 
 export interface UseLayerAssignmentResult {
@@ -87,6 +99,8 @@ export interface UseLayerAssignmentResult {
    *  renders AS its column, so no map above holds it; lineage that names it
    *  learns its column here. */
   promotedAnchors: ReadonlyMap<string, string>
+  /** Flag-on: why each loaded node is where it is (the contract's placement); null with the flag off. */
+  contractPlacements: ReadonlyMap<string, PlacementResult> | null
 }
 
 // ============================================
@@ -107,6 +121,8 @@ export function useLayerAssignment({
   branchCreatedUrns: branchCreatedUrnsOption,
   defaultNodeSortMode,
   sortOverrides,
+  placementSpec,
+  placementChains,
 }: UseLayerAssignmentOptions): UseLayerAssignmentResult {
 
   // Branch-created delta: URNs created in the active branch's draft. Read from
@@ -120,6 +136,11 @@ export function useLayerAssignment({
   // every node on the canvas.
   const layerRules = useMemo<LayerAssignmentRule[]>(
     () => sortLayerRules(buildLayerRules(sortedLayers)), [sortedLayers])
+
+  // Flag-on: the view's compiled spec with this session's drags as explicit entries.
+  const sessionSpec = useMemo(
+    () => (placementSpec ? withSessionPlacements(placementSpec, instanceAssignments) : null),
+    [placementSpec, instanceAssignments])
 
   // Core Logic: Group nodes by layer with Deep Inheritance support.
   // Returns the promoted-anchor set alongside the grouping: `unassignedNodes`
@@ -163,7 +184,7 @@ export function useLayerAssignment({
 
     // 2. Build rule-based assignments (fallback if no explicit assignment)
     const ruleAssignments = new Map<string, string>() // nodeId -> layerId
-    nodes.forEach(node => {
+    if (!sessionSpec) nodes.forEach(node => {
       // Skip if already has explicit assignment from view
       if (explicitAssignments.has(node.id)) return
 
@@ -185,6 +206,13 @@ export function useLayerAssignment({
     // 2. Determine "Effective Layer" for every node, considering inheritance
     // We traverse top-down. If a node has explicit, it wins. If not, it inherits.
     const effectiveLayer = new Map<string, string>() // nodeId -> layerId
+    // Flag-on: the contract decides, and the traversal below never runs. Only LOADED nodes enter
+    // effectiveLayer — a chain ancestor holding a layer would make its loaded child look nested under
+    // a parent that is never drawn.
+    const contract = sessionSpec
+      ? placeCanvasNodes({ spec: sessionSpec, nodes, nodeMap, parentMap, childMap, chains: placementChains ?? NO_CHAINS, createdInBranch: branchCreatedDelta })
+      : null
+    contract?.forEach((p, id) => { if (p.layerId && nodeMap.has(id)) effectiveLayer.set(id, p.layerId) })
 
     // We can't just iterate nodes orderless. We need top-down.
     // Use a Set to track processed.
@@ -230,7 +258,7 @@ export function useLayerAssignment({
       stack.push({ nodeId: roots[i].id })
     }
 
-    while (stack.length > 0) {
+    while (!contract && stack.length > 0) {
       const { nodeId, inheritedLayerId } = stack.pop()!
       if (processed.has(nodeId)) continue
       processed.add(nodeId)
@@ -570,9 +598,9 @@ export function useLayerAssignment({
       })
     }
 
-    return { grouped, promotedAnchors }
+    return { grouped, promotedAnchors, contract }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides])
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides, sessionSpec, placementChains])
 
   const nodesByLayer = layerGrouping.grouped
 
@@ -652,5 +680,5 @@ export function useLayerAssignment({
     [nodeEdgeFingerprint, nodeLayerMap, layerGrouping],
   )
 
-  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors: layerGrouping.promotedAnchors }
+  return { layerRules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors: layerGrouping.promotedAnchors, contractPlacements: layerGrouping.contract }
 }

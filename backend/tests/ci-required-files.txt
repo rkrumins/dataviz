@@ -31,6 +31,8 @@ tests/test_aggregation_scan_shrink.py
 tests/test_aggregation_settings.py
 tests/test_alembic_revision_lengths.py
 tests/test_api_graph.py
+tests/test_assignment_engine.py
+tests/test_assignment_engine_contract.py
 tests/test_automation_holds.py
 tests/test_automation_holds_scope.py
 tests/test_background_tasks.py
@@ -59,6 +61,7 @@ tests/test_edges_beneath.py
 tests/test_entity_audit_unit.py
 tests/test_export_downloads.py
 tests/test_export_native_lines.py
+tests/test_export_view_scope.py
 tests/test_falkordb_edges_pair_binding.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
@@ -89,6 +92,8 @@ tests/test_import_resolve.py
 tests/test_import_resume.py
 tests/test_import_template.py
 tests/test_import_uploads.py
+tests/test_import_view_assignments.py
+tests/test_import_view_assignments_contract.py
 tests/test_import_xlsx.py
 tests/test_index_ddl_once.py
 tests/test_insights_asset_endpoints.py
@@ -96,6 +101,7 @@ tests/test_job_lease.py
 tests/test_job_list_overlay.py
 tests/test_job_reaping.py
 tests/test_label_cache_warmup.py
+tests/test_layout_config.py
 tests/test_layout_promote.py
 tests/test_lease_keeper.py
 tests/test_loadtest_manifests.py
@@ -108,6 +114,9 @@ tests/test_object_store.py
 tests/test_package_ndjson_cursor.py
 tests/test_package_new_source_api.py
 tests/test_package_seed_rows.py
+tests/test_placement_conformance.py
+tests/test_placement_dry_run.py
+tests/test_placement_legacy_parity.py
 tests/test_process_memory.py
 tests/test_profiling_endpoints.py
 tests/test_profiling_series.py
@@ -154,10 +163,12 @@ tests/test_upload_pins.py
 tests/test_versioned_branch_resolve_identities.py
 tests/test_versioning_read_only_queries.py
 tests/test_view_bundle_schema.py
+tests/test_view_layer_rule_validation.py
 tests/test_view_layout_rules_preserved.py
 tests/test_view_library.py
 tests/test_view_library_schema.py
 tests/test_view_live_filter.py
+tests/test_view_placement.py
 tests/test_view_portability_switch.py
 tests/test_view_transfer_canonical.py
 tests/test_view_transfer_export.py

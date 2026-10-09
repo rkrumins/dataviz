@@ -869,4 +869,34 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "sort_order": 2,
         "deprecated": False,
     },
+    {
+        "key": "placementContractEnabled",
+        "name": "One placement rule for every view surface",
+        "description": (
+            "Decide which layer each entity sits in with one shared rule everywhere: the canvas, "
+            "Layer Studio, the trace overlay, search badges, Build Mode and view imports, so they "
+            "can no longer disagree."
+        ),
+        "impact_when_off": (
+            "Every surface keeps today's placement, including its known disagreements: an entity "
+            "type two layers claim can land in either column depending on load order, and Layer "
+            "Studio can show a different column from the canvas. Saved views are not changed "
+            "either way. While it is on, an entity created in an open view is pinned to a layer "
+            "only where the rule would put it elsewhere, so after turning it off such entities "
+            "follow today's rules. This is a preview; it ships off until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Run the placement dry run first (python -m backend.scripts.placement_dry_run) and "
+            "review the views it lists. While this is on, creating a view or saving its layers "
+            "refuses a new or changed layer rule that can never match. Safe to switch back off "
+            "at any time."
+        ),
+        "sort_order": 3,
+        "deprecated": False,
+    },
 ]

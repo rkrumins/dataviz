@@ -11,6 +11,7 @@ import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../../../dia
 
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
+import { useFeature } from '@/store/features'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import { assignEntities, unassignEntities } from '@/components/canvas/context-view/assignmentMutations'
 import type { AssignmentStepProps } from './AssignmentStep'
@@ -27,6 +28,7 @@ export function AssignmentStepLegacy({ formData, updateFormData }: AssignmentSte
     const containmentEdgeTypes = useContainmentEdgeTypes()
     const storeParentMap = useReferenceModelStore(s => s.parentMap)
     const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
+    const placementContractOn = useFeature('placementContractEnabled')
 
     // The Entity Browser's API-sourced containment data (from useEntityBrowser hook)
     const [browserParentMap, setBrowserParentMap] = useState(new Map<string, string>())
@@ -49,12 +51,13 @@ export function AssignmentStepLegacy({ formData, updateFormData }: AssignmentSte
     }, [canvasEdges, containmentEdgeTypes, storeParentMap, browserParentMap])
 
     // Layer assignment lookup: wizard formData.assignments (canonical) > store effectiveAssignments
+    // (flag off only: under the placement contract nothing computes the store's result).
     const layerAssignmentMap = useMemo(() => {
         const map = new Map<string, string>()
-        storeEffectiveAssignments.forEach((a, entityId) => map.set(entityId, a.layerId))
+        if (!placementContractOn) storeEffectiveAssignments.forEach((a, entityId) => map.set(entityId, a.layerId))
         Object.entries(formData.assignments ?? {}).forEach(([urn, entry]) => map.set(urn, entry.layerId))
         return map
-    }, [storeEffectiveAssignments, formData.assignments])
+    }, [storeEffectiveAssignments, formData.assignments, placementContractOn])
 
     // Build reverse child map from parentMap for DOWN checks
     const childMap = useMemo(() => {

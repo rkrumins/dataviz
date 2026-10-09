@@ -40,6 +40,7 @@ import {
 import { cn } from '@/lib/utils'
 import { PlacedTag } from '@/components/ui/PlacedTag'
 import { PlacementPathsContext } from './placementPathsContext'
+import type { PlacementResult } from '@/lib/placement/placement'
 import { groupSubtreeIds, listGroups } from '@/components/canvas/context-view/layerMutations'
 import type {
     ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry,
@@ -108,6 +109,7 @@ import {
     WIZARD_CHILDREN_PAGE_SIZE,
     type WizardEntityIndex,
 } from '@/components/views/ViewWizard/useWizardEntityIndex'
+import type { PlacedBy } from '@/components/views/ViewWizard/effectivePlacement'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -135,8 +137,11 @@ export interface LayerRootRow {
     name: string
     typeId: string
     childCount: number
-    /** Placed by the layer's `entityTypes` rule, so it holds no assignment. */
+    /** Placed by a layer's rule (or, under the contract, the entity's own
+     *  stamp), so it holds no assignment. */
     rulePlaced: boolean
+    /** Contract only: what placed a rulePlaced row. Absent reads as 'type'. */
+    placedBy?: PlacedBy
 }
 
 interface LayerHierarchyPanelProps {
@@ -149,6 +154,9 @@ interface LayerHierarchyPanelProps {
      *  (which hold no assignment entry), so the rail is honest about what the
      *  canvas will render — see ViewWizard/effectivePlacement.ts. */
     rootsByLayer?: Map<string, LayerRootRow[]>
+    /** Contract only: each loaded node's placement. A child is drawn under its
+     *  parent only in the layer the canvas draws it in (null: nowhere). */
+    contractPlacement?: ReadonlyMap<string, PlacementResult>
     /** View-wide default sort, for the per-column menu's "View default" item. */
     defaultNodeSortMode?: LayerNodeSortAlgo
     onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
@@ -262,6 +270,9 @@ function AssignedEntityItem({
     onUnassign,
     inherited = false,
     rulePlaced = false,
+    placedBy,
+    contractPlacement,
+    columnLayerId,
     onReorder,
 }: {
     entityId: string
@@ -272,10 +283,16 @@ function AssignedEntityItem({
      *  it is read-only here (no unassign, no drag: moving it would violate the
      *  containment rule the Studio already enforces). */
     inherited?: boolean
-    /** Placed by this layer's `entityTypes` rule, not by an assignment entry.
-     *  There is no entry to remove, so no unassign — but it stays DRAGGABLE:
-     *  dropping it on another layer writes the explicit override. */
+    /** Placed by a layer's rule (or, under the contract, the entity's own stamp),
+     *  not by an assignment entry. There is no entry to remove, so no unassign —
+     *  but it stays DRAGGABLE: dropping it on another layer writes the explicit
+     *  override. */
     rulePlaced?: boolean
+    /** What placed a rulePlaced row (see LayerRootRow). */
+    placedBy?: PlacedBy
+    /** Contract only (see LayerHierarchyPanel), with the column this row is in. */
+    contractPlacement?: ReadonlyMap<string, PlacementResult>
+    columnLayerId?: string
     /** Present on column roots: dropping another root on this row's top/bottom
      *  third reorders instead of re-assigning. Absent on inherited children,
      *  which have no independent position. */
@@ -294,13 +311,23 @@ function AssignedEntityItem({
     const identity = entityIndex.resolve(entityId)
     const dataPath = useContext(PlacementPathsContext).get(entityId)
     const isNodeLoading = entityIndex.isLoading(entityId)
-    const childrenIds = entityIndex.childrenOf(entityId)
+    const loadedChildIds = entityIndex.childrenOf(entityId)
+    // A child placed in another layer is listed there, and one placed nowhere is
+    // not drawn; one the contract has not placed is shown as before.
+    const childrenIds = contractPlacement
+        ? loadedChildIds.filter(id => !contractPlacement.has(id) || contractPlacement.get(id)!.layerId === columnLayerId)
+        : loadedChildIds
 
     const isResolving = identity === undefined
     const name = identity?.name ?? fallbackNameFromUrn(entityId)
     const type = identity?.type ?? 'unknown'
-    const childCount = identity?.childCount ?? childrenIds.length
+    const childCount = identity?.childCount ?? loadedChildIds.length
     const hasChildren = childCount > 0
+    // A row that passes nothing down counts only the children drawn under it:
+    // no unloaded one can inherit its layer.
+    const inheritingCount = contractPlacement?.get(entityId)?.cascade === null
+        ? childrenIds.length
+        : childCount - (loadedChildIds.length - childrenIds.length)
     const isMissing = !!identity?.missing
 
     const handleToggle = (e: React.MouseEvent) => {
@@ -443,9 +470,9 @@ function AssignedEntityItem({
                             {name}
                         </span>
                     )}
-                    {hasChildren && !isExpanded && (
-                        <span className="text-[9px] text-slate-400 shrink-0" title={`${childCount} children inherit this layer`}>
-                            {childCount}
+                    {hasChildren && !isExpanded && inheritingCount > 0 && (
+                        <span className="text-[9px] text-slate-400 shrink-0" title={`${inheritingCount} children inherit this layer`}>
+                            {inheritingCount}
                         </span>
                     )}
                 </div>
@@ -455,7 +482,8 @@ function AssignedEntityItem({
                 {!inherited && dataPath && dataPath.length > 0 && (
                     <span
                         className="mt-0.5 flex items-center gap-1 min-w-0"
-                        title={`Placed here for this view only — the data source is unchanged. In the data, ${name} is part of ${dataPath.map(a => a.displayName).join(' › ')}.`}
+                        // A stamp lives on the entity, not only in this view.
+                        title={`${placedBy === 'stamp' ? "Placed here by the entity's own layer setting." : 'Placed here for this view only — the data source is unchanged.'} In the data, ${name} is part of ${dataPath.map(a => a.displayName).join(' › ')}.`}
                     >
                         <PlacedTag />
                         <span className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
@@ -470,9 +498,13 @@ function AssignedEntityItem({
                     <span
                         data-testid="rail-rule-placed-marker"
                         className="text-[9px] px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 shrink-0"
-                        title={`Placed automatically because this layer covers the ${type} type. Drag it to another layer to override.`}
+                        title={placedBy === 'rule'
+                            ? 'Placed automatically by a rule on this layer. Drag it to another layer to override.'
+                            : placedBy === 'stamp'
+                                ? "Placed by the entity's own layer setting. Drag it to another layer to override."
+                                : `Placed automatically because this layer covers the ${type} type. Drag it to another layer to override.`}
                     >
-                        by type
+                        {placedBy === 'rule' ? 'by rule' : placedBy === 'stamp' ? 'stamped' : 'by type'}
                     </span>
                 )}
                 {/* Unassign — only the explicit placement can be removed. */}
@@ -506,6 +538,8 @@ function AssignedEntityItem({
                                 entityIndex={entityIndex}
                                 onUnassign={onUnassign}
                                 inherited
+                                contractPlacement={contractPlacement}
+                                columnLayerId={columnLayerId}
                             />
                         ))}
                     </motion.div>
@@ -527,6 +561,7 @@ interface LogicalNodeItemProps {
     logicalNodes: UseLogicalNodesReturn
     entityAssignments: LayerEntityRef[]
     entityIndex: WizardEntityIndex
+    contractPlacement?: ReadonlyMap<string, PlacementResult>
     onSetActiveTarget: (target: ActiveTarget) => void
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
     onUnassign: (entityId: string) => void
@@ -542,6 +577,7 @@ function LogicalNodeItem({
     logicalNodes,
     entityAssignments,
     entityIndex,
+    contractPlacement,
     onSetActiveTarget,
     onDrop,
     onUnassign,
@@ -843,6 +879,7 @@ function LogicalNodeItem({
                                         logicalNodes={logicalNodes}
                                         entityAssignments={entityAssignments}
                                         entityIndex={entityIndex}
+                                        contractPlacement={contractPlacement}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -859,6 +896,8 @@ function LogicalNodeItem({
                                         depth={depth + 1}
                                         entityIndex={entityIndex}
                                         onUnassign={onUnassign}
+                                        contractPlacement={contractPlacement}
+                                        columnLayerId={layerId}
                                     />
                                 ))}
                             </div>
@@ -879,6 +918,7 @@ interface LayerRowProps {
     assignments: Record<string, LayerAssignmentEntry>
     /** This column's roots, already ordered by the Studio. */
     rows?: LayerRootRow[]
+    contractPlacement?: ReadonlyMap<string, PlacementResult>
     defaultNodeSortMode?: LayerNodeSortAlgo
     onSetLayerSortMode?: (layerId: string, mode: LayerNodeSortMode | null) => void
     onApplySortToView?: (mode: LayerNodeSortAlgo) => void
@@ -903,6 +943,7 @@ function LayerRow({
     layerIndex,
     assignments,
     rows,
+    contractPlacement,
     defaultNodeSortMode,
     onSetLayerSortMode,
     onApplySortToView,
@@ -1264,6 +1305,7 @@ function LayerRow({
                                         logicalNodes={logicalNodes}
                                         entityAssignments={layerEntityAssignments}
                                         entityIndex={entityIndex}
+                                        contractPlacement={contractPlacement}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -1305,6 +1347,9 @@ function LayerRow({
                                                 entityIndex={entityIndex}
                                                 onUnassign={onUnassign}
                                                 rulePlaced={row.rulePlaced}
+                                                placedBy={row.placedBy}
+                                                contractPlacement={contractPlacement}
+                                                columnLayerId={layer.id}
                                                 onReorder={onReorderRoot
                                                     ? (dragged, target, position) =>
                                                         onReorderRoot(layer.id, dragged, target, position)
@@ -1399,6 +1444,7 @@ export function LayerHierarchyPanel({
     layers,
     assignments,
     rootsByLayer,
+    contractPlacement,
     defaultNodeSortMode,
     onSetLayerSortMode,
     onApplySortToView,
@@ -1504,6 +1550,7 @@ export function LayerHierarchyPanel({
                                 layerIndex={i}
                                 assignments={assignments}
                                 rows={rootsByLayer?.get(layer.id)}
+                                contractPlacement={contractPlacement}
                                 defaultNodeSortMode={defaultNodeSortMode}
                                 onSetLayerSortMode={onSetLayerSortMode}
                                 onApplySortToView={onApplySortToView}

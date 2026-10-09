@@ -154,7 +154,7 @@ export function AdminPage() {
                 </div>
 
                 {/* Navigation */}
-                <nav className="flex-1 px-3 space-y-4 pt-2">
+                <nav className="flex-1 overflow-y-auto custom-scrollbar px-3 space-y-4 pt-2">
                     {visibleGroups.map((group) => {
                         const GroupIcon = group.icon
                         // Check if any child is active to keep the group open and highlighted

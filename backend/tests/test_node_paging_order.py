@@ -9,11 +9,18 @@ POSITION, taking the next position from the server. That is lossless only if:
   * a children page reports where the next page starts (`nextOffset`) as the
     rows it CONSUMED in that order — not rows a caller happens to keep.
 
+A FIRST type page also says how many rows the whole query matches (a layer
+column's total), counted over exactly the labels and WHERE the page reads.
+
 The live engine's agreement is pinned in
 integration/test_nodes_type_paging_live.py.
 """
 import asyncio
 
+import pytest
+from redis.exceptions import ResponseError
+
+from backend.common.adapters import ProviderBusy
 from backend.common.models.graph import NodeQuery
 from backend.app.providers.falkordb_provider import FalkorDBProvider
 
@@ -97,3 +104,72 @@ def test_a_page_whose_lineage_failed_says_so_and_is_not_cached_as_complete():
         assert [c.urn for c in res.children] == ["urn:c:0", "urn:c:1"]
         assert res.degraded_detail and "lineage" in res.degraded_detail
         assert _is_incomplete_result(res)
+
+
+# ── a first type page's total ────────────────────────────────────────────
+
+
+def _counting_provider(count_error=None):
+    """Type pages answer three rows; the count answers 450 (or raises)."""
+    from backend.common.models.graph import GraphNode
+
+    p = _provider()
+    p._extract_node_from_result = lambda n: GraphNode(**n)
+    rows = [[{"urn": f"urn:d:{i}", "entityType": "domain", "displayName": f"d{i}"}, 0] for i in range(3)]
+
+    async def _ro(cypher, params=None, timeout=None, op=None):
+        p.recorded.append((op, cypher, params or {}))
+        if op == "nodes.count":
+            if count_error is not None:
+                raise count_error
+            return _FakeResult([[450]])
+        return _FakeResult(rows)
+
+    p._ro_query = _ro
+    return p
+
+
+def _counts(p):
+    return [r for r in p.recorded if r[0] == "nodes.count"]
+
+
+def test_a_first_type_page_counts_what_the_page_reads():
+    p = _counting_provider()
+    p._source_entity_aliases = {"DOMAIN": ["Domain"]}
+    page = _run(p.get_nodes_page(NodeQuery(entityTypes=["domain", "system"], searchQuery="Fin", tags=["t"],
+                                           limit=2)))
+    [(_, cypher, params)] = _counts(p)
+    assert "MATCH (n:Domain) WHERE" in cypher and "MATCH (n:system) WHERE" in cypher
+    assert " UNION " in cypher and "RETURN count(n)" in cypher and "SKIP" not in cypher
+    assert params == {"tagVal": '"t"', "search": "fin"}
+    # Exactly the page's label union and WHERE, or the total counts another query.
+    page_cypher = next(c for op, c, _ in p.recorded if op == "nodes.query")
+    inner = lambda c: c[c.index("CALL {"):c.index("}") + 1]
+    assert inner(cypher) == inner(page_cypher)
+    assert page.total_count == 450
+
+
+def test_a_later_type_page_is_not_counted():
+    p = _counting_provider()
+    page = _run(p.get_nodes_page(NodeQuery(entityTypes=["domain"], limit=2, offset=2)))
+    assert _counts(p) == []
+    assert page.total_count is None
+
+
+def test_a_page_that_holds_everything_is_its_own_count():
+    p = _counting_provider()
+    page = _run(p.get_nodes_page(NodeQuery(entityTypes=["domain"], limit=5)))
+    assert _counts(p) == []
+    assert (len(page.nodes), page.has_more, page.total_count) == (3, False, 3)
+
+
+@pytest.mark.parametrize("error", [
+    asyncio.TimeoutError(),
+    ResponseError("Query timed out"),   # the store's own budget, the usual way it ends
+    ProviderBusy(provider_name="g", reason="busy", retry_after_seconds=1),
+])
+def test_a_count_over_its_budget_leaves_the_total_unknown(error):
+    p = _counting_provider(count_error=error)
+    page = _run(p.get_nodes_page(NodeQuery(entityTypes=["domain"], limit=2)))
+    assert len(page.nodes) == 2 and page.has_more
+    assert page.total_count is None

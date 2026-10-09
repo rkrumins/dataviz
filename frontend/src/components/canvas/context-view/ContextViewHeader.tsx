@@ -148,6 +148,8 @@ export interface ContextViewHeaderProps {
   onResetCanvasDisplaySettings: () => void
   /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
   onFitToWidth?: () => void
+  /** Open the orphaned-entities panel (Display menu → Advanced). Optional. */
+  onOpenOrphans?: () => void
 }
 
 export function ContextViewHeader({
@@ -204,6 +206,7 @@ export function ContextViewHeader({
   onToggleSubtleCanvasTreeLines,
   onResetCanvasDisplaySettings,
   onFitToWidth,
+  onOpenOrphans,
 }: ContextViewHeaderProps) {
   // Shared comprehension cluster — identical in both modes (see
   // header/ViewerActions.tsx for the rationale).
@@ -220,6 +223,7 @@ export function ContextViewHeader({
     onToggleSubtleCanvasTreeLines,
     onResetCanvasDisplaySettings,
     onFitToWidth,
+    onOpenOrphans,
     lineageRenderMode,
     onSetLineageRenderMode,
     showEdgeDirection,

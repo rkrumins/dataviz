@@ -869,6 +869,8 @@ export class RemoteGraphProvider implements GraphDataProvider {
         if (query.entityTypes?.length) {
             query.entityTypes.forEach(t => params.append('entityTypes', t))
         }
+        // Only when true, so default requests (and their cache keys) are unchanged.
+        if (query.orphansOnly) params.append('orphansOnly', 'true')
         // Backend returns camelCase via response_model_by_alias=True, so the
         // wire shape already matches TopLevelNodesResult one-to-one.
         return await this.fetch<TopLevelNodesResult>(

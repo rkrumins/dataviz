@@ -832,8 +832,8 @@ function AccessRevokedPanel({
     }
 
     return (
-        <div className="flex items-center justify-center h-full p-6">
-            <div className="max-w-md w-full rounded-2xl border border-amber-500/30 bg-amber-500/5 p-6 text-center">
+        <div className="flex h-full overflow-y-auto p-6">
+            <div className="m-auto max-w-md w-full rounded-2xl border border-amber-500/30 bg-amber-500/5 p-6 text-center">
                 <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center mx-auto mb-4">
                     <ShieldOff className="w-6 h-6 text-amber-500" />
                 </div>

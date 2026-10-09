@@ -53,10 +53,12 @@ def _stats(node_count: int = 150_000) -> dict:
     }
 
 
-def _resolved(containment=_CONTAINMENT, roots=_ROOTS):
+def _resolved(containment=_CONTAINMENT, roots=_ROOTS, assigned=()):
     return SimpleNamespace(
         containment_edge_types=list(containment),
         root_entity_types=list(roots),
+        entity_type_definitions={t: {} for t in assigned},
+        resolution_sources={t: "assigned" for t in assigned},
     )
 
 
@@ -445,6 +447,41 @@ async def test_ontology_shift_mid_query_skips_persist(monkeypatch) -> None:
     assert obs.restored == ["ds1"]                      # consumed dirty flag restored
     assert len(obs.upserts) == 1                        # counts write intact
     assert obs.polling_config.last_status == "success"  # poll-success stamp intact
+
+
+@pytest.mark.asyncio
+async def test_payload_digest_includes_assigned_entity_types(monkeypatch) -> None:
+    """The payload is stamped with the digest the serve path computes:
+    containment, roots AND the assigned ontology's entity types."""
+    stats = _stats(150_000)
+    obs = _wire(
+        monkeypatch, stats=stats, resolved=_resolved(assigned=["dataset"]),
+        stored_top_level=None, tl_result=_tl_result(3),
+    )
+
+    await collector.collect_counts(_envelope())
+
+    assert len(obs.sets) == 1
+    payload = json.loads(obs.sets[0])
+    assert payload["digest"] == containment_digest(_CONTAINMENT, _ROOTS, ["dataset"])
+
+
+@pytest.mark.asyncio
+async def test_assigned_entity_types_shift_mid_query_skips_persist(monkeypatch) -> None:
+    """An ontology re-resolve mid roots-query that changes only the assigned
+    vocabulary is still an ontology shift — nothing is persisted."""
+    stats = _stats(150_000)
+    obs = _wire(
+        monkeypatch, stats=stats, resolved=_resolved(assigned=["dataset"]),
+        stored_top_level=None, resolved_after=_resolved(assigned=["dataset", "table"]),
+        tl_result=_tl_result(3), dirty=True,
+    )
+
+    await collector.collect_counts(_envelope())
+
+    assert len(obs.tl_calls) == 1   # roots query ran
+    assert obs.sets == []           # but nothing persisted
+    assert obs.restored == ["ds1"]  # consumed dirty flag restored
 
 
 @pytest.mark.asyncio

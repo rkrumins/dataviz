@@ -47,20 +47,23 @@ export function RequireNav({ group, sectionKey, fallback, children }: RequireNav
 function DeniedPanel({ spec }: { spec: NavPermissionSpec }) {
     const desc = describe(spec)
     return (
-        <div className="flex items-center justify-center min-h-[60vh] p-8">
-            <div className="max-w-sm text-center">
-                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-amber-500/20 to-amber-500/0 border border-amber-500/20 flex items-center justify-center mx-auto mb-5">
-                    <ShieldOff className="w-7 h-7 text-amber-500" />
+        <div className="h-full overflow-y-auto">
+            {/* Its own scroller: this can render straight into AppLayout's <main>, which clips. */}
+            <div className="flex items-center justify-center min-h-[60vh] p-8">
+                <div className="max-w-sm text-center">
+                    <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-amber-500/20 to-amber-500/0 border border-amber-500/20 flex items-center justify-center mx-auto mb-5">
+                        <ShieldOff className="w-7 h-7 text-amber-500" />
+                    </div>
+                    <h2 className="text-base font-bold text-ink mb-1.5">
+                        You don't have access
+                    </h2>
+                    <p className="text-sm text-ink-muted leading-relaxed">
+                        This section requires {desc}.
+                    </p>
+                    <p className="text-xs text-ink-muted/80 mt-3">
+                        Ask your workspace admin or system administrator if you should have it.
+                    </p>
                 </div>
-                <h2 className="text-base font-bold text-ink mb-1.5">
-                    You don't have access
-                </h2>
-                <p className="text-sm text-ink-muted leading-relaxed">
-                    This section requires {desc}.
-                </p>
-                <p className="text-xs text-ink-muted/80 mt-3">
-                    Ask your workspace admin or system administrator if you should have it.
-                </p>
             </div>
         </div>
     )

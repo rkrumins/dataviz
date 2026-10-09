@@ -178,8 +178,9 @@ export function IngestionPage() {
     const setTab = (id: IngestionTab) => setSearchParams({ tab: id })
 
     return (
-        <div className="absolute inset-0 flex flex-col animate-in fade-in duration-500">
-            {/* Fixed header area — does not scroll */}
+        <div className="absolute inset-0 flex flex-col overflow-x-hidden overflow-y-auto animate-in fade-in duration-500">
+            {/* Fixed header area — scrolls away only when the window is too short
+                for it and the content pane's min-h-40 floor */}
             <div className="shrink-0">
                 <PageContainer className="pt-8">
                     {/* Header */}
@@ -272,13 +273,15 @@ export function IngestionPage() {
                 </PageContainer>
             </div>
 
-            {/* Content pane — fills remaining space */}
+            {/* Content pane — fills remaining space. `relative` keeps absolutely
+                positioned content (sr-only labels) inside it rather than
+                stretching the page's own scroll range. */}
             <div
                 role="tabpanel"
                 id={`ingestion-panel-${activeTab}`}
                 aria-labelledby={`ingestion-tab-${activeTab}`}
                 className={cn(
-                    'flex-1 min-h-0',
+                    'relative flex-1 min-h-40',
                     // Jobs tab manages its own scroll so it can pin header/filters
                     activeTab === 'jobs' ? 'flex flex-col' : 'overflow-y-auto',
                 )}

@@ -18,11 +18,12 @@ from backend.app.models.assignment import LayerAssignmentRequest, LayerAssignmen
 from backend.app.services.assignment_engine import assignment_engine
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.graph_cache import ENDPOINT_LAYER_ASSIGNMENT, get_graph_cache
+from backend.app.services.view_placement import CONTRACT_VERSION, contract_enabled
 
 router = APIRouter()
 
 
-def _cache_params(request: LayerAssignmentRequest) -> dict:
+def _cache_params(request: LayerAssignmentRequest, *, contract: bool = False) -> dict:
     """What this compute actually depends on — not the raw request.
 
     Dumping the request made two things part of the key that have no bearing
@@ -42,6 +43,11 @@ def _cache_params(request: LayerAssignmentRequest) -> dict:
     canvas by expanding in a different order share one entry instead of
     fragmenting into two, which is what every neighbouring endpoint already
     does.
+
+    ``contract`` (``placementContractEnabled``) adds ``placementContract``: the
+    placement contract answers the same request differently from the legacy
+    engine, and a contract revision differently again, so neither may serve
+    the other's entry. Off, the key is exactly what it was.
     """
     dumped = request.model_dump(mode="json", by_alias=True, exclude_none=True)
     assignments = dumped.get("assignments")
@@ -54,6 +60,8 @@ def _cache_params(request: LayerAssignmentRequest) -> dict:
     urns = dumped.get("urns")
     if isinstance(urns, list):
         dumped["urns"] = sorted(urns)
+    if contract:
+        dumped["placementContract"] = CONTRACT_VERSION
     return dumped
 
 
@@ -85,11 +93,15 @@ async def compute_assignments(
     routed through GraphCache so repeat calls with the same layer config
     hit Redis instead of the provider. The same gen counter that
     invalidates other graph-cache entries also invalidates this one.
+
+    ``placementContractEnabled`` (read once per request) places through the
+    shared placement contract instead, under its own cache key.
     """
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
+    contract = await contract_enabled()
 
     async def compute() -> LayerAssignmentResult:
-        return await assignment_engine.compute_assignments(request, engine=engine)
+        return await assignment_engine.compute_assignments(request, engine=engine, contract=contract)
 
     scope = _cache_scope(engine)
     if scope is None:
@@ -104,7 +116,7 @@ async def compute_assignments(
         return await get_graph_cache().get_or_compute(
             scope=scope,
             endpoint=ENDPOINT_LAYER_ASSIGNMENT,
-            params=_cache_params(request),
+            params=_cache_params(request, contract=contract),
             compute=compute,
             model_cls=LayerAssignmentResult,
             # Without this the cross-pod election falls back to its flat

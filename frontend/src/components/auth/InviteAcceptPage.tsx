@@ -65,7 +65,7 @@ export function InviteAcceptPage() {
     }, [inviteToken, navigate, bootstrap])
 
     return (
-        <div className="relative min-h-screen w-full flex items-center justify-center bg-canvas font-sans">
+        <div className="relative min-h-full w-full flex items-center justify-center py-8 bg-canvas font-sans">
             <motion.div
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}

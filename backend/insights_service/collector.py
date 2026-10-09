@@ -39,6 +39,7 @@ from backend.app.registry.provider_registry import provider_registry
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.top_level_cache import (
     TOP_LEVEL_MATERIALIZE_LIMIT,
+    assigned_entity_types,
     build_top_level_payload,
     consume_dirty_flag,
     containment_digest,
@@ -229,6 +230,7 @@ async def materialize_top_level(
             digest = containment_digest(
                 getattr(resolved, "containment_edge_types", None) or [],
                 getattr(resolved, "root_entity_types", None) or [],
+                assigned_entity_types(resolved),
             )
             if not should_rematerialize(
                 stored_payload, fresh_stats=stats, digest=digest, dirty=dirty,
@@ -270,6 +272,7 @@ async def materialize_top_level(
                 post_digest = containment_digest(
                     getattr(post_resolved, "containment_edge_types", None) or [],
                     getattr(post_resolved, "root_entity_types", None) or [],
+                    assigned_entity_types(post_resolved),
                 )
                 if post_digest != digest:
                     logger.warning(

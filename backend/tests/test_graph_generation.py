@@ -9,7 +9,8 @@ handle decodes with the wrong names — the incident where every Domain rendered
 
 Rebuilds no longer drop (they reconcile in place). The drops that remain — eviction and
 purge — bump a per-graph generation, and every provider checks it (throttled) before a
-query and clears its handles' tables when it moved.
+query and clears its handles' tables when it moved. A drop nothing bumps for (an external
+loader, a script) is caught by comparing the handle's tables with the server's catalogue.
 """
 import asyncio
 from types import SimpleNamespace
@@ -158,3 +159,114 @@ def test_a_slow_bus_costs_a_query_at_most_the_read_timeout():
     t0 = _t.monotonic()
     assert asyncio.run(w.rebuilt("g")) is False
     assert _t.monotonic() - t0 < 1.0
+
+
+# ── the catalogue probe: drops nobody bumped for (external loader, script, flush) ──
+
+
+class _Blind:
+    async def rebuilt(self, _name):
+        return False
+
+
+class _Schema:
+    def __init__(self, labels=(), properties=(), relationships=()):
+        self.labels, self.properties, self.relationships = list(labels), list(properties), list(relationships)
+        self.cleared = 0
+
+    def clear(self):
+        self.cleared += 1
+        self.labels, self.properties, self.relationships = [], [], []
+
+
+class _CatalogueGraph:
+    """A handle whose server catalogue is ``server``; read-only by construction."""
+
+    def __init__(self, schema, server, ro_query=None):
+        self.schema = schema
+        self.probes = []
+
+        async def _ro(cypher, *a, **kw):
+            self.probes.append(cypher)
+            proc = cypher.removeprefix("CALL ").removesuffix("()")
+            return SimpleNamespace(result_set=[[v] for v in server.get(proc, [])])
+        self.ro_query = ro_query or _ro
+
+    async def query(self, *a, **kw):
+        raise AssertionError("the catalogue probe must never issue a write-flagged query")
+
+
+def _probing_provider(schema, server=None, ro_query=None):
+    p = FalkorDBProvider(host="h", port=6379, graph_name="g", auto_reconcile=False)
+    p._redis = None
+    p._rebuild_watch = _Blind()
+    p._graph = _CatalogueGraph(schema, server or {}, ro_query)
+    p._save_indices_ensured = True
+    return p
+
+
+def test_the_provider_forgets_tables_the_catalogue_no_longer_starts_with():
+    # The graph was dropped and reloaded out of band: same name, new catalogue.
+    schema = _Schema(labels=["domain", "dataPlatform"])
+    p = _probing_provider(schema, {"db.labels": ["Layer", "Object"]})
+    asyncio.run(p._refresh_if_graph_rebuilt())
+    assert schema.cleared == 1
+    assert p._save_indices_ensured is False
+
+
+def test_the_provider_keeps_tables_when_the_catalogue_only_grew():
+    schema = _Schema(labels=["domain", "dataPlatform"])
+    p = _probing_provider(schema, {"db.labels": ["domain", "dataPlatform", "new"]})
+    asyncio.run(p._refresh_if_graph_rebuilt())
+    assert schema.cleared == 0
+    assert p._save_indices_ensured is True
+
+
+def test_the_provider_notices_drifted_property_keys():
+    # The labels can line up again while the property keys shift: names decode wrong.
+    schema = _Schema(labels=["Layer"], properties=["urn", "displayName"])
+    p = _probing_provider(schema, {"db.labels": ["Layer"], "db.propertyKeys": ["name", "urn"]})
+    asyncio.run(p._refresh_if_graph_rebuilt())
+    assert schema.cleared == 1
+
+
+def test_the_provider_catalogue_probe_is_throttled_and_read_only():
+    schema = _Schema(labels=["Layer"])
+    p = _probing_provider(schema, {"db.labels": ["Layer"]})
+
+    async def twice():
+        await p._refresh_if_graph_rebuilt()
+        await p._refresh_if_graph_rebuilt()
+    asyncio.run(twice())
+    assert p._graph.probes == ["CALL db.labels()"]
+    assert schema.cleared == 0
+
+
+def test_an_unanswerable_catalogue_changes_nothing_for_the_provider():
+    import time as _t
+
+    async def broken(*a, **kw):
+        raise ConnectionError("node gone")
+
+    async def slow(*a, **kw):
+        await asyncio.sleep(5)
+
+    for ro_query in (broken, slow):
+        schema = _Schema(labels=["domain"])
+        p = _probing_provider(schema, ro_query=ro_query)
+        t0 = _t.monotonic()
+        asyncio.run(p._refresh_if_graph_rebuilt())
+        assert _t.monotonic() - t0 < 1.0
+        assert schema.cleared == 0
+        assert p._save_indices_ensured is True
+
+
+def test_the_provider_does_not_probe_a_handle_without_real_tables():
+    from unittest.mock import AsyncMock, MagicMock
+
+    p = FalkorDBProvider(host="h", port=6379, graph_name="g", auto_reconcile=False)
+    p._rebuild_watch = _Blind()
+    p._graph = MagicMock()
+    p._graph.ro_query = AsyncMock()
+    asyncio.run(p._refresh_if_graph_rebuilt())
+    p._graph.ro_query.assert_not_awaited()

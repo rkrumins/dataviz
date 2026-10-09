@@ -1,0 +1,253 @@
+{
+  "cases": [
+    {
+      "name": "suggest-open-scope-pins-only-a-different-layer",
+      "summary": "SUGGEST open scope: L = valid(chosen) ?? member layer ?? valid(default); pin only when L differs from the layer the contract already computes.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] },
+              { "id": "c", "name": "C", "order": 2, "entityTypes": [] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }, { "urn": "y", "entityType": "folder" }],
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "_type_b_dataset" }, "y": { "source": "none" } },
+      "suggest": [
+        { "urn": "x", "expect": { "layerId": "b", "pin": false } },
+        { "urn": "x", "chosenLayerId": "b", "expect": { "layerId": "b", "pin": false } },
+        { "urn": "x", "chosenLayerId": "c", "expect": { "layerId": "c", "pin": true } },
+        {
+          "urn": "x",
+          "chosenLayerId": "gone",
+          "defaultLayerId": "a",
+          "expect": { "layerId": "b", "pin": false }
+        },
+        { "urn": "y", "expect": { "layerId": null, "pin": false } },
+        { "urn": "y", "defaultLayerId": "a", "expect": { "layerId": "a", "pin": true } },
+        { "urn": "y", "defaultLayerId": "gone", "expect": { "layerId": null, "pin": false } },
+        { "urn": "y", "chosenLayerId": "c", "defaultLayerId": "a", "expect": { "layerId": "c", "pin": true } }
+      ]
+    },
+    {
+      "name": "suggest-curated-scope-always-pins",
+      "summary": "SUGGEST curated scope: with no chosen layer and no entry, the open-scope placement (rule or stamp) is used, else the default, else the first layer; curated always pins.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": { "e": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset" },
+        { "urn": "y", "entityType": "folder" },
+        { "urn": "e", "entityType": "folder" },
+        { "urn": "s", "entityType": "folder", "layerAssignment": "b" }
+      ],
+      "expect": {
+        "x": { "source": "none" },
+        "y": { "source": "none" },
+        "e": { "layerId": "a", "source": "explicit" },
+        "s": { "source": "none" }
+      },
+      "suggest": [
+        { "urn": "x", "expect": { "layerId": "b", "pin": true } },
+        { "urn": "x", "chosenLayerId": "a", "expect": { "layerId": "a", "pin": true } },
+        {
+          "urn": "x",
+          "chosenLayerId": "gone",
+          "defaultLayerId": "a",
+          "expect": { "layerId": "b", "pin": true }
+        },
+        { "urn": "y", "expect": { "layerId": "a", "pin": true } },
+        { "urn": "y", "defaultLayerId": "b", "expect": { "layerId": "b", "pin": true } },
+        { "urn": "y", "defaultLayerId": "gone", "expect": { "layerId": "a", "pin": true } },
+        { "urn": "e", "expect": { "layerId": "a", "pin": true } },
+        { "urn": "s", "expect": { "layerId": "b", "pin": true } }
+      ]
+    },
+    {
+      "name": "suggest-fallback-is-not-a-placement",
+      "summary": "SUGGEST m = member layer only: a fallback placement is not a member, so with no default nothing is suggested and a default is pinned.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [], "showUnassigned": true },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["dataset"] }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "folder" }],
+      "expect": { "x": { "layerId": "a", "source": "fallback" } },
+      "suggest": [
+        { "urn": "x", "expect": { "layerId": null, "pin": false } },
+        { "urn": "x", "defaultLayerId": "a", "expect": { "layerId": "a", "pin": true } },
+        { "urn": "x", "defaultLayerId": "b", "expect": { "layerId": "b", "pin": true } }
+      ]
+    },
+    {
+      "name": "suggest-curated-fallback-is-not-a-placement",
+      "summary": "SUGGEST curated: the open-scope retry ignores a fallback placement, so the first layer is suggested and pinned.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [], "showUnassigned": true }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "entityType": "folder" }],
+      "expect": { "x": { "source": "none" } },
+      "suggest": [
+        { "urn": "x", "expect": { "layerId": "a", "pin": true } },
+        { "urn": "x", "defaultLayerId": "b", "expect": { "layerId": "b", "pin": true } }
+      ]
+    },
+    {
+      "name": "suggest-stamp-and-explicit-count-as-placed",
+      "summary": "SUGGEST open scope: stamped, explicit and (stale-entry) rule placements are members, so suggesting their own layer does not pin and the default is not used.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": ["dataset"] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": [] }
+            ],
+            "assignments": {
+              "e": { "layerId": "a", "inheritsChildren": true },
+              "z": { "layerId": "gone", "inheritsChildren": true }
+            }
+          }
+        }
+      },
+      "nodes": [
+        { "urn": "x", "entityType": "dataset", "layerAssignment": "b" },
+        { "urn": "e", "entityType": "dataset" },
+        { "urn": "z", "entityType": "dataset" }
+      ],
+      "expect": {
+        "x": { "layerId": "b", "source": "stamped" },
+        "e": { "layerId": "a", "source": "explicit" },
+        "z": { "layerId": "a", "source": "rule", "ruleId": "_type_a_dataset", "staleExplicit": true }
+      },
+      "suggest": [
+        { "urn": "x", "expect": { "layerId": "b", "pin": false } },
+        { "urn": "x", "chosenLayerId": "a", "expect": { "layerId": "a", "pin": true } },
+        { "urn": "x", "defaultLayerId": "a", "expect": { "layerId": "b", "pin": false } },
+        { "urn": "e", "expect": { "layerId": "a", "pin": false } },
+        { "urn": "e", "chosenLayerId": "b", "expect": { "layerId": "b", "pin": true } },
+        { "urn": "z", "expect": { "layerId": "a", "pin": false } }
+      ]
+    },
+    {
+      "name": "suggest-ignores-containment-parents",
+      "summary": "SUGGEST: P = PLACE(spec, facts, []) with no parents, so a node that inherits inside place_all is suggested from its own tiers.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              { "id": "b", "name": "B", "order": 1, "entityTypes": ["table"] }
+            ],
+            "assignments": { "p": { "layerId": "a", "inheritsChildren": true } }
+          }
+        }
+      },
+      "ontology": { "containment": { "CONTAINS": null } },
+      "nodes": [
+        { "urn": "p", "entityType": "folder" },
+        { "urn": "c", "entityType": "table" },
+        { "urn": "d", "entityType": "folder" }
+      ],
+      "edges": [
+        { "source": "p", "target": "c", "edgeType": "CONTAINS" },
+        { "source": "p", "target": "d", "edgeType": "CONTAINS" }
+      ],
+      "expect": {
+        "p": { "layerId": "a", "source": "explicit" },
+        "c": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" },
+        "d": { "layerId": "a", "source": "inherited", "inheritedFrom": "p" }
+      },
+      "suggest": [
+        { "urn": "c", "expect": { "layerId": "b", "pin": false } },
+        { "urn": "d", "expect": { "layerId": null, "pin": false } },
+        { "urn": "d", "defaultLayerId": "a", "expect": { "layerId": "a", "pin": true } }
+      ]
+    },
+    {
+      "name": "suggest-property-rule-placement",
+      "summary": "SUGGEST open scope (Build/import callers): a property rule's placement is the member layer, so the build layer default is used only when no rule places the entity.",
+      "view": {
+        "content": { "entityScope": "all" },
+        "layout": {
+          "referenceLayout": {
+            "layers": [
+              { "id": "a", "name": "A", "order": 0, "entityTypes": [] },
+              {
+                "id": "b",
+                "name": "B",
+                "order": 1,
+                "entityTypes": [],
+                "rules": [
+                  {
+                    "id": "rp",
+                    "priority": 1,
+                    "propertyMatch": { "field": "owner", "operator": "equals", "value": "finance" }
+                  }
+                ]
+              }
+            ],
+            "assignments": {}
+          }
+        }
+      },
+      "nodes": [{ "urn": "x", "properties": { "owner": "Finance" } }, { "urn": "y", "properties": { "owner": "ops" } }],
+      "expect": { "x": { "layerId": "b", "source": "rule", "ruleId": "rp" }, "y": { "source": "none" } },
+      "suggest": [
+        { "urn": "x", "defaultLayerId": "a", "expect": { "layerId": "b", "pin": false } },
+        { "urn": "y", "defaultLayerId": "a", "expect": { "layerId": "a", "pin": true } },
+        { "urn": "y", "chosenLayerId": "b", "expect": { "layerId": "b", "pin": true } }
+      ]
+    },
+    {
+      "name": "suggest-with-no-layers-never-pins",
+      "summary": "SUGGEST: with no layers every candidate is invalid and firstLayerId is null, so nothing is suggested or pinned even in curated scope.",
+      "view": {
+        "content": { "entityScope": "curated" },
+        "layout": { "referenceLayout": { "layers": [], "assignments": {} } }
+      },
+      "nodes": [{ "urn": "x", "entityType": "dataset" }],
+      "expect": { "x": { "source": "none" } },
+      "suggest": [
+        { "urn": "x", "expect": { "layerId": null, "pin": false } },
+        {
+          "urn": "x",
+          "chosenLayerId": "a",
+          "defaultLayerId": "a",
+          "expect": { "layerId": null, "pin": false }
+        }
+      ]
+    }
+  ]
+}

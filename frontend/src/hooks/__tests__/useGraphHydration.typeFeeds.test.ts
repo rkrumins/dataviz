@@ -1,5 +1,5 @@
 /**
- * Open ('all') views: each visible type is a lossless feed, and explicit
+ * Open ('all') views: each type a layer claims is a lossless feed, and explicit
  * placements always load.
  *
  * An open view used to load the first 200 entities of each type and stop —
@@ -9,7 +9,8 @@
  *
  * Pinned here:
  *  - hydration records a feed per type from its first page, positioned where
- *    the SERVER said the next page starts;
+ *    the SERVER said the next page starts, with the total the server counted
+ *    on that page — kept as later pages (which carry none) land;
  *  - an explicit placement beyond the first page is fetched by URN;
  *  - loadMoreFeeds reads each page at the server's position and walks the type
  *    to exhaustion with every entity exactly once — even when the server
@@ -98,6 +99,8 @@ function serve({ hide = new Set<number>(), failAt }: { hide?: Set<number>; failA
       nodes: read.filter((_, k) => !hide.has(start + k)),
       hasMore: start + read.length < TOTAL,
       nextOffset: start + read.length,
+      // The server counts with the first page only.
+      totalCount: start === 0 ? TOTAL : null,
     }
   })
 }
@@ -121,7 +124,7 @@ describe('open-scope type feeds', () => {
   it('records a feed per type and fetches a far-sorting placement by URN', async () => {
     serve()
     await hydrate()
-    expect(useCanvasStore.getState().typeFeeds.domain).toMatchObject({ offset: 200, hasMore: true })
+    expect(useCanvasStore.getState().typeFeeds.domain).toMatchObject({ offset: 200, hasMore: true, total: TOTAL })
     expect(domains()).toContain(ANCHOR)
     expect(mockProvider.getNodes.mock.calls.some(c => (c[0] as { urns?: string[] }).urns?.includes(ANCHOR))).toBe(true)
   })
@@ -138,6 +141,7 @@ describe('open-scope type feeds', () => {
     expect(new Set(got).size).toBe(TOTAL)
     expect(calls).toHaveLength(3)
     expect(useCanvasStore.getState().typeFeeds.domain.hasMore).toBe(false)
+    expect(useCanvasStore.getState().typeFeeds.domain.total).toBe(TOTAL)
   })
 
   it('neither repeats nor stops early when a page returns fewer rows than it read', async () => {
@@ -225,5 +229,13 @@ describe('feedAfter', () => {
     expect(feedAfter(['t'], { nodes: [], hasMore: true, nextOffset: 200 }, 200).hasMore).toBe(false)
     expect(feedAfter(['t'], { nodes: [], hasMore: true, nextOffset: 400 }, 200)).toEqual(
       { entityTypes: ['t'], offset: 400, hasMore: true })
+  })
+
+  it('keeps the first page’s total across a later page that sends none', () => {
+    expect(feedAfter(['t'], { nodes: [], hasMore: true, nextOffset: 400, totalCount: null }, 200, 450).total).toBe(450)
+  })
+
+  it('takes a fresh count over the one it held', () => {
+    expect(feedAfter(['t'], { nodes: [], hasMore: true, nextOffset: 200, totalCount: 500 }, 0, 450).total).toBe(500)
   })
 })

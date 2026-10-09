@@ -49,7 +49,7 @@ vi.mock('@/store/schema', () => ({
     id: viewState.id,
     layout: {
       type: 'reference',
-      referenceLayout: { layers: [{ id: 'L1' }], assignments: viewState.assignments },
+      referenceLayout: { layers: [{ id: 'L1', entityTypes: ['object'] }], assignments: viewState.assignments },
     },
     content: { visibleEntityTypes: ['layer', 'object'], entityScope: viewState.scope },
   }),
