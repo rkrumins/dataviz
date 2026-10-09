@@ -569,7 +569,7 @@ export const faqEntries: FAQEntry[] = [
     category: 'General',
     question: 'Is {brand} open source?',
     answer:
-      'Yes. {brand} is open source and available on GitHub. Contributions, issues, and feature requests are welcome.',
+      'Yes. {brand} is open source. Contributions, issues, and feature requests are welcome; the [Setup Guide](/docs/setup) gets a development environment running.',
   },
 
   // Setup

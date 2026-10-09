@@ -40,7 +40,7 @@ const EXTRA_GUIDE_ROUTES = new Set<string>([])
 // A route link is a bare `/docs/<slug>` / `/guide/<slug>` leaf — bounded by a
 // link/quote/space delimiter, not followed by a further path segment or file
 // extension. That excludes asset paths (/docs-assets/guide/x-hero.png) and
-// absolute GitHub URLs (…/blob/main/docs/versioning/02-…md), which are external.
+// absolute URLs that merely contain /docs/ (https://host/…/docs/x.md), which are external.
 const DOC_LINK = /(?<=^|[("'\s>])\/docs\/([a-z0-9-]+)(?=$|[)#"'\s<])/g
 const GUIDE_LINK = /(?<=^|[("'\s>])\/guide\/([a-z0-9-]+)(?=$|[)#"'\s<])/g
 // Relative markdown link, e.g. ](./FILE.md#anchor), ](sub/FILE.md) or
@@ -142,14 +142,17 @@ describe('docs content integrity', () => {
     expect(errors).toEqual([])
   })
 
-  it('docs and guides link to each other relatively, never to the repository on GitHub', async () => {
-    // A deployment serves these pages itself and may not reach github.com. A
+  it('docs, guides and FAQ answers point at nothing on GitHub', async () => {
+    // A deployment serves these pages itself and may not reach GitHub. A
     // relative link works there and in the repository alike; register the
-    // target instead of linking its GitHub copy.
+    // target instead of linking a GitHub-hosted copy.
+    const GITHUB = /\b(?:github\.com|github\.io|githubusercontent\.com|ghcr\.io)\b/i
     const errors: string[] = []
     for (const e of [...docEntries, ...guideEntries]) {
-      const content = (await e.importFn()).default
-      if (content.includes('github.com/rkrumins/dataviz')) errors.push(e.slug)
+      if (GITHUB.test((await e.importFn()).default)) errors.push(e.slug)
+    }
+    for (const f of [...faqEntries, ...guideFaqs]) {
+      if (GITHUB.test(f.answer)) errors.push(`faq:"${f.question.slice(0, 32)}"`)
     }
     expect(errors).toEqual([])
   })

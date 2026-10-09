@@ -34,11 +34,13 @@ Kustomize image override.
 
 ## 3. Install the ingress controller
 
-GKE has no Nginx ingress by default:
+GKE has no Nginx ingress by default. Set `INGRESS_NGINX_CHART_REPO` to the
+ingress-nginx chart repository your cluster can reach — the project's own, or
+your organisation's mirror of it:
 
 ```sh
 helm upgrade --install ingress-nginx ingress-nginx \
-  --repo https://kubernetes.github.io/ingress-nginx \
+  --repo "$INGRESS_NGINX_CHART_REPO" \
   --namespace ingress-nginx --create-namespace
 ```
 

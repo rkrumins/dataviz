@@ -14,13 +14,21 @@ limitations** — a changelog that only lists good news is not worth reading.
 ### Changed
 
 **The in-app docs no longer send readers to GitHub.** Wherever a doc linked to one the reader did
-not carry, the link was an absolute `github.com` URL, which on a deployment that cannot reach the
-repository led nowhere. Those links are relative now, and the pages they pointed at — versioning
+not carry, the link was an absolute URL into the public repository, which on a deployment that cannot
+reach it led nowhere. Those links are relative now, and the pages they pointed at — versioning
 chapters 02–05 and 07–11, the versioning suite guide and glossary, and the draft-lineage notes — are
 in the reader under **Versioning**. A relative link with an `#anchor`, or one that climbs out of its
 folder (`../DATA_ARCHITECTURE.md`), now opens in the reader too; both used to open a new tab on a page
-that did not exist. The docs tests check links with the reader's own resolver, and fail if a doc or
-guide links to the repository on GitHub again.
+that did not exist. The docs tests check links with the reader's own resolver, and fail if a doc, a
+guide or an FAQ answer links anywhere on GitHub again.
+
+**Nothing else points at public GitHub either.** The landing site's GitHub buttons — in the
+navigation, the open-source call to action and the footer — open the docs at `/docs`, the way its
+other links already route into the app. `SECURITY.md` describes private vulnerability reporting
+without a URL and links the known-issues list in the repository. The Helm chart no longer names a
+home page, the FAQ no longer sends readers to GitHub, and the ingress-nginx chart repository and the
+FalkorDB module download in the deploy notes are variables you point at a source your cluster can
+reach.
 
 **The technical-debt register, the roadmap and the status pages were re-verified against the code.**
 `docs/TECHNICAL_DEBT.md` was last checked on 2026-08-25 and had drifted: four of its items had
