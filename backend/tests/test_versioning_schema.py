@@ -14,7 +14,7 @@ _PG = postgresql.dialect()
 _EXPECTED_TABLES = {
     "graphs", "branches", "branch_members", "merge_requests", "projection_state",
     "jobs", "import_rows", "commits", "node_versions", "edge_versions", "entity_heads",
-    "merkle_nodes", "working_changes",
+    "merkle_nodes", "working_changes", "bootstrap_nodes",
 }
 
 

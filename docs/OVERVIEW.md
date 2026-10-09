@@ -509,7 +509,7 @@ timeline
 - **Production safeguards are not switched on:** The checks exist and are tested, but they key off `ENV=production`, which no shipped deployment config sets
 - **Observability:** Metrics are exported but off by default, and nothing scrapes or alerts on them
 - **Unproven at scale:** No load or chaos run has been recorded, and two FalkorDB manifest defects on Kubernetes have not been checked
-- **Deployment parity:** The Helm chart lacks the versioning worker and other pieces the Kubernetes manifests have, and the zero-config quickstart does not boot
+- **Deployment parity:** The Helm chart lacks pieces the Kubernetes manifests have, and the zero-config quickstart does not boot
 - **Legacy code:** The pre-workspace connection path is unreachable dead code still waiting to be deleted
 
 Each of these is an entry, with evidence, in the [technical-debt register](TECHNICAL_DEBT.md).

@@ -4,7 +4,9 @@ The job goes through the same hook the API wires into the import/export service 
 live ontology, the route's refusals, then what a publish sets off), so this runs it end to end
 against Postgres: the draft's changes reach main and the job carries the commit; a draft that fell
 behind main is refused with the route's own answer, for the client to raise the same error; the
-merge of a draft's review goes the same way, waiting on its reviewer's approval.
+merge of a draft's review goes the same way, waiting on its reviewer's approval. And a job run again
+after its draft merged — its worker died after the squash, or a superseded attempt's squash landed
+under it — completes with that merge, publishing nothing twice, and what a publish sets off runs.
 """
 import asyncio
 import os
@@ -14,8 +16,10 @@ import pytest
 from backend.app.services.versioning import db, models
 
 
-async def _run() -> None:
+async def _run(monkeypatch) -> None:
+    from backend.app.api.v1.endpoints import versioning as ep
     from backend.app.api.v1.endpoints.versioning import get_import_export_service, get_versioning_service
+    from backend.app.services.versioning.import_export.import_worker import lease_job
 
     await models.create_schema_and_partitions()
     svc, ie = get_versioning_service(), get_import_export_service()
@@ -72,9 +76,60 @@ async def _run() -> None:
     assert pr["status"] == "merged" and pr["resulting_commit_id"] == merged["commitId"], (pr, merged)
     nodes = (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]
     assert nodes["B"]["displayName"] == "reviewed"
+
+    # What a publish sets off, as it runs.
+    set_off = []
+
+    async def promote(branch_id, actor):
+        set_off.append(("promote", branch_id))
+
+    async def nudge(graph_id):
+        set_off.append(("nudge", graph_id))
+
+    monkeypatch.setattr(ep, "_promote_view_layout_overlay", promote)
+    monkeypatch.setattr(ep, "nudge_projection", nudge)
+
+    async def squashes_of(branch_id):
+        return [c for c in await svc.commit_log(graph_id=gid, branch_id=main)
+                if c["kind"] == "squash_publish" and c.get("source_branch_id") == branch_id]
+
+    # The worker died after its squash committed, before it finished the job: the next attempt
+    # publishes nothing again, completes with the merge, and what a publish sets off runs.
+    crashed = await svc.open_draft(graph_id=gid, owner="alice")
+    await svc.apply_ops(graph_id=gid, branch_id=crashed, actor="alice", ops=[upd("A", displayName="crashed")])
+    job = await ie.create_publish_job(workspace_id="ws1", data_source_id=ds, graph_id=gid,
+                                      branch_id=crashed, actor="alice", message="crashed")
+    await lease_job(job["job_id"])                      # the first attempt's worker...
+    landed = await svc.publish(graph_id=gid, branch_id=crashed, actor="alice", message="crashed")
+    result = await ie.run_publish(job["job_id"])       # ...died here; the next attempt runs it
+    got = await ie.get_job(job["job_id"])
+    assert (got["status"], got["attempt"], result) == ("completed", 2, {"commitId": landed}), got
+    assert [c["commit_id"] for c in await squashes_of(crashed)] == [landed], "published once"
+    assert set_off == [("promote", crashed), ("nudge", gid)]
+
+    # A superseded attempt's squash lands between this attempt's look and its publish: the publish
+    # is refused (the draft merged), and the job completes with that merge all the same.
+    raced = await svc.open_draft(graph_id=gid, owner="alice")
+    await svc.apply_ops(graph_id=gid, branch_id=raced, actor="alice", ops=[upd("B", displayName="raced")])
+    job = await ie.create_publish_job(workspace_id="ws1", data_source_id=ds, graph_id=gid,
+                                      branch_id=raced, actor="alice", message="raced")
+    looked = svc.merged_commit_id
+    zombie = []
+
+    async def looks_then_the_zombie_lands(**kwargs):
+        merged = await looked(**kwargs)
+        if not zombie:
+            zombie.append(await svc.publish(graph_id=gid, branch_id=raced, actor="alice", message="zombie"))
+        return merged
+    monkeypatch.setattr(svc, "merged_commit_id", looks_then_the_zombie_lands)
+    set_off.clear()
+    result = await ie.run_publish(job["job_id"])
+    assert result == {"commitId": zombie[0]} and (await ie.get_job(job["job_id"]))["status"] == "completed"
+    assert [c["commit_id"] for c in await squashes_of(raced)] == zombie
+    assert set_off == [("promote", raced), ("nudge", gid)]
     await db.dispose_engine()
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_a_publish_job_lands_like_a_publish_and_says_why_when_it_cannot():
-    asyncio.run(_run())
+def test_a_publish_job_lands_like_a_publish_and_says_why_when_it_cannot(monkeypatch):
+    asyncio.run(_run(monkeypatch))

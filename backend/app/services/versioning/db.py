@@ -15,6 +15,7 @@ DB, no asyncpg) — which keeps it unit-test/inspection friendly.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from typing import AsyncGenerator, Optional
 
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from . import config
 
@@ -35,6 +37,7 @@ class VersioningBase(DeclarativeBase):
 
 _engine: Optional[AsyncEngine] = None
 _session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+_lock_engine: Optional[AsyncEngine] = None
 
 
 def get_engine() -> AsyncEngine:
@@ -67,21 +70,55 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 @contextlib.asynccontextmanager
 async def graphver_session() -> AsyncGenerator[AsyncSession, None]:
-    """Commit-on-success / rollback-on-error session scope for the store."""
+    """Commit-on-success / rollback-on-error session scope for the store.
+
+    Cancellation-safe, as ``db/engine.py``'s ``_session_scope`` is: ``CancelledError`` is not an
+    ``Exception``, so a job task cancelled mid-window (a worker draining, a request timing out)
+    would otherwise skip the rollback and leak its connection out of the pool. The commit, the
+    rollback and the close are shielded, so the connection goes back even as the task dies."""
     session = get_session_factory()()
     try:
-        yield session
-        await session.commit()
-    except Exception:
-        await session.rollback()
-        raise
+        try:
+            yield session
+            await asyncio.shield(session.commit())
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(session.rollback())
+            raise
+        except Exception:
+            await session.rollback()
+            raise
     finally:
-        await session.close()
+        with contextlib.suppress(Exception):
+            await asyncio.shield(session.close())
+
+
+@contextlib.asynccontextmanager
+async def graphver_lock_session() -> AsyncGenerator[AsyncSession, None]:
+    """A session on a connection of its OWN, for a session-level advisory lock held for minutes.
+
+    The projector holds ``pg_advisory_lock`` for a whole projection (a full seed runs for minutes),
+    so its connection must not come out of the pool sized for short window transactions: a few
+    graphs projecting at once would starve every job in the process. A NullPool engine opens a
+    connection per session and closes it on exit, and closing it releases any lock it still holds,
+    so a projection that fails to unlock can never wedge the next. Nothing is committed."""
+    global _lock_engine
+    if _lock_engine is None:
+        _lock_engine = create_async_engine(config.graphver_db_url(), poolclass=NullPool, echo=False)
+    session = AsyncSession(bind=_lock_engine, expire_on_commit=False, autoflush=False)
+    try:
+        yield session
+    finally:
+        with contextlib.suppress(Exception):
+            await asyncio.shield(session.close())
 
 
 async def dispose_engine() -> None:  # pragma: no cover - shutdown path
-    global _engine, _session_factory
+    global _engine, _session_factory, _lock_engine
     if _engine is not None:
         await _engine.dispose()
+    if _lock_engine is not None:
+        await _lock_engine.dispose()
     _engine = None
     _session_factory = None
+    _lock_engine = None

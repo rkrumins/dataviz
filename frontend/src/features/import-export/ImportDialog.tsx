@@ -14,8 +14,8 @@ import {
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
-  detectFormat, getImport, getImportPreview, importInParts, importLimit, MAX_IMPORT_BYTES, pollJob,
-  queuePosition, templateDownloadUrl, triggerBrowserDownload,
+  detectFormat, getImport, getImportPreview, importInParts, importLimit, jobProgressText, MAX_IMPORT_BYTES, pollJob,
+  queuePosition, resumeNote, templateDownloadUrl, triggerBrowserDownload,
   type ImportFormat, type ImportPreviewRow, type ImportSummary, type Job, type ReconcileMode,
 } from '@/services/importExportApiService'
 import { prettyBytes } from './format'
@@ -72,7 +72,8 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([])
   const [upload, setUpload] = useState<{ sent: number; total: number } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  // Leaving stops an upload in flight; choosing the same file again resumes it.
+  // Leaving stops an upload in flight (choosing the same file again resumes it), and stops
+  // following the import (it carries on on the server).
   const uploadRun = useRef<AbortController | null>(null)
   useEffect(() => () => uploadRun.current?.abort(), [])
 
@@ -98,14 +99,15 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     setPreviewRows([])
     setJob(null)
     setUpload(null)
-    uploadRun.current = new AbortController()
+    const run = new AbortController()
+    uploadRun.current = run
     try {
       const created = await importInParts(wsId, graphId, file, {
-        format, reconcileMode, branchId, viewId, signal: uploadRun.current.signal,
+        format, reconcileMode, branchId, viewId, signal: run.signal,
         onProgress: (sent, total) => setUpload({ sent, total }),
       })
       setResultBranch(created.branchId)
-      const done = await pollJob(() => getImport(wsId, graphId, created.jobId), { onTick: setJob })
+      const done = await pollJob(() => getImport(wsId, graphId, created.jobId), { onTick: setJob, signal: run.signal })
       if (done.status === 'failed' || done.status === 'cancelled') {
         setError(done.errorMessage
           || (done.status === 'cancelled' ? 'The import was cancelled.' : 'The import could not be completed.'))
@@ -124,6 +126,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
         }
       }
     } catch (e) {
+      if (run.signal.aborted) return            // the dialog closed
       setError(e instanceof Error ? e.message : 'The import could not be completed.')
       setPhase('failed')
     }
@@ -400,7 +403,8 @@ function RunningStep({ job, upload, fileName }: {
   const queued = queuePosition(job)
   const phaseLabel = !job
     ? (upload ? `Uploading… ${prettyBytes(upload.sent)} of ${prettyBytes(upload.total)}` : 'Uploading…')
-    : queued ? 'Waiting to start…' : job.status === 'pending' ? 'Starting…' : 'Reconciling changes…'
+    : queued ? 'Waiting to start…' : job.status === 'pending' ? 'Starting…' : jobProgressText(job) ?? 'Reconciling changes…'
+  const note = resumeNote(job)
   const pct = !job && upload && upload.total > 0 ? Math.round((100 * upload.sent) / upload.total) : null
   return (
     <div className="px-8 py-16 flex flex-col items-center gap-5">
@@ -413,6 +417,7 @@ function RunningStep({ job, upload, fileName }: {
       <div className="text-center">
         <p className="text-sm font-semibold text-ink">{phaseLabel}</p>
         {queued && <p className="text-[11px] text-ink-muted mt-1">{queued}</p>}
+        {note && <p className="text-[11px] text-ink-muted mt-1">{note}</p>}
         <p className="text-[11px] text-ink-muted mt-1 truncate max-w-[24rem]">{fileName}</p>
       </div>
       <div className="w-full max-w-sm h-1 rounded-full bg-black/5 dark:bg-white/5 overflow-hidden">

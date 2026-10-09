@@ -169,7 +169,8 @@ async def _run() -> None:
         assert [r[0] for r in await _rows(client, "CALL db.labels()")][:len(labels_before)] \
             == labels_before, "label ids must never be renumbered"
         idx = await _rows(client, "CALL db.indexes() YIELD label, properties RETURN label, properties")
-        assert ["column", ["displayName"]] in [[r[0], list(r[1])] for r in idx], idx
+        # The displayName index survives the heal (beside the urn index the projector makes).
+        assert any(r[0] == "column" and "displayName" in list(r[1]) for r in idx), idx
         dom = (await _rows(reader, "MATCH (n {urn: $u}) RETURN n", {"u": D1}))[0][0]
         assert dom.labels == ["domain"], f"a Domain must still decode as a Domain: {dom.labels}"
         assert handoffs == [], handoffs

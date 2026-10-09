@@ -32,7 +32,8 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 
 from . import config
 from .db import VersioningBase, get_engine
@@ -277,6 +278,11 @@ class ProjectionStateORM(VersioningBase):
     )
 
 
+# Every job type the code writes. ``ck_jobs_type`` allows these (∪ whatever a DB already holds).
+JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
+             "package_inspect")
+
+
 class JobORM(VersioningBase):
     """Crash-recoverable worker job (ingest / projection / rebuild).
 
@@ -349,10 +355,12 @@ class JobORM(VersioningBase):
         CheckConstraint(
             # 'bootstrap' = "enable version control" (bootstrap_worker). Deliberately NOT
             # 'ingest': that is the file-import worker's type, and a worker claims by
-            # job_type — sharing one would have the two run each other's jobs. Existing
-            # DBs get it via migration 20260713_1400_jobs_bootstrap. 'publish' = a large draft's
-            # publish on the transfer runner (20260928_1000_jobs_publish).
-            "job_type IN ('ingest','projection','rebuild','export','bootstrap','publish')",
+            # job_type — sharing one would have the two run each other's jobs. 'publish' = a
+            # large draft's publish on the transfer runner; 'purge' = reclaiming a deleted graph
+            # (purge_worker); 'package_inspect' = checking an uploaded view package. Existing DBs
+            # are widened by migration (20261008_1000_jobs_check_widen) and, for a separate
+            # GRAPHVER_DB_URL alembic never reaches, by _ensure_schema_upgrades.
+            "job_type IN (" + ",".join(f"'{t}'" for t in JOB_TYPES) + ")",
             name="ck_jobs_type",
         ),
     )
@@ -382,10 +390,39 @@ class ImportRowORM(VersioningBase):
 
     __table_args__ = _plain(
         PrimaryKeyConstraint("job_id", "row_index", name="pk_import_rows"),
-        Index("ix_import_rows_match", "job_id", "kind", "match_key"),
-        Index("ix_import_rows_status", "job_id", "status"),
+        # A window reads one kind's rows in parse order (``kind`` + ``row_index`` > cursor); the PK
+        # alone made it walk the other kind's rows too. (Migration 20261008_1200_import_rows_idx,
+        # which also drops the (job, kind, match_key) and (job, status) indexes nothing reads.)
+        Index("ix_import_rows_kind_row", "job_id", "kind", "row_index"),
         Index("ix_import_rows_matched", "job_id", "matched_entity_id"),   # a replace's absence check
         CheckConstraint("kind IN ('node','edge')", name="ck_import_rows_kind"),
+    )
+
+
+class BootstrapNodeORM(VersioningBase):
+    """One source node seen by an "enable version control" pre-flight (``bootstrap_worker``).
+
+    The pre-flight reads every node's internal id, label, ``urn`` and ``lastSyncedAt`` BEFORE
+    anything is copied, so duplicate identifiers are found — and decided — up front instead of
+    failing the job after the whole copy. ``copy_rank`` is NULL for a unique urn; for a duplicated
+    one it ranks the copies (latest ``last_synced_at``, then lowest ``falkor_id``): 1 is kept, >1 is
+    collapsed into it. ``TIMESTAMPTZ``, not text, so the ranking is chronological, not lexical.
+    Unique rows are deleted when the job finishes; the duplicate rows stay as its audit list."""
+
+    __tablename__ = "bootstrap_nodes"
+
+    graph_id = Column(Text, nullable=False)
+    falkor_id = Column(BigInteger, nullable=False)        # the source node's ID(n)
+    urn = Column(Text, nullable=False)
+    label = Column(Text, nullable=True)
+    last_synced_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    copy_rank = Column(Integer, nullable=True)            # a urn may have >32,767 copies
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "falkor_id", name="pk_bootstrap_nodes"),
+        Index("ix_bootstrap_nodes_urn", "graph_id", "urn"),
+        Index("ix_bootstrap_nodes_dupes", "graph_id", "urn", "copy_rank",
+              postgresql_where=text("copy_rank IS NOT NULL")),
     )
 
 
@@ -602,9 +639,14 @@ async def create_schema_and_partitions(engine=None) -> None:
     Idempotent.  Used by the dev bootstrap and the Alembic migration body.
     Child partitions are created *after* ``create_all`` so the partitioned
     indexes defined on each parent are auto-attached to them (PG 11+).
+
+    Serialized across processes by a transaction-scoped advisory lock: every worker lane pod
+    runs this on start, and they start together — two ``create_all``s racing on an empty schema
+    both find a table missing and the second CREATE fails.
     """
     eng = engine or get_engine()
     async with eng.begin() as conn:
+        await conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('graphver:schema'))"))
         await conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{_SCHEMA}"'))
         await conn.run_sync(VersioningBase.metadata.create_all)
         n = config.PARTITIONS
@@ -617,3 +659,55 @@ async def create_schema_and_partitions(engine=None) -> None:
                         f"FOR VALUES WITH (MODULUS {n}, REMAINDER {rem})"
                     )
                 )
+        await conn.run_sync(_ensure_schema_upgrades)
+
+
+def _ensure_schema_upgrades(conn) -> None:
+    """Bring an EXISTING graphver schema up to what the code writes — the part of the alembic
+    chain that touches graphver tables, for a store alembic never reaches.
+
+    With ``GRAPHVER_DB_URL`` pointing at a separate database, alembic migrates only the management
+    DB, and ``create_all`` creates missing tables but never alters an existing one's checks or
+    indexes. Without this, such a store keeps the CHECK it was born with and rejects every job type
+    added since. Each step is idempotent and a no-op once applied, so it runs on every start."""
+    widen_job_type_check(conn, JOB_TYPES)
+    # 20261008_1200_import_rows_idx (``bootstrap_nodes`` is a new table: ``create_all`` makes it).
+    if sa_inspect(conn).has_table("import_rows", schema=_SCHEMA):
+        rows = f'"{_SCHEMA}"."import_rows"'
+        conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_import_rows_kind_row ON {rows} "
+                          "(job_id, kind, row_index)"))
+        conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_match"'))
+        conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_status"'))
+
+
+def widen_job_type_check(conn, required) -> None:
+    """Make ``ck_jobs_type`` allow ``required`` ∪ every type already in the table. WIDEN-ONLY.
+
+    ``graphver.jobs`` is shared by several producers, and a CHECK rebuilt from a hard-coded list
+    has wedged alembic on it before: a type some row already holds makes the narrower constraint
+    unaddable. So the domain can only grow, and can never fail on rows already there — the
+    migrations' downgrades widen too and delete nothing. When the constraint already allows every
+    type it is left alone: rebuilding it takes an ACCESS EXCLUSIVE lock and re-validates the table,
+    which every worker start would otherwise do. ``conn`` is a synchronous connection (alembic's
+    bind, or ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("jobs", schema=_SCHEMA):
+        # A database installed at head has no graphver schema until create_schema_and_partitions
+        # creates it, and that builds the constraint from the models.
+        return
+    jobs = f'"{_SCHEMA}"."jobs"'
+
+    def quoted(types):
+        return ["'" + t.replace("'", "''") + "'" for t in sorted(types)]
+
+    current = conn.execute(text(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'ck_jobs_type' AND conrelid = CAST(:jobs AS regclass)"),
+        {"jobs": jobs}).scalar()
+    if current is not None and all(q in current for q in quoted(required)):
+        return                            # the rows there already satisfy it
+    present = {row[0] for row in conn.execute(text(f"SELECT DISTINCT job_type FROM {jobs}"))
+               if row[0]}
+    allowed = ", ".join(quoted(set(required) | present))
+    conn.execute(text(f"ALTER TABLE {jobs} DROP CONSTRAINT IF EXISTS ck_jobs_type"))
+    conn.execute(text(
+        f"ALTER TABLE {jobs} ADD CONSTRAINT ck_jobs_type CHECK (job_type IN ({allowed}))"))

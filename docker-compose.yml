@@ -21,6 +21,9 @@
 # With demo data seeding:
 #   docker compose --profile seed up --build
 #
+# Optional S3-compatible object store (MinIO, off by default):
+#   docker compose --profile s3 up -d minio minio-init
+#
 # Tear down (keep data):
 #   docker compose down
 #
@@ -382,14 +385,11 @@ services:
       # CPU-bound and, on the web event loop, wedged the loop
       # (event_loop_lag CRITICAL) and froze EVERY request (auth, /docs,
       # health) while FalkorDB loaded/projected. Keep 0 here — the
-      # versioning-worker service owns projection. Only set 1 for a
-      # single-process dev run with no worker container.
+      # versioning-worker service owns projection, and versioning-jobs runs
+      # the import, export, publish and bootstrap jobs this service only
+      # queues. 1 takes effect only with SYNODIC_ROLE=dev (a single-process
+      # run with no worker containers); on this web role it is ignored.
       GRAPHVER_PROJECTION_INPROCESS: "${GRAPHVER_PROJECTION_INPROCESS:-0}"
-      # Import and export jobs are only queued here: the versioning-worker
-      # service claims them from the jobs table and runs them, so a large
-      # import or export never shares this container's CPU with requests.
-      # Only set 1 for a single-process dev run with no worker container.
-      GRAPHVER_TRANSFER_INPROCESS: "${GRAPHVER_TRANSFER_INPROCESS:-0}"
 
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -485,12 +485,15 @@ services:
   # provider outage here cannot affect the web tier. Does NOT gate on
   # FalkorDB — connects lazily and retries, so it starts even when the graph
   # is down/loading. Scale: docker compose up --scale versioning-worker=2
-  versioning-worker:
+  # This is the projection lane (GRAPHVER_WORKER_LANES); versioning-jobs
+  # below runs the job lanes from the same definition.
+  versioning-worker: &versioning-worker
     build:
       context: .
       dockerfile: backend/Dockerfile.aggregation
     command: ["python", "-m", "backend.app.services.versioning"]
-    environment:
+    environment: &versioning-worker-env
+      GRAPHVER_WORKER_LANES: projection
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
       CACHE_REDIS_URL: redis://redis:6379/1
@@ -505,14 +508,15 @@ services:
       FALKORDB_SERVER_TIMEOUT_MAX_MS: "${FALKORDB_SERVER_TIMEOUT_MAX_MS:-180000}"
       SYNODIC_ROLE: worker
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # The bootstrap lane reads provider credentials, which viz-service encrypts with this key.
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
     # Headless projector: no HTTP health server yet, so disable the inherited
     # Dockerfile healthcheck (which probes the aggregation worker's port 8090)
     # rather than flap to "unhealthy". restart: unless-stopped covers crashes;
     # a dedicated liveness endpoint is a follow-up.
     healthcheck:
       disable: true
-    # On stop it gives running import/export jobs 40 s to finish, then
-    # records the rest as interrupted: allow for that, as the Deployment does.
+    # The same grace as the Deployments (terminationGracePeriodSeconds: 60).
     stop_grace_period: 60s
     depends_on:
       upgrade:
@@ -522,6 +526,23 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+
+  # ── Versioning Job Worker (Data Plane) ────────────────────────────
+  # The versioning worker's job lanes: import / export / publish (transfer)
+  # and "Enable version control" / purge (bootstrap). The API only queues
+  # these jobs in graphver.jobs, so without this service none of them runs.
+  # Same image, command and environment as versioning-worker; only the lanes
+  # differ. Scale: docker compose up --scale versioning-jobs=2 (claims skip
+  # rows another worker holds, so replicas share the queue).
+  versioning-jobs:
+    <<: *versioning-worker
+    environment:
+      <<: *versioning-worker-env
+      GRAPHVER_WORKER_LANES: transfer,bootstrap
+    # On stop it gives running jobs 40 s (GRAPHVER_DRAIN_SECS) to hand
+    # themselves back at a window boundary, then cancels and releases the
+    # rest: allow for that, as the Deployments do.
+    stop_grace_period: 60s
 
   # ── Stats Service (Background Poller) ─────────────────────────────
   # Headless refresh loop that keeps per-data-source graph stats
@@ -727,7 +748,57 @@ services:
         condition: service_started
     restart: "no"
 
+  # ── MinIO (optional S3-compatible object store) ───────────────────
+  # Only with the profile:
+  #   docker compose --profile s3 up -d minio minio-init
+  # For OBJECT_STORE_BACKEND=s3 in a local run, and for the opt-in S3
+  # tests (OBJECT_STORE_S3_TEST_ENDPOINT=http://localhost:9000). No
+  # default service uses it, and their images don't carry boto3
+  # (backend/requirements-s3.txt); see docs/versioning/08-import-export.md
+  # §9. MinIO no longer publishes free images: pgsty/minio and pgsty/mc
+  # are community-maintained rebuilds of the same server and client, NOT
+  # MinIO's own, so both are pinned by digest (a tag can be pushed again):
+  # bump tag and digest together after checking the new build.
+  minio:
+    profiles: ["s3"]
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    command: ["server", "/data"]
+    environment:
+      # No default login: set both in .env (the password 8+ characters).
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+    ports:
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Creates the bucket once MinIO is up, then exits; running it again is
+  # harmless (--ignore-existing). The login reaches mc as plain environment,
+  # never inside a URL.
+  minio-init:
+    profiles: ["s3"]
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z@sha256:cfc83108c3abb371f8fb84d99c1fdc88f8c237e022409b0081fb7c0a3be634dd
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_BUCKET: ${MINIO_BUCKET:-synodic}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        && mc mb --ignore-existing "local/$$MINIO_BUCKET"
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   falkordb_data:
   redis_data:
   postgres_data:
+  minio_data:

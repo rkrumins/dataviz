@@ -13,29 +13,45 @@ Phases (all params on the ``JobORM`` row):
   build    apply each window's ops via ``apply_ops(branch_id=draft)`` before the next is resolved.
 
 Invalid rows are quarantined (partial acceptance), not fatal; the tally lands on ``job.summary``.
+
+The job runs on its lease (:mod:`..job_lease`) and RESUMES: every unit of work commits together with
+the job's cursor (``last_cursor``) as one fenced transaction, so a worker that dies or is stopped
+loses at most the unit it was in, and the next one carries on from the cursor —
+
+  ``parse:<n>``   n rows staged; a resumed parse streams the file again and stages from row n;
+  ``node:<row>``  the node windows applied up to staged row ``row`` (``node:-1``: parsed, none yet);
+  ``edge:<row>``  every node window, and the edge windows up to ``row``;
+  ``replace``     every window; a replace's deletes under way (run again whole: a deleted entity is
+                  no longer there to delete).
+
+A superseded worker (its job taken over, or no longer running) finds out at its next checkpoint,
+whose transaction — the window's work with it — then rolls back.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import BigInteger, Text, bindparam, delete, exists, insert, select, text, update
+from sqlalchemy import BigInteger, Text, bindparam, delete, exists, insert, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from backend.app.services.view_placement import NodeFacts, suggest_placement
 
 from .. import config, db
 from ..ids import prefixed_id
-from ..models import BranchORM, ImportRowORM, JobORM
+from ..job_lease import QUEUED, Lease, Superseded
+from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM
+from ..service import OntologyViolation
 from .formats import get_adapter
 from .resolve import resolve_rows
-from .rowmodel import normalize
+from .rowmodel import PROP_DELETE, normalize
 from .snapshot import open_snapshot
 from .stream import view_entities
-from .uploads import WHOLE_FILE_FORMATS, open_source, source_size, too_large
+from .uploads import WHOLE_FILE_FORMATS, is_archive_source, open_source, source_size, too_large
 
 logger = logging.getLogger(__name__)
 
@@ -49,30 +65,49 @@ _RESOLVE_ROWS = text(
     "WHERE r.job_id = :job_id AND r.row_index = v.row_index",
 ).bindparams(bindparam("idx", type_=ARRAY(BigInteger)),
              *(bindparam(name, type_=ARRAY(Text)) for name in ("eids", "ops", "statuses", "reasons")))
-# How often a running import or export touches its job's ``updated_at``. ``get_job`` reports a job
-# silent for JOB_STALE_AFTER_SECS as failed, and a long parse or apply window says nothing on its own.
-_HEARTBEAT_SECS = 15
-
-
-async def heartbeat(job_id: str, progress: Optional[Callable[[], Dict[str, Any]]] = None,
-                    every: Optional[float] = None) -> None:
-    """Say "still running" on a timer rather than per batch, until cancelled: resolving or applying
-    one window, or writing a long export, can take minutes without a batch boundary. ``progress``,
-    when given, says how far the job has got: its summary until the job's own replaces it."""
-    while True:
-        await asyncio.sleep(every or _HEARTBEAT_SECS)
-        values: Dict[str, Any] = {"updated_at": _now()}
-        if progress is not None:
-            values["summary"] = progress()
-        try:
-            async with db.graphver_session() as s:
-                await s.execute(update(JobORM).where(JobORM.id == job_id).values(**values))
-        except Exception:  # noqa: BLE001 — the next beat tries again
-            logger.debug("job %s: heartbeat skipped", job_id, exc_info=True)
+# What an import's summary tallies, per row by its resolution (``deleted`` also counts what a
+# replace deleted because no row named it).
+_TALLIES = ("new", "updated", "unchanged", "deleted", "invalid")
+# Times a window's other rows are applied again after the write gate refused some of them
+# (``ImportWorker._apply_window``).
+_QUARANTINE_ROUNDS = 4
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+async def lease_job(job_id: str) -> Lease:
+    """Take ``job_id`` for a caller that runs it itself rather than on the transfer lane (a tool, a
+    test): as a claim does — the next epoch, running — so it runs fenced like any other. Raises
+    ``ValueError`` for an unknown job."""
+    async with db.graphver_session() as s:
+        row = await s.get(JobORM, job_id, with_for_update=True)
+        if row is None:
+            raise ValueError(f"unknown job {job_id}")
+        now = _now()
+        row.retry_count = (row.retry_count or 0) + 1
+        row.status, row.updated_at, row.error_message = "running", now, None
+        row.started_at = row.started_at or now
+        if row.current_phase == QUEUED:
+            row.current_phase = None
+        return Lease(job_id=row.id, job_type=row.job_type, epoch=row.retry_count,
+                     workspace_id=row.workspace_id, graph_id=row.graph_id)
+
+
+class _Position(NamedTuple):
+    """Where an import job has got, as its row says."""
+    cursor: Optional[str]
+    summary: Dict[str, Any]
+    processed: int
+    total: int
+
+
+def _window_after(cursor: Optional[str]) -> Tuple[Optional[str], int]:
+    """The kind and row a cursor's next window starts after: ``node:<row>``/``edge:<row>`` →
+    ``(kind, row)``; ``replace`` (or anything else) → ``(None, -1)``, no window left."""
+    kind, _, row = (cursor or "").partition(":")
+    return (kind, int(row)) if kind in ("node", "edge") else (None, -1)
 
 
 def _sniff_format(declared: str, head: bytes) -> str | None:
@@ -233,48 +268,64 @@ class ImportWorker:
         self._store = store
         self._scope = scope          # view scope for scoped replace ({assigned_urns, ...}) | None
         self._ontology = ontology    # {node_types, edge_types} for the per-row gate | None
-        # Raw batch facts for the post-commit layout write-back (view-scoped imports): the created
-        # NODE entities ({eid, urn, layer_signal}) and the batch's create-edge triples. Collected in
-        # _resolve_and_build; the ImportExportService hands them to the injected layout writer.
-        # ``facts=False`` (no view to write them to) collects none: one per created entity.
+        # Raw facts for the post-commit layout write-back (view-scoped imports): the created NODE
+        # entities ({eid, urn, layer_signal}) and the create-edge triples. Derived once the import
+        # is built (_derive_facts); the ImportExportService hands them to the injected layout
+        # writer. ``facts=False`` (no view to write them to) derives none.
         self._facts = facts
         self.created_node_facts: List[Dict[str, Any]] = []
         self.batch_edge_facts: List[tuple] = []
+        # The job's lease (``run`` takes it), and its cursor as this worker last read it or staged
+        # rows past it (what a parse batch's checkpoint expects to find).
+        self._lease: Optional[Lease] = None
+        self._cursor: Optional[str] = None
+        # Rows of the file a previous run of the job already staged: a resumed parse skips them.
+        self._skip = 0
 
-    async def run(self, job_id: str) -> Dict[str, int]:
-        job = await self._load_running(job_id)
-        beat = asyncio.create_task(heartbeat(job_id))
-        try:
-            graph_id, branch_id = job["graph_id"], job["branch_id"]
-            actor = await self._branch_owner(graph_id, branch_id)
+    async def run(self, job_id: str, *, lease: Optional[Lease] = None) -> Dict[str, int]:
+        """Run the import job to the end on ``lease`` — the transfer lane's; called without one,
+        the job is taken here (:func:`lease_job`) — resuming from its cursor. Returns its tallies.
+        Raises :class:`Superseded` once the job is no longer this worker's."""
+        self._lease = lease or await lease_job(job_id)
+        job = await self._job(job_id)
+        graph_id, branch_id = job["graph_id"], job["branch_id"]
+        actor = await self._branch_owner(graph_id, branch_id)
 
-            await self._parse(job_id, job["source_uri"], job["import_format"])
-            summary = await self._resolve_and_build(
-                job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
-        finally:
-            beat.cancel()
-
-        async with db.graphver_session() as s:
-            row = await s.get(JobORM, job_id)
-            row.status = "completed"
-            row.completed_at = _now()
-            row.updated_at = _now()
-            row.summary = summary
-            row.processed = sum(summary.values())
+        await self._lease.retry_transient(
+            lambda: self._stage(job_id, job["source_uri"], job["import_format"]))
+        summary = await self._resolve_and_build(
+            job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
+        if self._facts:
+            await self._derive_facts(job_id, graph_id, branch_id)
+        if not await self._lease.finish("completed", summary=summary, progress=100):
+            raise Superseded(f"import job {job_id} (epoch {self._lease.epoch}) was taken over "
+                             "before it could finish")
         return summary
 
     # ------------------------------------------------------------------ #
-    async def _load_running(self, job_id: str) -> Dict[str, Any]:
+    async def _job(self, job_id: str) -> Dict[str, Any]:
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             if row is None:
                 raise ValueError(f"unknown import job {job_id}")
-            row.status = "running"
-            row.started_at = _now()
-            row.updated_at = _now()
             return {"graph_id": row.graph_id, "branch_id": row.branch_id,
                     "source_uri": row.source_uri, "import_format": row.import_format,
                     "reconcile_mode": row.reconcile_mode}
+
+    async def _position(self, job_id: str) -> _Position:
+        """Where the job has got, read afresh by every unit of work: a unit retried after a fault
+        whose commit landed after all then carries on past it instead of doing it again. Raises
+        :class:`Superseded` when the row is no longer this worker's."""
+        async with db.graphver_session() as s:
+            row = (await s.execute(select(
+                JobORM.last_cursor, JobORM.summary, JobORM.processed, JobORM.total,
+                JobORM.retry_count, JobORM.status).where(JobORM.id == job_id))).one()
+        if (row.retry_count, row.status) != (self._lease.epoch, "running"):
+            raise Superseded(f"import job {job_id} (epoch {self._lease.epoch}) is no longer this "
+                             "worker's")
+        self._cursor = row.last_cursor
+        return _Position(row.last_cursor, dict(row.summary) if isinstance(row.summary, dict) else {},
+                         row.processed or 0, row.total or 0)
 
     async def _branch_owner(self, graph_id: str, branch_id: str) -> str:
         async with db.graphver_session() as s:
@@ -286,20 +337,37 @@ class ImportWorker:
         workbook (.xlsx/.xls) instead of CSV is a common mistake that would otherwise parse into
         meaningless rows. Raised in the normal flow (not inside a generator) so the message
         surfaces on the job. Returns the first chunk for the format sniff."""
-        async for chunk in open_source(self._store, source_uri):
-            if chunk[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
-                raise ValueError(
-                    "This looks like an Excel workbook (.xlsx). Please open it and 'Save As' "
-                    "CSV (UTF-8), then import that file — spreadsheet workbooks aren't supported yet.")
-            if chunk[:4] == b"\xd0\xcf\x11\xe0":
-                raise ValueError(
-                    "This looks like a legacy Excel file (.xls). Please save it as CSV and import that.")
-            return chunk  # only the first chunk is needed to sniff the file type
+        async with contextlib.aclosing(open_source(self._store, source_uri)) as chunks:
+            async for chunk in chunks:
+                if chunk[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
+                    raise ValueError(
+                        "This looks like an Excel workbook (.xlsx). Please open it and 'Save As' "
+                        "CSV (UTF-8), then import that file — spreadsheet workbooks aren't supported yet.")
+                if chunk[:4] == b"\xd0\xcf\x11\xe0":
+                    raise ValueError(
+                        "This looks like a legacy Excel file (.xls). Please save it as CSV and import that.")
+                return chunk  # only the first chunk is needed to sniff the file type
         return b""
 
+    async def _stage(self, job_id: str, source_uri: str, fmt: str) -> None:
+        """Parse the file into ``import_rows`` from where an earlier run of the job got to, then
+        point the job at its first window (``node:-1``), with how many rows it has (``total``).
+        Nothing to do once the job is past parsing."""
+        cursor = (await self._position(job_id)).cursor
+        if cursor is not None and not cursor.startswith("parse:"):
+            return
+        self._skip = int(cursor.partition(":")[2]) if cursor else 0
+        staged = await self._parse(job_id, source_uri, fmt)
+        async with db.graphver_session() as s:
+            await self._lease.checkpoint(s, expect_cursor=self._cursor, last_cursor="node:-1",
+                                         total=staged, current_phase="nodes")
+        self._cursor = "node:-1"
+
     async def _parse(self, job_id: str, source_uri: str, fmt: str) -> int:
-        if (fmt or "").lower() != "xlsx":
-            head = await self._reject_binary(source_uri)   # xlsx IS a zip (PK); its adapter reads it natively
+        # xlsx IS a zip (PK); its adapter reads it natively. A view package's data is NDJSON read out
+        # of its archive (uploads.open_source): nothing to sniff, and no second spool to sniff it.
+        if (fmt or "").lower() != "xlsx" and not is_archive_source(source_uri):
+            head = await self._reject_binary(source_uri)
             sniffed = _sniff_format(fmt, head)
             if sniffed:
                 logger.info("import job %s: declared format %r overridden to %r by the content sniff",
@@ -310,25 +378,35 @@ class ImportWorker:
             if reason:
                 raise ValueError(reason)
         adapter = get_adapter(fmt)
+        native = is_archive_source(source_uri)            # a package: its lines may be format 2
         batch: List[Dict[str, Any]] = []
         idx = 0
-        async for raw in adapter.parse(open_source(self._store, source_uri)):
-            kind = raw.get("kind")
-            if kind not in ("node", "edge"):
-                continue  # tallied as skipped; a malformed record never aborts the parse
-            batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": normalize(raw, kind)})
-            idx += 1
-            if len(batch) >= _PARSE_BATCH:
-                await self._flush(batch)
-                batch = []
+        # Closed however the parse ends, so a package's spool goes with it.
+        async with contextlib.aclosing(open_source(self._store, source_uri)) as chunks:
+            async for page in _record_pages(adapter, chunks):
+                # Normalizing is per-row Python work: a page at a time, off the event loop.
+                for kind, row in await asyncio.to_thread(_normalize_page, page, native):
+                    if idx >= self._skip:              # below it: staged by an earlier run of the job
+                        batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": row})
+                    idx += 1
+                if len(batch) >= _PARSE_BATCH:
+                    await self._flush(batch)
+                    batch = []
         if batch:
             await self._flush(batch)
         return idx
 
     async def _flush(self, batch: List[Dict[str, Any]]) -> None:
-        """Stage a batch of parsed rows: batched multi-row INSERTs, no ORM object per row."""
+        """Stage a batch of parsed rows — batched multi-row INSERTs, no ORM object per row — and
+        move the job's cursor past them in the SAME transaction, fenced: each row is staged once,
+        by whichever run of the job got to it, and a superseded worker's batch rolls back."""
+        self._lease.check()
+        cursor = f"parse:{batch[-1]['row_index'] + 1}"
         async with db.graphver_session() as s:
             await s.execute(insert(ImportRowORM.__table__), batch)
+            await self._lease.checkpoint(s, expect_cursor=self._cursor, last_cursor=cursor,
+                                         total=batch[-1]["row_index"] + 1, current_phase="parse")
+        self._cursor = cursor
 
     async def _resolve_and_build(self, job_id, graph_id, branch_id, actor,
                                  reconcile_mode: str = "upsert") -> Dict[str, int]:
@@ -336,29 +414,80 @@ class ImportWorker:
         every node window first, then every edge window, so an edge finds a node any row of the file
         creates. A window looks up only the entities its own rows name (by id, urn, qualifiedName,
         endpoints) in the draft's composed state, where the windows before it are already applied,
-        so memory stays flat whatever the size of the file or of the graph."""
+        so memory stays flat whatever the size of the file or of the graph. Each window is retried
+        through a transient fault (``retry_transient``) from the cursor; returns the tallies."""
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
-        summary: Dict[str, int] = {"new": 0, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0}
-        for kind in ("node", "edge"):
-            after = -1
-            while True:
-                rows = await self._window(job_id, kind, after)
-                if not rows:
-                    break
-                after = rows[-1]["_row_index"]
-                lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
-                ops, resolutions = resolve_rows(rows, lookups, mint_id=lambda: prefixed_id("ent"),
-                                                ontology=self._ontology)
-                self._collect_facts(ops)
-                await self._persist_resolutions(job_id, resolutions)
-                if ops:
-                    await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
-                                              branch_id=branch_id, message="import")
-                for res in resolutions:
-                    summary[res["status"]] = summary.get(res["status"], 0) + 1
-        if reconcile_mode == "replace":        # delete-on-absence (not file rows, so counted here)
-            summary["deleted"] += await self._delete_absent(job_id, snap, graph_id, branch_id, actor)
-        return summary
+        more = True
+        while more:
+            more = await self._lease.retry_transient(
+                lambda: self._next_window(job_id, snap, graph_id, branch_id, actor))
+        if reconcile_mode == "replace":        # delete-on-absence (not file rows; counted as it goes)
+            await self._lease.retry_transient(
+                lambda: self._delete_absent(job_id, snap, graph_id, branch_id, actor))
+        summary = (await self._position(job_id)).summary
+        return {k: int(summary.get(k) or 0) for k in _TALLIES}
+
+    async def _next_window(self, job_id, snap, graph_id, branch_id, actor) -> bool:
+        """Resolve and build the window after the job's cursor; False once none is left.
+
+        The window's ops, its rows' resolutions and the job's checkpoint (cursor, progress, running
+        tallies) commit as ONE transaction (``apply_ops(on_commit=...)``): a window lands whole or
+        not at all, so a resumed import neither repeats nor skips one, and a superseded worker's
+        window rolls back at its checkpoint. A window with no ops commits the rest on its own."""
+        pos = await self._position(job_id)
+        kind, after = _window_after(pos.cursor)
+        rows = await self._window(job_id, kind, after) if kind else []
+        if not rows and kind == "node":             # the node windows are done: on to the edges
+            await _analyze_graph(graph_id)
+            kind, rows = "edge", await self._window(job_id, "edge", -1)
+        if not rows:
+            return False
+        lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
+        ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
+            resolve_rows, rows, lookups, mint_id=lambda: prefixed_id("ent"),
+            ontology=self._ontology)
+        processed = pos.processed + len(rows)
+
+        async def on_commit(s) -> None:
+            # Tallied at the commit, so a row quarantined on the way counts as what it ended as.
+            summary = {**dict.fromkeys(_TALLIES, 0), **pos.summary}
+            for res in resolutions:
+                summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
+            await self._persist_resolutions(s, job_id, resolutions)
+            await self._lease.checkpoint(
+                s, expect_cursor=pos.cursor, last_cursor=f"{kind}:{rows[-1]['_row_index']}",
+                processed=processed, summary=summary, current_phase=f"{kind}s",
+                progress=min(99, processed * 100 // pos.total) if pos.total else 0)
+
+        await self._apply_window(graph_id, branch_id, actor, ops, resolutions, on_commit)
+        return True
+
+    async def _apply_window(self, graph_id, branch_id, actor, ops, resolutions, on_commit) -> None:
+        """Apply a window's ``ops`` with its ``on_commit`` (which commits alone when there are none).
+
+        A row the write gate refuses (:class:`OntologyViolation` — a type a strict ontology does
+        not declare, an edge a case variant duplicates) is quarantined like any other bad row:
+        its resolution turns ``invalid`` with the gate's reasons (recorded by ``on_commit`` with
+        the rest of the window) and the window's other ops are applied again. The gate stops at
+        its first failing check, so this takes up to ``_QUARANTINE_ROUNDS`` rounds; past them, or
+        when a violation names an entity no op of the window writes, the window fails as before
+        (resumable from its cursor)."""
+        for attempt in range(_QUARANTINE_ROUNDS + 1):
+            if not ops:
+                async with db.graphver_session() as s:
+                    await on_commit(s)
+                return
+            try:
+                await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
+                                          branch_id=branch_id, message="import", on_commit=on_commit)
+                return
+            except OntologyViolation as exc:
+                rest = _quarantine(ops, resolutions, exc.violations) if attempt < _QUARANTINE_ROUNDS else None
+                if rest is None:
+                    raise
+                logger.info("import window: %d op(s) quarantined by the write gate, the other %d "
+                            "applied again", len(ops) - len(rest), len(rest))
+                ops = rest
 
     async def _window(self, job_id: str, kind: str, after: int) -> List[Dict[str, Any]]:
         """The next ``IMPORT_COMMIT_WINDOW`` staged rows of ``kind`` after ``after``, in file order."""
@@ -372,61 +501,76 @@ class ImportWorker:
 
     async def _node_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs to match these node rows: the live nodes they name by
-        entity_id, urn or qualifiedName, and each one's current payload."""
+        entity_id, urn or — a row without a urn — qualifiedName, and each one's current payload."""
         by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
         urn_to_eid = await snap.nodes_by_urn(r.get("urn") for r in rows)
-        qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows)
-        named = set(by_id) | set(urn_to_eid.values()) | set(qname_to_eid.values())
+        qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows if not r.get("urn"))
+        named = set(by_id) | set(urn_to_eid.values()) | {e for e in qname_to_eid.values() if e}
         return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid, "node_eids": named,
                 "current": await _payloads(snap, "node", named)}
 
     async def _edge_lookups(self, snap, rows) -> Dict[str, Any]:
-        """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name,
-        the live edges between those nodes, and each such edge's current payload."""
+        """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name (by
+        entity_id, urn, or — an end without a urn — qualifiedName), the live edges between those
+        nodes, and each such edge's current payload."""
         ends = {}
         for end in ("source", "target"):
             by_id = await snap.lookup_live("node", {r[f"{end}_entity_id"] for r in rows
                                                     if r.get(f"{end}_entity_id")})
-            by_qname = await snap.nodes_by_qname(r.get(f"{end}QualifiedName") for r in rows)
+            by_qname = await snap.nodes_by_qname(r.get(f"{end}QualifiedName") for r in rows
+                                                 if not r.get(f"{end}Urn"))
             by_urn = await snap.nodes_by_urn(r.get(f"{end}Urn") for r in rows)
             ends[end] = (by_id, by_qname, by_urn)
         (src_ids, src_qnames, src_urns), (tgt_ids, tgt_qnames, tgt_urns) = ends["source"], ends["target"]
         edge_to_eid = await snap.edges_between(
-            set(src_ids) | set(src_qnames.values()) | set(src_urns.values()),
-            set(tgt_ids) | set(tgt_qnames.values()) | set(tgt_urns.values()))
+            set(src_ids) | {e for e in src_qnames.values() if e} | set(src_urns.values()),
+            set(tgt_ids) | {e for e in tgt_qnames.values() if e} | set(tgt_urns.values()))
         return {"urn_to_eid": {**src_urns, **tgt_urns}, "qname_to_eid": {**src_qnames, **tgt_qnames},
                 "node_eids": set(src_ids) | set(tgt_ids), "edge_to_eid": edge_to_eid,
                 "current": await _payloads(snap, "edge", edge_to_eid.values())}
 
-    def _collect_facts(self, ops) -> None:
-        """Raw facts for the post-commit view layout write-back (created top-level entities). The
-        eids are the stable minted ids resolve_rows assigned; the layout writer maps each to its
-        projection key (urn or gv:<eid>) and reasons about parentage from the created edges."""
-        if not self._facts:
-            return
-        for op in ops:
-            if op.get("op") != "create":
-                continue
-            payload = op.get("payload") or {}
-            if op.get("entity_kind") == "node":
-                # entity_type .. properties: the facts the placement contract reads.
-                self.created_node_facts.append({"eid": op["entity_id"], "urn": payload.get("urn"),
-                                                "layer_signal": payload.get("layerAssignment"),
-                                                "entity_type": payload.get("entityType"),
-                                                "display_name": payload.get("displayName"),
-                                                "tags": payload.get("tags"),
-                                                "properties": payload.get("properties")})
-            elif op.get("entity_kind") == "edge":
-                self.batch_edge_facts.append((payload.get("sourceEntityId"),
-                                              payload.get("targetEntityId"), payload.get("edgeType")))
+    async def _derive_facts(self, job_id: str, graph_id: str, branch_id: str) -> None:
+        """The raw facts for the post-commit view layout write-back (created top-level entities),
+        from what the whole import did rather than from this run's memory, which lacks the windows
+        an earlier run of a resumed job applied: the node rows it created (their minted eids, urns,
+        layer signals and the type, name, tags and properties the placement contract reads, in file
+        order), and the endpoints of the edges it created as the draft holds them. The layout writer
+        maps each eid to its projection key (urn or gv:<eid>) and reasons about parentage from the
+        created edges."""
+        created = (ImportRowORM.job_id == job_id, ImportRowORM.resolved_op == "create")
+        async with db.graphver_session() as s:
+            nodes = (await s.execute(
+                select(ImportRowORM.matched_entity_id, ImportRowORM.raw["urn"].astext,
+                       ImportRowORM.raw["layerAssignment"], ImportRowORM.raw["entityType"].astext,
+                       ImportRowORM.raw["displayName"].astext, ImportRowORM.raw["tags"],
+                       ImportRowORM.raw["properties"])
+                .where(*created, ImportRowORM.kind == "node").order_by(ImportRowORM.row_index))).all()
+            edge_ids = (await s.execute(select(ImportRowORM.matched_entity_id)
+                                        .where(*created, ImportRowORM.kind == "edge"))).scalars().all()
+            edges = []
+            for chunk in _chunks(edge_ids, _PERSIST_BATCH):
+                edges += (await s.execute(
+                    select(EdgeVersionORM.source_entity_id, EdgeVersionORM.target_entity_id,
+                           EdgeVersionORM.edge_type)
+                    .where(EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id == branch_id,
+                           EdgeVersionORM.entity_id.in_(chunk), EdgeVersionORM.op == "create"))).all()
+        # A create drops a PROP_DELETE marker (resolve._no_deletes): no property the entity has.
+        self.created_node_facts = [
+            {"eid": eid, "urn": urn, "layer_signal": signal, "entity_type": etype,
+             "display_name": name, "tags": tags,
+             "properties": {k: v for k, v in (props or {}).items() if v != PROP_DELETE}}
+            for eid, urn, signal, etype, name, tags, props in nodes]
+        self.batch_edge_facts = [tuple(edge) for edge in edges]
 
     async def _delete_absent(self, job_id, snap, graph_id, branch_id, actor) -> int:
         """Replace mode: the file is the authoritative snapshot for its scope, so every entity in
         scope that no row matched is deleted (reviewed on the draft before publish; ``apply_ops``
-        cascades containment and incident edges). Edges first, then nodes, a page at a time. A
+        cascades containment and incident edges). Edges first, then nodes, a page at a time, each
+        page's deletes committed with the job's checkpoint (cursor ``replace``) and their count. A
         view-scoped replace can delete only the view's own entities (its placements and their
         containment descendants, and the edges between them), never the rest of the data source.
-        Returns how many were deleted."""
+        Run again after an interruption, it finds only what is left to delete. Returns how many
+        this run deleted."""
         deleted = 0
         keep = (await view_entities(snap, self._scope))["keep"] if self._scope else None
         for kind in ("edge", "node"):
@@ -436,9 +580,21 @@ class ImportWorker:
                     await self._svc.apply_ops(
                         graph_id=graph_id, actor=actor, branch_id=branch_id, message="import",
                         ops=[{"op": "delete", "entity_kind": kind, "entity_id": eid, "payload": None}
-                             for eid in absent])
+                             for eid in absent],
+                        on_commit=self._count_deleted(job_id, len(absent)))
                     deleted += len(absent)
         return deleted
+
+    def _count_deleted(self, job_id: str, n: int):
+        """The end of a replace page's transaction: the job's checkpoint, adding the page's ``n``
+        deletes to the tally the row holds."""
+        async def on_commit(s) -> None:
+            summary = await s.scalar(select(JobORM.summary).where(JobORM.id == job_id))
+            summary = dict(summary) if isinstance(summary, dict) else {}
+            summary["deleted"] = int(summary.get("deleted") or 0) + n
+            await self._lease.checkpoint(s, last_cursor="replace", current_phase="replace",
+                                         summary=summary)
+        return on_commit
 
     async def _unmatched(self, job_id: str, eids: List[str]) -> List[str]:
         """Those of ``eids`` no row of this import matched."""
@@ -449,16 +605,36 @@ class ImportWorker:
             )).scalars())
         return [eid for eid in eids if eid not in matched]
 
-    async def _persist_resolutions(self, job_id: str, resolutions) -> None:
-        """Record each row's resolution: one UPDATE per few thousand rows, each column as one array
-        (unnest), rather than a round trip per row (which took over a third of an import)."""
+    @staticmethod
+    async def _persist_resolutions(s, job_id: str, resolutions) -> None:
+        """Record each row's resolution, in the window's transaction: one UPDATE per few thousand
+        rows, each column as one array (unnest), rather than a round trip per row (which took over
+        a third of an import)."""
+        for chunk in _chunks(resolutions, _PERSIST_BATCH):
+            await s.execute(_RESOLVE_ROWS, {
+                "job_id": job_id, "idx": [r["_row_index"] for r in chunk],
+                "eids": [r["matched_entity_id"] for r in chunk],
+                "ops": [r["resolved_op"] for r in chunk], "statuses": [r["status"] for r in chunk],
+                "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk]})
+
+
+async def _analyze_graph(graph_id: str) -> None:
+    """Refresh the planner's statistics of the graph's partitions once the node windows are in.
+
+    Until autovacuum gets to them, they describe the partitions without what those windows wrote
+    (100k draft heads and versions into a new graph): the first edge window's lookups of its ends'
+    draft heads, planned for a handful of rows, took 88 s of a 100k import where later windows
+    take 5 s. Best effort (it needs the tables' owner): without it the plans only come later."""
+    try:
         async with db.graphver_session() as s:
-            for chunk in _chunks(resolutions, _PERSIST_BATCH):
-                await s.execute(_RESOLVE_ROWS, {
-                    "job_id": job_id, "idx": [r["_row_index"] for r in chunk],
-                    "eids": [r["matched_entity_id"] for r in chunk],
-                    "ops": [r["resolved_op"] for r in chunk], "statuses": [r["status"] for r in chunk],
-                    "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk]})
+            for table in ("entity_heads", "node_versions", "edge_versions"):
+                part = await s.scalar(text(
+                    f'SELECT tableoid::regclass::text FROM "{config.graphver_schema()}"."{table}" '
+                    "WHERE graph_id = :g LIMIT 1"), {"g": graph_id})
+                if part:
+                    await s.execute(text(f"ANALYZE {part}"))
+    except Exception as exc:                                     # noqa: BLE001 — best effort
+        logger.warning("import into %s: could not refresh statistics: %s", graph_id, exc)
 
 
 async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> int:
@@ -482,6 +658,53 @@ async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> i
             if gone < batch:
                 break
     return removed
+
+
+async def _record_pages(adapter, chunks):
+    """The adapter's records a page at a time — decoded off the event loop where the adapter can
+    (``parse_pages``), else gathered from its record stream."""
+    if hasattr(adapter, "parse_pages"):
+        async for page in adapter.parse_pages(chunks, _PARSE_BATCH):
+            yield page
+        return
+    page: List[Dict[str, Any]] = []
+    async for raw in adapter.parse(chunks):
+        page.append(raw)
+        if len(page) >= _PARSE_BATCH:
+            yield page
+            page = []
+    if page:
+        yield page
+
+
+def _quarantine(ops: List[dict], resolutions: List[dict], violations) -> Optional[List[dict]]:
+    """``ops`` without the entities ``violations`` name, and the rows that wrote them turned
+    ``invalid`` with the gate's reasons (in ``resolutions``, in place) — or ``None`` when a
+    violation names an entity no op writes: then the window itself is not what is wrong."""
+    reasons: Dict[str, List[str]] = {}
+    for v in violations or []:
+        reasons.setdefault(v.get("entity_id"), []).append(
+            str(v.get("reason") or v.get("rule") or "refused by the write gate"))
+    if not reasons or not set(reasons) <= {op["entity_id"] for op in ops}:
+        return None
+    for res in resolutions:
+        eid = res["matched_entity_id"]
+        if eid in reasons and res["resolved_op"] in ("create", "update", "delete"):
+            created = res["resolved_op"] == "create"       # a minted id names nothing now
+            res.update(resolved_op="invalid", status="invalid", reasons=reasons[eid],
+                       matched_entity_id=None if created else eid)
+    return [op for op in ops if op["entity_id"] not in reasons]
+
+
+def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> List[tuple]:
+    """``(kind, normalized row)`` for each node or edge record; anything else is skipped (tallied
+    as skipped — a malformed record never aborts the parse). ``native``: a view package's lines."""
+    out = []
+    for raw in page:
+        kind = raw.get("kind") if isinstance(raw, dict) else None
+        if kind in ("node", "edge"):
+            out.append((kind, normalize(raw, kind, native=native)))
+    return out
 
 
 async def _payloads(snap, kind: str, eids) -> Dict[str, dict]:

@@ -245,27 +245,22 @@ every new API pod failing readiness with `schema_mismatch`
 (`backend/app/main.py:3176`) until someone runs the upgrade by hand, and a fresh
 install comes up degraded.
 
-**Evidence — the Helm chart is behind the manifests.** It has no versioning
-worker and sets no `GRAPHVER_*`. With `GRAPHVER_PROJECTION_INPROCESS` unset
-(`backend/app/services/versioning/config.py:157`), the web process starts none
-of the loops that worker hosts and logs that it has handed them off
-(`backend/app/main.py:1583`), so on a Helm install the reconciling projection
-loop, "Enable version control" jobs, the data-source purge and reaper, and
-FalkorDB eviction never run: an enable request queues a job nothing picks up, and
-a projection that falls behind never catches up. Its upgrade hook, and the
+**Evidence — the Helm chart is behind the manifests.** It now runs the
+versioning worker's three lanes as the Kubernetes base does
+(`deploy/helm/dataviz/templates/versioning-worker.yaml`: projection, transfer
+with an autoscaler, bootstrap), so projection, imports, exports and "Enable
+version control" jobs run on a Helm install too. Its upgrade hook, and the
 `wait-for-schema` init container every backend pod starts behind, run an image
 nothing builds (§2.4). Beyond that, the chart ships a 60-minute token and no
-control-plane token (§1.1), no autoscalers or disruption budgets, a control plane
-fixed at one replica with `Recreate`
+control-plane token (§1.1), no autoscalers beyond the transfer lane's and no
+disruption budgets, and a control plane fixed at one replica with `Recreate`
 (`deploy/helm/dataviz/templates/aggregation-controlplane.yaml:10`, which ignores
-`values.yaml:299`), and imports and exports running inside the API pods
-(`GRAPHVER_TRANSFER_INPROCESS` defaults on, `config.py:288`).
+`values.yaml:299`).
 
 **Recommendation.** Give the kustomize base the same upgrade Job and
 `wait-for-schema` init container the chart has; until then, apply migrations by
 hand with the new release's image (`python -m backend.scripts.upgrade upgrade`)
-before rolling it out. Add the versioning worker to the chart — same image and
-command as the Kubernetes base. Then decide what the chart is for: if it is the
+before rolling it out. Then decide what the chart is for: if it is the
 evaluation path, say so in `NOTES.txt` and point production at the kustomize
 overlays, as the scaling guide already does; if it is a production path, it
 needs the parity list above.
@@ -762,7 +757,7 @@ that encode calendar time rather than order.
 | 4 | §1.2 connection-tester SSRF | Live security exposure, small fix, mechanism already written |
 | 5 | §2.8 the bootstrapped-graph re-sync test | Before the next re-sync of a bootstrapped graph: the failure it rules out is mass deletion |
 | 6 | §1.4 export the two alert series, then scrape and alert | Makes §1.7 say where it bent, not only whether |
-| 7 | §1.5 a migration step for kustomize, the versioning worker for Helm | Small; until then every migration is a manual step on one path and versioning half-works on the other |
+| 7 | §1.5 a migration step for kustomize | Small; until then every migration is a manual step on that path |
 | 8 | §2.1 quickstart: fix or delete | Small; it is the front door |
 | 9 | §1.7 load and chaos run, recorded | Needs 6 to be worth reading; settles §2.6 |
 | 10 | §2.3 invalidation listeners, then §3.3 | Three call sites; then the legacy registry can go |

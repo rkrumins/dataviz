@@ -1,9 +1,11 @@
-"""An import job never reads "running" after the work behind it has stopped.
+"""An import job never reads "running" after the work behind it has stopped for good.
 
 Two ways it used to: the job's task was cancelled (``_run_safe`` caught only ``Exception``, and
-``CancelledError`` is not one), or the pod running it went away. A cancelled job is now marked
-failed on its way out; a running import touches ``updated_at`` on a timer; and ``get_job`` reports
-a pending/running job silent for ``JOB_STALE_AFTER_SECS`` as failed, so the UI stops polling.
+``CancelledError`` is not one), or the pod running it went away. Now a cancelled or draining job
+hands itself back (``Lease.release``, shielded) for another worker to resume; a superseded one stops
+quietly; an error fails it, fenced; and ``get_job`` never writes — a job whose worker died reads
+``stale`` until it is taken over (the claim's stale takeover, ``job_lease``), rather than being
+failed by whoever happened to poll it.
 
 The versioning store is faked at its session boundary, as in test_import_view_assignments.py.
 """
@@ -12,18 +14,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import pytest
 
 from backend.app.services.versioning import config
 from backend.app.services.versioning import db as ver_db
-from backend.app.services.versioning.import_export import import_worker
-from backend.app.services.versioning.import_export.import_worker import ImportWorker
 from backend.app.services.versioning.import_export.service import ImportExportService
+from backend.app.services.versioning.job_lease import Draining, Lease, Superseded
 from backend.app.services.versioning.models import JobORM
-
-_STOPPED = "The job stopped before it finished (the server restarted or it was interrupted). Start it again."
 
 
 def _ago(secs: float) -> str:
@@ -46,93 +44,93 @@ def _service():
     return ImportExportService(versioning=object(), store=object())
 
 
-_SILENT = config.JOB_STALE_AFTER_SECS + 60
+_SILENT = config.INGEST_STALE_SECS + 60
 
 
-@pytest.mark.parametrize("job_type, status, stamps, reported", [
-    ("ingest", "running", {"updated_at": _ago(_SILENT)}, "failed"),      # its heartbeat stopped
-    ("ingest", "running", {"updated_at": _ago(5)}, "running"),           # still beating
-    ("ingest", "pending", {}, "failed"),                                 # never started: by creation
-    ("export", "running", {"started_at": _ago(_SILENT)}, "failed"),      # no heartbeat: by its start
-    ("export", "running", {"started_at": _ago(30)}, "running"),
-    ("ingest", "completed", {"updated_at": _ago(_SILENT)}, "completed"),  # a finished job stays so
-    ("bootstrap", "running", {"updated_at": _ago(_SILENT)}, "running"),  # not this service's job
+@pytest.mark.parametrize("job_type, status, silent, stale", [
+    ("ingest", "running", {"updated_at": _SILENT}, True),            # its heartbeat stopped
+    ("ingest", "running", {"updated_at": 5}, False),                 # still beating
+    ("ingest", "pending", {}, False),                                # not started: no heartbeat due
+    ("export", "running", {"started_at": _SILENT}, True),            # no heartbeat: by its start
+    ("export", "running", {"started_at": 30}, False),
+    ("ingest", "completed", {"updated_at": _SILENT}, False),         # a finished job is not stale
 ])
-async def test_get_job_reports_a_job_whose_server_went_away(monkeypatch, job_type, status, stamps, reported):
+async def test_get_job_reports_a_quiet_job_stale_and_never_changes_it(monkeypatch, job_type, status,
+                                                                     silent, stale):
+    stamps = {column: _ago(secs) for column, secs in silent.items()}   # now, not at collection
     row = JobORM(id="vjob_1", job_type=job_type, graph_id="g1", status=status,
                  created_at=_ago(_SILENT), **stamps)
-    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row))
+    executed = []
+    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row, executed))
 
     job = await _service().get_job("vjob_1")
-    assert job["status"] == reported and row.status == reported, "recorded on the job, not only reported"
-    if reported == "failed":
-        assert job["errorMessage"] == _STOPPED and row.completed_at
+    assert job["status"] == status and row.status == status, "a read never flips a job"
+    assert job["stale"] is stale and row.error_message is None and row.completed_at is None
+    assert not any(getattr(stmt, "is_update", False) for stmt in executed)
 
 
-async def test_a_cancelled_import_is_marked_failed(monkeypatch):
-    row = JobORM(id="vjob_1", job_type="ingest", graph_id="g1", status="running", created_at=_ago(1))
-    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row))
-    started = asyncio.Event()
+class _FakeLease(Lease):
+    """A lease whose fenced writes are recorded instead of sent."""
 
-    async def run_import(job_id):
-        started.set()
-        await asyncio.sleep(3600)
+    def __init__(self, *, fenced_out=False):
+        super().__init__(job_id="vjob_1", job_type="ingest", epoch=1, workspace_id="ws1",
+                         graph_id="g1")
+        self.calls = []
+        self._fenced_out = fenced_out
 
-    svc = _service()
-    monkeypatch.setattr(svc, "run_import", run_import)
-    task = asyncio.create_task(svc.run_import_safe("vjob_1"))
-    await started.wait()
+    async def release(self):
+        self.calls.append(("release",))
+        return not self._fenced_out
+
+    async def fail(self, message, code="internal", action=None, phase=None):
+        self.calls.append(("fail", message, code))
+        return not self._fenced_out
+
+
+async def _cancelled_while_running(svc, lease, run_import):
+    svc.run_import = run_import
+    task = asyncio.create_task(svc.run_import_safe("vjob_1", lease))
+    await asyncio.sleep(0.01)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task                                  # the cancellation still propagates
-    assert (row.status, row.error_message) == ("failed", _STOPPED) and row.completed_at
 
 
-async def test_a_cancellation_after_the_import_completed_leaves_it_completed(monkeypatch):
-    row = JobORM(id="vjob_1", job_type="ingest", graph_id="g1", status="running", created_at=_ago(1))
-    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row))
+async def test_a_cancelled_import_is_handed_back_for_another_worker():
+    lease = _FakeLease()
 
-    async def run_import(job_id):
-        row.status = "completed"                    # the worker finished; a post-commit step is running
+    async def run_import(job_id, lease=None):
         await asyncio.sleep(3600)
 
+    await _cancelled_while_running(_service(), lease, run_import)
+    assert lease.calls == [("release",)]
+
+
+async def test_a_cancellation_after_the_import_completed_leaves_it_completed():
+    """The release is fenced on ``status='running'``: once the worker finished the job, a late
+    cancellation (a post-commit step still running) changes nothing."""
+    lease = _FakeLease(fenced_out=True)
+
+    async def run_import(job_id, lease=None):
+        await asyncio.sleep(3600)
+
+    await _cancelled_while_running(_service(), lease, run_import)
+    assert lease.calls == [("release",)]            # tried, and fenced out (returned False)
+
+
+@pytest.mark.parametrize("raised, calls", [
+    (Draining("stopping"), [("release",)]),                  # handed back at a boundary
+    (Superseded("taken over"), []),                          # someone else's now: stop quietly
+    (RuntimeError("bad row 7"), [("fail", "bad row 7", "internal")]),
+])
+async def test_how_a_run_ends_settles_its_lease(raised, calls):
+    lease = _FakeLease()
+
+    async def run_import(job_id, lease=None):
+        raise raised
+
     svc = _service()
-    monkeypatch.setattr(svc, "run_import", run_import)
-    task = asyncio.create_task(svc.run_import_safe("vjob_1"))
-    await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert row.status == "completed" and row.error_message is None
+    svc.run_import = run_import
+    await svc.run_import_safe("vjob_1", lease)               # none of them escapes
+    assert lease.calls == calls
 
-
-async def test_a_running_import_beats_until_it_ends(monkeypatch):
-    executed = []
-    row = SimpleNamespace(status="running", completed_at=None, updated_at=None, summary=None, processed=0)
-    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row, executed))
-    monkeypatch.setattr(import_worker, "_HEARTBEAT_SECS", 0.01)
-
-    async def load(job_id):
-        return {"graph_id": "g1", "branch_id": "b1", "source_uri": "k", "import_format": "ndjson",
-                "reconcile_mode": "upsert"}
-
-    async def owner(graph_id, branch_id):
-        return "usr_1"
-
-    async def parse(job_id, source_uri, fmt):
-        await asyncio.sleep(0.1)                    # a long phase with no batch boundary
-
-    async def build(*args):
-        return {"new": 1}
-
-    worker = ImportWorker(versioning=None, store=None)
-    for name, fake in (("_load_running", load), ("_branch_owner", owner), ("_parse", parse),
-                       ("_resolve_and_build", build)):
-        monkeypatch.setattr(worker, name, fake)
-
-    assert await worker.run("vjob_1") == {"new": 1}
-    beats = [s for s in executed if s.is_update and s.table.name == "jobs"]
-    assert len(beats) >= 3, "updated_at was touched while the import worked"
-    assert row.status == "completed"
-    await asyncio.sleep(0.05)
-    assert len(executed) == len(beats), "and the heartbeat stopped with it"

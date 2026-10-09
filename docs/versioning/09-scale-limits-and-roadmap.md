@@ -137,18 +137,21 @@ frontend-only gap.)*
 
 See [08](08-import-export.md) for detail; the load-bearing ones:
 
-- **An interrupted job starts over.** Jobs queue in Postgres and run on the versioning worker
-  (`GRAPHVER_TRANSFER_INPROCESS=0`, as the compose and Kubernetes manifests set it), or in the web
-  process by default — which is where the Helm chart leaves them. Either way, a process that stops mid-import/export takes the job with it: it
-  is reported `failed` once silent for `JOB_STALE_AFTER_SECS`, and runs again from the start.
+- **An interrupted export starts over; an import resumes.** Jobs queue in Postgres and run only on
+  the versioning worker's transfer lane (the web tier never runs them). A worker that stops hands
+  its job back (drain) or loses its lease (crash, after `INGEST_STALE_SECS`), and another worker
+  takes it over: an import resumes from its last committed window (`parse:` / `node:` / `edge:`
+  cursor); an export is rewritten from the start under a new attempt key.
 - **A 50 GB export takes hours.** An export reads one snapshot a page at a time, in flat memory at any
   size, and the Export dialog has the workers write it to the object store, then downloads it in
   pieces that resume. One export runs on one worker, at about 10 MB a second as NDJSON and 3.5 as
   CSV (two passes): nothing splits it across workers yet. `GRAPH_EXPORT_MAX_BYTES` caps it at 50 GiB.
-- **No native cloud client yet**: artifacts live in the management database (`DatabaseObjectStore`,
-  shared by every API pod), or as files on a mount every pod shares, which can be a bucket's FUSE
-  mount (`OBJECT_STORE_BACKEND=local`); S3/GCS clients raise `NotImplementedError`; the `presigned`
-  upload path is modeled but unbacked; uploads go through the backend instead, in resumable pieces.
+- **The cloud client is opt-in**: artifacts live in the management database (`DatabaseObjectStore`,
+  shared by every API pod), as files on a mount every pod shares, which can be a bucket's FUSE
+  mount (`OBJECT_STORE_BACKEND=local`), or in an S3-compatible bucket (`OBJECT_STORE_BACKEND=s3`:
+  Amazon S3, MinIO, GCS through HMAC keys; boto3 from `requirements-s3.txt`). With
+  `OBJECT_STORE_S3_PRESIGN=1`, view-package uploads and stored downloads go straight to the bucket;
+  a data source's own import still uploads through the backend, in resumable pieces.
   JSON and xlsx *exports* now stream; JSON and xlsx *imports* are still read whole, which the client
   caps at 100 MiB.
 - **Row-scoped export is API-only — not surfaced in the UI.** The backend export options (`props`,
@@ -183,10 +186,8 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | `GRAPHVER_DRAFT_TTL_DAYS` / `_SWEEP_SECS` | `30` / daily | auto-abandon idle drafts |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `commit_seq`-collision retry budget |
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
-| `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `50000` / `5000` | import windowing / inline-vs-async threshold |
-| `GRAPHVER_TRANSFER_INPROCESS` | on | run imports and exports in the web process; Compose and Kubernetes set `0` to use the versioning worker |
-| `JOB_STALE_AFTER_SECS` | `900` | silence after which a running import/export job is reported `failed` |
-| `OBJECT_STORE_BACKEND` | `database` | where import/export artifacts live: `database` or `local` (a shared mount) |
+| `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `10000` / `5000` | import windowing / inline-vs-async threshold |
+| `OBJECT_STORE_BACKEND` | `database` | where import/export artifacts live: `database`, `local` (a shared mount) or `s3` (opt-in) |
 | `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | `50000` | largest projection window whose rollups are maintained incrementally |
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | largest graph a re-sync may attempt; `0` disables the guard ([11](11-resync-at-any-scale.md)) |
 | `GRAPHVER_BOOTSTRAP_MERKLE_MAX` | `1000000` | above this, an enable-VC copy defers the Merkle root rather than building it in memory |

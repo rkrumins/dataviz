@@ -27,7 +27,7 @@ async def _run(monkeypatch) -> tuple:
     async def fake_pg_counts(graph_id, main_id, to_seq, is_fork):
         return (5, 5)
 
-    async def fake_falkor_counts(client):
+    async def fake_falkor_counts(client, owned=True):
         return (3, 3)
 
     monkeypatch.setattr(proj, "_pg_live_counts", fake_pg_counts)

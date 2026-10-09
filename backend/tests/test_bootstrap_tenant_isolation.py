@@ -59,3 +59,23 @@ async def test_status_does_not_leak_another_workspaces_job(
     resp = await test_client.get(
         f"/api/v1/{WS_MINE}/graph/bootstrap/status?dataSourceId={DS_THEIRS}")
     assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("query", ["", "&format=csv"])
+async def test_the_duplicate_list_does_not_leak_another_workspaces_job(
+    test_client: AsyncClient, _their_data_source, query,
+):
+    resp = await test_client.get(
+        f"/api/v1/{WS_MINE}/graph/bootstrap/duplicates?dataSourceId={DS_THEIRS}{query}")
+    assert resp.status_code == 404
+
+
+async def test_cannot_decide_about_another_workspaces_duplicates(
+    test_client: AsyncClient, _their_data_source,
+):
+    """A collapse DELETES nodes from the source graph: the decision is the one call here that
+    must never reach another tenant's data source."""
+    resp = await test_client.post(
+        f"/api/v1/{WS_MINE}/graph/bootstrap/decision?dataSourceId={DS_THEIRS}",
+        json={"action": "collapse", "fingerprint": "f" * 32})
+    assert resp.status_code == 404

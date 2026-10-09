@@ -117,6 +117,20 @@ class NdjsonAdapter:
             if line:
                 yield json.loads(line)
 
+    async def parse_pages(self, chunks: AsyncIterator[bytes],
+                          size: int = 2000) -> AsyncIterator[List[Dict[str, Any]]]:
+        """:meth:`parse`, a page of records at a time, each page decoded off the event loop."""
+        page: List[str] = []
+        async for line in _lines(chunks):
+            line = line.strip()
+            if line:
+                page.append(line)
+                if len(page) >= size:
+                    yield await asyncio.to_thread(_decode_lines, page)
+                    page = []
+        if page:
+            yield await asyncio.to_thread(_decode_lines, page)
+
     async def write(
         self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str] = ()
     ) -> AsyncIterator[bytes]:
@@ -128,6 +142,10 @@ class NdjsonAdapter:
     ) -> AsyncIterator[bytes]:
         async for page in pages:
             yield await asyncio.to_thread(_ndjson_lines, page)
+
+
+def _decode_lines(lines: List[str]) -> List[Dict[str, Any]]:
+    return [json.loads(line) for line in lines]
 
 
 class DelimitedAdapter:

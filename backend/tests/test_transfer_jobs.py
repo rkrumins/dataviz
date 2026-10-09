@@ -1,10 +1,12 @@
-"""Import and export jobs on the versioning worker (``GRAPHVER_TRANSFER_INPROCESS`` off).
+"""Import, export and publish jobs on the versioning worker's transfer lane.
 
-The API process only queues the jobs it creates; the worker's transfer loop runs them a few at a
-time. ``get_job`` lets a queued job wait its turn, with how many are ahead of it, rather than read
-it as abandoned. The job store is faked at its session boundary, as in test_import_job_liveness.py;
-the claim itself (``FOR UPDATE SKIP LOCKED``) is proven on Postgres in
-integration/test_transfer_queue.py.
+The API process only queues the jobs it creates — never runs them; the worker's slot loops run them
+a few at a time on leases. ``get_job`` is read-only: a queued job says how many are ahead of it in
+its slot, a running one how far it has got and whether its worker went quiet, and nothing a reader
+does flips a job's status — the transfer lane's ``JobReaper`` fails the jobs nothing will run. A
+stopping worker DRAINS: it tells its jobs to hand themselves back, and cancels (and so releases) the
+rest. The job store is faked at its session boundary, as in test_import_job_liveness.py; the claim
+itself is proven on Postgres in test_job_lease.py and integration/test_transfer_queue.py.
 """
 from __future__ import annotations
 
@@ -16,10 +18,15 @@ import pytest
 
 from backend.app.services.versioning import config
 from backend.app.services.versioning import db as ver_db
-from backend.app.services.versioning import worker as worker_mod
-from backend.app.services.versioning.import_export import service as service_mod
-from backend.app.services.versioning.import_export.runner import QUEUED, TransferRunner
+from backend.app.services.versioning.import_export.runner import (
+    INSPECT_TYPES,
+    JOB_TYPES,
+    QUEUED,
+    JobReaper,
+    TransferRunner,
+)
 from backend.app.services.versioning.import_export.service import ImportExportService
+from backend.app.services.versioning.job_lease import Lease
 from backend.app.services.versioning.models import JobORM
 from backend.app.services.versioning.worker import ProjectionWorker
 
@@ -31,6 +38,7 @@ def _ago(secs: float) -> str:
 class _Count:
     def __init__(self, n):
         self._n = n
+        self.rowcount = n
 
     def scalar_one(self):
         return self._n
@@ -54,32 +62,19 @@ def _service():
     return ImportExportService(versioning=object(), store=object())
 
 
+def _lease(job_id="vjob_1", job_type="export") -> Lease:
+    return Lease(job_id=job_id, job_type=job_type, epoch=1, workspace_id="ws1", graph_id="g1")
+
+
 # ── Starting a job ───────────────────────────────────────────────────────────
 
 
-async def test_by_default_a_job_runs_in_the_api_process(monkeypatch):
-    monkeypatch.setattr(config, "TRANSFER_INPROCESS", True)
-    spawned = []
-
-    def spawn(coro, *, name):
-        coro.close()
-        spawned.append(name)
-
-    monkeypatch.setattr(service_mod, "spawn_detached", spawn)
-    svc = _service()
-    assert await svc.start_import("vjob_1") == "running"
-    assert await svc.start_export("vjob_2") == "running"
-    assert spawned == ["import vjob_1", "export vjob_2"]
-
-
-async def test_with_the_switch_off_the_api_only_queues_the_job(monkeypatch):
-    monkeypatch.setattr(config, "TRANSFER_INPROCESS", False)
-    monkeypatch.setattr(service_mod, "spawn_detached",
-                        lambda *a, **k: pytest.fail("the job ran in the API process"))
+@pytest.mark.parametrize("start", ["start_import", "start_export", "start_publish"])
+async def test_the_api_only_ever_queues_a_job(monkeypatch, start):
     executed = []
     monkeypatch.setattr(ver_db, "graphver_session", lambda: _session(executed=executed))
 
-    assert await _service().start_import("vjob_1") == "pending"
+    assert await getattr(_service(), start)("vjob_1") == "pending"
     (stmt,) = executed
     params = stmt.compile().params
     assert params["current_phase"] == QUEUED and params["updated_at"]
@@ -87,80 +82,121 @@ async def test_with_the_switch_off_the_api_only_queues_the_job(monkeypatch):
     assert "vjob_1" in params.values() and "pending" in params.values()
 
 
-# ── A queued job waits its turn ──────────────────────────────────────────────
-
-
-_WAITED = config.JOB_STALE_AFTER_SECS + 60
+# ── Reading a job never changes it ───────────────────────────────────────────
 
 
 async def test_a_queued_job_waits_its_turn_and_says_how_many_are_ahead(monkeypatch):
+    waited = config.TRANSFER_QUEUE_TIMEOUT_SECS + 60      # long past the queue timeout, even
     row = JobORM(id="vjob_1", job_type="export", graph_id="g1", status="pending",
-                 current_phase=QUEUED, created_at=_ago(_WAITED), updated_at=_ago(_WAITED))
-    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session(row, ahead=3))
-
-    job = await _service().get_job("vjob_1")
-    # Silent longer than a running job may be, but a queued job isn't abandoned: it's waiting.
-    assert job["status"] == "pending" and row.status == "pending"
-    assert job["queuedAhead"] == 3
-
-
-async def test_a_job_no_worker_starts_in_time_reads_failed(monkeypatch):
-    waited = config.TRANSFER_QUEUE_TIMEOUT_SECS + 60
-    row = JobORM(id="vjob_1", job_type="ingest", graph_id="g1", status="pending",
                  current_phase=QUEUED, created_at=_ago(waited), updated_at=_ago(waited))
-    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session(row))
+    executed = []
+    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session(row, executed, ahead=3))
 
     job = await _service().get_job("vjob_1")
-    assert job["status"] == "failed" and row.status == "failed" and row.completed_at
-    assert "No worker started the job" in job["errorMessage"]
-    assert job["queuedAhead"] is None
+    assert job["status"] == "pending" and row.status == "pending", "the reaper fails it, not a GET"
+    assert job["queuedAhead"] == 3 and job["phase"] == QUEUED
+    (count,) = executed
+    assert count.is_select, "the only statement is the queue count"
+    assert set(count.compile().params["job_type_1"]) == set(JOB_TYPES)
 
 
-async def test_a_job_that_is_not_queued_says_nothing_about_a_queue(monkeypatch):
-    row = JobORM(id="vjob_1", job_type="ingest", graph_id="g1", status="running",
-                 created_at=_ago(5), updated_at=_ago(5))
+async def test_an_inspection_counts_only_the_inspections_ahead_of_it(monkeypatch):
+    row = JobORM(id="vjob_1", job_type="package_inspect", graph_id="g1", status="pending",
+                 current_phase=QUEUED, created_at=_ago(5), updated_at=_ago(5))
     executed = []
-    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session(row, executed=executed))
+    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session(row, executed, ahead=1))
+
+    assert (await _service().get_job("vjob_1"))["queuedAhead"] == 1
+    assert list(executed[0].compile().params["job_type_1"]) == list(INSPECT_TYPES)
+
+
+async def test_a_running_job_reports_its_progress_and_attempt(monkeypatch):
+    row = JobORM(id="vjob_1", job_type="ingest", graph_id="g1", status="running",
+                 current_phase="node:20000", progress=40, processed=20000, total=50000,
+                 retry_count=2, created_at=_ago(60), updated_at=_ago(5))
+    executed = []
+    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session(row, executed))
 
     job = await _service().get_job("vjob_1")
     assert job["status"] == "running" and job["queuedAhead"] is None
+    assert (job["phase"], job["progress"], job["processed"], job["total"]) == (
+        "node:20000", 40, 20000, 50000)
+    assert job["attempt"] == 2 and job["stale"] is False
     assert executed == [], "no queue count for a job that isn't queued"
 
 
-# ── The worker's transfer loop ───────────────────────────────────────────────
+async def test_a_running_job_whose_worker_went_quiet_reads_stale_and_stays_running(monkeypatch):
+    row = JobORM(id="vjob_1", job_type="ingest", graph_id="g1", status="running", retry_count=1,
+                 created_at=_ago(3600), updated_at=_ago(config.INGEST_STALE_SECS + 30))
+    monkeypatch.setattr(ver_db, "graphver_session", lambda: _session(row))
+
+    job = await _service().get_job("vjob_1")
+    assert job["status"] == "running" and job["stale"] is True
+    assert row.status == "running" and row.error_message is None, "taken over, not failed"
+
+
+# ── The job reaper ───────────────────────────────────────────────────────────
+
+
+async def test_the_reaper_fails_jobs_queued_too_long_and_uploads_that_never_finished():
+    executed = []
+
+    @contextlib.asynccontextmanager
+    async def session():
+        async with _session(executed=executed, ahead=2) as s:
+            yield s
+
+    assert await JobReaper(session_factory=session).run_once() == {"timedOut": 2,
+                                                                   "neverQueued": 2}
+    timed_out, abandoned = (stmt.compile().params for stmt in executed)
+    assert timed_out["status"] == "failed" and "No worker started the job" in timed_out["error_message"]
+    assert timed_out["current_phase_1"] == QUEUED and timed_out["status_1"] == "pending"
+    assert set(timed_out["job_type_1"]) == set(JOB_TYPES + INSPECT_TYPES)
+    assert abandoned["status"] == "failed" and "upload never finished" in abandoned["error_message"]
+    assert "current_phase IS NULL" in str(executed[1].compile())
+
+
+# ── The worker's slot loop ───────────────────────────────────────────────────
 
 
 class _Queue:
-    """A TransferRunner stand-in: hands out queued jobs and records how they ran."""
+    """A TransferRunner stand-in: hands out leases on queued jobs and records how they ran. A job
+    honours its lease's drain the way a windowed job does: at its next boundary (every 10 ms)."""
 
-    def __init__(self, jobs, *, secs=0.05):
+    def __init__(self, jobs, *, secs=0.05, honours_drain=True):
         self.queue = list(jobs)
         self.secs = secs
+        self.honours_drain = honours_drain
         self.running = 0
         self.peak = 0
         self.done: list = []
+        self.released: list = []
         self.cancelled: list = []
 
     async def claim_one(self):
-        return (self.queue.pop(0), "export") if self.queue else None
+        return _lease(self.queue.pop(0)) if self.queue else None
 
-    async def run_job(self, job_id, job_type):
+    async def run_job(self, lease):
         self.running += 1
         self.peak = max(self.peak, self.running)
         try:
-            await asyncio.sleep(self.secs)
-            self.done.append(job_id)
+            deadline = asyncio.get_running_loop().time() + self.secs
+            while asyncio.get_running_loop().time() < deadline:
+                if self.honours_drain and lease.drain.is_set():
+                    self.released.append(lease.job_id)
+                    return
+                await asyncio.sleep(0.01)
+            self.done.append(lease.job_id)
         except asyncio.CancelledError:
-            self.cancelled.append(job_id)
+            self.cancelled.append(lease.job_id)
             raise
         finally:
             self.running -= 1
 
 
-@pytest.fixture
-def quick(monkeypatch):
-    monkeypatch.setattr(config, "TRANSFER_SLOTS", 2)
-    monkeypatch.setattr(config, "TRANSFER_POLL_SECS", 0.01)
+def _loop(worker, queue, slots=2):
+    return asyncio.create_task(worker._slot_loop(queue, slots=slots, name="transfer",
+                                                 poll_secs=0.01))
 
 
 async def _until(check, timeout=5.0):
@@ -170,43 +206,84 @@ async def _until(check, timeout=5.0):
         await asyncio.sleep(0.01)
 
 
-async def test_the_worker_runs_queued_jobs_a_few_at_a_time(quick):
+async def test_the_worker_runs_queued_jobs_a_few_at_a_time():
     queue = _Queue([f"vjob_{i}" for i in range(5)])
     worker = ProjectionWorker(object(), transfers=queue)
-    loop = asyncio.create_task(worker._transfer_loop())
+    loop = _loop(worker, queue)
 
     await _until(lambda: len(queue.done) == 5)
     worker.stop()
     await asyncio.wait_for(loop, 5)
     assert sorted(queue.done) == [f"vjob_{i}" for i in range(5)]
-    assert queue.peak == 2, "never more than TRANSFER_SLOTS at once"
+    assert queue.peak == 2, "never more than its slots at once"
 
 
-async def test_a_stopping_worker_lets_its_jobs_finish(quick):
-    queue = _Queue(["vjob_1"], secs=0.2)
-    worker = ProjectionWorker(object(), transfers=queue)
-    loop = asyncio.create_task(worker._transfer_loop())
-
-    await _until(lambda: queue.running == 1)
-    worker.stop()
-    await asyncio.wait_for(loop, 5)
-    assert queue.done == ["vjob_1"] and queue.cancelled == []
-
-
-async def test_a_job_still_running_when_the_drain_ends_is_cancelled(quick, monkeypatch):
-    monkeypatch.setattr(worker_mod, "_TRANSFER_DRAIN_SECS", 0.05)
+async def test_a_stopping_worker_has_its_jobs_hand_themselves_back():
     queue = _Queue(["vjob_1"], secs=3600)
     worker = ProjectionWorker(object(), transfers=queue)
-    loop = asyncio.create_task(worker._transfer_loop())
+    loop = _loop(worker, queue)
 
     await _until(lambda: queue.running == 1)
     worker.stop()
     await asyncio.wait_for(loop, 5)
-    # Cancelled, which is what marks its job failed ("start it again") in run_*_safe.
+    assert queue.released == ["vjob_1"] and queue.cancelled == [] and queue.done == []
+
+
+async def test_a_job_still_running_when_the_drain_ends_is_cancelled(monkeypatch):
+    monkeypatch.setattr(config, "DRAIN_SECS", 0.05)
+    queue = _Queue(["vjob_1"], secs=3600, honours_drain=False)
+    worker = ProjectionWorker(object(), transfers=queue)
+    loop = _loop(worker, queue)
+
+    await _until(lambda: queue.running == 1)
+    worker.stop()
+    await asyncio.wait_for(loop, 5)
+    # Cancelled, which releases its job under a shield in _run_safe (test_import_job_liveness.py).
     assert queue.cancelled == ["vjob_1"] and queue.done == []
 
 
-async def test_the_loop_outlives_a_failed_claim(quick):
+@pytest.mark.parametrize("while_draining", [False, True])
+async def test_a_cancelled_loop_cancels_its_jobs_so_they_release_now(monkeypatch, while_draining):
+    """An in-process worker's shutdown cancels the loop rather than waiting out the drain."""
+    monkeypatch.setattr(config, "DRAIN_SECS", 3600)
+    queue = _Queue(["vjob_1"], secs=3600, honours_drain=False)
+    worker = ProjectionWorker(object(), transfers=queue)
+    loop = _loop(worker, queue)
+
+    await _until(lambda: queue.running == 1)
+    if while_draining:
+        worker.stop()
+        await asyncio.sleep(0.05)                          # in the drain's wait now
+    loop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await loop
+    await _until(lambda: queue.cancelled == ["vjob_1"])
+
+
+async def test_a_runner_not_on_the_lease_yet_still_runs_by_job_id():
+    ran = []
+
+    class _Legacy:
+        def __init__(self):
+            self.queue = ["boot_1", "boot_2"]
+
+        async def claim_one(self):
+            return self.queue.pop(0) if self.queue else None
+
+        async def run_job(self, job_id):
+            ran.append(job_id)
+
+    worker = ProjectionWorker(object())
+    runner = _Legacy()
+    loop = asyncio.create_task(worker._slot_loop(runner, slots=1, name="bootstrap",
+                                                 poll_secs=0.01))
+    await _until(lambda: len(ran) == 2)
+    worker.stop()
+    await asyncio.wait_for(loop, 5)
+    assert ran == ["boot_1", "boot_2"]
+
+
+async def test_the_loop_outlives_a_failed_claim():
     queue = _Queue(["vjob_1"])
     claims = {"n": 0}
     claim = queue.claim_one
@@ -219,43 +296,50 @@ async def test_the_loop_outlives_a_failed_claim(quick):
 
     queue.claim_one = flaky
     worker = ProjectionWorker(object(), transfers=queue)
-    loop = asyncio.create_task(worker._transfer_loop())
+    loop = _loop(worker, queue)
 
     await _until(lambda: queue.done == ["vjob_1"])
     worker.stop()
     await asyncio.wait_for(loop, 5)
 
 
-async def test_a_claimed_job_runs_through_the_services_safe_entry_point():
+# ── The runner ───────────────────────────────────────────────────────────────
+
+
+async def test_a_claimed_job_runs_through_the_services_safe_entry_point_with_its_lease():
     ran = []
 
     class _Service:
-        async def run_import_safe(self, job_id):
-            ran.append(("import", job_id))
+        async def run_import_safe(self, job_id, lease):
+            ran.append(("import", job_id, lease.epoch))
 
-        async def run_export_safe(self, job_id):
-            ran.append(("export", job_id))
+        async def run_export_safe(self, job_id, lease):
+            ran.append(("export", job_id, lease.epoch))
 
-        async def run_publish_safe(self, job_id):
-            ran.append(("publish", job_id))
+        async def run_publish_safe(self, job_id, lease):
+            ran.append(("publish", job_id, lease.epoch))
 
     runner = TransferRunner(_Service)
-    await runner.run_job("vjob_1", "ingest")
-    await runner.run_job("vjob_2", "export")
-    await runner.run_job("vjob_3", "publish")
-    assert ran == [("import", "vjob_1"), ("export", "vjob_2"), ("publish", "vjob_3")]
+    await runner.run_job(_lease("vjob_1", "ingest"))
+    await runner.run_job(_lease("vjob_2", "export"))
+    await runner.run_job(_lease("vjob_3", "publish"))
+    assert ran == [("import", "vjob_1", 1), ("export", "vjob_2", 1), ("publish", "vjob_3", 1)]
 
 
 async def test_a_job_of_a_type_the_runner_does_not_know_fails_rather_than_run_as_something_else():
     """Anything not an import used to run as an export."""
-    ran = []
+    failed = []
 
     class _Service:
-        async def run_export_safe(self, job_id):
-            ran.append(("export", job_id))
+        async def run_export_safe(self, job_id, lease):
+            pytest.fail("ran as an export")
 
-        async def mark_failed(self, job_id, message):
-            ran.append(("failed", job_id, message))
+    lease = _lease("vjob_9", "bogus")
 
-    await TransferRunner(_Service).run_job("vjob_9", "bogus")
-    assert ran == [("failed", "vjob_9", "this worker doesn't run 'bogus' jobs")]
+    async def fail(message, code="internal", action=None, phase=None):
+        failed.append((lease.job_id, message))
+        return True
+
+    lease.fail = fail
+    await TransferRunner(_Service).run_job(lease)
+    assert failed == [("vjob_9", "this worker doesn't run 'bogus' jobs")]

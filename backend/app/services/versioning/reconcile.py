@@ -146,7 +146,7 @@ async def pg_live_counts_projectable(session, graph_id: str, branch_id: str) -> 
     return int(pg_nodes), int(triples)
 
 
-async def falkor_counts(client) -> Tuple[int, int]:
+async def falkor_counts(client, *, owned: bool = True) -> Tuple[int, int]:
     """Node/edge counts in a FalkorDB cache graph, excluding derived-cache artifacts.
 
     The ``:AGGREGATED`` rollup layer and the bookkeeping nodes beside it are derived (aggregation
@@ -158,7 +158,28 @@ async def falkor_counts(client) -> Tuple[int, int]:
     graph, so omitting it left the count one high after ANY aggregation job (including one the
     projector queued itself via ``on_rollups_stale``). ``_sweep_tombstoned`` cannot clear it — it
     carries no tombstone — so the verify reported extra entities, ``published`` went False, and
-    ``_apply`` pinned the watermark: reads fell back to Postgres until someone rebuilt by hand."""
+    ``_apply`` pinned the watermark: reads fell back to Postgres until someone rebuilt by hand.
+
+    ``owned=False`` is a graph the projector did not mint (``projection_state.owns_falkor_graph``):
+    a customer's own graph, pinned by "enable version control". Postgres holds only what the reader
+    can see of it (``bootstrap_worker``), so that is what is counted: nodes with a (non-empty) ``urn``, and
+    edges between two of them as DISTINCT ``(source, type, target)`` triples — the same shape as
+    :func:`pg_live_counts_projectable`, because such a graph may hold parallel relationships of one
+    type between one pair, which the projector's own graphs never do. Counting every node and every
+    relationship there reported the urn-less nodes and the parallel copies as "extra entities" on
+    every verify. A graph the projector owns is counted as before: anything there that it did not
+    write IS drift."""
+    if not owned:
+        fn = await _bounded_query(
+            client,
+            f"MATCH (n) WHERE n.urn IS NOT NULL AND n.urn <> '' AND {_NOT_DERIVED} "
+            "RETURN count(n) AS c")
+        fe = await _bounded_query(
+            client,
+            "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND a.urn IS NOT NULL "
+            "AND a.urn <> '' AND b.urn IS NOT NULL AND b.urn <> '' "
+            "RETURN count(DISTINCT [a.urn, type(r), b.urn]) AS c")
+        return int(fn.result_set[0][0]), int(fe.result_set[0][0])
     fn = await _bounded_query(
         client,
         f"MATCH (n) WHERE {_NOT_DERIVED} RETURN count(n) AS c")
@@ -351,6 +372,7 @@ class ProjectionReconciler:
             status = ps.status if ps is not None else "idle"
             name = ps.falkor_graph_name if ps is not None else None
             provider_id = ps.falkor_provider if ps is not None else None
+            owned = bool(ps.owns_falkor_graph) if ps is not None else True
             # Collapse-modeled counts (node count + DISTINCT-triple edge count) so the report is
             # apples-to-apples with FalkorDB (which collapses parallel edges) — a parallel-edge graph
             # is NOT reported as a false shortfall / out-of-sync.
@@ -390,7 +412,7 @@ class ProjectionReconciler:
         client = self._client(name, provider_id)
         if inspect.isawaitable(client):
             client = await client
-        falkor_nodes, falkor_edges = await falkor_counts(client)
+        falkor_nodes, falkor_edges = await falkor_counts(client, owned=owned)
 
         missing_nodes, extra_nodes, mismatched, trunc_n = await self._diff_nodes(
             client, graph_id, main_id, sample_limit, deep)

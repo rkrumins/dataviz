@@ -17,7 +17,12 @@ import type { BootstrapJob } from '@/services/versioningApiService'
 export function useBootstrapWatch(
   wsId: string,
   dataSourceId: string | null,
-  { headSeq, seed }: { headSeq: number; seed?: BootstrapJob | null },
+  { headSeq, seed, enabled = true }: {
+    headSeq: number
+    seed?: BootstrapJob | null
+    /** False for someone the job isn't shown to: nothing is polled for them. */
+    enabled?: boolean
+  },
 ) {
   const qc = useQueryClient()
 
@@ -37,7 +42,7 @@ export function useBootstrapWatch(
   const q = useBootstrapStatus(wsId, dataSourceId, {
     // Only a not-yet-versioned source can have a live job — except while we're holding
     // the receipt open for the person who just ran one.
-    enabled: headSeq <= 1 || watching,
+    enabled: enabled && (headSeq <= 1 || watching),
     seed: seed ?? undefined,
   })
   const job = q.data ?? null
@@ -57,8 +62,8 @@ export function useBootstrapWatch(
 
   return {
     job,
-    /** A copy is running, or it stopped and needs a decision. */
-    showProgress: !!job && (active || job.status === 'failed'),
+    /** A copy is running, paused for a decision about duplicates, or it stopped and needs one. */
+    showProgress: !!job && (active || job.status === 'needs_decision' || job.status === 'failed'),
     /** The integrity report, for whoever ran the copy, until they dismiss it. */
     showReport: !!job && job.status === 'completed' && watching && !reportDismissed,
     dismissReport: () => setDismissed(dataSourceId),

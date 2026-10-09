@@ -154,7 +154,7 @@ See [08 · Import / Export](08-import-export.md) for the pipeline; the endpoints
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `POST /graphs/{gid}/imports` (`:1982`) | `_MANAGE` | `?format&reconcileMode(upsert\|replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status}`. Opens/append a draft, streams to the object store, then starts the job: `status` is `running` when it runs in this process, `pending` when it is queued for the versioning worker (`GRAPHVER_TRANSFER_INPROCESS=0`). |
+| `POST /graphs/{gid}/imports` (`:1982`) | `_MANAGE` | `?format&reconcileMode(upsert\|replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status}`. Opens/append a draft, streams to the object store, then queues the job: `status` is `pending` until a versioning worker's transfer lane claims it (the web tier never runs jobs). |
 | `GET /graphs/{gid}/imports` (`:2018`) | `_READ` | Import job history. |
 | `GET /graphs/{gid}/imports/template` (`:2030`) | `_READ` | `?format` → a prepopulated starter file. (Declared **before** `/{job_id}` so the literal wins.) |
 | `POST /graphs/{gid}/imports/uploads` | `_MANAGE` | Start a resumable upload: `{fileName, size, format}` → **201** `{uploadId, fileName, size, format, partBytes, parts, received: [], jobId: null}`. 413 when the file is too large for its format (10 GiB for NDJSON/CSV/TSV, 100 MB for JSON/xlsx). |

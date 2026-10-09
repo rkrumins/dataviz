@@ -18,15 +18,19 @@ live entity comes out once, from its deciding layer, with no global sort or in-m
 
 Pages are keyset-paged on ``entity_id`` in the database's own collation (the cursor compares in the
 same one), each in a short session: a commit landing mid-export can't shift a page, and pinning
-``main`` to a commit seq makes the whole export one consistent snapshot.
+``main`` to a commit seq makes the whole export one consistent snapshot. A draft read as it stands
+now has no seq to pin to; :func:`pinned_reads` gives such a reader one transaction instead.
 """
 from __future__ import annotations
 
+import contextlib
 import os
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Dict, Iterable, List, Optional, Sequence, Set, Union
 
-from sqlalchemy import Text, cast, func, select
+from sqlalchemy import Text, cast, func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import db
 from ..models import BranchORM, EdgeVersionORM, EntityHeadORM, GraphORM, NodeVersionORM
@@ -35,6 +39,39 @@ from ..models import BranchORM, EdgeVersionORM, EntityHeadORM, GraphORM, NodeVer
 PAGE_SIZE = int(os.getenv("GRAPH_EXPORT_PAGE_SIZE", "2000"))
 #: Ids per point lookup (an IN list).
 _LOOKUP_CHUNK = 5000
+
+#: The session every read here goes through while :func:`pinned_reads` is open.
+_PINNED: ContextVar[Optional[AsyncSession]] = ContextVar("snapshot_pinned_reads", default=None)
+
+
+@contextlib.asynccontextmanager
+async def _session():
+    """The pinned session inside :func:`pinned_reads`; else a short session of the read's own."""
+    pinned = _PINNED.get()
+    if pinned is not None:
+        yield pinned
+        return
+    async with db.graphver_session() as s:
+        yield s
+
+
+@contextlib.asynccontextmanager
+async def pinned_reads():
+    """Every read of a snapshot opened and read inside this block comes from ONE ``REPEATABLE READ
+    READ ONLY`` transaction: one state of the database, whatever commits meanwhile.
+
+    For a draft read as it stands now — its staged heads are not pinned to any commit, so a long
+    export reading it page by page in sessions of their own could take edges to nodes it never
+    wrote, or nodes and edges from two different states, as the draft is edited under it. On a
+    connection of its own (the NullPool one long-held locks use), not one of the pool's sized for
+    short window transactions. Reads only, in one task, one at a time."""
+    async with db.graphver_lock_session() as s:
+        await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        token = _PINNED.set(s)
+        try:
+            yield
+        finally:
+            _PINNED.reset(token)
 
 
 @dataclass(frozen=True)
@@ -106,7 +143,7 @@ class VersionLayer:
         stmt = self._winners(kind, payload)
         if after is not None:
             stmt = stmt.where(model.entity_id > after)
-        async with db.graphver_session() as s:
+        async with _session() as s:
             rows = (await s.execute(stmt.limit(limit))).all()
         return [_winner(kind, self.graph_id, r) for r in rows]
 
@@ -114,7 +151,7 @@ class VersionLayer:
         model = _model(kind)
         out: Dict[str, Winner] = {}
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
-            async with db.graphver_session() as s:
+            async with _session() as s:
                 rows = (await s.execute(self._winners(kind, payload).where(model.entity_id.in_(chunk)))).all()
             for r in rows:
                 out[r[0]] = _winner(kind, self.graph_id, r)
@@ -146,14 +183,14 @@ class HeadsLayer:
         stmt = self._heads(kind, payload).order_by(EntityHeadORM.entity_id)
         if after is not None:
             stmt = stmt.where(EntityHeadORM.entity_id > after)
-        async with db.graphver_session() as s:
+        async with _session() as s:
             rows = (await s.execute(stmt.limit(limit))).all()
         return [self._winner(kind, r) for r in rows]
 
     async def lookup(self, kind: str, entity_ids: Sequence[str], payload: bool = False) -> Dict[str, Winner]:
         out: Dict[str, Winner] = {}
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
-            async with db.graphver_session() as s:
+            async with _session() as s:
                 rows = (await s.execute(
                     self._heads(kind, payload).where(EntityHeadORM.entity_id.in_(chunk)))).all()
             for r in rows:
@@ -217,40 +254,55 @@ class Snapshot:
             remaining -= found.keys()
         return out
 
+    def _branches(self) -> Dict[str, List[str]]:
+        """The branches the layers read, by graph: the only rows a candidate can come from (other
+        drafts' rows would only be read to be thrown away)."""
+        out: Dict[str, Set[str]] = {}
+        for layer in self.layers:
+            out.setdefault(layer.graph_id, set()).add(layer.branch_id)
+        return {gid: sorted(bids) for gid, bids in out.items()}
+
     async def nodes_by_urn(self, urns: Iterable[str]) -> Dict[str, str]:
         """``urn -> entity_id`` for the live nodes carrying these URNs."""
-        return await self._nodes_by(NodeVersionORM.urn, "urn", urns)
+        live = await self._nodes_by(NodeVersionORM.urn, "urn", urns)
+        return {w.urn: eid for eid, w in live.items()}
 
-    async def nodes_by_qname(self, qnames: Iterable[str]) -> Dict[str, str]:
-        """``qualifiedName -> entity_id`` for the live nodes carrying these qualified names (not
-        unique: one of them)."""
-        return await self._nodes_by(NodeVersionORM.qualified_name, "qualified_name", qnames)
+    async def nodes_by_qname(self, qnames: Iterable[str]) -> Dict[str, Optional[str]]:
+        """``qualifiedName -> entity_id`` for the live nodes carrying these qualified names — or
+        ``None`` for one that several carry: a qualifiedName is not unique, and then it names none
+        of them."""
+        out: Dict[str, Optional[str]] = {}
+        for eid, w in (await self._nodes_by(NodeVersionORM.qualified_name, "qualified_name", qnames)).items():
+            out[w.qualified_name] = None if w.qualified_name in out else eid
+        return out
 
-    async def _nodes_by(self, column, attr: str, keys: Iterable[str]) -> Dict[str, str]:
+    async def _nodes_by(self, column, attr: str, keys: Iterable[str]) -> Dict[str, Winner]:
+        """The live nodes whose ``attr`` is one of ``keys``, by entity id."""
         wanted = [k for k in dict.fromkeys(keys) if k]
         candidates: Set[str] = set()
-        for graph_id in {layer.graph_id for layer in self.layers}:
+        for graph_id, branches in self._branches().items():
             for chunk in _chunks(wanted, _LOOKUP_CHUNK):
-                async with db.graphver_session() as s:
+                async with _session() as s:
                     rows = (await s.execute(
                         select(NodeVersionORM.entity_id).where(
-                            NodeVersionORM.graph_id == graph_id, column.in_(chunk)).distinct())).all()
+                            NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id.in_(branches),
+                            column.in_(chunk)).distinct())).all()
                 candidates.update(r[0] for r in rows)
         live = await self.lookup_live("node", candidates)
         wanted_set = set(wanted)
-        return {getattr(w, attr): eid for eid, w in live.items() if getattr(w, attr) in wanted_set}
+        return {eid: w for eid, w in live.items() if getattr(w, attr) in wanted_set}
 
     async def edges_between(self, sources: Iterable[str], targets: Iterable[str]) -> Dict[tuple, str]:
         """``(source, target, edgeType) -> entity_id`` for the live edges from one of ``sources``
         to one of ``targets``."""
         sources, targets = set(sources), set(targets)
         candidates: Set[str] = set()
-        for graph_id in {layer.graph_id for layer in self.layers}:
+        for graph_id, branches in self._branches().items():
             for chunk in _chunks(list(sources), _LOOKUP_CHUNK):
-                async with db.graphver_session() as s:
+                async with _session() as s:
                     rows = (await s.execute(
                         select(EdgeVersionORM.entity_id, EdgeVersionORM.target_entity_id).where(
-                            EdgeVersionORM.graph_id == graph_id,
+                            EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(branches),
                             EdgeVersionORM.source_entity_id.in_(chunk)).distinct())).all()
                 candidates.update(eid for eid, target in rows if target in targets)
         live = await self.lookup_live("edge", candidates)
@@ -262,16 +314,17 @@ class Snapshot:
         found: Set[str] = set()
         seen: Set[str] = set(roots)
         frontier = list(seen)
-        graphs = {layer.graph_id for layer in self.layers}
+        graphs = self._branches()
         while frontier:
             nxt: List[str] = []
             for chunk in _chunks(frontier, _LOOKUP_CHUNK):
                 candidates: Set[str] = set()
-                for graph_id in graphs:
-                    async with db.graphver_session() as s:
+                for graph_id, branches in graphs.items():
+                    async with _session() as s:
                         rows = (await s.execute(
                             select(EdgeVersionORM.entity_id).where(
                                 EdgeVersionORM.graph_id == graph_id,
+                                EdgeVersionORM.branch_id.in_(branches),
                                 EdgeVersionORM.source_entity_id.in_(chunk)).distinct())).all()
                     candidates.update(r[0] for r in rows)
                 parents = set(chunk)
@@ -290,7 +343,7 @@ class Snapshot:
         commit). ``None`` otherwise."""
         if self.is_draft or len(self.layers) != 1:
             return None
-        async with db.graphver_session() as s:
+        async with _session() as s:
             graph = await s.get(GraphORM, self.graph_id)
             if graph is None or graph.main_head_commit_seq != self.as_of_seq:
                 return None
@@ -317,7 +370,7 @@ async def open_snapshot(*, graph_id: str, branch_id: Optional[str] = None, as_of
                         page_size: int = PAGE_SIZE) -> Snapshot:
     """The layers for ``graph_id`` on ``branch_id`` (default: published ``main``) at ``as_of_seq``
     (default: now — ``main`` pinned to its current head, so a long export is one snapshot)."""
-    async with db.graphver_session() as s:
+    async with _session() as s:
         graph = await s.get(GraphORM, graph_id)
         if graph is None:
             raise LookupError(f"unknown graph {graph_id}")

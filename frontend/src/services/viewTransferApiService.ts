@@ -12,7 +12,8 @@ import { TIMEOUTS } from '@/config/timeouts'
 import { useHealthStore } from '@/store/health'
 import { fetchWithTimeout } from './fetchWithTimeout'
 import {
-  downloadExportUrl, getExport, pollJob, triggerBrowserDownload, type Job,
+  downloadExportUrl, getExport, pollJob, remember, remembered, sendInParts, triggerBrowserDownload,
+  type Job, type JobStatus, type PartsUpload,
 } from './importExportApiService'
 import type { View } from './viewApiService'
 import type { ViewDefinitionDiff, ViewVersionSummary } from './viewVersionsApiService'
@@ -70,7 +71,7 @@ export interface BundleSource {
     catalogSourceIdentifier?: string | null
     identityProperty?: string | null
   }
-  ontology: { name?: string | null; version?: number | null; digest?: string | null }
+  ontology: { id?: string | null; name?: string | null; version?: number | null; digest?: string | null }
 }
 
 export interface BundleHeader {
@@ -369,13 +370,16 @@ export class ViewTransferError extends Error {
   readonly status: number
   readonly type?: string
   readonly code?: string
+  /** The refusal's own fields beside its type (e.g. a free graph name's `suggestion`). */
+  readonly detail?: Record<string, unknown>
 
-  constructor(message: string, status: number, type?: string, code?: string) {
+  constructor(message: string, status: number, type?: string, code?: string, detail?: Record<string, unknown>) {
     super(message)
     this.name = 'ViewTransferError'
     this.status = status
     this.type = type
     this.code = code
+    this.detail = detail
   }
 }
 
@@ -395,7 +399,7 @@ async function errorFrom(res: Response): Promise<ViewTransferError> {
   }
   if (detail && typeof detail === 'object') {
     const d = detail as { message?: string; type?: string; code?: string }
-    return new ViewTransferError(d.message || res.statusText, res.status, d.type, d.code)
+    return new ViewTransferError(d.message || res.statusText, res.status, d.type, d.code, detail as Record<string, unknown>)
   }
   return new ViewTransferError(text || res.statusText, res.status)
 }
@@ -418,6 +422,11 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+  return res.json() as Promise<T>
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const res = await send(path, { method: 'GET' })
   return res.json() as Promise<T>
 }
 
@@ -497,50 +506,87 @@ export function newRequestId(): string {
 export type PackageScope = 'view' | 'source'
 export type PackageDataVersion = 'published' | 'draft'
 
+/** A view package the server's export job builds: what `POST /packages` answered. */
 export interface PackageStarted {
   jobId: string
   graphId: string
   workspaceId: string
   fileName: string
-  bundleHash: string
+  status: JobStatus
   views: Array<{ viewId: string; version: number }>
+  requestId?: string | null
 }
 
 export interface ExportedPackage extends PackageStarted {
   bytes: number | null
   nodes: number | null
   edges: number | null
+  /** The views' fingerprint, as the package's manifest names it. */
+  bundleHash: string | null
+}
+
+/** The package of these views being built, remembered in this browser until its download starts:
+ *  the dialog that closed meanwhile finds it again. Keyed by the views, however they were listed. */
+const packageKey = (viewIds: string[]) => `view-package:${[...viewIds].sort().join(',')}`
+
+/** The package of these views the server is building for this browser, if any. */
+export function rememberedViewPackage(viewIds: string[]): PackageStarted | null {
+  try { return JSON.parse(remembered(packageKey(viewIds)) ?? 'null') } catch { return null }
+}
+
+/** Stop remembering the package of these views (it carries on on the server). */
+export function forgetViewPackage(viewIds: string[]): void {
+  remember(packageKey(viewIds), null)
 }
 
 /**
- * Package views with their graph data and download it. An export job builds the package on the
- * server (the data can be large); this starts it, follows it, and downloads the result.
+ * Have the server package views with their graph data: the views are sealed as versions now, and
+ * an export job builds the package (the data can be large). Remembered until its download starts
+ * (`followViewPackage`). Sending the same `requestId` again answers with the job it started.
  */
-export async function exportViewPackage(
+export async function startViewPackage(
   views: Array<{ viewId: string; version?: number | null }>,
-  options: { scope: PackageScope; dataVersion: PackageDataVersion; message?: string },
-  onJob?: (job: Job) => void,
-  signal?: AbortSignal,
-): Promise<ExportedPackage> {
+  options: { scope: PackageScope; dataVersion: PackageDataVersion; message?: string; requestId?: string },
+): Promise<PackageStarted> {
   const started = await postJson<PackageStarted>('/packages', {
     views: views.map((v) => (v.version ? { viewId: v.viewId, version: v.version } : { viewId: v.viewId })),
     scope: options.scope,
     dataVersion: options.dataVersion,
     message: options.message || null,
+    requestId: options.requestId ?? null,
   })
+  remember(packageKey(views.map((v) => v.viewId)), JSON.stringify(started))
+  return started
+}
+
+/**
+ * Follow a package's export job until it ends, then download the package. Once the job ended it is
+ * forgotten: a job that failed, or whose file is no longer kept, throws a `ViewTransferError` of
+ * type `package_failed`. Any other error lost touch with the job, which carries on and stays
+ * remembered; so does aborting (the dialog closed).
+ */
+export async function followViewPackage(
+  started: PackageStarted,
+  opts: { onTick?: (job: Job) => void; signal?: AbortSignal } = {},
+): Promise<ExportedPackage> {
   const job = await pollJob(() => getExport(started.workspaceId, started.graphId, started.jobId), {
-    intervalMs: 1000, onTick: onJob, signal,
+    onTick: opts.onTick, signal: opts.signal,
   })
-  if (job.status !== 'completed') {
-    throw new ViewTransferError(job.errorMessage || 'The package could not be built.', 500)
+  forgetViewPackage(started.views.map((v) => v.viewId))
+  if (job.status !== 'completed' || job.kept === false) {
+    throw new ViewTransferError(job.status === 'completed' ? 'The package is no longer kept. Export it again.'
+      : job.errorMessage || 'The package could not be built.', 500, 'package_failed')
   }
   triggerBrowserDownload(downloadExportUrl(started.workspaceId, started.graphId, started.jobId), started.fileName)
-  const summary = (job.summary ?? {}) as { nodes?: number; edges?: number; package?: { bytes?: number } }
+  const summary = (job.summary ?? {}) as {
+    nodes?: number; edges?: number; package?: { bytes?: number; bundleHash?: string | null }
+  }
   return {
     ...started,
     bytes: summary.package?.bytes ?? null,
     nodes: summary.nodes ?? null,
     edges: summary.edges ?? null,
+    bundleHash: summary.package?.bundleHash ?? null,
   }
 }
 
@@ -552,27 +598,116 @@ export interface PackagePart {
   bundleHash?: string
 }
 
+/** What a package's data holds by type, in the shape a data source's own stats take. */
+export interface PackageTypeStats {
+  nodeCount: number
+  edgeCount: number
+  entityTypeCounts: Record<string, number>
+  edgeTypeCounts: Record<string, number>
+}
+
+/** The semantic layer here that is a package source's own: the same one (`exact`), whether it
+ *  changed since (`drift`), and whether the package came from this environment. */
+export interface OntologyMatch {
+  exact: { ontologyId: string; name: string; version: number } | null
+  drift: boolean
+  sameEnvironment: boolean
+}
+
 export interface PackageInspectResult extends InspectResult {
-  /** Keeps the package's data on the server (for a day) until it is imported. */
+  /** Keeps the package's data on the server (for a day), for its imports to read. */
   uploadId: string
   package: {
     scope: PackageScope | null
-    data: { version?: PackageDataVersion; nodes?: number | null; edges?: number | null } | null
+    data: {
+      version?: PackageDataVersion; nodes?: number | null; edges?: number | null; typeStats?: PackageTypeStats | null
+    } | null
     createdAt?: string | null
     parts: Record<string, PackagePart>
     integrity: 'verified' | 'modified'
   }
+  /** Keyed by the file's source key (`views[].source`). */
+  ontologyMatch?: Record<string, OntologyMatch>
+  /** When the upload may be swept, and its data can no longer be imported. */
+  expiresAt?: string
 }
 
-/** Read a view package: every part checked, the data kept for the import that follows, and the
- *  views described as for a view file. */
-export async function inspectViewPackage(file: Blob): Promise<PackageInspectResult> {
-  const res = await send('/packages/inspect', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/zip' },
-    body: file,
+export type PackageUploadStatus = 'uploading' | 'inspecting' | 'ready' | 'invalid'
+
+/** A view package on its way up in parts, then checked by a job of its own. */
+export interface PackageUpload extends PartsUpload {
+  fileName: string
+  status: PackageUploadStatus
+  expiresAt: string
+  /** The check's job, once the upload is completed. */
+  jobId?: string | null
+  /** Why it is no package to import (`invalid`). */
+  error?: { code: string; message: string } | null
+  /** While it is checked: how far the check has got. */
+  phase?: string | null
+  progress?: number | null
+  processed?: number | null
+  total?: number | null
+}
+
+/** How far reading a package has got: its upload (the bytes the server holds), then its check. */
+export type PackageProgress =
+  | { stage: 'upload'; sent: number; total: number }
+  | { stage: 'check'; progress: number | null }
+
+const UPLOADS = '/packages/uploads'
+
+/** An upload this close to its expiry isn't resumed: the server takes no new import of its data
+ *  then (410 `upload_expired`), so the file goes up afresh. The server's own margin. */
+const EXPIRY_MARGIN_MS = 60 * 60 * 1000
+
+/**
+ * Read a view package: it goes up in parts (`sendInParts`), a job of the server's checks every
+ * part, and the views are described as for a view file. The data stays on the server (for a day),
+ * for any number of imports. The same file chosen again — after a failure, a reload, or in a
+ * wizard opened again — resumes its upload, or reads the package already checked.
+ */
+export async function inspectViewPackage(
+  file: File,
+  opts: { onProgress?: (progress: PackageProgress) => void; signal?: AbortSignal } = {},
+): Promise<PackageInspectResult> {
+  const upload = await sendInParts<PackageUpload>(file, {
+    key: `view-package-upload:${file.name}:${file.size}:${file.lastModified}`,
+    find: async (id) => {
+      const found = await getJson<PackageUpload>(`${UPLOADS}/${id}`)
+      return Date.parse(found.expiresAt) - Date.now() > EXPIRY_MARGIN_MS ? found : null
+    },
+    create: () => postJson<PackageUpload>(UPLOADS, { fileName: file.name, size: file.size }),
+    partUrl: (id, n) => `${BASE}${UPLOADS}/${id}/parts/${n}`,
+    onProgress: (sent, total) => opts.onProgress?.({ stage: 'upload', sent, total }),
+    signal: opts.signal,
   })
-  return res.json() as Promise<PackageInspectResult>
+  if (upload.status !== 'ready') {
+    opts.onProgress?.({ stage: 'check', progress: null })
+    // Asking again answers with the check already under way, and queues again one that broke.
+    await send(`${UPLOADS}/${upload.uploadId}/complete`, { method: 'POST', signal: opts.signal })
+    const checked = await pollJob(() => getJson<PackageUpload>(`${UPLOADS}/${upload.uploadId}`), {
+      signal: opts.signal,
+      until: (u) => u.status === 'ready' || u.status === 'invalid',
+      onTick: (u) => opts.onProgress?.({ stage: 'check', progress: u.progress ?? null }),
+    })
+    if (checked.status === 'invalid') {
+      throw new ViewTransferError(checked.error?.message || "This package couldn't be read.", 422,
+        'invalid_package', checked.error?.code)
+    }
+  }
+  return getJson<PackageInspectResult>(`/packages/${upload.uploadId}`)
+}
+
+/** A package upload as the server holds it now: 404 once it is gone, or isn't the caller's. */
+export function getPackageUpload(uploadId: string): Promise<PackageUpload> {
+  return getJson<PackageUpload>(`${UPLOADS}/${uploadId}`)
+}
+
+/** A package already uploaded and checked, read again from its upload (no file to send): 410
+ *  `upload_expired` once it is gone. */
+export function getViewPackage(uploadId: string): Promise<PackageInspectResult> {
+  return getJson<PackageInspectResult>(`/packages/${uploadId}`)
 }
 
 export interface PackageDataStarted {
@@ -588,12 +723,83 @@ export interface PackageDataStarted {
 
 /** Bring an inspected package's data into a new draft of the target data source. The view then
  *  follows into the same draft. Asking again for the same target answers with the job already
- *  started; another target is refused (409): the data went with that job. */
+ *  started (queued again if it failed); another target gets a draft and a job of its own. 410
+ *  (`upload_expired`) once the upload is about to expire: the file goes up again. */
 export function importPackageData(
   uploadId: string,
   body: { workspaceId: string; dataSourceId: string; viewId?: string | null; draftName?: string | null },
 ): Promise<PackageDataStarted> {
   return postJson<PackageDataStarted>(`/packages/${uploadId}/data`, body)
+}
+
+/** A brand-new data source for a package's data, as the person named it: on a graph connection
+ *  (FalkorDB) of their choice, under a graph name of its own, with a semantic layer (a draft one
+ *  too) or none. */
+export interface NewSourceRequest {
+  /** `nsr_` and 32 hex digits ({@link newSourceRequestId}): the same id sent again answers with
+   *  the data source it created. */
+  requestId: string
+  workspaceId: string
+  providerId: string
+  label: string
+  graphName: string
+  ontologyId: string | null
+}
+
+/** The new data source, and the job copying the package's data into it. The copy is followed on
+ *  the data source's own bootstrap status (`job.origin` is `package`). */
+export interface NewSourceStarted {
+  dataSourceId: string
+  graphId: string
+  jobId: string
+  status: string
+  label: string
+  graphName: string
+  ontologyId: string | null
+  /** What the semantic layer does with types it doesn't declare: keeps them. */
+  enforcement: 'permissive'
+  requestId: string
+}
+
+/** A request id for `createNewSourceFromPackage`: `nsr_` and 32 hex digits. */
+export function newSourceRequestId(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return `nsr_${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`
+}
+
+/**
+ * Create a new data source from an inspected package: an independent full copy of its data, on
+ * the chosen connection under the chosen graph name. Answers 202 at once (the copy runs as a job);
+ * the same `requestId` sent again, or the same target asked again, answers 200 with what the first
+ * request created. Refusals are `ViewTransferError`s by type: `upload_consumed` (this upload
+ * already made another data source: `detail.dataSourceId`), `ds_has_other_job`, `upload_expired`
+ * (410), `not_inspected`, `graph_name_unavailable` (`detail.suggestion`), `provider_unsupported`,
+ * `provider_unreachable`, `ontology_unknown`, `provisioning_failed` (502).
+ */
+export function createNewSourceFromPackage(uploadId: string, body: NewSourceRequest): Promise<NewSourceStarted> {
+  return postJson<NewSourceStarted>(`/packages/${uploadId}/new-source`, body)
+}
+
+/** The new data source a package file was asked for in this browser: one request id per file, kept
+ *  with what was asked and, once answered, what it created. `sending` marks a request whose answer
+ *  was never heard (the page went away first): asked again under the same id, it is the same. */
+export interface RememberedNewSource {
+  requestId: string
+  request?: NewSourceRequest
+  sending?: boolean
+  started?: NewSourceStarted | null
+}
+
+const newSourceKey = (fileKey: string) => `view-package-new-source:${fileKey}`
+
+export function rememberedNewSource(fileKey: string): RememberedNewSource | null {
+  try { return JSON.parse(remembered(newSourceKey(fileKey)) ?? 'null') } catch { return null }
+}
+
+/** Remember (or, with null, forget) the new data source asked of the file known as `fileKey`. */
+export function rememberNewSource(fileKey: string, value: RememberedNewSource | null): void {
+  remember(newSourceKey(fileKey), value && JSON.stringify(value))
 }
 
 /** A view package, by its name or its first bytes (a zip). */

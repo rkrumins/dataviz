@@ -32,12 +32,17 @@ class _Client:
         self.deletes += 1
 
 
-def _runner(*, ps, shared_with, client):
+async def _no_readers(*_a):
+    return []
+
+
+def _runner(*, ps, shared_with, client, key_in_use=_no_readers):
     """A ``PurgeRunner`` whose session is faked — no DB, no schema.
 
     ``ps`` is the ProjectionState row (or None); ``shared_with`` is the count of other LIVE graphs
     still projecting into the same FalkorDB name; ``client`` is the stub graph client (or None to
-    model "no graph client configured").
+    model "no graph client configured"); ``key_in_use`` answers who else reads the key (the
+    management DB's bindings: none, by default — asking the real one needs that database).
     """
     job = SimpleNamespace(id="job1", status="running", retry_count=0, summary={}, updated_at=None)
 
@@ -57,7 +62,19 @@ def _runner(*, ps, shared_with, client):
         yield _Session()
 
     factory = (lambda name, provider: client) if client is not None else None
-    return PurgeRunner(graph_factory=factory, session_factory=_session), job
+    return PurgeRunner(graph_factory=factory, session_factory=_session, key_in_use=key_in_use), job
+
+
+def _landing(job):
+    """The purge's lease, as one whose fenced checkpoint lands: the verdict reaches the job row."""
+    class _Lease:
+        job_id = job.id
+
+        async def checkpoint(self, _s, **values):
+            for column, value in values.items():
+                setattr(job, column, value)
+
+    return _Lease()
 
 
 def _ps(owned, name="cust_graph"):
@@ -68,7 +85,7 @@ def test_external_graph_is_never_dropped():
     """owns_falkor_graph=False (the default; the federated/customer case) → PROTECTED, untouched."""
     client = _Client()
     runner, job = _runner(ps=_ps(owned=False), shared_with=0, client=client)
-    _run(runner._phase_falkor("job1", "g1"))
+    _run(runner._phase_falkor(_landing(job), "g1"))
     assert client.deletes == 0                       # the customer's data is never touched
     assert job.summary["falkor"]["owned"] is False
     assert "PROTECTED" in job.summary["falkor"]["verdict"]
@@ -78,7 +95,7 @@ def test_owned_managed_graph_is_dropped():
     """owns_falkor_graph=True (a graph we minted) and not shared → the drop really happens."""
     client = _Client()
     runner, job = _runner(ps=_ps(owned=True, name="blank_ds1"), shared_with=0, client=client)
-    _run(runner._phase_falkor("job1", "g1"))
+    _run(runner._phase_falkor(_landing(job), "g1"))
     assert client.deletes == 1                        # our managed/versioned graph is dropped
     assert job.summary["falkor"]["verdict"].startswith("dropped")
 
@@ -87,7 +104,7 @@ def test_owned_but_still_shared_graph_is_protected():
     """Even a graph we own is not dropped while another surviving graph still projects into it."""
     client = _Client()
     runner, job = _runner(ps=_ps(owned=True, name="blank_ds1"), shared_with=2, client=client)
-    _run(runner._phase_falkor("job1", "g1"))
+    _run(runner._phase_falkor(_landing(job), "g1"))
     assert client.deletes == 0
     assert "still projected" in job.summary["falkor"]["verdict"]
 
@@ -96,6 +113,32 @@ def test_no_projection_state_is_a_noop():
     """No projection row → nothing to drop; the phase is a no-op, not a destructive guess."""
     client = _Client()
     runner, job = _runner(ps=None, shared_with=0, client=client)
-    _run(runner._phase_falkor("job1", "g1"))
+    _run(runner._phase_falkor(_landing(job), "g1"))
     assert client.deletes == 0
     assert job.summary["falkor"]["verdict"] == "no projected graph"
+
+
+def test_owned_graph_still_read_elsewhere_is_protected():
+    """A key we minted that another data source (or a catalog entry) still reads is kept."""
+    async def readers(*_a):
+        return [{"kind": "dataSource", "id": "ds_other"}]
+
+    client = _Client()
+    runner, job = _runner(ps=_ps(owned=True, name="blank_ds1"), shared_with=0, client=client,
+                          key_in_use=readers)
+    _run(runner._phase_falkor(_landing(job), "g1"))
+    assert client.deletes == 0
+    assert "still read by" in job.summary["falkor"]["verdict"]
+
+
+def test_owned_graph_whose_readers_cannot_be_asked_is_protected():
+    """No answer to "who else reads it?" keeps the key: the purge fails closed."""
+    async def unreachable(*_a):
+        raise ConnectionRefusedError("management DB down")
+
+    client = _Client()
+    runner, job = _runner(ps=_ps(owned=True, name="blank_ds1"), shared_with=0, client=client,
+                          key_in_use=unreachable)
+    _run(runner._phase_falkor(_landing(job), "g1"))
+    assert client.deletes == 0
+    assert job.summary["falkor"]["verdict"].startswith("PROTECTED: could not check")

@@ -80,41 +80,105 @@ is (`service.py:86-88`). It inserts the `JobORM` row and mints a self-describing
 (`service.py:102-105`).
 
 **Dispatch.** The endpoint stores the job's inputs (it streams the upload into the object store),
-then starts the job with `ImportExportService.start_import` / `start_export` (`service.py`). Where
-the job runs is `GRAPHVER_TRANSFER_INPROCESS`:
+then queues the job with `ImportExportService.start_import` / `start_export` / `start_publish`
+(`service.py`): the job stays `pending`, in phase `queued`, and the endpoint reports `pending`. A
+job is queued only once its inputs are stored, so no worker takes one whose upload is still
+arriving. **The web tier never runs a job.** `GRAPHVER_TRANSFER_INPROCESS` is gone (a process that
+still finds it set logs a WARNING); jobs run on the versioning worker's **transfer lane** (§2a), so
+a large import or export never shares a web pod's CPU, memory or event loop with requests, and
+neither a web restart nor gunicorn's 120 s worker timeout touches it.
 
-- **On** (the code default, so a single-process stack needs nothing else): in the web process that
-  took the request, as a detached task (`spawn_detached`, `app/services/background.py`). Not FastAPI
-  `BackgroundTasks`: those run inside the request's ASGI call, so the route's 120 s timeout tier
-  cancelled any import that outlasted it.
-- **Off** (the compose and Kubernetes manifests): the web process only **queues** the job. It stays
-  `pending`, in phase `queued`, and the versioning worker claims queued jobs oldest first with
-  `FOR UPDATE SKIP LOCKED` (`import_export/runner.py`), so a job goes to one worker only. Each worker
-  process runs `GRAPHVER_TRANSFER_SLOTS` (2) at a time (`ProjectionWorker._transfer_loop`), so a
-  large import or export never shares a web pod's CPU and memory with interactive requests. A job
-  is queued only once its inputs are stored, so no worker takes one whose upload is still arriving.
-  While a job waits, `get_job` reports `queuedAhead`, the jobs queued before it, and the dialogs say
-  "Waiting to start… 2 jobs are ahead of it." A queued job no worker starts within
-  `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours) reads as failed, since no worker may be running.
-  A stopping worker takes no more jobs and gives its running ones 40 s to finish. Every worker
-  runs the transfer loop, whatever its own setting, so the switch only needs setting on the web
-  pods. An export job also takes one of its pod's export turns (`GRAPH_EXPORT_CONCURRENCY`, 2), so
-  raise the two together.
+**Claim.** Each transfer-lane process runs `GRAPHVER_TRANSFER_SLOTS` (2) jobs at a time, plus one
+slot kept for `package_inspect` jobs so an inspection never waits behind a long import. A slot
+claims through `job_lease.claim`: one transaction, `FOR UPDATE … SKIP LOCKED`, so a job goes to one
+worker however many pods poll. Inspections go first, then the oldest job of a workspace running
+fewer than `GRAPHVER_JOBS_PER_WORKSPACE` (2), so one tenant queueing fifty imports does not hold
+every slot. The share is soft: with nobody else waiting, that tenant's jobs still run. Every claim
+adds one to the job's `retry_count`, its **epoch**, so (job id, epoch) names exactly one owner.
 
-Either way, `run_import_safe` / `_run_safe` wrap the run so any exception, or a cancellation, marks
-the job `failed` with an `error_message`: the failure is durable on the job row. A running job
-touches its `updated_at` every 15 s, and `get_job` reports one silent for `JOB_STALE_AFTER_SECS`
-(default 900) as `failed` so the UI stops waiting: its process went away (a restart, a killed pod).
+**Lease and fencing.** While a job runs, a heartbeat thread in its process (`LeaseKeeper`) touches
+its `updated_at` every `GRAPHVER_INGEST_HEARTBEAT_SECS` (30 s), off the event loop, so a busy
+window cannot starve it. Every write a job makes to its own row (a checkpoint, the finish, a
+failure) is conditional on (id, epoch, `running`), and a checkpoint commits in the same
+transaction as the work it records. A job silent for `GRAPHVER_INGEST_STALE_SECS` (120 s), because
+its pod was killed or ran out of memory, is **taken over** by the next claim. If the old owner was
+only slow, its next checkpoint is refused, that window rolls back, and its finish does nothing. A
+job taken over more than `max_retries` (3) times fails instead ("The worker running this job
+stopped 4 times…"), so it can't take a fifth worker down with it.
 
-> **Limitation — an interrupted job starts over.** Nothing resumes a job whose process stopped
-> mid-run: it reads as failed ("Start it again"), and running it again redoes it from the start.
-> The web tier's restarts no longer touch jobs once they run on the worker, but a worker's do.
-> Tracked in [09 — Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md).
+**Resume.** A job that is taken over or handed back carries on according to its type:
+
+- **Import** resumes from its cursor (`last_cursor`): `parse:<n>` (n rows staged), `node:<row>` /
+  `edge:<row>` (windows applied up to that staged row), `replace` (the replace's deletes, run
+  again whole). It redoes at most one window, `IMPORT_COMMIT_WINDOW` (10,000) rows
+  (`import_worker.py`).
+- **Export** starts over and writes to a key of its own attempt (`…/export-e<epoch>.<ext>`), so an
+  old owner still writing cannot interleave with it; the finish points `result_uri` at the file of
+  the attempt that finished (`export_worker.py`).
+- **Publish** is safe to run again: a draft an earlier attempt already merged is not published
+  twice, and only what follows a publish runs again (`run_publish`).
+- An import staged by a worker from before leases (rows in `import_rows` but no cursor) fails with
+  "The job stopped before it finished… Start it again." instead: nothing records how far it got.
+
+**Stop.** A stopping worker (a rollout, a scale-down) takes no more jobs and gives its running
+ones `GRAPHVER_DRAIN_SECS` (40) to hand themselves back at a window boundary, `pending` again with
+the cursor kept; then it cancels the rest and hands them back too. The manifests allow 60 s for
+this (`terminationGracePeriodSeconds`; compose `stop_grace_period`), and the next worker resumes
+them.
+
+**Status.** `get_job` is read-only. For a queued job it reports `queuedAhead`, the jobs queued
+before it in the same slot, and the dialogs say "Waiting to start… 2 jobs are ahead of it." For
+every job it reports `phase`, `progress`, `processed`/`total`, `attempt` (the epoch) and `stale`:
+running, but silent past `GRAPHVER_INGEST_STALE_SECS`, so its worker died and another will take it
+over. A silent job is no longer reported failed. The transfer lane's `JobReaper` runs every minute
+and fails what nothing will run: a job queued past `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours,
+meaning no transfer lane is running), and a job whose upload never finished (pending with no phase
+for an hour). An export job also takes one of its pod's export turns (`GRAPH_EXPORT_CONCURRENCY`,
+2), so raise the two together.
+
+`_run_safe` wraps every run. An exception other than losing the lease marks the job `failed` with
+an `error_message`, through the same fenced write, so the failure is durable on the job row and a
+superseded worker's failure changes nothing.
 
 The service is wired as a singleton (`get_import_export_service`, `versioning.py:1964-1972`) with two
 injected resolvers so the worker stays decoupled from the management DB: a **scope resolver**
 (view-scope for scoped export/replace) and an **ontology resolver** (live valid types for the
 per-row gate).
+
+### 2a. Where the jobs run: the worker lanes
+
+`python -m backend.app.services.versioning` runs the lanes `GRAPHVER_WORKER_LANES` names
+(comma-separated; all three by default, and an unknown name stops it from starting):
+
+| Lane | Runs | Helm and k8s base | Compose |
+|---|---|---|---|
+| `projection` | FalkorDB projection, idle-draft sweep, the object-store and staged-row sweeps, cache eviction | `versioning-worker`, 1 replica | `versioning-worker` |
+| `transfer` | import, export and publish jobs (2 slots), the `package_inspect` slot, `JobReaper` | `versioning-transfer`, HPA 2–8 at 70 % CPU, scale-down after 15 quiet minutes | `versioning-jobs` (`transfer,bootstrap`) |
+| `bootstrap` | "Enable version control" jobs (2 slots; at most `GRAPHVER_BOOTSTRAP_PER_PROVIDER`, 2, at once per FalkorDB provider fleet-wide), purges, the undo-window reaper | `versioning-bootstrap`, 2 replicas | `versioning-jobs` |
+
+Every lane pod carries the label `synodic.io/lane`, mounts a 12Gi `emptyDir` as `TMPDIR` for its
+spool files, and gets 60 s to stop. Each process sizes its versioned-store pool for its lanes
+(`config.lane_pool_size`) unless `GRAPHVER_POOL_SIZE` is set. The lanes must resolve the same object
+store and database as the web tier, because the web tier stores an upload and a lane reads it back:
+
+- **Helm:** every lane reads the ConfigMap and Secret viz-service reads; `config.objectStore` sets
+  `OBJECT_STORE_*` for both.
+- **k8s base:** set `OBJECT_STORE_*` in `common-config`, which both tiers read, never in
+  `viz-config` alone.
+- **Compose:** the two services share one environment block.
+
+> **Deploy the lanes, or nothing runs.** A deployment without the transfer lane queues imports,
+> exports and publishes that never start, and has no `JobReaper` to time them out. System status
+> reports the oldest claimable job per lane (`bootstrapJobs.lanes`), so a missing lane shows up
+> there as a backlog that only grows. In development, `SYNODIC_ROLE=dev` with
+> `GRAPHVER_PROJECTION_INPROCESS=1` runs the lanes inside the API process; on any other role that
+> setting is ignored. The quickstart (`docker-compose.quickstart.yml`, SQLite) runs no
+> versioning worker, so versioning, and with it these jobs, is not part of the quickstart.
+
+> **Upgrading from the single worker.** Roll it over in one release. Apply the migrations, scale the
+> old `versioning-worker` to 0 (on Helm, roll the web tier first, so nothing still runs jobs
+> in-process), then start the three lanes. Jobs the old workers left running are taken over once
+> they go silent. An import that had already staged rows fails with "Start it again".
 
 ---
 
@@ -423,25 +487,123 @@ one place every pod shares:
 
 **Or files on a mount.** `OBJECT_STORE_BACKEND=local` keeps the files under `IMPORT_STORE_ROOT`
 instead (`LocalFsObjectStore`), which keeps multi-GB files out of the database. Point it at a
-directory that every pod serving the API or running the versioning worker mounts:
+directory that every viz-service pod and every versioning lane pod mounts (§2a). The Helm chart and
+the k8s base mount none, so add the volume to both tiers:
 
 - a shared volume: a `ReadWriteMany` PersistentVolumeClaim (NFS, Amazon EFS, Filestore);
 - a bucket through its FUSE driver: S3 through Mountpoint for Amazon S3 (with `--allow-delete` and
   `--allow-overwrite`), GCS through Cloud Storage FUSE;
-- for one pod whose jobs run in-process, the pod's own disk (the default,
-  `/tmp/synodic-import-store`). Several pods can't share it, and neither can a separate worker.
+- for a single-process development run (`SYNODIC_ROLE=dev`, lanes in-process), the process's own
+  disk (the default, `/tmp/synodic-import-store`). No separate worker can read it, compose's
+  `versioning-jobs` included.
 
 A file is written once, front to back, and never appended to or renamed, which is all a bucket
 mount supports. A write that fails, or whose upload fails when the file closes, deletes what it
 wrote, so a reader never takes half a file for the whole one. A path-escape guard rejects keys that
 resolve outside the root, and the same sweep deletes files by age.
 
-> **Limitation — no native cloud client yet.** A bucket is used through its mount (above).
-> `OBJECT_STORE_BACKEND=s3|gcs` raises `NotImplementedError`
-> (`get_object_store`, `object_store.py:333-348`). Cloud backends implement the same `ObjectStore`
-> Protocol and differ only in `upload_target` (a presigned PUT vs the backend-streamed blob), so
-> callers don't change — but the presigned path is modeled, not yet backed (`UploadTarget`,
-> `:52-64`).
+**Which store.** The database is right for artifacts of up to about 1 GB each. Above that (a large
+export, or a view package with a big graph), use `local` on a shared mount or `s3` (below), which
+keep multi-GB blobs out of Postgres.
+
+### Optional S3/GCS object store
+
+`OBJECT_STORE_BACKEND=s3` keeps the artifacts in an S3-compatible bucket (`S3ObjectStore`,
+`storage/s3_store.py`): Amazon S3, MinIO, or Google Cloud Storage through its XML API. It is **off by
+default and nothing depends on it**. The default image doesn't carry its client: install
+`backend/requirements-s3.txt` (boto3) in the image of every tier that reads the store, which means
+viz-service and every versioning lane (§2a). `get_object_store` refuses a configuration without a
+bucket or without boto3, and says which is missing — on first use, not at startup: a misconfigured
+pod starts healthy, and every import, export and package route answers 500 until it is fixed.
+Unknown backends (`gcs` included: GCS goes through `s3`) still raise `NotImplementedError`. On Helm,
+the chart renders only `OBJECT_STORE_BACKEND` and `OBJECT_STORE_TTL_HOURS`, and no shipped image
+carries boto3: an `s3` deployment needs images built with `requirements-s3.txt` and the
+`OBJECT_STORE_S3_*` variables added by a post-renderer (or a chart of your own).
+
+| Variable | Default | |
+|---|---|---|
+| `OBJECT_STORE_S3_BUCKET` | none (required) | |
+| `OBJECT_STORE_S3_PREFIX` | `synodic-import-store` | Every key goes under it. The daily sweep deletes whatever under it is older than `OBJECT_STORE_TTL_HOURS`, so nothing else may write there. Empty (or `/`) means the default: never the bucket's root. |
+| `OBJECT_STORE_S3_ENDPOINT_URL` | Amazon S3 | e.g. `http://minio:9000`, `https://storage.googleapis.com` |
+| `OBJECT_STORE_S3_REGION` | boto3's | `auto` for GCS. With `PRESIGN=1` on Amazon S3, the bucket's own region: browsers can't follow S3's region redirect as boto3 does, so a URL signed for another region fails (`AuthorizationQueryParametersError`). |
+| `OBJECT_STORE_S3_ADDRESSING` | `auto` | `path` for MinIO, or `virtual` |
+| `OBJECT_STORE_S3_PRESIGN` | off | `1`: presigned URLs for browsers (below) |
+
+Credentials come from boto3's own chain: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or an IAM role
+(IRSA, an instance profile). It keeps the same `ObjectStore` contract as the other stores
+(`tests/test_object_store.py` runs one contract against all three):
+
+- Every bucket call runs in a worker thread, and so does signing a URL in a request (signing may
+  first refresh temporary credentials), so the event loop doesn't wait on the bucket. The client is
+  built once per process and configuration; with role credentials that first build resolves them
+  (an STS or instance-metadata call). Requests use s3v4 signing, 5 standard retries, and checksums
+  only where an operation requires one (botocore's default CRC32 checksums are refused by GCS).
+- A put of up to 16 MiB is one PutObject (a package part sent through the API is exactly that). A
+  larger one is a multipart upload in parts of just over 16 MiB, visible only once complete. The
+  chunks are held as they arrive and joined once per part, so a put holds about two parts' worth for
+  an instant, then one while the part is sent. A put that fails, or is cancelled, aborts its
+  multipart upload, also when cancelled while the upload was being created. One cancelled during its
+  last call (the PutObject, or completing the multipart upload) may still land, because that call
+  carries on in its thread; an export writes a key per attempt, so a late landing never replaces a
+  newer attempt's file. Give the bucket an `AbortIncompleteMultipartUpload` lifecycle rule (1 day)
+  for the uploads of a process that was killed before it could abort them.
+- A read is one ranged GET (`open_stream(start=…)`), stat is a HeadObject, and a delete is one
+  DeleteObject per object (GCS has no multi-object delete). Listings use ListObjects (v1), which both
+  APIs serve.
+- The sweep and the package-upload prune (`prune_older_than`) list the prefix and delete by
+  `LastModified`. Like the other stores, they keep the inputs of jobs that may still read them
+  (`jobs_input_prefixes`).
+
+**GCS.** Create an HMAC key for a service account with Storage Object Admin on the bucket (Cloud
+Storage → Settings → Interoperability) and set it as `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`,
+with `OBJECT_STORE_S3_ENDPOINT_URL=https://storage.googleapis.com` and `OBJECT_STORE_S3_REGION=auto`.
+
+**Presigned URLs** (`OBJECT_STORE_S3_PRESIGN=1`): the bytes move between the browser and the bucket
+without passing through an API worker.
+
+- **Package uploads.** While a package upload is `uploading`, `POST /packages/uploads` and
+  `GET /packages/uploads/{id}` carry `partUrls`: one presigned PUT per part, signed for that part's
+  exact length. The wizard sends each part there as a bare request (no cookies, no CSRF header). A
+  part that lands counts in `received` (a HeadObject per part) like one sent through
+  `PUT …/parts/{n}`, and completing the upload works as before. A completed upload hands out no
+  URLs. A part changed later through an old URL fails its import's checksum; it is never imported
+  as something else.
+- **How long a URL works.** A part URL is signed for a day and a download for an hour, but no URL
+  outlives the credentials that signed it. A role's temporary credentials (IRSA, an instance
+  profile, STS) last an hour by default and are renewed shortly before they run out, so a URL may
+  stop working about 15 minutes after it was signed. When the bucket refuses a part (403), the
+  wizard reads the upload again for freshly signed URLs and sends the part again.
+- **Downloads.** A finished export's or package's download (`…/exports/{id}/download`) answers
+  `307` with a presigned GET, which carries the file's name. Ranges and resumes go to the bucket.
+- The endpoint must be one browsers can reach, not an in-cluster name such as `http://minio:9000`.
+  The bucket's CORS must allow this site's origin to `PUT`; no custom header is sent, so no
+  `AllowedHeaders` is needed. The redirected download is a navigation and needs no CORS. For S3,
+  `aws s3api put-bucket-cors --bucket B --cors-configuration file://cors.json` with:
+
+  ```json
+  {"CORSRules": [{"AllowedOrigins": ["https://synodic.example.com"], "AllowedMethods": ["PUT"], "MaxAgeSeconds": 3600}]}
+  ```
+
+  For GCS, `gcloud storage buckets update gs://B --cors-file=cors.json` with
+  `[{"origin": ["https://synodic.example.com"], "method": ["PUT"], "maxAgeSeconds": 3600}]`. MinIO
+  allows every origin by default.
+- This site's Content-Security-Policy (`connect-src`) must let the browser reach the bucket too: add
+  the bucket's exact origin as the URLs name it to `CSP_CONNECT_SRC` (compose) or
+  `frontend.cspConnectSrc` (Helm). That is `https://B.s3.REGION.amazonaws.com` with virtual-host
+  addressing, or the endpoint itself with path addressing (`https://storage.googleapis.com`). Only
+  `https://` origins are accepted there, so presigning needs an HTTPS endpoint.
+- A part the browser can't send to its URL at all (no CSP entry or CORS rule for it) goes through
+  `PUT …/parts/{n}` instead, and so does every part after it: a misconfigured bucket slows an upload
+  down rather than breaking it.
+
+**Locally.** Set `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` (8+ characters) in `.env`; MinIO has
+no default login here. `docker compose --profile s3 up -d minio minio-init` then starts MinIO on
+`localhost:9000` with the bucket `synodic`. The compose images don't carry boto3, so run the backend outside them to
+use it: `pip install -r backend/requirements-s3.txt`, then set `OBJECT_STORE_BACKEND=s3`,
+`OBJECT_STORE_S3_BUCKET=synodic`, `OBJECT_STORE_S3_ENDPOINT_URL=http://localhost:9000`,
+`OBJECT_STORE_S3_ADDRESSING=path`, and `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` to that user and password. The opt-in
+tests run against it: `OBJECT_STORE_S3_TEST_ENDPOINT=http://localhost:9000 python -m pytest -q
+tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 
 ---
 
@@ -473,23 +635,22 @@ resolve outside the root, and the same sweep deletes files by age.
 
 ## 11. Limitations & open items (candid)
 
-- **An interrupted job starts over.** A job whose process stops mid-run reads as failed and runs
-  again from the start (§2). With `GRAPHVER_TRANSFER_INPROCESS` on (the code default), jobs share
-  the web process with requests; the compose and Kubernetes manifests turn it off, so they run on
-  the versioning worker.
+- **A taken-over export starts over.** An import resumes from its last window and a publish runs
+  again safely, but an export rewrites its file from the start under a new key (§2). A job whose
+  worker keeps dying fails once it has been taken over more than 3 times.
 - **JSON and xlsx imports are read whole** (a JSON array and a zip aren't line-streamable), so they
   stay at 100 MB; NDJSON, CSV and TSV go to 10 GB (§3d). Every format *writes* streaming.
 - **A 10 GB import takes hours**: about 1,500–2,500 rows a second (a 10 GB NDJSON file holds ~40M
-  rows). It runs on the worker and shows its place in the queue, not yet its progress.
+  rows). It runs on the transfer lane; `get_job` reports its phase and the rows processed.
 - **A large import's staged rows take their space in Postgres** until they are swept (§3c).
 - **A 50 GB export takes hours to prepare**: one job writes about 10 MB a second as NDJSON, 3.5 as
   CSV (which reads everything twice), on one worker. Nothing splits an export across workers yet,
   or cancels one being prepared; its file is swept a day after it is written.
 - **Exports download uncompressed**, so that their size is known and a download resumes: a 50 GB
   CSV is 50 GB on the wire.
-- **No native cloud client yet**: artifacts live in the management database, or on a mount, which
-  can be a bucket's FUSE mount (§9); S3/GCS clients and the presigned-upload path are stubbed
-  (`get_object_store`).
+- **The S3/GCS store is optional and off by default** (§9): boto3 isn't in the default image.
+  Presigned URLs serve package uploads and stored downloads, but not yet a data source's own import
+  uploads (`…/imports/uploads`), whose parts still go through the API.
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
 - **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
   (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow

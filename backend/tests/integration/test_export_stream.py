@@ -6,6 +6,8 @@ holds — for published ``main``, an earlier commit, a draft (committed and stag
 and deletes), a draft as of one of its commits, and a copy-on-write fork — with a page size small
 enough that every read spans many pages. Then that the view scope, a selection, and every format
 written from it agree with the materializing path, and that an empty export is still a valid file.
+A view package's format-2 lines (``stream.native_pages``) carry the same entities' payloads whole.
+A draft read as it stands now, inside ``pinned_reads``, reads one state while it is edited.
 """
 import asyncio
 import json
@@ -16,11 +18,11 @@ from sqlalchemy import func, select
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.import_export import stream
-from backend.app.services.versioning.import_export.export_worker import records_from_state
 from backend.app.services.versioning.import_export.rowmodel import column_order
 from backend.app.services.versioning.import_export.formats import get_adapter
-from backend.app.services.versioning.import_export.rowmodel import normalize
-from backend.app.services.versioning.import_export.snapshot import open_snapshot
+from backend.app.services.versioning.import_export.rowmodel import denormalize_edge, denormalize_node, normalize
+from backend.app.services.versioning.merkle import content_hash
+from backend.app.services.versioning.import_export.snapshot import open_snapshot, pinned_reads
 from backend.app.services.versioning.service import GraphVersioningService
 
 PAGE = 4          # every read spans several pages
@@ -52,6 +54,19 @@ def _e(eid, src, tgt, t="LINEAGE"):
 
 def _key(r):
     return (r["kind"], r["entity_id"])
+
+
+def records_from_state(nodes, edges):
+    """What the materializing export wrote for a ``{nodes, edges}`` state: the oracle the stream
+    is held to."""
+    qname = {eid: p.get("qualifiedName") for eid, p in nodes.items()}
+    urn = {eid: p.get("urn") for eid, p in nodes.items()}
+    return ([{"kind": "node", **denormalize_node(eid, content_hash(p), p)} for eid, p in nodes.items()]
+            + [{"kind": "edge", **denormalize_edge(
+                eid, content_hash(p), p,
+                source_qname=qname.get(p.get("sourceEntityId")), target_qname=qname.get(p.get("targetEntityId")),
+                source_urn=urn.get(p.get("sourceEntityId")), target_urn=urn.get(p.get("targetEntityId")))}
+               for eid, p in edges.items()])
 
 
 def _materialized_filter(nodes, edges, scope, ids, types):
@@ -106,6 +121,10 @@ async def _check(svc, gid, bid, *, seq=None, scope=None, ids=(), types=(), label
     got = await _streamed(snap, sel)
     assert got == want, (label, sorted(set(got) ^ set(want)),
                          [k for k in set(got) & set(want) if got[k] != want[k]][:3])
+    # A view package's format-2 lines: the same entities, each with its stored payload whole.
+    native = [json.loads(line) async for chunk in stream.native_pages(snap, sel) for line in chunk.splitlines()]
+    assert {_key(r): r["payload"] for r in native} == {
+        **{("node", eid): p for eid, p in nodes.items()}, **{("edge", eid): p for eid, p in edges.items()}}, label
     counted = await stream.count(snap, sel)
     assert counted == {"nodes": len(nodes), "edges": len(edges), "exact": True}, (label, counted)
     return snap, sel, want
@@ -212,6 +231,19 @@ async def _run() -> None:
     assert (await _file(snap, nothing, "csv"))[0].startswith("\ufeffkind,".encode())  # a BOM, then the header
     assert (await _file(snap, nothing, "csv"))[0].count(b"\n") == 1
     assert await _parse("xlsx", (await _file(snap, nothing, "xlsx"))[0]) == []
+
+    # A draft read as it stands now is pinned to no commit: inside pinned_reads every page comes
+    # from one state, whatever the draft takes meanwhile; outside it, the next page sees the edit.
+    async def _pages(snap):
+        return [w.entity_id async for page in snap.iter_live("node") for w in page]
+
+    async with pinned_reads():
+        pinned = await open_snapshot(graph_id=gid, branch_id=d, page_size=PAGE)
+        before = await _pages(pinned)
+        await svc.apply_ops(graph_id=gid, branch_id=d, actor="u", message="meanwhile",
+                            ops=[_n("n18", "urn:t:18")])
+        assert await _pages(pinned) == before and "n18" not in before
+    assert "n18" in await _pages(await open_snapshot(graph_id=gid, branch_id=d, page_size=PAGE))
 
     # A whole published graph is counted from its head pointers.
     head = await open_snapshot(graph_id=gid)

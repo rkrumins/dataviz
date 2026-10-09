@@ -114,7 +114,7 @@ A short, grounded roadmap. Detail lives in the linked docs.
 - **The register's §1 before new features.** Production safeguards that no shipped config
   turns on, the connection-tester SSRF, FalkorDB persistence on Kubernetes that nobody has
   checked, metrics that nothing scrapes, gaps in both Kubernetes deploy paths (no migration
-  step in the kustomize manifests, no versioning worker in the Helm chart), and a setup
+  step in the kustomize manifests, a Helm chart behind them on tokens and replicas), and a setup
   script that can overwrite live secrets — see
   [`docs/TECHNICAL_DEBT.md`](docs/TECHNICAL_DEBT.md), which also sets the order.
 - **Server-side membership for the placement contract.** Export, scoped replace, the search
@@ -135,5 +135,5 @@ A short, grounded roadmap. Detail lives in the linked docs.
   [`docs/versioning/09-scale-limits-and-roadmap.md`](docs/versioning/09-scale-limits-and-roadmap.md) §10.
 - **Integrity fingerprint at scale.** The Merkle root is deferred above 1,000,000 entities
   rather than built in memory; the full integrity checks still run.
-- **Imports and exports that resume.** An interrupted job still starts over, and there is
-  no native S3 or GCS object store yet.
+- **Exports that resume.** An interrupted import resumes from its last committed window; an
+  interrupted export still starts over.

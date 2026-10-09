@@ -9,11 +9,13 @@ import types
 
 import pytest
 
+from backend.app.services.versioning import config
 from backend.app.services.versioning.bootstrap_worker import (
     PHASES,
     BootstrapFailure,
     BootstrapRunner,
     _Reservoir,
+    _advance_phase,
     _explain_failed_checks,
     _label_of,
     _merge_scan_summary,
@@ -49,6 +51,19 @@ def test_phase_order_validates_before_anything_becomes_visible():
         "r.id) aren't stamped yet, an edit duplicates nodes and a delete silently no-ops"
     )
     assert PHASES[-1] == "finalize"
+
+
+def test_a_restart_clears_the_old_copy_before_anything_is_read_again():
+    # `reset` deletes what an earlier run imported (on the worker, in windows); it must come
+    # before the counts that the re-read is checked against.
+    assert PHASES[0] == "reset" and _next_phase("reset") == "counting"
+
+
+def test_advancing_a_phase_starts_it_from_scratch():
+    job = types.SimpleNamespace(current_phase="nodes", last_cursor="nodes:400", batch_size=7)
+    _advance_phase(job, "edges")
+    assert (job.current_phase, job.last_cursor, job.batch_size) == (
+        "edges", None, config.BOOTSTRAP_SCAN_WIDTH)
 
 
 def test_next_phase_walks_to_the_end():
@@ -88,7 +103,7 @@ def test_scan_summary_keeps_node_and_edge_tallies_apart():
                             rejects={"danglingEdges": 0}, sample=None, dupes=1)
     assert s["scanned"] == {"nodes": 2, "edges": 3,
                             "byLabel": {"Table": 2}, "byType": {"FLOWS_TO": 2}}
-    assert s["written"] == {"nodes": 2, "edges": 2}
+    assert (s["written"]["nodes"], s["written"]["edges"]) == (2, 2)
     assert s["collapsedParallelEdges"] == 1
 
 
@@ -169,10 +184,12 @@ def test_reservoir_resumes_from_checkpointed_state():
 # ── job-worker edge serialization is the canonical shape (regression: rebuild blanked edges) ──
 
 def _edges_to_rows(rows, live):
-    # `_edges_to_rows` reads no instance state, so drive it with a bare object as `self`.
-    commit = types.SimpleNamespace(id="cmt_1", commit_seq=1)
-    return BootstrapRunner._edges_to_rows(
-        object(), rows, commit, "main_1", "g1", "alice", None, live)
+    # `_edges_to_rows` reads no instance state, so drive it with a bare object as `self`. A scan
+    # row is (source id, target id, source urn, target urn, type, properties).
+    ctx = types.SimpleNamespace(commit_id="cmt_1", commit_seq=1, main_id="main_1", actor="alice")
+    win = BootstrapRunner._edges_to_rows(
+        object(), [(i, i + 1, *row) for i, row in enumerate(rows)], ctx, "g1", None, live)
+    return win.dicts, win.scanned, win.rejects, None, win.dupes
 
 
 def test_edges_to_rows_emits_canonical_payload_with_confidence_and_nested_props():

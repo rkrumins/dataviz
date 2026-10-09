@@ -3,8 +3,14 @@
  * and the call follows it to its commit — or raises the error the request would have raised (a
  * draft behind Published → NotUpToDateError), so the publish and review dialogs work unchanged.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mergeMergeRequest, NotUpToDateError, PUBLISH_JOB_POLL, publishBranch } from './versioningApiService'
+
+// The job is followed like every job (pollJob); its waits shortened so the tests don't sit them out.
+vi.mock('@/config/polling', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@/config/polling')>(),
+    jobPollDelayMs: () => 1,
+}))
 
 const realFetch = globalThis.fetch
 
@@ -20,8 +26,7 @@ function serve(responses: Array<[number, unknown]>) {
 const JOB = '/api/v1/ws1/versioning/graphs/g1/publish-jobs/vjob_1'
 
 describe('publishing a large draft', () => {
-    beforeEach(() => { PUBLISH_JOB_POLL.ms = 1 })
-    afterEach(() => { globalThis.fetch = realFetch; PUBLISH_JOB_POLL.ms = 2000; PUBLISH_JOB_POLL.patienceMs = 120_000 })
+    afterEach(() => { globalThis.fetch = realFetch; PUBLISH_JOB_POLL.patienceMs = 120_000 })
 
     it('publishes a small draft in the request, as before', async () => {
         const calls = serve([[200, { commitId: 'cmt_1' }]])

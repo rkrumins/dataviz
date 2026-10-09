@@ -9,7 +9,9 @@ alive and working and gets declared dead by its own colleague.
 Each test here pins a failure that was real before it was written.
 """
 import asyncio
+import contextlib
 import time
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -18,9 +20,10 @@ from backend.app.services.versioning import config
 from backend.app.services.versioning.bootstrap_worker import (
     BootstrapFailure,
     BootstrapRunner,
-    BootstrapSuperseded,
     _is_transient,
 )
+from backend.app.services.versioning.job_lease import Draining, Lease, Superseded
+from backend.app.services.versioning.purge_worker import PurgeRefused, PurgeRunner
 
 
 class _Boom(Exception):
@@ -51,9 +54,10 @@ def test_transient_classification(exc, transient, why):
 
 
 def test_our_own_control_exceptions_are_never_transient():
-    # These two drive the phase machine; treating either as "infrastructure" would retry a
-    # deliberate abort (superseded) or an integrity failure until the budget ran out.
-    assert not _is_transient(BootstrapSuperseded("taken over"))
+    # These drive the phase machine; treating any as "infrastructure" would retry a deliberate
+    # abort (superseded), a shutdown (draining) or an integrity failure until the budget ran out.
+    assert not _is_transient(Superseded("taken over"))
+    assert not _is_transient(Draining("the worker is stopping"))
     assert not _is_transient(BootstrapFailure("counts disagree", "integrity"))
 
 
@@ -64,6 +68,11 @@ def _runner(**kw) -> BootstrapRunner:
                            session_factory=lambda: None, **kw)
 
 
+def _lease(epoch: int = 3) -> Lease:
+    return Lease(job_id="job_1", job_type="bootstrap", epoch=epoch, workspace_id="ws1",
+                 graph_id="graph_1")
+
+
 async def test_a_blip_is_ridden_out_not_fatal(monkeypatch):
     """The headline: two dropped connections must not destroy a job that is 80% done."""
     r = _runner()
@@ -71,14 +80,35 @@ async def test_a_blip_is_ridden_out_not_fatal(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
     attempts = []
 
-    async def flaky(job_id, graph_id):
+    async def flaky(lease, graph_id):
         attempts.append(1)
         if len(attempts) < 3:
             raise ConnectionResetError("reset by peer")
         return True                                   # third attempt lands
 
-    assert await r._run_phase(flaky, "job_1", "graph_1", "edges") is True
+    assert await r._run_phase(_lease(), flaky, "graph_1", "edges") is True
     assert len(attempts) == 3, "the worker must reconnect and carry on, not give up"
+
+
+async def test_each_interruption_is_recorded(monkeypatch):
+    """Riding out an outage is something the user is TOLD (the report counts them)."""
+    r = _runner()
+    seen = []
+
+    async def note(lease, phase, exc):
+        seen.append((phase, type(exc).__name__))
+    monkeypatch.setattr(r, "_note_interruption", note)
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+    attempts = []
+
+    async def flaky(lease, graph_id):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise ConnectionResetError("reset by peer")
+        return True
+
+    await r._run_phase(_lease(), flaky, "graph_1", "edges")
+    assert seen == [("edges", "ConnectionResetError")] * 2
 
 
 async def test_a_real_bug_fails_immediately(monkeypatch):
@@ -86,12 +116,12 @@ async def test_a_real_bug_fails_immediately(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
     attempts = []
 
-    async def broken(job_id, graph_id):
+    async def broken(lease, graph_id):
         attempts.append(1)
         raise ValueError("bad ontology rule")
 
     with pytest.raises(ValueError):
-        await r._run_phase(broken, "job_1", "graph_1", "nodes")
+        await r._run_phase(_lease(), broken, "graph_1", "nodes")
     assert len(attempts) == 1, "a bug must surface at once, not be retried into the budget"
 
 
@@ -100,12 +130,12 @@ async def test_an_integrity_failure_is_never_retried(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
     attempts = []
 
-    async def failing(job_id, graph_id):
+    async def failing(lease, graph_id):
         attempts.append(1)
         raise BootstrapFailure("the source changed while we copied it", "integrity")
 
     with pytest.raises(BootstrapFailure):
-        await r._run_phase(failing, "job_1", "graph_1", "validate")
+        await r._run_phase(_lease(), failing, "graph_1", "validate")
     assert len(attempts) == 1
 
 
@@ -115,12 +145,33 @@ async def test_a_takeover_stops_us_at_once(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
     attempts = []
 
-    async def taken(job_id, graph_id):
+    async def taken(lease, graph_id):
         attempts.append(1)
-        raise BootstrapSuperseded("another worker took over this job")
+        raise Superseded("another worker took over this job")
 
-    with pytest.raises(BootstrapSuperseded):
-        await r._run_phase(taken, "job_1", "graph_1", "nodes")
+    with pytest.raises(Superseded):
+        await r._run_phase(_lease(), taken, "graph_1", "nodes")
+    assert len(attempts) == 1
+
+
+async def test_a_lost_lease_stops_the_wait_before_the_next_attempt(monkeypatch):
+    """Mid-outage, the LeaseKeeper finds the job is no longer ours: the next attempt must not
+    run — a window written now would race the new owner (and roll back at best)."""
+    r = _runner()
+    lease = _lease()
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+    attempts = []
+
+    async def note(_lease, _phase, _exc):
+        lease.lost.set()                              # the renewal came back without us
+    monkeypatch.setattr(r, "_note_interruption", note)
+
+    async def down(_lease, graph_id):
+        attempts.append(1)
+        raise ConnectionResetError("reset by peer")
+
+    with pytest.raises(Superseded):
+        await r._run_phase(lease, down, "graph_1", "nodes")
     assert len(attempts) == 1
 
 
@@ -137,12 +188,12 @@ async def test_an_endless_outage_gives_up_honestly(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", sleep)
     attempts = []
 
-    async def down(job_id, graph_id):
+    async def down(lease, graph_id):
         attempts.append(1)
         raise ConnectionResetError("the graph service is gone")
 
     with pytest.raises(ConnectionResetError):
-        await r._run_phase(down, "job_1", "graph_1", "nodes")
+        await r._run_phase(_lease(), down, "graph_1", "nodes")
     assert 1 < len(attempts) < 10, "it must retry, and it must stop retrying"
 
 
@@ -160,13 +211,13 @@ async def test_backoff_grows_and_is_capped(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", sleep)
     attempts = []
 
-    async def flaky(job_id, graph_id):
+    async def flaky(lease, graph_id):
         attempts.append(1)
         if len(attempts) <= 6:
             raise ConnectionResetError("down")
         return True
 
-    await r._run_phase(flaky, "job_1", "graph_1", "nodes")
+    await r._run_phase(_lease(), flaky, "graph_1", "nodes")
     assert waits == [1, 2, 4, 8, 8, 8], (
         "backoff must ease off a struggling server, but never wait longer than the cap")
 
@@ -256,40 +307,239 @@ async def test_a_timeout_at_the_floor_is_finally_waited_out(monkeypatch):
 def test_the_heartbeat_beats_well_inside_the_stale_window():
     """The livelock guard, as arithmetic.
 
-    `claim_one` steals any `running` job whose heartbeat is older than INGEST_STALE_SECS.
-    Before the timer existed, the only heartbeat was a window COMMIT — so a scan halving down
+    `claim_one` takes over any `running` job whose heartbeat is older than INGEST_STALE_SECS.
+    Before the heartbeat had a timer, the only one was a window COMMIT — so a scan halving down
     its ladder, or a validate anti-joining a 10M-row commit, went quiet for minutes while
     working perfectly, and a second worker declared it dead. Fencing kept the data safe, but
-    the loser re-claimed in turn and two healthy workers traded the same window forever.
+    the loser re-claimed in turn and two healthy workers traded the same window forever. The
+    LeaseKeeper thread renews every INGEST_HEARTBEAT_SECS, whatever the event loop is doing.
     """
     assert config.INGEST_HEARTBEAT_SECS * 3 <= config.INGEST_STALE_SECS, (
         "a worker must be able to miss two beats and still not be presumed dead")
 
 
-async def test_the_heartbeat_goes_quiet_once_the_job_is_not_ours(monkeypatch):
-    """A superseded worker that kept beating would fight the new owner for the job."""
-    beats = []
+# ── run_job: the slot-loop protocol ──────────────────────────────────────────
+#
+# run_job never raises: it ends the job (finish/fail), hands it back (release), or — when the
+# job is no longer its own — stops without writing anything at all.
 
-    class _Job:
-        id, status, retry_count = "job_1", "running", 7      # epoch moved on: 7 != our 5
-        updated_at = None
+def _job(**kw):
+    return SimpleNamespace(**{
+        "id": "job_1", "status": "running", "retry_count": 3, "current_phase": "nodes",
+        "last_cursor": "nodes:4", "graph_id": "graph_1", "summary": {}, "batch_size": 7,
+        "data_source_id": "ds1", "workspace_id": "ws1", "processed": 4, "total": 9, **kw})
 
-    class _Session:
-        async def __aenter__(self):
-            return self
 
-        async def __aexit__(self, *a):
-            return False
-
+def _sessions(job):
+    class _S:
         async def get(self, _model, _id):
-            beats.append(1)
-            return _Job()
+            return job
 
-    r = BootstrapRunner(graph_factory=lambda *a, **k: None, session_factory=_Session)
-    r._epoch["job_1"] = 5                                    # we hold an older claim
-    monkeypatch.setattr(config, "INGEST_HEARTBEAT_SECS", 0)
-    await asyncio.wait_for(r._heartbeat("job_1"), timeout=2)
-    assert beats == [1], "it must look once, see it is not ours, and stop"
+    @contextlib.asynccontextmanager
+    async def factory():
+        yield _S()
+    return factory
+
+
+def _recording_lease(*, landed: bool = True, checkpoint_raises=None) -> Lease:
+    """A real lease (check(), retry_transient) whose writes are recorded, not executed."""
+    lease = _lease()
+    lease.calls = []
+
+    async def fail(message, code="internal", action=None, phase=None):
+        lease.calls.append(("fail", code, action))
+        return landed
+
+    async def release():
+        lease.calls.append(("release",))
+        return landed
+
+    async def finish(status="completed", **values):
+        lease.calls.append(("finish", status))
+        return landed
+
+    async def checkpoint(_s, **values):
+        lease.calls.append(("checkpoint", values))
+        if checkpoint_raises is not None:
+            raise checkpoint_raises
+
+    lease.fail, lease.release, lease.finish, lease.checkpoint = fail, release, finish, checkpoint
+    return lease
+
+
+def _driven(job, **phases) -> BootstrapRunner:
+    r = BootstrapRunner(graph_factory=lambda *a, **k: None, session_factory=_sessions(job))
+    for name, fn in phases.items():
+        setattr(r, f"_phase_{name}", fn)
+    return r
+
+
+async def test_a_job_no_longer_ours_stops_without_writing():
+    """Taken over (a newer epoch) or abandoned: not a failure, and not ours to record."""
+    lease = _recording_lease()
+    for job in (_job(retry_count=4), _job(status="cancelled")):
+        out = await _driven(job).run_job(lease)
+        assert out["status"] == "superseded"
+    assert lease.calls == [], "a superseded worker must not touch the job row"
+
+
+async def test_a_stopping_worker_hands_the_job_back():
+    lease = _recording_lease()
+    lease.drain.set()
+    out = await _driven(_job()).run_job(lease)
+    assert out["status"] == "released" and lease.calls == [("release",)]
+
+
+async def test_a_cancelled_job_task_releases_and_still_dies():
+    """Past the drain deadline the slot loop cancels the task: the job is handed back (under a
+    shield) and the cancellation is NOT swallowed."""
+    lease = _recording_lease()
+
+    async def stuck(_lease, _graph_id):
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await _driven(_job(), nodes=stuck).run_job(lease)
+    assert lease.calls == [("release",)]
+
+
+@pytest.mark.parametrize("exc, code, action", [
+    (BootstrapFailure("the source changed while we copied it", "integrity"),
+     "integrity", "restart"),
+    (ValueError("a bug"), "infrastructure", "resume"),
+    (BootstrapFailure("the import commit is missing", "internal"), "internal", None),
+])
+async def test_a_failure_is_recorded_with_what_the_user_can_do(exc, code, action):
+    """``summary.failure.action`` is what the UI offers: an integrity failure needs a fresh read
+    (resuming would fail the same check), an infrastructure one resumes, an internal one is a
+    bug no button fixes."""
+    lease = _recording_lease()
+
+    async def boom(_lease, _graph_id):
+        raise exc
+
+    out = await _driven(_job(), nodes=boom).run_job(lease)
+    assert out["status"] == "failed" and lease.calls == [("fail", code, action)]
+
+
+async def test_a_phase_advance_is_a_compare_and_set():
+    """The advance re-checks, in its own transaction, that the job is still ours AND still at
+    the cursor the finished phase ended on — then starts the next phase from scratch."""
+    job = _job()
+    lease = _recording_lease()
+
+    async def done(_lease, _graph_id):
+        return True
+
+    async def stop(_lease, _graph_id):
+        raise BootstrapFailure("stop here", "internal")
+
+    await _driven(job, nodes=done, edges=stop).run_job(lease)
+    assert lease.calls[0] == ("checkpoint", {"expect_cursor": "nodes:4"})
+    assert (job.current_phase, job.last_cursor, job.batch_size) == (
+        "edges", None, config.BOOTSTRAP_SCAN_WIDTH)
+
+
+async def test_an_advance_by_a_worker_that_lost_the_job_is_not_made():
+    job = _job()
+    lease = _recording_lease(checkpoint_raises=Superseded("moved on"))
+
+    async def done(_lease, _graph_id):
+        return True
+
+    out = await _driven(job, nodes=done).run_job(lease)
+    assert out["status"] == "superseded"
+    assert (job.current_phase, job.last_cursor) == ("nodes", "nodes:4"), "nothing may move"
+
+
+async def test_a_job_paused_for_a_decision_stops_without_another_write():
+    """The pre-flight's last unit put the job back to pending (``awaiting_decision``) in its own
+    fenced write. The driver must stop there: no phase advance, no finish — those would clobber
+    the pause and hand the job straight back to a worker."""
+    lease = _recording_lease()
+
+    async def paused(_lease, _graph_id):
+        return "paused"
+
+    runner = _driven(_job(current_phase="counting"), counting=paused)
+    runner._contexts[(lease.job_id, lease.epoch)] = object()
+    out = await runner.run_job(lease)
+    assert out["status"] == "paused" and lease.calls == []
+    assert runner._contexts == {}, "a run's cached context goes with the run"
+
+
+async def test_a_backfill_write_pauses_for_the_readers_only_when_it_wrote(monkeypatch):
+    """Each write to the live source graph holds its write lock: the job steps aside for the
+    canvas's readers after one that changed something — and not after one that matched nothing."""
+    import backend.app.services.versioning.bootstrap_worker as bw
+    monkeypatch.setattr(config, "BOOTSTRAP_BACKFILL_PAUSE_MS", 200)
+    pauses, answers = [], [[[3]], [[0]]]
+
+    async def q(client, cypher, params=None, *, timeout_ms=0, read_only=False):
+        assert not read_only
+        return type("R", (), {"result_set": answers.pop(0)})()
+
+    async def sleep(d):
+        pauses.append(d)
+
+    monkeypatch.setattr(bw, "_q", q)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    r = _runner()
+    assert await r._write(object(), "UNWIND $rows AS row RETURN count(row)", [{"x": 1}]) == 3
+    assert await r._write(object(), "UNWIND $rows AS row RETURN count(row)", [{"x": 1}]) == 0
+    assert await r._write(object(), "never sent", []) == 0
+    assert pauses == [0.2]
+
+
+async def test_finishing_a_job_that_is_no_longer_ours_is_not_a_completion():
+    lease = _recording_lease(landed=False)
+
+    async def done(_lease, _graph_id):
+        return True
+
+    out = await _driven(_job(current_phase="finalize"), finalize=done).run_job(lease)
+    assert out["status"] == "superseded" and lease.calls == [("finish", "completed")]
+
+
+# ── the purge shares the lane, and the same outages ──────────────────────────
+#
+# Nothing retries a failed purge but a person asking again, and until it finishes the data
+# source can't be enabled again — so one dropped connection must not fail it either.
+
+def _purging(job, run_phase) -> PurgeRunner:
+    r = PurgeRunner(session_factory=_sessions(job))
+    r._run_phase = run_phase
+    return r
+
+
+async def test_a_purge_rides_out_a_blip(monkeypatch):
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+    lease = _recording_lease()
+    attempts = []
+
+    async def flaky(_phase, _lease, _graph_id):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise OperationalError("DELETE", {}, ConnectionResetError("reset by peer"))
+        return True                                   # the window lands on the third try
+
+    out = await _purging(_job(current_phase="finalize"), flaky).run_job(lease)
+    assert out["status"] == "completed" and len(attempts) == 3
+    assert lease.calls == [("finish", "completed")]
+
+
+async def test_a_purge_refusal_is_never_retried(monkeypatch):
+    monkeypatch.setattr(asyncio, "sleep", _noop_sleep)
+    lease = _recording_lease()
+    attempts = []
+
+    async def refused(_phase, _lease, _graph_id):
+        attempts.append(1)
+        raise PurgeRefused("this graph is still live", "graph_not_deleted")
+
+    out = await _purging(_job(current_phase="count"), refused).run_job(lease)
+    assert out["status"] == "failed" and len(attempts) == 1
+    assert lease.calls == [("fail", "graph_not_deleted", None)]
 
 
 async def _noop(*a, **k):

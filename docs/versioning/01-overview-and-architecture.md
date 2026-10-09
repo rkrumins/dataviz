@@ -175,13 +175,14 @@ replaces — a defensive invariant that closed a real merge-time data-loss class
 ## 7. Deployment topology
 
 - **viz-service (FastAPI).** Hosts the `/versioning` and `/graph` routers and
-  `GraphVersioningService`. Optionally runs the projection worker **in-process** when
-  `GRAPHVER_PROJECTION_INPROCESS=1` (for a single-node install; no compose file sets it) — see
-  `backend/app/main.py:1530`.
-- **Standalone projection worker.** `python -m backend.app.services.versioning` runs the reconciling
-  projector as its own process for production/multi-node — Compose and the Kubernetes manifests
-  run it — with the same rollup-rebuild hook as the in-process path, and it also hosts the
-  "Enable version control" jobs, the data-source purge and the import/export jobs.
+  `GraphVersioningService`. It never runs jobs: it queues them. Only a single-process development
+  run (`SYNODIC_ROLE=dev` with `GRAPHVER_PROJECTION_INPROCESS=1`) runs the worker lanes
+  **in-process** — see `backend/app/main.py:1525`.
+- **Versioning worker lanes.** `python -m backend.app.services.versioning` runs the lanes
+  `GRAPHVER_WORKER_LANES` names — `projection` (the reconciling projector, with the same
+  rollup-rebuild hook as the in-process path), `transfer` (import, export and publish jobs) and
+  `bootstrap` ("Enable version control" jobs, the data-source purge and its reaper). Compose, the
+  Kubernetes manifests and the Helm chart run them ([08](08-import-export.md) §2a).
 - **Aggregation worker.** Maintains `:AGGREGATED` rollups on full-seed / stale windows via a triggered
   job. **Redis** carries projection nudges (stream) and cache leases/locks.
 - **Postgres.** The `graphver` schema is **decoupled** — point `GRAPHVER_DB_URL` at its own instance
