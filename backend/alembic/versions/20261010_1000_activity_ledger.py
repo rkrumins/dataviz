@@ -55,6 +55,10 @@ _INDEXES = (
     ("idx_aal_projection_version", ["projection_version"]),
 )
 
+#: The workspace lens: a workspace's workspace-audience rows only.
+_LENS = "idx_aal_workspace_lens"
+_LENS_WHERE = "audience = 'workspace'"
+
 _SUPERSEDED = "idx_auth_audit_event_type"
 
 
@@ -89,6 +93,11 @@ def upgrade() -> None:
     for name, cols in _INDEXES:
         if name not in existing:
             op.create_index(name, _TABLE, cols)
+    if _LENS not in existing:
+        op.create_index(
+            _LENS, _TABLE, ["workspace_id", "occurred_at"],
+            postgresql_where=sa.text(_LENS_WHERE), sqlite_where=sa.text(_LENS_WHERE),
+        )
     # ``(event_type)`` is a prefix of ``idx_aal_type_occurred``: everything it
     # answered, that answers, and every index is a write per recorded event.
     if _SUPERSEDED in existing:
@@ -100,7 +109,7 @@ def downgrade() -> None:
     existing = _indexes(bind)
     if _SUPERSEDED not in existing:
         op.create_index(_SUPERSEDED, _TABLE, ["event_type"])
-    for name, _cols in _INDEXES:
+    for name in (*(n for n, _ in _INDEXES), _LENS):
         if name in existing:
             op.drop_index(name, table_name=_TABLE)
     have = _columns(bind)

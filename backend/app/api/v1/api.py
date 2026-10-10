@@ -22,6 +22,7 @@ from .endpoints import (
     admin_users_lookup,
     admin_sso_config,
     me_identities,
+    activity,
     audit,
     sso_activity,
     sso_failures,
@@ -221,6 +222,20 @@ api_router.include_router(
     audit.router,
     prefix="/admin/audit",
     tags=["admin:audit"],
+)
+
+# The activity ledger: who did what, where, when and why. The platform-wide
+# lens for auditors, and one workspace's lens for its admins — the same
+# handlers, with the workspace mount's scope forced server-side.
+api_router.include_router(
+    activity.router,
+    prefix="/admin/activity",
+    tags=["admin:activity"],
+)
+api_router.include_router(
+    activity.workspace_router,
+    prefix="/admin/workspaces/{ws_id}/activity",
+    tags=["admin:activity:workspace"],
 )
 
 # Who could not sign in, why, and whether they have since — the audit

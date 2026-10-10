@@ -226,3 +226,48 @@ async def test_a_replica_that_loses_the_claim_builds_nothing(monkeypatch):
     shutdown.set()
     await asyncio.wait_for(task, timeout=2)
     assert passes["n"] == 0
+
+
+# ── Entries that are not analytics documents ─────────────────────────
+
+
+async def test_a_short_ttl_holds_on_every_tier(monkeypatch):
+    """A document cached for a minute must not live five in the in-process
+    tier because it happened to be read back from Redis."""
+    store: dict = {}
+
+    async def _get(key):
+        return store.get(key)
+
+    async def _set(key, value, ttl=None):
+        store[key] = value
+        return True
+
+    monkeypatch.setattr(analytics_cache, "_redis_get", _get)
+    monkeypatch.setattr(analytics_cache, "_redis_set", _set)
+
+    async def _build():
+        return {"n": 1}
+
+    await analytics_cache.cached("k:short", _build, ttl=60)
+    analytics_cache.clear()          # another replica: Redis has it, memory does not
+    await analytics_cache.cached("k:short", _build, ttl=60)
+    expires, _ = analytics_cache._memory["k:short"]
+    import time as _time
+    assert expires - _time.monotonic() <= 61
+
+
+async def test_a_redis_only_entry_never_lands_in_process(monkeypatch):
+    """Activity folds hold every person in their span: one copy per worker
+    would be memory nobody budgeted for."""
+    builds = {"n": 0}
+
+    async def _build():
+        builds["n"] += 1
+        return {"big": True}
+
+    assert await analytics_cache.cached("k:fold", _build, memory=False) == {"big": True}
+    assert "k:fold" not in analytics_cache._memory
+    # Without Redis there is nothing to reuse it from, so it is rebuilt.
+    await analytics_cache.cached("k:fold", _build, memory=False)
+    assert builds["n"] == 2

@@ -32,6 +32,7 @@ tests/test_aggregation_run_record.py
 tests/test_aggregation_scan_shrink.py
 tests/test_aggregation_settings.py
 tests/test_alembic_revision_lengths.py
+tests/test_api_activity.py
 tests/test_api_graph.py
 tests/test_assignment_engine.py
 tests/test_assignment_engine_contract.py

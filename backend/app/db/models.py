@@ -3299,6 +3299,15 @@ class AuthAuditLogORM(Base):
         Index("idx_aal_actor_occurred", "actor_id", "occurred_at"),
         Index("idx_aal_subject_occurred", "subject_id", "occurred_at"),
         Index("idx_aal_workspace_occurred", "workspace_id", "occurred_at"),
+        # The workspace lens: what a workspace admin may read is only the
+        # workspace-audience rows, and a workspace's view and group activity
+        # (platform audience) can far outnumber them. Through the index
+        # above, a page scanned past all of those first — 315 ms on a
+        # workspace of 100k rows. Partial, so it costs a write only for the
+        # rows it answers.
+        Index("idx_aal_workspace_lens", "workspace_id", "occurred_at",
+              postgresql_where=text("audience = 'workspace'"),
+              sqlite_where=text("audience = 'workspace'")),
         Index("idx_aal_ds_occurred", "data_source_id", "occurred_at"),
         Index("idx_aal_target_occurred", "target_type", "target_id", "occurred_at"),
         Index("idx_aal_type_occurred", "event_type", "occurred_at"),

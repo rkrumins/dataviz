@@ -20,10 +20,13 @@ import os
 import uuid
 
 import pytest
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, insert, select, text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.db.models import AuthAuditLogORM, OutboxEventORM
+from backend.app.db.repositories import activity_repo
+from backend.app.db.repositories.activity_repo import ActivityFilter
 from backend.app.db.singleton import try_xact_lock
 from backend.app.services import outbox_relay
 from backend.app.services.activity import catalogue
@@ -175,3 +178,37 @@ async def test_history_is_reprojected_in_place(factory, run_id):
     assert {(r.category, r.actor_id, r.projection_version) for r in rows} == {
         ("access", "usr_admin", catalogue.PROJECTION_VERSION),
     }
+
+
+async def test_a_person_filter_never_walks_the_timeline(factory):
+    """Newest-first over "this person, as actor or subject" is the query
+    Postgres plans worst: it can walk the whole timeline index filtering row
+    by row, which for a person with no events is every row in the ledger
+    (80 s on ten million). The page must be read through the per-person
+    indexes instead, one bounded scan each."""
+    stmt = activity_repo.page_statement(
+        ActivityFilter(person_ids=frozenset({"usr_nobody", "usr_somebody"})), limit=50,
+    )
+    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    async with factory() as s, s.begin():
+        # A scratch ledger is too small for the planner to bother with
+        # indexes at all; this asks which ones it reaches for when it must.
+        await s.execute(text("SET LOCAL enable_seqscan = off"))
+        plan = "\n".join((await s.execute(text("EXPLAIN " + sql))).scalars())
+    assert "idx_aal_actor_occurred" in plan and "idx_aal_subject_occurred" in plan, plan
+    assert "idx_aal_occurred " not in plan and "idx_aal_occurred\n" not in plan, plan
+
+
+async def test_the_workspace_lens_reads_its_own_index(factory):
+    """A workspace admin reads only workspace-audience rows, and a workspace's
+    view and group activity can far outnumber them. Through the full
+    workspace index a page scanned past all of those first; the partial
+    index holds exactly the rows the lens reads."""
+    stmt = activity_repo.page_statement(
+        ActivityFilter(audience="workspace", workspace_id="ws_lens_test"), limit=50,
+    )
+    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    async with factory() as s, s.begin():
+        await s.execute(text("SET LOCAL enable_seqscan = off"))
+        plan = "\n".join((await s.execute(text("EXPLAIN " + sql))).scalars())
+    assert "idx_aal_workspace_lens" in plan, plan

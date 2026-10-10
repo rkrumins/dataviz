@@ -148,7 +148,7 @@ async def claim(name: str, *, ttl: float) -> bool:
         return True
 
 
-def _memory_put(key: str, value: Any) -> None:
+def _memory_put(key: str, value: Any, ttl: float | None = None) -> None:
     """Store one entry, first dropping whatever has aged out of reach."""
     now = time.monotonic()
     if len(_memory) >= _MEMORY_MAX_ENTRIES:
@@ -160,7 +160,7 @@ def _memory_put(key: str, value: Any) -> None:
         # rebuild, which is what the read-through path is for.
         if len(_memory) >= _MEMORY_MAX_ENTRIES:
             _memory.clear()
-    _memory[key] = (now + read_ttl_seconds(), value)
+    _memory[key] = (now + (read_ttl_seconds() if ttl is None else ttl), value)
 
 
 def _memory_get(key: str) -> Optional[Any]:
@@ -174,26 +174,34 @@ def _memory_get(key: str) -> Optional[Any]:
     return value
 
 
-async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
+async def cached(
+    key: str, build: Callable[[], Awaitable[Any]], *,
+    ttl: float | None = None, memory: bool = True,
+) -> Any:
     """Return ``key``'s document, computing it at most once per TTL per key.
 
     ``build`` is a factory rather than an awaited coroutine so that followers
-    joining a flight never re-invoke the work themselves.
+    joining a flight never re-invoke the work themselves. ``ttl`` sets an
+    entry's life apart from the epoch's, for a document whose readers expect
+    it fresher, or that stays valid longer. ``memory=False`` keeps it out of
+    the per-process tier — for a document too large to hold a copy of in
+    every worker: Redis alone serves it, and without Redis it is rebuilt.
     """
-    hit = _memory_get(key)
+    hit = _memory_get(key) if memory else None
     if hit is not None:
         return hit
     hit = await _redis_get(key)
     if hit is not None:
         # Populate the local layer too: the next read on this replica skips
         # even the Redis round trip.
-        _memory_put(key, hit)
+        if memory:
+            _memory_put(key, hit, ttl)
         return hit
 
     async def _compute() -> Any:
         # Re-check inside the flight: the leader may have landed while this
         # caller was queueing, and recomputing would waste the dedup entirely.
-        again = _memory_get(key)
+        again = _memory_get(key) if memory else None
         if again is not None:
             return again
         value = await build()
@@ -203,8 +211,9 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
         # while getting no benefit. Negatives are cheap to recompute; don't
         # store them.
         if value is not None:
-            _memory_put(key, value)
-            await _redis_set(key, value)
+            if memory:
+                _memory_put(key, value, ttl)
+            await _redis_set(key, value, ttl)
         return value
 
     return await _flight.run(("analytics", key), _compute)

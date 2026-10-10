@@ -124,9 +124,6 @@ class PageNames:
     #: people and workspaces too — to the one name a sentence shows for it.
     names: dict[str, str] = field(default_factory=dict)
 
-    def name_of(self, ref: str | None) -> str | None:
-        return self.names.get(ref) if ref else None
-
 
 async def name_page(
     session: AsyncSession,
