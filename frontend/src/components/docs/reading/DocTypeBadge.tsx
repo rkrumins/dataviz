@@ -38,6 +38,14 @@ export const DOC_TYPES: Record<string, DocType> = {
   'infra-launch-scale': 'explanation',
   'infra-scaling-250m': 'explanation',
   'read-path-performance': 'explanation',
+  'versioning-branching-and-merge': 'explanation',
+  'versioning-projection-and-cache': 'explanation',
+  'versioning-ontology-governance': 'explanation',
+  'versioning-frontend-integration': 'explanation',
+  'versioning-scale-and-roadmap': 'explanation',
+  'versioning-authoritative-sources': 'explanation',
+  'versioning-resync-at-any-scale': 'explanation',
+  'versioning-drafts-and-merge': 'explanation',
   // Reference — information-oriented
   backend: 'reference',
   frontend: 'reference',
@@ -47,6 +55,9 @@ export const DOC_TYPES: Record<string, DocType> = {
   'versioning-deep-dives': 'reference',
   changelog: 'reference',
   'feature-search-and-rules-reference': 'reference',
+  'versioning-data-model': 'reference',
+  'versioning-import-export': 'reference',
+  'versioning-guide': 'reference',
   // How-to — task-oriented
   setup: 'how-to',
   'integration-testing': 'how-to',
@@ -55,6 +66,10 @@ export const DOC_TYPES: Record<string, DocType> = {
   sso: 'how-to',
   'versioning-e2e': 'how-to',
   'scaling-concurrent-users': 'how-to',
+  'feature-view-portability': 'how-to',
+  'multi-environment-sessions': 'how-to',
+  migrations: 'how-to',
+  'concurrency-tuning': 'how-to',
 }
 
 export function getDocType(slug: string): DocType | undefined {

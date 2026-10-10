@@ -55,7 +55,6 @@ export interface GuideEntry {
   persona?: string
   title: string
   description: string
-  readingTime: string
   importFn: () => Promise<{ default: string }>
 }
 
@@ -172,7 +171,6 @@ export const guideEntries: GuideEntry[] = [
     section: 'start-here',
     title: 'Welcome to {brand}',
     description: 'What {brand} is, who it’s for, and how to use this guide',
-    readingTime: '4 min',
     importFn: () => import('@docs/guide/WELCOME.md?raw'),
   },
   {
@@ -180,7 +178,6 @@ export const guideEntries: GuideEntry[] = [
     section: 'start-here',
     title: 'Key Concepts',
     description: 'The ten-word vocabulary that makes everything click',
-    readingTime: '8 min',
     importFn: () => import('@docs/guide/KEY_CONCEPTS.md?raw'),
   },
   {
@@ -188,7 +185,6 @@ export const guideEntries: GuideEntry[] = [
     section: 'start-here',
     title: 'Quick Start',
     description: 'Your first 10 minutes, from sign-in to your first View',
-    readingTime: '6 min',
     importFn: () => import('@docs/guide/QUICK_START.md?raw'),
   },
 
@@ -199,7 +195,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'viewer',
     title: 'Browsing Views',
     description: 'Find, open, and favourite curated explorations',
-    readingTime: '5 min',
     importFn: () => import('@docs/guide/BROWSING_VIEWS.md?raw'),
   },
   {
@@ -208,7 +203,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'viewer',
     title: 'Reading Lineage',
     description: 'Interpret nodes, edges, colours, and granularity',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/READING_LINEAGE.md?raw'),
   },
   {
@@ -217,7 +211,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'viewer',
     title: 'Exploring the Graph',
     description: 'Search, trace, expand, and filter on the open canvas',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/EXPLORING_GRAPH.md?raw'),
   },
   {
@@ -226,7 +219,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'viewer',
     title: 'Advanced Search',
     description: 'Find every match in a View, act on it on the canvas, and save the searches you reuse',
-    readingTime: '10 min',
     importFn: () => import('@docs/guide/ADVANCED_SEARCH.md?raw'),
   },
   {
@@ -235,7 +227,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'viewer',
     title: 'The Lineage Lens & Context View',
     description: 'Focus on one thing’s upstream and downstream — and what sits just outside the view',
-    readingTime: '8 min',
     importFn: () => import('@docs/guide/LINEAGE_LENS.md?raw'),
   },
   {
@@ -244,7 +235,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'viewer',
     title: 'Navigating Layers',
     description: 'The Layer Strip, resizable columns, load-more paging, and the Anchor Rail',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/NAVIGATING_LAYERS.md?raw'),
   },
 
@@ -255,7 +245,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'builder',
     title: 'Creating Views',
     description: 'The View Wizard, layers, visibility, and tagging',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/CREATING_VIEWS.md?raw'),
   },
   {
@@ -264,7 +253,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'builder',
     title: 'Managing Views',
     description: 'Edit, share, co-own, and keep your collection tidy',
-    readingTime: '6 min',
     importFn: () => import('@docs/guide/MANAGING_VIEWS.md?raw'),
   },
   {
@@ -273,7 +261,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'builder',
     title: 'Display Rules',
     description: 'Tag every entity that matches a search with a coloured chip, and share rules between Views',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/DISPLAY_RULES.md?raw'),
   },
   {
@@ -282,7 +269,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'builder',
     title: 'The Semantic Layer',
     description: 'Ontologies, types, hierarchy, and safe versioning',
-    readingTime: '8 min',
     importFn: () => import('@docs/guide/SEMANTIC_LAYER.md?raw'),
   },
 
@@ -293,7 +279,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'versioning',
     title: 'Versioning & Change Control',
     description: 'Drafts, review and merge, and undo vs. restore',
-    readingTime: '9 min',
     importFn: () => import('@docs/guide/VERSIONING_CHANGE_CONTROL.md?raw'),
   },
   {
@@ -302,7 +287,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'versioning',
     title: 'Import & Export',
     description: 'Bulk-load or back up data through the same review flow, and move views between environments',
-    readingTime: '6 min',
     importFn: () => import('@docs/guide/IMPORT_EXPORT.md?raw'),
   },
 
@@ -313,7 +297,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Admin Setup',
     description: 'From a fresh platform to a workspace your team can use',
-    readingTime: '8 min',
     importFn: () => import('@docs/guide/ADMIN_SETUP.md?raw'),
   },
   {
@@ -322,7 +305,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Workspace Admin',
     description: 'Day-2 workspace ops: wizards, moves, Views, and ontology health',
-    readingTime: '8 min',
     importFn: () => import('@docs/guide/WORKSPACE_ADMIN.md?raw'),
   },
   {
@@ -331,7 +313,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Users & Access',
     description: 'Approvals, roles, groups, scopes, and grants',
-    readingTime: '8 min',
     importFn: () => import('@docs/guide/USERS_ACCESS.md?raw'),
   },
   {
@@ -340,7 +321,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Single Sign-On',
     description: 'Connect an identity provider, map claims, rehearse, publish',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/SSO_SETUP.md?raw'),
   },
   {
@@ -349,7 +329,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Running Single Sign-On',
     description: 'Access rules, sign-in posture, linking, and why a sign-in failed',
-    readingTime: '9 min',
     importFn: () => import('@docs/guide/SSO_OPERATIONS.md?raw'),
   },
   {
@@ -358,7 +337,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Governance & Operations',
     description: 'Provider health, audits, announcements, and flags',
-    readingTime: '6 min',
     importFn: () => import('@docs/guide/GOVERNANCE_OPS.md?raw'),
   },
   {
@@ -367,7 +345,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'The Graph Store: Shards, Replicas & Placement',
     description: 'What every figure on the Graph store page means, and what to do when one looks wrong',
-    readingTime: '8 min',
     importFn: () => import('@docs/guide/GRAPH_STORE_TOPOLOGY.md?raw'),
   },
   {
@@ -376,7 +353,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Rollup Capacity & Large Graphs',
     description: 'What a rebuild measures before it writes, the limits you set, and what "would not fit" means',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/ROLLUP_CAPACITY.md?raw'),
   },
 
@@ -386,7 +362,6 @@ export const guideEntries: GuideEntry[] = [
     section: 'reference',
     title: 'Ways of Working',
     description: 'Conventions and habits that make {brand} shine for teams',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/WAYS_OF_WORKING.md?raw'),
   },
   {
@@ -394,7 +369,6 @@ export const guideEntries: GuideEntry[] = [
     section: 'reference',
     title: 'Glossary & Acronyms',
     description: 'Every term and acronym, in plain language',
-    readingTime: '6 min',
     importFn: () => import('@docs/guide/GLOSSARY.md?raw'),
   },
   {
@@ -402,7 +376,6 @@ export const guideEntries: GuideEntry[] = [
     section: 'reference',
     title: 'Troubleshooting',
     description: 'Common situations and how to resolve them',
-    readingTime: '6 min',
     importFn: () => import('@docs/guide/TROUBLESHOOTING.md?raw'),
   },
 ]
@@ -555,6 +528,27 @@ export const glossaryChips: GlossaryChip[] = [
   { term: 'RBAC', full: 'Role-Based Access Control' },
   { term: 'Blast Radius', full: 'Everything a change would affect' },
   { term: 'Provider', full: 'A connection to a graph database' },
+]
+
+// ── Hub: jobs-first entry ──────────────────────────────────────────
+
+/** A goal-phrased card in the hub's "What do you want to do?" row. */
+export interface TopJob {
+  title: string
+  outcome: string
+  slug: string
+  icon: LucideIcon
+}
+
+// Jobs-first entry: the hub leads with what people are trying to DO, phrased as
+// goals, each routing straight to the article that gets them there.
+export const topJobs: TopJob[] = [
+  { title: 'See what a change will break', outcome: 'Trace a dataset upstream and downstream to find its blast radius', slug: 'reading-lineage', icon: Network },
+  { title: 'Find and open the right view', outcome: 'Browse curated explorations and pin the ones you use most', slug: 'browsing-views', icon: Eye },
+  { title: 'Save & share a view with my team', outcome: 'Turn an exploration into a durable, shareable asset', slug: 'creating-views', icon: Share2 },
+  { title: 'Give someone the right access', outcome: 'Approve people and grant exactly the access they need', slug: 'users-access', icon: Users },
+  { title: 'Undo or roll back a change', outcome: 'Reverse one edit, or reset the graph to a known-good point', slug: 'versioning-change-control', icon: History },
+  { title: 'Connect a new data source', outcome: 'Provider → catalog → workspace → data source, end to end', slug: 'admin-setup', icon: PlugZap },
 ]
 
 // ── Hub FAQs ───────────────────────────────────────────────────────

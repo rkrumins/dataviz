@@ -60,7 +60,8 @@ export interface WizardShellProps {
     hideClose?: boolean
     /** Some steps need the room (a picker grid, an assignment tree). */
     wide?: boolean
-    /** When set, renders a contextual Guide link in the shell header. */
+    /** When set, renders a contextual Guide link in the shell header. It opens
+     *  in a new tab, so reading the Guide never discards the wizard. */
     helpSlug?: string
     children: React.ReactNode
 }
@@ -145,7 +146,7 @@ export function WizardShell({
                         </div>
                     </div>
                     <div className="flex items-center gap-1">
-                        {helpSlug && <DocsLink slug={helpSlug} variant="icon" />}
+                        {helpSlug && <DocsLink slug={helpSlug} variant="icon" newTab />}
                         {!hideClose && (
                             <button
                                 onClick={onClose}

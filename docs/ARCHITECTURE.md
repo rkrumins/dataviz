@@ -182,7 +182,7 @@ erDiagram
 
 > **Important:** A `WorkspaceDataSource` is the only unit of data access, and it is unique per `(workspace_id, provider_id, graph_name)`. This invariant is what keeps tenants isolated — no view or query can reach a graph that isn't bound into its workspace.
 
-> See [ADR-001](/docs/decisions#adr-001) for the rationale behind this design.
+> See [ADR-001](/docs/decisions#adr-001-three-entity-model-provider--ontology--workspace) for the rationale behind this design.
 
 ---
 
@@ -248,7 +248,7 @@ Pre-registration provider testing (list supported provider types, test connectiv
 
 A standalone `graph-service` (port 8001) once hosted this probe surface as a separate process, but it was built and deployed yet never actually invoked. The standalone HTTP service was removed; the same provider connectivity now lives in-process, while the underlying Neo4j/DataHub/Spanner adapters (`backend/graph/adapters/`) survive and are imported directly by viz-service.
 
-> See [DECISIONS.md ADR-018](DECISIONS.md#adr-018) for why the standalone service was retired.
+> See [DECISIONS.md ADR-018](DECISIONS.md#adr-018-retire-the-graph-service) for why the standalone service was retired.
 
 ---
 
@@ -294,7 +294,7 @@ sequenceDiagram
     EP-->>FE: JSON Response
 ```
 
-> See [DECISIONS.md ADR-005](DECISIONS.md#adr-005) for caching strategy rationale.
+> See [DECISIONS.md ADR-005](DECISIONS.md#adr-005-providerregistry-singleton-with-lazy-initialization) for caching strategy rationale.
 
 ---
 

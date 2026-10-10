@@ -313,7 +313,7 @@ export const markdownComponents: Components = {
 
     const rewritten = rewriteDocLink(href)
 
-    if (rewritten.startsWith('/docs/')) {
+    if (rewritten.startsWith('/docs/') || rewritten.startsWith('/guide/')) {
       return (
         <RouterLink to={rewritten} {...props}>
           {children}
