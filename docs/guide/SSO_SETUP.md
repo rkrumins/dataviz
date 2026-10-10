@@ -394,8 +394,10 @@ Ask them for:
   says so where you type them: those calls are made *by* the browser, so their
   headers are public.)
 - **Whether their reply includes an authentication time.** Without one there is
-  no way to tell how long ago somebody actually signed in, and the daily
-  re-authentication ceiling stops applying to them.
+  no way to tell when somebody actually signed in at your portal, so the daily
+  re-authentication ceiling is measured from each sign-in to {brand} instead.
+  The sign-in still succeeds, and the rehearsal verdict says when this happens.
+  With the time included, the ceiling measures from their own sign-in.
 - **A validate-only endpoint, if they have one.** The session re-check calls it
   instead of the redeem endpoint (the connection's **Re-check URL**), so
   renewals stop minting a token apiece.
@@ -452,12 +454,12 @@ The five-step flow is the same, with the differences you would expect:
 | Step | What is different |
 |---|---|
 | **Connect** | No **Fetch** — there is no document to read. You fill in the two endpoints and where the token and the user details sit in their replies. |
-| **Map** | The same two-column mapper. Your gateway's reply is the payload being mapped. |
+| **Fields** | The same two-column mapper. Your gateway's reply is the payload being mapped. |
 | **Rehearse** | Works exactly as it does elsewhere, and matters more here: it is the only way to see what your gateway actually returned before anyone else depends on it. |
 | **Publish** | Refused if the connection is not configured enough to work. |
 
 If something is wrong, saving tells you which field and why. If a sign-in fails
-afterwards, see *Running Single Sign-On* → **Why a sign-in failed**.
+afterwards, see [When a sign-in fails](/guide/sso-operations#when-a-sign-in-fails).
 
 There is a document written for the team that owns the gateway rather
 than for you — `docs/SSO_BACKCHANNEL_CONTRACT.md` in the {brand}
@@ -548,10 +550,12 @@ one combination no individual switch can warn you about.
 
 ---
 
-## What next
+## Where to next
 
-Your connection is live and people are signing in. The questions from here are
-about running it: who gets what, what happens when somebody leaves, and why one
-person cannot sign in when everybody else can.
-
-**→ [Running Single Sign-On](/guide/sso-operations)**
+- [Running Single Sign-On](/guide/sso-operations) — when your connection is
+  live and you want to decide who gets what, handle somebody leaving, or find
+  out why one person cannot sign in when everybody else can.
+- [Users & Access](/guide/users-access) — when you want to understand the roles
+  and groups your access rules grant.
+- [Troubleshooting](/guide/troubleshooting#a-new-user-cant-log-in) — when
+  someone can't sign in at all and you need the quick checks.

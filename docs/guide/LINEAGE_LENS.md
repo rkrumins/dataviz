@@ -8,10 +8,24 @@ and everything that touches it — clear, grouped, and searchable — no matter 
 large or zoomed-out the canvas is. Think of it as the Context View for a node:
 click, and the picture is laid out for you.
 
+> **Before you start:** the Lens works in Context Views. If **Focus Lens** is
+> missing from the view's header, your administrator has turned off **Lineage
+> trace** in **Administration → Features**.
+
+**Most common tasks:**
+
+- [Open the Lens on an entity](#opening-the-lens)
+- [Read what it shows](#what-the-lens-shows)
+- [Fold or unfold the picture with Density](#how-much-of-the-picture-is-folded--density)
+- [Walk further, focus somewhere else, or go back](#moving-through-connections)
+- [See lineage that lies outside a curated view](#curated-views-and-lineage-beyond-your-scope)
+- [Close the Lens](#closing-the-lens)
+
 Here you'll learn to:
 
-- **Open the Lens** on any entity — a keystroke or a right-click, a dense
-  node's own chip, the Anchor Rail, or a curated View.
+- **Open the Lens** on any entity — a keystroke, a button or a right-click, a
+  dense node's own chip, a column's list of off-screen partners, or a curated
+  View's *outside this view* chip.
 - **Read its layout** — sources on the left, consumers on the right, the
   focused entity in the middle.
 - **Watch it load** — the Lens says what it is doing, stage by stage, and
@@ -168,15 +182,23 @@ flowchart LR
 There are a few natural ways in:
 
 - **Select any entity and press F** — or right-click it and choose **Focus
-  Connections**. This works everywhere, any time, on any entity.
+  Connections**, click **Focus Lens** in the view's header, or click **Focus**
+  in the entity's details panel. This works on any entity in a Context View.
 - When an entity has a **large connection fan**, the canvas shows only its
   strongest links to stay legible, and a chip appears reading *"Strongest N of
-  M"* with an **Open lens** button. That's your cue that there's more to see.
-- The **Anchor Rail** — the small docked chips that mark a focused entity's
-  off-screen partners — ends in a **"+N more · Open lens"** control when there
-  are more partners than it can show.
-- From a **curated view**, the "outside this view" chip offers a **Preview**
-  action that opens the Lens on the out-of-scope partners (more on that below).
+  M lines"* with an **Open lens** button. That's your cue that there's more to
+  see.
+- When you select an entity and many of its partners are off-screen, a pill
+  reads *N entities off-screen*, with **Frame** to bring them into view and
+  **Open lens**.
+- When you select an entity (or rest the pointer on one), its partners that are
+  scrolled out of sight in other columns are listed at the top or bottom edge of
+  their column, under **Off-screen above** or **Off-screen below**. When there
+  are more than fit, the list ends in **N more in the lens** — click it.
+- On a **curated view**, when **Preview outside-view lineage** is turned on in
+  **Display**, the *outside this view* chip offers **Preview**, which opens the
+  Lens on the partners beyond the view
+  ([see below](#previewing-whats-outside-the-view)).
 
 However you open it, the Lens is strictly a way of *looking*. Nothing you do
 inside it changes your data — it reads connections, it doesn't rewrite them.
@@ -290,8 +312,8 @@ The Lens is built for exploring, not just reading:
   lineage — every upstream source and downstream consumer, however many,
   with no "load more" to click — and leaves the next hop to you, one ⊕ at a
   time. **Full flow** keeps walking every frontier until the end-to-end flow
-  is drawn, hands-free; on a very large flow it pauses once, around fifty
-  thousand nodes, to ask whether to continue, since the rest may slow your
+  is drawn, hands-free; on a very large flow it pauses once, at about 20,000
+  nodes, to ask whether to **Continue**, since the rest may slow your
   browser. If a step fails at the data source the capsule says so and offers
   **Try again** — what is already on the board stays.
 - **Look at just one side of the story** with the direction control —
@@ -345,13 +367,15 @@ All of this follows you as you explore: double-click a card to focus it and
 the same opening, expanding and filtering apply to that entity's own
 neighbours.
 
-First time here? The Lens offers a **one-minute guided tour** when the graph
-opens; replay it any time from the **Help** panel while you're on a view.
+If your administrator has turned on guided tours, the Lens offers a short tour
+the first time it opens, and you can replay tours from **Help** while you're on
+a view.
 
 The header is two rows, and nothing in it is blank for long. The first is
 who and where: the entity's name and counts, **Back / Forward** and
 **Center on focus**, the **Path** you have walked (every stop a chip you can
-jump to, with *Show on canvas*, *Copy path* and *Copy link* at its end), and
+jump to, with *Show on canvas*, *Copy path* and *Copy link to this view* at
+its end), and
 — always, never behind a menu — the **Filter connections** search, with
 help, share and close beside it. The second is how the picture draws. It
 opens with **Direction**, always expanded — **Both · Root cause · Impact** —
@@ -393,10 +417,21 @@ way, **⊘** a confirmed dead end, then blue **upstream**, amber
 yet counted flow by flow) and heavy **bundle** — and, on the right, what is on
 the board right now: cards, wires, bundles and the zoom.
 
-Press **Esc** to close — a row preview first if one is open, then the Lens
-itself. Clicking the backdrop closes it outright. To follow a chain across
-the *canvas* instead, with the browse picture still underneath, use a
-**Trace** — see [Exploring the Graph](/guide/exploring-graph).
+### Closing the Lens
+
+**Esc** steps back one layer at a time: an open row preview first, then a
+spotlight you clicked to keep, then the selected card, and finally the Lens
+itself. The **×** in the header's corner, or a click on the dimmed canvas
+behind the Lens, closes it in one go.
+
+Once you've walked somewhere or opened anything, closing first asks **Leave
+this walk?**, says how far you got, and warns that closing starts over from the
+entity you focused. Choose **Keep exploring** to stay, or **Close the lens** to
+leave. To keep what you found, copy a link first with the link button in the
+header.
+
+To follow a chain across the view's own columns instead, use a trace — see
+[Tracing Lineage on the Canvas](/guide/exploring-graph).
 
 ## When to reach for it
 
@@ -412,7 +447,7 @@ actually depends on this?" becomes a question you can answer in seconds.
 A **View** is a curated subset of a Data Source — you chose which entities
 belong in it. That means an entity inside your view may legitimately connect to
 things *outside* it. Those aren't missing or broken connections; they're simply
-beyond the boundary you drew. (See [Browsing Views](/guide/browsing-views) and
+beyond the boundary you drew. (See [Finding Views](/guide/browsing-views) and
 [Creating Views](/guide/creating-views) for what Views are and how they're
 built.)
 
@@ -422,21 +457,31 @@ bottom-right corner:
 
 > **Selected: 12↑ 5↓ outside this view**
 
-Those numbers come from a **node-degree signal** — {brand} asks the backend for
-each entity's *total* lineage degree and subtracts what's already loaded on the
-canvas. The remainder is the lineage that exists in the data source but leads to
-entities your view doesn't include. Hovering the chip explains it in plain
-terms: this is expected for a curated view, not a sign of missing data. Because
-the count is measured, not guessed, an entity with no known external lineage
-shows no chip at all — {brand} never invents a "zero."
+Those numbers count the selected entity's flows whose other end lies outside the
+view: lineage that exists in the data source but leads to entities your view
+doesn't include. Hovering the chip explains it in plain terms: this is expected
+for a curated view, not a sign of missing data. Because the count is measured,
+not guessed, an entity with no known external lineage shows no chip at all —
+{brand} never invents a "zero."
+
+The chip shows for one selected entity at a time, not during a trace, and only
+while **Missing-link alerts** is on (**Display → Lineage appearance → Missing
+Connections**; it's on unless you turn it off).
 
 ## Previewing what's outside the view
 
 The chip's **Preview** action is the guided path from that signal straight into
-the Lens. It opens the focal entity's Lens with an extra **"Outside this view"**
-section listing the out-of-scope partners — each labelled with its direction and
-relationship, and each offering a **Trace** control to pull its lineage onto the
-canvas if you decide you want it.
+the Lens. It's off until you turn it on:
+
+1. In the view's header, open **Display**.
+2. Under **Lineage appearance → External Preview**, turn on **Preview
+   outside-view lineage**. It now reads *On — chip offers Preview*.
+3. Select an entity that has lineage beyond the view. The chip now ends in
+   **Preview**.
+4. Click **Preview**. The Lens opens on that entity with an extra **Outside
+   this view** section listing the out-of-scope partners — each labelled with
+   its direction and relationship, and each offering a **Trace** control to pull
+   its lineage onto the canvas if you decide you want it.
 
 This preview is deliberately advisory. It shows you what's *there* without
 adding anything to your view — nothing lands on the canvas until you act. It
@@ -445,12 +490,15 @@ widen the picture in your hands. When you're ready to include those partners for
 real, add them to the View or run a Trace from the row.
 
 > **Note:** The external-lineage chip and the "Outside this view" preview are
-> only shown when it makes sense — for curated Views where an out-of-scope
-> boundary actually exists. On the open Explorer, where you're pulling in
-> whatever you like, there's no boundary to report against.
+> only shown when it makes sense — for curated Views, limited to the entities
+> someone chose, where an out-of-scope boundary actually exists. A view that
+> includes everything in its data source has no boundary to report against.
 
 ## Where to next
 
-- Follow a chain across many hops instead of one → [Reading Lineage](/guide/reading-lineage)
-- Drive your own investigation on the open canvas → [Exploring the Graph](/guide/exploring-graph)
-- Understand what a curated View is and how to build one → [Creating Views](/guide/creating-views)
+- [Tracing Lineage on the Canvas](/guide/exploring-graph) — when you want to
+  follow a chain across many hops, on the view's own columns.
+- [Reading Lineage](/guide/reading-lineage) — when you want to know what the
+  lines, colours and roll-ups mean.
+- [Creating Views](/guide/creating-views) — when you want to understand what a
+  curated View is and how to build one.

@@ -3,10 +3,10 @@
 *For Viewers.* A Context View arranges your graph into **layers** — vertical
 columns that read left to right, like *Source → Staging → Transform →
 Warehouse*. It's a clear way to see data flow, but a rich graph can run wider
-and taller than one screen. This page covers the controls that keep a large
-layered canvas easy to move around: the Layer Strip, resizable columns,
-load-more paging, and the Anchor Rail. None of them change your data — they're
-all about finding your way.
+and taller than one screen. This page shows you how to move around a large
+layered view without losing your place: the Layer Strip, resizable columns,
+load-more paging, and the lists of off-screen partners at each column's edge.
+None of them change your data — they're all about finding your way.
 
 This page covers how to:
 
@@ -14,7 +14,8 @@ This page covers how to:
 - **Resize and collapse** columns so the layers you care about get the room.
 - **Load more** roots, children, and connection detail as you go — always
   additively.
-- **Reach off-screen partners** of a focused entity with the Anchor Rail.
+- **Reach off-screen partners** of a selected entity from the list at the
+  edge of their column.
 - **Find orphaned entities** (advanced) and put them in a layer.
 
 ## The layered canvas
@@ -42,8 +43,8 @@ chip per layer, each with the layer's colour dot and name:
   the strip is a live "you-are-here" indicator that tracks as you scroll.
 - **Click a chip** to smoothly scroll that column into view — the fastest way to
   jump from one end of a wide canvas to the other.
-- A **Fit** control (also `⌘0`) frames all layers to the window, so orientation
-  and the way back to "see everything" live on the same surface.
+- A **Fit** control (also `⌘0` / `Ctrl-0`) frames all layers to the window, so
+  orientation and the way back to "see everything" live on the same surface.
 
 The strip stays docked to the canvas frame, never drifting into the scroll area,
 so it's always exactly where you left it.
@@ -84,9 +85,9 @@ replaced or lost.
   likely has more). Scrolling a column to its very end also pulls the next page
   of roots automatically, one page ahead.
 
-- **More connection detail.** Where an aggregated connection has been expanded
-  and its underlying links are truncated, a **"Showing X of Y connections"** chip
-  offers a **Load more** to page in the rest.
+- **More connection detail.** When only part of the flows behind the lines on
+  screen has loaded, a **"Showing X of Y underlying flows"** chip offers
+  **Load more** to page in the rest.
 
 > **Note:** These chips live in the bottom-right cluster and each explains itself
 > on hover. They only appear when there's genuinely more to load — a quiet,
@@ -121,30 +122,43 @@ pages through the rest. Each row shows:
 Opening the panel changes nothing on the canvas. Only Reveal and Place in layer
 do.
 
-## The Anchor Rail
+## Reaching off-screen partners
 
-When you focus an entity, some of its connected partners will be in *other*
-columns and often scrolled off-screen. Rather than leave those connections
-pointing into empty space, the **Anchor Rail** docks a small stand-in chip for
-each off-screen partner at the **top** (for partners above) or **bottom** (for
-partners below) of the column it lives in.
+When you select an entity, some of its connected partners will be in *other*
+columns and often scrolled out of sight. Rather than leave those connections
+pointing into empty space, each column lists them at the edge they're beyond:
+**Off-screen above** at the top of the column, **Off-screen below** at the
+bottom. The selected entity's lines run to these entries.
 
-- Focus by **selecting** an entity, or simply **hover** over one — after a brief
-  dwell its rail docks into place. Move away and the rail clears itself a moment
-  later, so it never clutters the canvas.
-- Each chip is named, colour-coded to its layer, and shows the strength of the
-  connection. **Click a chip** to scroll that real entity into view in its
-  column — a direct jump to a partner you couldn't otherwise see.
-- Each column's rail shows the strongest few partners. When there are more, a
-  **"+N more · Open lens"** chip hands off to the [Lineage Lens](/guide/reading-lineage),
-  which lists every connection, grouped and searchable.
+- **Select** an entity, or simply **rest the pointer** on one — after a brief
+  pause its lists appear. Move away and they clear a moment later, so they
+  never clutter the canvas.
+- Each entry names the partner — or, for several in one card, how many (for
+  example *3 sources*) — says how it connects (**feeds**, **fed by**, or
+  **feeds & fed by**) and where it sits, with its number of flows.
+- **Click an entry** (it shows **Reveal** as you hover) to scroll that real
+  entity into view in its column. The selection stays where it was.
+- When a column has more partners than it can list, the last entry reads
+  **N more in the lens**. Click it to open the
+  [Lineage Lens](/guide/lineage-lens), which lists every connection, grouped and
+  searchable.
+- To tuck a list away, click its **×** or press `Esc` while it has focus. It
+  folds into a small pill (for example *↑ 4 connected*); click the pill to open
+  the list again.
 
-The rail turns "this connects to something off-screen" into "here's exactly what,
-and here's a click to reach it" — so a wide, layered canvas stays navigable even
-when the entities you care about are far apart.
+> **Tip:** Prefer the small pill all the time? Open **Display** in the view's
+> header and, under **Lineage appearance → Appearance**, turn off **Off-screen
+> partners**.
+
+The lists turn "this connects to something off-screen" into "here's exactly
+what, and here's a click to reach it" — so a wide, layered canvas stays
+navigable even when the entities you care about are far apart.
 
 ## Where to next
 
-- See every connection of one entity, grouped and searchable → [Reading Lineage](/guide/reading-lineage)
-- Drive your own investigation across the graph → [Exploring the Graph](/guide/exploring-graph)
-- Learn what a curated View is and how layers are defined → [Creating Views](/guide/creating-views)
+- [The Lineage Lens & Context View](/guide/lineage-lens) — when you want every
+  connection of one entity, grouped and searchable.
+- [Tracing Lineage on the Canvas](/guide/exploring-graph) — when you want to
+  follow lineage from an entity across all the layers.
+- [Creating Views](/guide/creating-views) — when you want to learn what a
+  curated View is and how its layers are defined.

@@ -228,6 +228,18 @@ describe('docs content integrity', () => {
     expect(errors).toEqual([])
   })
 
+  it('every guide page ends by pointing the reader on ("Where to next")', () => {
+    // A guide page is one step on a path: it ends by saying where to go
+    // next, so a reader is never left at a dead end.
+    const missing = guideEntries
+      .filter((e) => {
+        const sections = [...proseOnly(guideContent.get(e.slug) ?? '').matchAll(/^## (.+)$/gm)]
+        return sections.at(-1)?.[1].trim() !== 'Where to next'
+      })
+      .map((e) => `guide/${e.slug}`)
+    expect(missing).toEqual([])
+  })
+
   it('every anchor in a link matches a heading on the page it points at', () => {
     // Ids are what rehype-slug renders after {brand} is substituted. An anchor
     // must hold under any brand, so a link into a heading that carries {brand}
