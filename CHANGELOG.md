@@ -9,6 +9,65 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — A guide and docs for every reader, checked against the product
+
+### Added
+
+**Six new User Guide pages.** *Requesting Access* explains each "you can't do that" message and
+which way of asking works; *Editing in a Draft* and *The Review Center* cover changing data and
+publishing it; *Feature Switches* describes all 28 switches by the names Administration → Features
+shows; *Data Freshness & Ingestion* covers keeping lineage current; *Analytics* explains who sees
+what. Administration → Features' **Learn more** opens the new page — it used to open one that
+didn't exist.
+
+**Help shows the guide pages for the screen you're on.** The Help panel opens with **For this
+page** on every signed-in screen, above the quick start.
+
+**Three new ways into the docs.** The docs hub has cards for Integrators (a new *API Guide*),
+Security Reviewers (a new *Security Overview*) and Data Engineers (a new *Onboarding a Data
+Source*), alongside New Engineers, Architects and Operators. New pages: *Contributing*, *Testing &
+CI*, *Kubernetes*, *Observability*, *Runbooks* and a *Configuration Reference* generated from every
+environment variable the backend reads. Pages that existed but weren't in the reader now are:
+*Property Storage*, *Database Domain Ownership*, *Feature Switch Lifecycle*, *Top-Level Nodes
+Performance*, the *Back-channel SSO Contract*, the *Production Cluster Overlay* and the
+2026-09-10 upgrade note.
+
+### Changed
+
+**The User Guide teaches the product as it ships.** The pages people start with described an
+Explorer that was an open canvas, a "Save as View" button, renamed visibility tiers, a five-step
+wizard and favourites in the sidebar. Every page was checked against the code and rewritten where
+it had drifted; each task page now says what to have ready, what you should see after each step,
+what to do if you don't, and where to go next. The guide's "Before you start", "If …" and
+"Admins" notes render as callouts.
+
+**The engineering entry points match the code.** *Developer Setup* follows the real `dev.sh`, a
+seed command that works and the first sign-in's password change; *Backend* is a router map;
+*Architecture*, *Frontend* and *Data Architecture* drop the mock provider, the Web-Worker layout
+and the session in local storage; *RBAC* and *Feature Flags API* list every permission and switch;
+the ADRs record what superseded what.
+
+### Fixed
+
+- Wizard help links opened the guide in the same tab, unmounting the wizard and throwing away what
+  you had entered. They open a new tab.
+- Four deep links into the docs pointed at headings that don't exist.
+- Guide reading times were typed by hand and had drifted; they are computed from each page.
+
+Guards keep this from drifting again: every link the app shows into the guide or docs must open a
+page, every guide page must end by pointing the reader on, every seeded switch, permission and role
+must be documented, every signed-in page must offer help, and the configuration reference must
+match the code.
+
+### Known limitations
+
+- **Request access** on the Access denied card can't load its list of roles for most accounts, so
+  the request isn't sent; and **Add member** on a workspace's Members tab works fully only for
+  Super Admins. *Requesting Access* and *Workspace Admin* describe the routes that work today.
+- Some guide pages still mark where a screenshot belongs rather than show one.
+
+---
+
 ## [Unreleased] — Docs that stay inside the deployment, and a debt register that matches the code
 
 ### Changed
