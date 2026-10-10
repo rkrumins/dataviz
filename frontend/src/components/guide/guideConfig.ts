@@ -137,7 +137,7 @@ export const guidePersonas: GuidePersona[] = [
     icon: History,
     tagline: 'Draft, review, and roll back safely',
     intro:
-      'Changes to a graph’s data are made in a private draft and published — usually through a review in the Review Center. Every published change stays in history, so you can undo one change or restore an earlier point. For anyone who edits data or reviews changes.',
+      'Change data in a private draft, get it reviewed in the Review Center, and undo one change or restore an earlier point when you need to.',
     startSlug: 'versioning-change-control',
     accent: {
       gradient: 'from-amber-500 to-orange-600',
