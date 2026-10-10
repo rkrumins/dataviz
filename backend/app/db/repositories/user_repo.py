@@ -14,6 +14,7 @@ from typing import Optional
 
 from sqlalchemy import select, func, delete, or_, update
 
+from backend.app.common import activity_context
 from backend.common.display_name import resolve_display_name
 from backend.auth_service.activity import (
     RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS,
@@ -855,10 +856,14 @@ async def create_outbox_event(
     needs to be *found* by subject later — ``idx_outbox_aggregate``
     covers that pair, whereas locating the same row through the JSON
     payload means an unindexed scan.
+
+    The request's correlation id and the reason a person gave, when there
+    is one, ride along in the payload (``activity_context.envelope``) —
+    under their own keys, and only where the payload has not set them.
     """
     event = OutboxEventORM(
         event_type=event_type,
-        payload=json.dumps(payload),
+        payload=json.dumps(activity_context.envelope(dict(payload))),
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
     )

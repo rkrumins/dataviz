@@ -2829,7 +2829,12 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
+    # ``X-Activity-Reason`` carries the optional "why" a person gives for a
+    # manual operation into the activity ledger (``common/activity_context``).
+    allow_headers=[
+        "Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token",
+        "X-Activity-Reason",
+    ],
     # Custom response headers the frontend reads from JS — must be listed
     # explicitly because allow_credentials=true forbids the wildcard.
     #
