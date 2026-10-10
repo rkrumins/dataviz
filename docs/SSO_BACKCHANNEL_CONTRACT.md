@@ -1,12 +1,13 @@
 # Back-channel SSO — integration contract
 
-> **For the team that owns the sign-in service.** This describes what a
-> back-channel SSO integration requires of *your* endpoints. It is
-> deliberately vendor-neutral and says nothing about how the application
-> is configured — that is the operator's side, and it is a form.
->
-> Read §3 first if you read nothing else. It is the part that cannot be
-> fixed from our side afterwards.
+*For the team that owns your organisation's sign-in service, and the operator who connects it to {brand}.*
+
+This describes what a back-channel SSO integration — the **Enterprise gateway** connection
+type — requires of *your* endpoints. It is deliberately vendor-neutral and says nothing about
+how the application is configured: that is the operator's side, and it is a form.
+
+> **Important:** Read [§3](#3-status-codes--the-part-that-matters-most) first if you read
+> nothing else. It is the part that cannot be fixed from our side afterwards.
 
 ---
 
@@ -325,11 +326,13 @@ session still decides when ours ends: it is re-checked on every renewal
 **The profile picture** is a URL (`picture`, `avatarUrl`, `photoUrl`
 and similar names map by default), and it is opt-in per connection.
 When the operator turns the avatar mapping on, the application's
-SERVER fetches the image at sign-in — image content types only, size
-capped, redirects refused — and re-serves it from its own origin;
+SERVER fetches the image at sign-in — raster image types only, size
+capped, and at most three redirects, each checked against the same rules
+as the first request — and re-serves it from its own origin;
 browsers never load your URL directly, so nothing about your photo
-host reaches end users' machines. A private photo host must be added
-to the same internal-hosts allowlist as the endpoints above. The image
+host reaches end users' machines. Your photo host must be on one of the
+operator's host lists: the avatar image hosts list, or — for a host inside
+your network — the same internal-gateways allowlist as the endpoints above. The image
 refreshes when the URL in your claims changes, so serve a new URL (a
 content hash, a version) when the photo changes.
 
@@ -341,15 +344,15 @@ Of your endpoints:
 
 - **TLS**, with an answer that validates — against a public CA, or a
   CA bundle this deployment has been given (`SSO_OUTBOUND_TLS_CA_CERTS`,
-  a PEM path; see the deployment guide for mounting it). Plain HTTP is
+  a PEM path; see the [deployment guide](/docs/deployment) for mounting it). Plain HTTP is
   refused outright in production.
 - **No redirects.** A `3xx` from either endpoint is treated as an error,
   not followed. Redirecting a credentialed back-channel call is the
   standard way around a destination check, so it is refused rather than
   chased.
 - **An answer within the timeout**, and a response within a size cap.
-  Both are configurable; the defaults are seconds and hundreds of
-  kilobytes, because a user record is small.
+  Both are configurable; the defaults are 5 seconds and 256 KiB,
+  because a user record is small.
 - **A reachable address.** These endpoints are usually internal, and the
   application refuses to make requests into a private network unless an
   operator has explicitly permitted the destination — by host *and*
@@ -420,3 +423,13 @@ of them are cheaper to establish now than to discover later.
    cookie still exists" rather than "the session is still live", which
    is a materially weaker guarantee and worth knowing before relying on
    it.
+
+---
+
+## See also
+
+- [SSO operator reference](/docs/sso) — the operator's side: connecting an
+  **Enterprise gateway** in the application.
+- [Security Overview](/docs/security-overview#outbound-connections-from-sso) — the
+  controls every outbound sign-in call passes through, and how the operator allowlists
+  your hosts.

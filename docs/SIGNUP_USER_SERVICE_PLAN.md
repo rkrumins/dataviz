@@ -1,305 +1,197 @@
 # User & Sign-up Service
 
-> **At a glance.** The design reference for {brand}'s User & Sign-up Service — schema,
-> APIs, UX, and the principles behind them: the "logical split" that lets the user domain
-> be lifted into its own repo/DB, the transactional-outbox event model, the admin approval
-> flow, and defense-in-depth security. The **What's implemented** table below tracks what
-> shipped versus what's still pending. For the authorization model see [RBAC](/docs/rbac);
-> for the SSO layer built on top, [SSO](/docs/sso) and the
+*For engineers working on accounts and sign-in, and the security reviewers who check them.*
+
+This page explains how an account comes to exist in {brand}, how it's approved, how its
+password is set and reset, and where that code lives. It began as a design plan, so it also
+records which parts of the plan shipped and which didn't.
+
+> **Note:** **Status.** The service shipped: self-registration with administrator approval,
+> invitations, administrator-created accounts, Argon2id password hashing with a server-side
+> strength check, a forced change of the seeded administrator's default password
+> (`must_change_password`), administrator-assisted password reset, per-account rate limits,
+> and an audit trail built on a transactional outbox. Some of the original plan did not
+> ship: moving the user domain into its own repository and database, publishing events to a
+> message bus, sending email, idempotency keys on sign-up, and UUID v7 identifiers. The
+> table below has the detail. For the authorization model see [RBAC](/docs/rbac); for the
+> single sign-on built on top, [SSO](/docs/sso) and the
 > [SSO Integration Guide](/docs/sso-integration).
 
-This is the reference for the User & Sign-up Service: its schema, APIs, UX, and the design principles behind them. The service treats user management as one system — **auditability and safe evolution** (database), **clarity and trust** (UI/UX), **predictable behavior and operability** (engineering), **growth without rewrites** (scalability), and **defense in depth** (security) — and enforces a **logical split** so the user domain can be lifted into its own repository and database without breaking the main application.
+## What shipped and what stayed a plan
 
----
+| Area | Status | How it works today |
+|---|---|---|
+| Account tables (`users`, `user_roles`, `user_approvals`, `outbox_events`) | Shipped | Defined in `backend/app/db/models.py`. Identifiers are prefixed hex strings (`usr_` followed by 12 hex characters), not UUID v7. |
+| Self-registration with approval | Shipped | Off by default (the **Self-registration** feature switch). A self-registered account is `pending` until an administrator approves it. |
+| Invitations | Shipped | Invite links activate the account at sign-up and can grant a role. The **Invite links** switch is on by default. |
+| Administrator-created accounts | Shipped | **Add people** in **Administration → User Management**, with a setup link, a password the administrator sets, or single sign-on only. |
+| Password hashing | Shipped | Argon2id. Checking a password costs the same whether or not the account exists. |
+| Password strength | Shipped | The server refuses a password that zxcvbn scores below 3 on its 0 to 4 scale; the forms show a matching meter. |
+| Forced password change | Shipped | When the seeded administrator's password is a shipped default, the account must choose a new one at first sign-in (`must_change_password`). |
+| Password reset | Shipped, without email | An administrator generates a one-time reset token (valid for 1 hour) or sets a password directly; the user redeems the token on the password-reset page. |
+| Sessions | Shipped, differently from the plan | `HttpOnly` cookies carrying a short-lived access token, with rotating refresh tokens and server-side revocation — not a bearer token kept in `sessionStorage`. |
+| Rate limiting | Shipped | In the application: per-account limits on failed sign-ins and on reset requests, plus per-address flood guards. |
+| Transactional outbox and relay | Shipped | Events commit in the same transaction as the change; a relay copies them into the audit table `auth_audit_log`. |
+| Single sign-on (OIDC, SAML 2.0, corporate portal, enterprise gateway) | Shipped | See [SSO](/docs/sso). |
+| User domain in its own repository and database | Plan | The identity package is isolated (see [Where the code lives](#where-the-code-lives)), but the user tables and endpoints live in the main application and its PostgreSQL database. |
+| Publishing events to a message bus | Plan | The relay's only consumer is the audit table. |
+| Email (reset links, notifications) | Plan | The application sends no email. |
+| `X-Idempotency-Key` on sign-up | Plan | Not implemented. |
+| UUID v7 keys; re-using an email after deletion | Plan | Prefixed hex identifiers. `users.email` is unique across every row, soft-deleted ones included. |
+| Keyset pagination for the administrator's user list | Plan | The list uses offset pagination. |
 
-## What's implemented
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| **Database schema** (users, user_roles, user_approvals, outbox_events) | **Done** | All tables implemented in `backend/app/db/models.py`. Uses prefixed hex UUIDs (`usr_*`) rather than UUID v7. |
-| **Auth endpoints** (signup, login, forgot/reset password) | **Done** | Registered under `/api/v1/auth/*` |
-| **User management endpoints** (GET /users/me, admin CRUD) | **Done** | Registered under `/api/v1/users/*` and `/api/v1/admin/users/*` |
-| **Argon2id password hashing** | **Done** | OWASP-recommended hashing with constant-time comparison |
-| **JWT issuance & verification** | **Done** | HS256, configurable expiry, role claims in payload |
-| **Admin approval flow** | **Done** | Pending → Approve/Reject with audit trail in `user_approvals` |
-| **Frontend auth pages** (Login, SignUp, Reset) | **Done** | Glass-panel design, zxcvbn strength meter |
-| **Transactional outbox** (write side) | **Done** | Events written in same transaction as user operations |
-| **Outbox consumer** (read/publish side) | **Done** | The outbox relay drains `outbox_events` and lands them in `auth_audit_log`, deduped by `source_event_id`. See [SSO Integration Guide](/docs/sso-integration) §6.4. |
-| **SSO (OIDC + SAML2)** | **Done** | DB-backed IdP providers, multi-identity per user, JIT provisioning, group→role/group mapping, Argon2 local identity. See [SSO](/docs/sso) and the [SSO Integration Guide](/docs/sso-integration). |
-| **Force password change on first login** | **Pending** | `must_change_password` flag not implemented |
-| **Rate limiting** | **Partial** | Feature flag rate limits exist; per-IP signup/login limits not yet at API gateway level |
-
----
-
-## 1. Origin — what this service replaced
-
-Before the service existed, the platform ran on a client-only auth stub. That
-starting point is recorded here for context:
-
-- **Auth:** Client-only in `frontend/src/store/auth.ts` — env-based username/password hash (SHA-256), no backend auth API.
-- **Backend:** FastAPI at `/api/v1`, async SQLAlchemy in `backend/app/db/models.py`, repos + Pydantic in `backend/common/models/management.py`. `ViewFavouriteORM` has `user_id` (Text) with no FK; views endpoints use `_PLACEHOLDER_USER`.
-- **Login UI:** `frontend/src/components/auth/LoginPage.tsx` — glass panel, motion, shared CSS (`input`, `glass-panel`, `gradient-text` in `frontend/src/styles/globals.css`).
-
----
-
-## 2. Architectural Strategy: "The Logical Split"
-
-**Goal:** Ensure the User Service can be cut and pasted into its own repository/database without breaking the main application.
-
-- **Domain isolation:** All user-related logic lives in `backend/app/users/`. No user tables or user business logic in the rest of the app.
-- **Zero physical FKs:** Cross-domain tables (e.g. `view_favourites`) store `user_id` as a **logical reference** (UUID v7) only. There is **no database-level foreign key** from `view_favourites.user_id` to `users.id`. This allows the `users` schema to live in a separate database when the User Service is extracted.
-- **Event-driven hooks:** The system uses a **Transactional Outbox** pattern. When a user is created or approved, a row is written to `outbox_events` in the same transaction. A processor (same process or separate worker) reads unprocessed events and publishes to a message bus (or in-memory in v1). Other parts of the system react to `user.created` and `user.approved` via events, not by querying the user DB. **Outbox consumer:** In the monolith, a background task reads `outbox_events` where `processed = false`, publishes to the chosen destination (NATS / RabbitMQ / or in-memory for v1), then sets `processed = true`. When the User Service is split, this processor runs inside the User Service and publishes to the shared message bus.
-
----
-
-## 3. Database Schema: High-Performance & Sortable
-
-**Principle:** Use **UUID v7** for primary keys. Time-ordered IDs reduce index fragmentation and allow efficient sorting by creation time.
-
-**Database choice:**  
-- **Option A (same DB):** User tables live in the existing management DB (SQLite in dev). Use TEXT for UUIDs, TEXT for timestamps (ISO UTC), and a TEXT column storing JSON for `metadata` (SQLite has no native `jsonb`). Indexes and partial indexes still apply where the engine supports them.  
-- **Option B (separate DB from day one):** User domain uses its own database (e.g. PostgreSQL). Use native `uuid` (or uuid_v7), `timestamptz`, and `jsonb`; GIN index on `metadata`, partial index on `users(id) WHERE status = 'pending'`.  
-State the chosen option in implementation; the schema below is described in a DB-agnostic way with type hints.
-
-### 3.1 Entity relationship (domain-isolated)
+## How an account comes to exist
 
 ```mermaid
-erDiagram
-    users {
-        uuid_v7 id PK
-        text email UK "Indexed (lower-case)"
-        text password_hash "Argon2id"
-        text first_name
-        text last_name
-        text status "pending | active | suspended"
-        text auth_provider "local | saml2 | oidc"
-        text external_id "SSO subject"
-        text metadata "JSON: SSO claims, preferences"
-        text reset_token_hash "Hash of one-time reset token"
-        timestamp_tz reset_token_expires_at
-        timestamp_tz created_at
-        timestamp_tz updated_at
-        timestamp_tz deleted_at "Soft delete, Right to be Forgotten"
-    }
-
-    user_roles {
-        uuid_v7 id PK
-        uuid_v7 user_id "Logical reference, no FK"
-        text role_name "admin | user | viewer"
-        timestamp_tz created_at
-    }
-
-    user_approvals {
-        uuid_v7 id PK
-        uuid_v7 user_id "Logical reference"
-        uuid_v7 approved_by "Logical reference"
-        text status "pending | approved | rejected"
-        text rejection_reason "Optional string shown to user"
-        timestamp_tz created_at
-        timestamp_tz resolved_at
-    }
-
-    outbox_events {
-        uuid_v7 id PK "Event id / idempotency key"
-        text event_type "user.created | user.approved"
-        text payload "JSON"
-        timestamp_tz created_at
-        boolean processed "default false"
-    }
-
-    users ||--o{ user_roles : has
-    users ||--o{ user_approvals : "approval record"
+stateDiagram-v2
+    [*] --> pending: Self-registration
+    [*] --> active: Invite, admin-created or SSO
+    pending --> active: Approve
+    pending --> suspended: Reject
+    active --> suspended: Suspend
+    suspended --> active: Reactivate
 ```
 
-- **users:** Core profile. `status`: `pending` (awaiting approval), `active`, `suspended`. `auth_provider` + `external_id` for SSO; local signup uses `local`. `metadata`: JSON for SSO claims and preferences (no schema churn for new attributes). `reset_token_hash` + `reset_token_expires_at` store a hashed one-time password reset token and expiry so that a DB leak does not expose active reset links. `deleted_at`: set for "Right to be Forgotten"; exclude from default queries, keep for audit.
-- **user_roles:** One row per (user, role). `role_name` is `admin` | `editor` | `user` (no separate `roles` table in v1; add a `roles` table later if many roles or permission inheritance is needed). `user_id` is a logical reference only (no FK to `users` if user table moves to another DB—within the same DB, FK is optional for integrity; `user_roles` moves with the user domain when extracted).
-- **user_approvals:** Audit trail; `user_id` and `approved_by` are logical references. `rejection_reason` holds the admin-provided explanation (e.g. "Company email required") that can be surfaced to the user when they check status. Single source of truth for "who approved/rejected when and why."
-- **outbox_events:** Event type, JSON payload, `processed` flag. Same transaction as user create/approve; processor publishes and marks processed. Downstream consumers must treat the event id (primary key) as an idempotency key and de-duplicate on it because the outbox worker may publish an event more than once (e.g. crash after publish but before `processed` is set).
+An account's `status` is one of `pending`, `active` or `suspended`, shown in **Administration →
+User Management** as **Pending**, **Active** and **Suspended**. Only an `active` account can
+sign in; a `pending` or `suspended` one gets the same "Invalid email or password" answer as a
+wrong password. `users.signup_source` records how the account began:
 
-**Cross-domain (e.g. view_favourites):** `user_id` remains a UUID v7 value (same type as `users.id`). **No foreign key** from `view_favourites.user_id` to `users.id`. Application logic resolves "current user" from JWT and passes `user_id`; no referential integrity across domains.
+| How | Who starts it | Starts as | `signup_source` |
+|---|---|---|---|
+| **Sign up** on the sign-in page (shown only while **Self-registration** is on) | The person | `pending` | `local_signup` |
+| An invite link | An administrator invites; the person signs up | `active` | `invite` |
+| **Add people** in **User Management** | An administrator | `active` | `admin_created` |
+| A first single sign-on with **Create accounts automatically** on | The person, through their identity provider | `active` | `sso_jit` |
 
-### 3.2 Database best practices (applied)
+**Approving a sign-up.** Self-registered accounts wait under **Pending** in **Administration →
+User Management**. **Approve** makes the account active. It grants no workspace access: that
+comes from a workspace binding, added separately. **Reject** takes an optional reason, sets
+the account to `suspended`, and records the reason on the approval record in
+`user_approvals`. Both write an outbox event (`user.approved`, `user.rejected`).
 
-- **Indexes:** Unique on `users.email` (store and index lower-cased, or use collation where supported). For soft deletes, prefer a uniqueness guarantee such as `UNIQUE(email, deleted_at)` or a partial index `UNIQUE(email) WHERE deleted_at IS NULL` so users can later sign up again with the same email after deletion. Non-unique on `users(status, created_at)` for admin lists. **Partial index:** `users(id) WHERE status = 'pending'` (or equivalent) so the Admin "pending signups" list is fast even with millions of users. Indexes on `user_roles(user_id)`, `user_roles(role_name)`; on `user_approvals(user_id, status)` and `status`; on `outbox_events(processed, created_at)` for the processor.
-- **GIN index:** On `users.metadata` where the engine supports it (e.g. PostgreSQL jsonb) for querying custom attributes.
-- **Soft deletes:** `users.deleted_at`; default queries filter `WHERE deleted_at IS NULL`; supports "Right to be Forgotten" without destroying audit history.
-- **Timestamps:** Store in UTC (`timestamptz` or ISO string in TEXT); app converts for display.
+**Invitations.** An invite link can grant a role and attach groups; an invite for a
+privileged role is bound to one email address. Who may invite whom, and the two kinds of
+link, are covered in [RBAC](/docs/rbac#invites).
 
-> **Note on UUIDs and SQLite:** SQLite has no native UUID type and stores them as TEXT or BLOB. For higher write volumes, consider a custom SQLAlchemy `TypeDecorator` that stores UUIDs as 16-byte BLOBs while exposing them as UUID/str in Python. For now, this plan keeps TEXT ids for simplicity and compatibility across SQLite and PostgreSQL.
+**Accounts an administrator creates.** **Add people** asks how the person will sign in:
+**Send them a setup link** (the account has no password until they choose one), **Set a
+password yourself**, or **Single sign-on only** (no password at all).
 
-### 3.3 User status semantics (Activated / Disabled)
+## Passwords
 
-- **Internal values:** `status` is one of `pending`, `active`, `suspended`.
-- **UI labels:** These map to **Pending approval** (`pending`), **Activated** (`active`), and **Disabled** (`suspended`) in the admin and user-facing UIs.
-- **Login enforcement:** Only `active` users (with `deleted_at IS NULL`) may obtain JWTs. `pending` users receive a clear message ("Your account is pending administrator approval."); `suspended` users receive a clear message ("Your account has been disabled. Contact an administrator."). This guarantees that until an Admin activates the account, the user cannot log in.
+**Hashing and checking.** Passwords are hashed with Argon2id. Checking one takes the same
+time whether the email exists, the account has no password (single sign-on only), or the
+password is wrong, and every refusal returns the same message.
 
----
+**Strength.** The server refuses any password that zxcvbn scores below 3 on its 0 to 4 scale — at
+sign-up, password reset, a self-service change, and when an administrator sets one. The sign-up,
+reset and account pages load the same estimator in the browser and show a strength meter, so
+a weak password is caught before it's submitted.
 
-## 4. Backend: Engineering & Security Excellence
+**The seeded administrator.** On first start with an empty database, the backend creates one
+administrator from `ADMIN_EMAIL` and `ADMIN_PASSWORD` and marks it as a break-glass system
+account. If the password is one of the defaults shipped in the repository, the account is
+flagged `must_change_password`: at sign-in the app takes it to **Choose a new password**, and
+the server — not just the page — enforces the change, refusing with
+`password_change_required` until there's a new password. Setting any new password clears
+the flag.
 
-**Principles:** API-first contract, validation at the boundary, no secrets in logs, idempotent signup, stateless auth.
+**Changing your own password.** On **Account settings**, the **Password** card asks for the
+current password. A successful change signs the account out of every device, including the
+current one.
 
-### 4.1 Module layout (microservice-ready)
+## Resetting a password
 
-```
-backend/app/users/
-├── api/             # FastAPI routers (the contract)
-├── core/             # Hashing (Argon2id), JWT logic, password policy
-├── models/           # SQLAlchemy ORM (domain-specific tables only)
-├── repositories/     # Pure DB operations (atomic, no business logic)
-├── services/         # Business logic, outbox event writing
-└── schemas/          # Pydantic DTOs (request/response, the interface)
-```
+The application sends no email, so a reset always goes through an administrator.
 
-Routers in `api/` depend on `services/` and `schemas/`; services use `repositories/` and `core/` (hashing, JWT). When the User Service is extracted, this tree moves as-is (or to a new repo).
+1. On the sign-in page, the person chooses **Forgot your password?** and enters their email.
+   The page answers the same way whether or not the account exists, and the request flags
+   the account (only if it's `active` or `pending`) as **Password reset requested** in
+   **User Management**.
+2. In **Administration → User Management**, an administrator opens **Reset password** on that
+   person and chooses **Generate Token** or **Set Password**.
+3. With **Generate Token**, the administrator passes the one-time token on through a channel
+   they trust. It's valid for 1 hour, and only its SHA-256 hash is stored.
+4. The person enters the token and a new password on the reset page. Their password is
+   replaced and every session they had is ended.
 
-### 4.2 Advanced auth contract
+An account that signs in only through single sign-on has no password. Giving it one is a
+deliberate administrator decision — the person redeems a token an administrator generated,
+or an administrator uses the user-management API's explicit `allowSsoOnlyOverride` — because
+it lets the person sign in around the identity provider. Either way it's recorded in the
+audit trail as `user.local_login_enabled`.
 
-- **Hashing:** Argon2id (OWASP-recommended). Server-side only; frontend sends password over HTTPS.
-- **Stateless JWTs:** Tokens include `user_id`, `email`, and `roles`. Other services can verify the JWT signature locally without calling the User Service. Short-lived access token; define expiry; optional refresh with rotation later.
-- **Idempotency:** `POST /api/v1/auth/signup` supports an **`X-Idempotency-Key`** header. Same key within a time window returns the same response (e.g. 201 with same user or 409 if already exists); prevents duplicate accounts on double-click or retries.
-- **Constant-time verification:** Password comparison must be constant-time to prevent timing attacks (use the library’s secure compare).
+## Sessions and limits
 
-### 4.3 API endpoints
+A successful sign-in sets `HttpOnly` session cookies: a short-lived access token renewed by a
+rotating refresh token, with server-side revocation behind both. Sign-in failures and reset
+requests are rate-limited per account as well as per client address. Both are described in
+full in the [Security Overview](/docs/security-overview#sessions).
 
-- **Public:** `POST /api/v1/auth/signup` (SignUpRequest → SignUpResponse; "pending approval"; idempotency key); `POST /api/v1/auth/login` (LoginRequest → LoginResponse with user profile + JWT).
-- **Authenticated:** `GET /api/v1/users/me`, optional `PATCH /api/v1/users/me`. All require `Authorization: Bearer <token>`.
-- **Admin (users):** `GET /api/v1/admin/users` (filter by status, **paginated**—see Scalability); `POST /api/v1/admin/users/{user_id}/approve`, optional reject. Gated by "admin" role in JWT and enforced in backend dependency.
-- **Admin (password reset):** `POST /api/v1/admin/users/{user_id}/reset-password` — generates a one-time reset token and expiry for the user and returns the token so the admin can hand it to the user out of band (until email is available).
-- **Public (password reset):** `POST /api/v1/auth/reset-password` — accepts `{ resetToken, newPassword }`, validates the token (exists, not expired, user not deleted), sets a new Argon2id password, and clears the reset token and expiry.
+## Events and the audit trail
 
-### 4.4 Security and operability
+Every account change writes a row to `outbox_events` in the same transaction as the change
+itself — `user.created`, `user.approved`, `user.rejected`, `user.password_reset_requested`,
+`user.password_reset_completed` and so on — so a change can't commit without its event. The
+outbox relay (`backend/app/services/outbox_relay.py`) copies each event into `auth_audit_log`
+and marks it processed in one transaction. `auth_audit_log.source_event_id` is unique, so an
+event the relay has already copied is skipped rather than recorded twice. Administrators read
+the trail in **Administration → Identity & Access → Audit Log**; see the
+[Security Overview](/docs/security-overview#audit-trail).
 
-- **Credential masking:** Middleware strips `password` and `password_hash` from all JSON request/response logs. Never log secrets.
-- **Logging:** Log only safe identifiers (user id, masked email) and event type (signup, login success/failure, approval).
-- **Validation:** Pydantic for all inputs (email format, password policy, name length); 422 with clear messages.
-- **Error contract:** Consistent JSON (`detail`, optional `code` e.g. `DUPLICATE_EMAIL`) for client handling.
-- **Login enumeration:** Single generic message ("Invalid email or password") and similar response time on the login endpoint. For the public, internet-facing sign-up flow, avoid exposing whether an email is already registered in the response body; instead always return a generic success ("If this email is eligible, an administrator will review the request.") and, once email delivery is available, use the outbox/email path to notify existing users. In the current, internal-only environment, a 409 with a clear message is acceptable but should be reconsidered before exposing self-signup publicly.
-- **Admin:** Approve/reject only if JWT contains admin role; enforce in dependency.
+## Where the code lives
 
----
+The plan put every piece of the user domain in one `users/` package. What exists instead is
+an isolated identity package plus user-management code in the main application.
 
-## 5. Frontend: Resilient & Transparent UX
+| Concern | Where |
+|---|---|
+| Sign-in, sign-out, session renewal, tokens, cookies, CSRF, rate limits, identity providers | `backend/auth_service/` |
+| Sign-up, reset requests and redemption, invite verification and redemption | `backend/app/api/v1/endpoints/auth.py` |
+| The signed-in user's own account, and administrators' user management | `backend/app/api/v1/endpoints/users.py` |
+| Persistence | `backend/app/db/repositories/user_repo.py`, `backend/app/db/repositories/invite_repo.py` |
+| Tables | `backend/app/db/models.py` (`UserORM`, `UserRoleORM`, `UserApprovalORM`, `InviteORM`, `RefreshTokenORM`, `OutboxEventORM`, `AuthAuditLogORM`) |
+| Request and response models | `backend/common/models/auth.py` |
+| Outbox relay | `backend/app/services/outbox_relay.py` |
+| Sign-in, sign-up, forgot- and reset-password pages | `frontend/src/components/auth/` |
+| Forced password change page | `frontend/src/pages/PasswordChangeRequired.tsx` |
+| User Management | `frontend/src/components/admin/AdminUsers.tsx` |
+| Client-side strength meter | `frontend/src/lib/passwordStrength.ts` |
 
-**Principles:** Match LoginPage aesthetic (glass, motion, typography); accessible, clear feedback, secure storage.
+**The isolation that exists.** Nothing under `backend/auth_service/` may import from
+`backend.app`; `backend/tests/test_auth_service_isolation.py` enforces it. Anything the
+identity service needs from the application — the database session, repositories, the
+outbox — is handed to it when it's constructed in `backend/app/main.py`. That is the part of
+the "logical split" that shipped: the identity service could move into its own process
+without changing its callers.
 
-### 5.1 Sign-up page
+**Cross-domain references.** Some tables store a user id without a database-level foreign
+key — `view_favourites.user_id`, for example — so the user tables could live elsewhere later.
+Inside the user domain, `user_roles` and `user_approvals` do reference `users.id`, with
+`ON DELETE CASCADE`.
 
-- **Component:** `frontend/src/components/auth/SignUpPage.tsx`.
-- **Visual:** Same as LoginPage: glass panel, motion, shared `input`/labels. Fields: First Name, Last Name, Email, Password, optional Confirm Password.
-- **Password strength:** Use **zxcvbn** (or equivalent) for real-time "time to crack" / strength meter instead of only "min 8 chars." Always provide a **"Show password"** toggle to reduce confirm-password mismatches and help users avoid typos.
-- **Submit:** `POST /api/v1/auth/signup` with optional `X-Idempotency-Key` (e.g. from a generated client key). Success: “If this email is eligible, an administrator will review the request.” For internal deployments where user enumeration is not a concern, a 409 with a clear "Email already registered" message is acceptable; for public-facing deployments, prefer the generic success response and a future email-based notification to tell existing users they already have an account.
-- **Focus management:** After successful signup, move keyboard focus to the success message (e.g. "Check your email" / "Pending approval") for screen-reader users.
-- **SSO:** Disabled button with "Coming Soon" and subtle warning styling; same on LoginPage.
+**Storage.** Everything lives in the management database, which must be PostgreSQL
+(`MANAGEMENT_DB_URL` has to be a `postgresql+asyncpg://` URL). Identifiers and timestamps are
+stored as text (ISO-8601 timestamps in UTC), and `users.metadata` is a JSON text column.
+`users.deleted_at` marks a soft-deleted account, and queries exclude those rows by default.
 
-### 5.2 Login page
+## Design principles that still hold
 
-- **Flow:** "Create account" link to SignUp; same SSO "Coming Soon" button. Login calls `POST /api/v1/auth/login`; store JWT and user in auth store.
-- **Auth store:** Signup action; login calls backend; store **JWT in sessionStorage** (not localStorage) to mitigate XSS exposure (sessionStorage is tab-scoped and not persisted across tabs). Store `user.id` for view_favourites and future RBAC.
-- **Accessibility:** Labels, focus ring, errors linked via `aria-describedby`; loading state and disabled submit during request.
+| Area | Principle | How it's applied |
+|---|---|---|
+| Security | Don't reveal whether an account exists | Sign-in failures, sign-up and reset requests answer the same way for an unknown email |
+| Security | Constant-time password checks | Argon2id verification, including against a stand-in hash when there's no real one |
+| Security | Secrets stay out of logs | The request log records method, path, status and duration — never request bodies |
+| Security | The server enforces, the page explains | Strength, self-registration, forced password change and approval are all checked server-side |
+| Engineering | Validation at the boundary | Pydantic models in `backend/common/models/auth.py`; invalid input is a 422 |
+| Engineering | Every change is auditable | The transactional outbox and the relay into `auth_audit_log` |
+| Scalability | One session path for every tenant size | Workspace permissions stay on the server rather than in the cookie — see [RBAC](/docs/rbac#how-claims-reach-a-request) |
 
-### 5.3 Password reset UX
+## See also
 
-- **Admin flow:** In the user management view, admins can trigger "Generate password reset token" which calls `POST /api/v1/admin/users/{userId}/reset-password` and shows the generated token so it can be handed to the user via a secure out-of-band channel (until email is implemented).
-- **User flow:** A simple `ResetPasswordPage` accepts a reset token (pasted by the user) and a new password (with confirm and zxcvbn strength meter), calls `POST /api/v1/auth/reset-password`, and routes to login on success.
-
-### 5.4 General UX
-
-- **Validation:** Inline email format, password strength (zxcvbn), confirm password match; disable submit while loading.
-- **Responsive:** Single column, touch-friendly; consistent with LoginPage.
-
----
-
-## 6. Admin Approval Flow
-
-- **On signup:** Create user with `status = 'pending'`; insert into `user_approvals` with status `pending`; write `user.created` to `outbox_events`. Do not assign `user` role yet.
-- **Admin:** User with role `admin` sees "Pending signups." List via `GET /api/v1/admin/users?status=pending` (paginated). Approve → `POST .../approve`: set user `status = 'active'`, add `user_roles` row with `role_name = 'user'`, update `user_approvals` (resolved_at, approved_by), write `user.approved` to `outbox_events`. Reject → `POST .../reject` (or equivalent): set `status = 'rejected'`, populate `rejection_reason` (e.g. "Company email required"), and emit a `user.rejected` outbox event for future notification systems.
-- **Login:** Backend allows login only when `status = 'active'` and `deleted_at IS NULL`; otherwise 403 with "Your account is pending approval" or "Account deactivated."
-
-### 6.1 Password reset flow (no email yet)
-
-- **Admin-initiated reset:** Admins can initiate a password reset for a user via `POST /api/v1/admin/users/{userId}/reset-password`. The backend generates a strong, random `reset_token` and `reset_token_expires_at` on the user record and returns the token. Admins share this token with the user out of band (until email delivery is introduced).
-- **User completes reset:** Users visit the reset page with the token, choose a new password, and call `POST /api/v1/auth/reset-password`. The backend verifies the token (exists, not expired, user not deleted) by hashing the provided token and comparing it to `reset_token_hash`, sets the new Argon2id hash, and clears the reset token hash and expiry. Existing JWTs can be invalidated in a later phase via a `token_version` field.
-
----
-
-## 7. Scalability & Operational Readiness
-
-| Concern | Monolith (current) | Microservice (future) |
-|--------|---------------------|------------------------|
-| **Communication** | Direct function calls within app | Message bus (e.g. RabbitMQ / NATS) for user.created / user.approved |
-| **Data integrity** | DB transactions (user + outbox in one tx) | Saga pattern (distributed transactions) if needed |
-| **Pagination** | `OFFSET` / `LIMIT` for admin user list | Prefer **keyset (cursor-based)** pagination for large datasets |
-| **Auth** | Shared middleware; JWT verified in app | Sidecar auth (e.g. Envoy / Istio) or API gateway validates JWT |
-
-- **Stateless auth:** JWT in header; no server-side session store; horizontal scaling and future gateway/User Service.
-- **Rate limiting:** Implement **Leaky Bucket** (or equivalent) at API gateway level—e.g. **5 signups per IP per hour**, and limits on login attempts. Protects signup and login from abuse.
-- **Feature flag for self-signup:** Control whether `/auth/signup` is available using the existing feature flag system (e.g. `auth.selfSignupEnabled`). When disabled, the endpoint returns 403 and the frontend hides or disables the \"Create account\" entry point, showing a clear message instead.
-
----
-
-## 8. Security Summary (Defense in Depth)
-
-> **Important:** Two rules are non-negotiable before exposing self-signup publicly:
-> credential-masking middleware must strip `password` / `password_hash` from **all** JSON
-> logs, and the public signup response must not leak whether an email already exists
-> (return a generic success and notify existing users out-of-band). A 409 "email already
-> registered" is acceptable only for internal-only deployments.
-
-- **Credentials:** Passwords only in request body over HTTPS; never in URL, query, or logs. Server hashes (Argon2id) and compares with constant-time verification.
-- **Credential masking:** Middleware strips `password` and `password_hash` from all JSON logs.
-- **Rate limiting:** Leaky bucket at gateway (e.g. 5 signups per IP per hour).
-- **Constant-time comparison:** Used for password verification to prevent timing attacks.
-- **Admin:** Approve/reject gated by backend role check (JWT).
-- **Tokens:** Short-lived JWT; stored in sessionStorage on client; no sensitive data in payload beyond what’s needed (user_id, email, roles).
-- **Headers:** `Authorization: Bearer <token>`; keep `X-Request-ID` for tracing.
-
----
-
-## 9. Build sequence
-
-The service shipped in the order below; it is kept here as a build reference. The
-"optional follow-ups" at the end are remaining enhancements, not blockers.
-
-1. **Backend — DB and domain**
-   - Add ORM models: `users` (UUID v7 id, email, password_hash, first_name, last_name, status, auth_provider, external_id, metadata, created_at, updated_at, deleted_at), `user_roles`, `user_approvals`, `outbox_events`. Use logical references only; no FK from other domains to `users`.
-   - Migrations: create tables; indexes (unique email, status+created_at, partial index WHERE status = 'pending'); GIN on metadata if supported.
-   - Choose DB: same DB (SQLite-friendly types) or separate DB (PostgreSQL with timestamptz/jsonb).
-
-2. **Backend — users module**
-   - Create `backend/app/users/` with `api/`, `core/`, `models/`, `repositories/`, `services/`, `schemas/`.
-   - Implement Argon2id hashing and JWT (issue and verify) in `core/`; password policy in Pydantic/schemas.
-   - Repositories: atomic CRUD for users, user_roles, user_approvals, outbox_events.
-   - Services: signup (create user + approval + outbox row), login (verify password, require active, issue JWT), approve (update user, add role, approval record, outbox row). Outbox processor: background task that reads unprocessed `outbox_events`, publishes, marks processed.
-   - API: signup (with X-Idempotency-Key), login, GET/PATCH /users/me, GET /admin/users (paginated), POST /admin/users/{id}/approve (and optional reject). Middleware: strip password/password_hash from logs; constant-time password compare in login.
-
-3. **Backend — wiring**
-   - Register routers under `/api/v1/auth` and `/api/v1/users`, `/api/v1/admin/users`. Add JWT dependency for protected routes and admin-only dependency for approval endpoints. Start outbox processor (same process or worker).
-
-4. **Frontend — sign-up, login, and reset**
-   - SignUp page: form (first name, last name, email, password, confirm); zxcvbn strength meter; submit with optional idempotency key; on duplicate email, show message + "Forgot password?"; on success, focus success message; SSO "Coming Soon" disabled button.
-   - Login page: "Create account" link; SSO "Coming Soon"; call backend login; store JWT in sessionStorage and user in auth store.
-   - Auth store: signup action, login calling backend, store user.id and token; use token in API requests (Authorization header).
-
-5. **Admin**
-   - "Pending signups" (or "User management") in existing Admin area: list from GET /admin/users?status=pending (paginated); Approve/Reject buttons calling new admin endpoints.
-
-6. **Optional follow-ups**
-   - Rate limiting at gateway (leaky bucket, 5 signups per IP per hour).
-   - Keyset pagination for GET /admin/users when dataset is large.
-   - Replace admin-distributed reset tokens with email-based password reset using the same token fields once an email service is available.
-
----
-
-## 10. Best Practices — Cross-Cutting Summary
-
-| Area | Principle | Applied in this plan |
-|------|-----------|----------------------|
-| **Architecture** | Logical split, no cross-domain FKs | Domain isolation in `users/`; `user_id` as UUID only in view_favourites; outbox for events. |
-| **DB** | Auditability, performance, soft delete | UUID v7; partial index for pending; GIN on metadata; deleted_at; outbox_events. |
-| **UI/UX** | Clarity, trust, accessibility | zxcvbn; duplicate email → Forgot password; sessionStorage; focus management; labels, focus, errors. |
-| **Engineering** | Predictable, operable | Idempotency key; Pydantic validation; consistent error contract; credential masking in logs. |
-| **Scalability** | Stateless, paginated, rate-limited | JWT; pagination (cursor later); rate limit at gateway; outbox for async decoupling. |
-| **Security** | Defense in depth | Argon2id; constant-time compare; credential stripping; leaky bucket; server-side admin check. |
-
-This document is the single source of truth for sign-up and User Service: schema, APIs, UX, and practices are aligned for production and for cutting the User Service into its own repository and database when needed.
+- [Security Overview](/docs/security-overview) — when you want every sign-in and session
+  control in one place.
+- [RBAC](/docs/rbac) — when you need the roles an approved or invited account can be given.
+- [Users & Access](/guide/users-access) — when you're the administrator approving, inviting
+  and resetting.
