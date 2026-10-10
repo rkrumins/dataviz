@@ -183,9 +183,27 @@ config:
 
 ### Docker Compose / local
 
+With Docker Compose, a container sees only the variables its service lists under
+`environment:` in `docker-compose.yml`, and the shipped file doesn't list this one — a line in
+`.env` alone does nothing. Add it to `viz-service`, together with `JWT_SECRET_KEY_PREVIOUS`
+for key rotation (§4), keep the values in `.env`, and recreate the container:
+
+```yaml
+services:
+  viz-service:
+    environment:
+      AUTH_ENVIRONMENT_ID: ${AUTH_ENVIRONMENT_ID:-}
+      JWT_SECRET_KEY_PREVIOUS: ${JWT_SECRET_KEY_PREVIOUS:-}
+```
+
 ```bash
+# .env
 AUTH_ENVIRONMENT_ID=dev
 ```
+
+When you run the API on your own machine with `.env.dev` loaded
+([Developer Setup](/docs/setup#run-the-apps-on-your-machine-instead)), the line in `.env.dev`
+is enough.
 
 Leave it unset for a single-environment deployment: every cookie name and the issuer stay
 exactly as they were, so this is a no-op upgrade.
