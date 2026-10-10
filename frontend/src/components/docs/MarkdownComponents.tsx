@@ -2,7 +2,7 @@ import type { ComponentProps } from 'react'
 import { Children, isValidElement, useState } from 'react'
 import type { Components } from 'react-markdown'
 import { Link as RouterLink } from 'react-router-dom'
-import { Hash, Info, Lightbulb, AlertCircle, AlertTriangle, Check, Copy, type LucideIcon } from 'lucide-react'
+import { Hash, Info, Lightbulb, AlertCircle, AlertTriangle, Check, Copy, ClipboardCheck, LifeBuoy, ShieldCheck, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MermaidBlock } from './MermaidBlock'
 import { ZoomableImage } from './reading/ZoomableImage'
@@ -100,7 +100,19 @@ const CALLOUTS: Record<string, { icon: LucideIcon; box: string; icon_cls: string
   important: { icon: AlertCircle, box: 'border-violet-500/30 bg-violet-500/[0.06]', icon_cls: 'text-violet-500' },
   warning: { icon: AlertTriangle, box: 'border-amber-500/30 bg-amber-500/[0.08]', icon_cls: 'text-amber-500' },
   caution: { icon: AlertTriangle, box: 'border-red-500/30 bg-red-500/[0.06]', icon_cls: 'text-red-500' },
+  // The guide's own bold labels: what to have ready before a task, what to do
+  // when the screen doesn't match the steps, and what only administrators need.
+  prerequisites: { icon: ClipboardCheck, box: 'border-indigo-500/30 bg-indigo-500/[0.06]', icon_cls: 'text-indigo-500' },
+  fallback: { icon: LifeBuoy, box: 'border-orange-500/30 bg-orange-500/[0.06]', icon_cls: 'text-orange-500' },
+  admins: { icon: ShieldCheck, box: 'border-teal-500/30 bg-teal-500/[0.06]', icon_cls: 'text-teal-500' },
 }
+
+/** Bold labels (`> **Before you start:** …`) that open one of the guide's callouts. */
+const LABELLED_CALLOUTS: Array<[RegExp, keyof typeof CALLOUTS]> = [
+  [/^before you start:$/i, 'prerequisites'],
+  [/^if\b.+:$/i, 'fallback'],
+  [/^admins:$/i, 'admins'],
+]
 
 /** Recursively pull the plain text out of react-markdown children. */
 function nodeText(node: React.ReactNode): string {
@@ -113,12 +125,22 @@ function nodeText(node: React.ReactNode): string {
   return ''
 }
 
+/** The text of a bold label opening the blockquote's first paragraph, if any. */
+function leadingBoldLabel(children: React.ReactNode): string | null {
+  const first = Children.toArray(children).find(isValidElement)
+  if (!first) return null
+  const lead = Children.toArray((first.props as { children?: React.ReactNode }).children)[0]
+  return isValidElement(lead) && lead.type === 'strong' ? nodeText(lead).trim() : null
+}
+
 /** Detect a leading callout label, tolerant of `[!NOTE]` or `**Note:**`. */
 function calloutKind(children: React.ReactNode): keyof typeof CALLOUTS | null {
   const text = nodeText(children).trimStart()
   const m = /^\[!(\w+)\]|^(note|tip|important|warning|caution)\b\s*:/i.exec(text)
   const raw = (m?.[1] ?? m?.[2] ?? '').toLowerCase()
-  return raw in CALLOUTS ? (raw as keyof typeof CALLOUTS) : null
+  if (raw in CALLOUTS) return raw as keyof typeof CALLOUTS
+  const label = leadingBoldLabel(children)
+  return label ? LABELLED_CALLOUTS.find(([re]) => re.test(label))?.[1] ?? null : null
 }
 
 /**
