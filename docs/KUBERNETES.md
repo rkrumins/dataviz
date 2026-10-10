@@ -55,7 +55,9 @@ The two are not equivalent. What each one actually deploys:
   both first: [Prepare the database, Secret and ConfigMap](#prepare-the-database-secret-and-configmap).
 - **The Helm chart deploys no versioning worker,** and the API pods don't run its loop
   either. Without it, nothing runs **Enable version control**, finishes the graph-store
-  projections the API hands off, or runs purges. Add one:
+  projections the API hands off, or runs purges — and on a first install the version
+  store's tables don't exist at all, because the schema Job builds a new database without
+  them and the worker creates them when it first starts. Add one:
   [Add the versioning worker](#add-the-versioning-worker).
 - **The kustomize FalkorDB StatefulSets mount their data volume at the wrong path,** so the
   graph store's writes don't reach the volume. Fix it before you load data:

@@ -250,6 +250,8 @@ Run the API and the frontend outside Docker when you want a debugger, a profiler
 
    On your machine the API runs in the all-in-one `dev` role, so it runs the scheduler itself. Because `.env.dev` sets `REDIS_URL`, aggregation jobs still go to the Redis stream and wait there for a worker.
 
+   Start the versioning worker at least once on a new database even if you don't need it otherwise: the upgrade builds a fresh database without the version store's tables, and the worker creates them when it starts. Until it has, turning on version control for a data source fails.
+
 ## If it goes wrong
 
 | What you see | Why | What to do |
