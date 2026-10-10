@@ -226,7 +226,7 @@ and gets it wrong in opposite directions if you conflate them.
 | You answer | The application concludes | What it does |
 |---|---|---|
 | **401** or **403** | this session is over | ends the user's session, here and now |
-| anything else that is not success | we could not tell | **does nothing** — the session continues |
+| anything else that is not success | we could not tell | **does nothing yet** — the session continues until the grace period below runs out |
 
 This matters because the application re-asks you on every session
 renewal, not only at sign-in. That is what makes signing out of your
@@ -234,14 +234,16 @@ portal sign the user out of the application too.
 
 So:
 
-- **If you return `500` for an invalid session**, the application will
-  never sign anyone out. Sessions will outlive yours indefinitely.
+- **If you return `500` for an invalid session**, the application treats
+  it as an outage, not an answer: the session outlives yours until the
+  grace period below runs out — by default 15 minutes after your last
+  real answer — instead of ending at the next renewal.
 - **If you return `401` during an outage**, the application will sign
   out every user at once, as fast as their sessions renew.
 
-Neither is recoverable by configuration on our side. There is no setting
-that means "treat 500 as revoked", because a server error genuinely is
-not a statement about a user.
+Configuration on our side can't fix either. There is no setting that
+means "treat 500 as revoked" — a shorter grace period only shortens the
+wait — because a server error genuinely is not a statement about a user.
 
 An outage is tolerated rather than acted on, but not forever: sessions
 survive an unreachable gateway for a configurable grace period measured

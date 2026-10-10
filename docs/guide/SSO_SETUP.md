@@ -462,8 +462,8 @@ If something is wrong, saving tells you which field and why. If a sign-in fails
 afterwards, see [When a sign-in fails](/guide/sso-operations#when-a-sign-in-fails).
 
 There is a document written for the team that owns the gateway rather
-than for you — `docs/SSO_BACKCHANNEL_CONTRACT.md` in the {brand}
-repository. It states what their endpoints have to do, and is worth
+than for you — the [Back-channel SSO Contract](/docs/sso-backchannel-contract)
+in the documentation. It states what their endpoints have to do, and is worth
 sending them before the work starts rather than after. The section on
 status codes is the one that cannot be fixed from this side afterwards:
 if their service returns a server error for an expired session, nobody

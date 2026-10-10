@@ -17,6 +17,8 @@ const STYLE: Record<DocType, { label: string; icon: LucideIcon; cls: string }> =
 
 /** Diátaxis classification per docs slug. Unlisted slugs simply show no badge. */
 export const DOC_TYPES: Record<string, DocType> = {
+  // Tutorial — learning-oriented
+  'onboarding-a-source': 'tutorial',
   // Explanation — understanding-oriented
   overview: 'explanation',
   architecture: 'explanation',
@@ -46,6 +48,9 @@ export const DOC_TYPES: Record<string, DocType> = {
   'versioning-authoritative-sources': 'explanation',
   'versioning-resync-at-any-scale': 'explanation',
   'versioning-drafts-and-merge': 'explanation',
+  'security-overview': 'explanation',
+  'property-storage': 'explanation',
+  'top-level-nodes-performance': 'explanation',
   // Reference — information-oriented
   backend: 'reference',
   frontend: 'reference',
@@ -58,6 +63,11 @@ export const DOC_TYPES: Record<string, DocType> = {
   'versioning-data-model': 'reference',
   'versioning-import-export': 'reference',
   'versioning-guide': 'reference',
+  'testing-and-ci': 'reference',
+  configuration: 'reference',
+  'sso-backchannel-contract': 'reference',
+  'domain-ownership': 'reference',
+  observability: 'reference',
   // How-to — task-oriented
   setup: 'how-to',
   'integration-testing': 'how-to',
@@ -70,6 +80,13 @@ export const DOC_TYPES: Record<string, DocType> = {
   'multi-environment-sessions': 'how-to',
   migrations: 'how-to',
   'concurrency-tuning': 'how-to',
+  contributing: 'how-to',
+  'feature-flags-lifecycle': 'how-to',
+  'api-guide': 'how-to',
+  kubernetes: 'how-to',
+  'kubernetes-cluster-overlay': 'how-to',
+  runbooks: 'how-to',
+  'upgrade-2026-09-10': 'how-to',
 }
 
 export function getDocType(slug: string): DocType | undefined {

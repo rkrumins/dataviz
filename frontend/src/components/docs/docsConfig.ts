@@ -8,6 +8,8 @@ import {
   GitBranch,
   Terminal,
   ShieldCheck,
+  Code2,
+  Database,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -59,7 +61,6 @@ export interface DocKeyJourney {
   outcome: string
   slug: string
   icon: LucideIcon
-  time: string
 }
 
 // ── Sections ───────────────────────────────────────────────────────
@@ -85,7 +86,7 @@ export const docPersonas: DocPersona[] = [
     icon: Rocket,
     tagline: 'Get {brand} running and make your first change',
     intro:
-      'Clone the repo, stand up the local stack, and get enough of the lay of the land to ship a first pull request with confidence.',
+      'Run the stack with one command, load demo data, learn what CI checks, and ship a first pull request with confidence.',
     sectionId: 'dev-workflow',
     startSlug: 'setup',
     accent: {
@@ -102,7 +103,7 @@ export const docPersonas: DocPersona[] = [
     icon: Boxes,
     tagline: 'Understand the system and why it\'s built this way',
     intro:
-      'System design, service boundaries, the data model, and the trade-offs behind them — including the decisions that didn\'t make the cut.',
+      'System design, service boundaries, the data model, and the trade-offs behind them — including the decisions that were later superseded.',
     sectionId: 'architecture',
     startSlug: 'architecture',
     accent: {
@@ -119,7 +120,7 @@ export const docPersonas: DocPersona[] = [
     icon: Cloud,
     tagline: 'Deploy, secure, and keep it running',
     intro:
-      'Deployment topology, known risks, and the operational posture worth tracking before it becomes an incident.',
+      'Deploy with Docker Compose or Kubernetes, harden it for production, watch the right signals, and recover when something breaks.',
     sectionId: 'operations',
     startSlug: 'deployment',
     accent: {
@@ -130,43 +131,107 @@ export const docPersonas: DocPersona[] = [
       glow: 'shadow-amber-500/20',
     },
   },
+  {
+    id: 'integrator',
+    label: 'Integrators',
+    icon: Code2,
+    tagline: 'Script {brand} through its API',
+    intro:
+      'Sign in from a script, find the endpoint you need, follow the API’s conventions, and automate the jobs people script most.',
+    sectionId: 'reference',
+    startSlug: 'api-guide',
+    accent: {
+      gradient: 'from-violet-500 to-purple-600',
+      text: 'text-violet-600 dark:text-violet-400',
+      soft: 'bg-violet-500/10',
+      border: 'border-violet-500/20',
+      glow: 'shadow-violet-500/20',
+    },
+  },
+  {
+    id: 'security',
+    label: 'Security Reviewers',
+    icon: ShieldCheck,
+    tagline: 'See how {brand} protects data and access',
+    intro:
+      'Sign-in, sessions, permissions, secrets and network posture — how each control works, how to configure it, and where it lives in the code.',
+    sectionId: 'security-identity',
+    startSlug: 'security-overview',
+    accent: {
+      gradient: 'from-indigo-500 to-blue-600',
+      text: 'text-indigo-600 dark:text-indigo-400',
+      soft: 'bg-indigo-500/10',
+      border: 'border-indigo-500/20',
+      glow: 'shadow-indigo-500/20',
+    },
+  },
+  {
+    id: 'data-engineer',
+    label: 'Data Engineers',
+    icon: Database,
+    tagline: 'Bring a data source in and keep it fresh',
+    intro:
+      'Register a graph store, onboard its data, give it a semantic layer, and keep its lineage summaries fresh and within limits.',
+    sectionId: 'services',
+    startSlug: 'onboarding-a-source',
+    accent: {
+      gradient: 'from-teal-500 to-emerald-600',
+      text: 'text-teal-600 dark:text-teal-400',
+      soft: 'bg-teal-500/10',
+      border: 'border-teal-500/20',
+      glow: 'shadow-teal-500/20',
+    },
+  },
 ]
 
 export const docKeyJourneys: DocKeyJourney[] = [
   {
     title: 'Run it locally',
-    outcome: 'Docker or hot-reload dev setup, from clone to logged in',
+    outcome: 'One command from clone to signed in, with demo data loaded',
     slug: 'setup',
     icon: Rocket,
-    time: '10 min',
   },
   {
     title: 'Understand the system',
     outcome: 'Services, data flow, and how the pieces fit together',
     slug: 'architecture',
     icon: LayoutGrid,
-    time: '12 min',
   },
   {
     title: 'See why we built it this way',
     outcome: 'Architecture decision records and the trade-offs behind them',
     slug: 'decisions',
     icon: GitBranch,
-    time: '15 min',
   },
   {
     title: 'Look up an API',
-    outcome: 'Backend routes, services, and repositories',
+    outcome: 'Which router owns which paths, and where each area is documented',
     slug: 'backend',
     icon: Server,
-    time: '8 min',
   },
   {
-    title: 'Ship a change safely',
-    outcome: 'Draft branches, review & merge, revert vs. rollback',
+    title: 'Change graph data safely',
+    outcome: 'Drafts, review and merge, and revert vs. rollback in the versioning engine',
     slug: 'versioning-overview',
     icon: GitBranch,
-    time: '10 min',
+  },
+  {
+    title: 'Script the API',
+    outcome: 'Sign in from a script, find endpoints, and automate common jobs',
+    slug: 'api-guide',
+    icon: Code2,
+  },
+  {
+    title: 'Review the security model',
+    outcome: 'Every control: how it works, how to configure it, where it lives',
+    slug: 'security-overview',
+    icon: ShieldCheck,
+  },
+  {
+    title: 'Onboard a data source',
+    outcome: 'From provider to first build, then freshness, profiling and limits',
+    slug: 'onboarding-a-source',
+    icon: Database,
   },
 ]
 
@@ -181,6 +246,13 @@ export const docEntries: DocEntry[] = [
     title: 'Project Overview',
     description: 'What {brand} is and how the platform works',
     importFn: () => import('@docs/OVERVIEW.md?raw'),
+  },
+  {
+    slug: 'contributing',
+    section: 'getting-started',
+    title: 'Contributing',
+    description: 'Where things live, how a change ships, and recipes for common changes',
+    importFn: () => import('@docs/CONTRIBUTING.md?raw'),
   },
 
   // Architecture
@@ -226,14 +298,42 @@ export const docEntries: DocEntry[] = [
     description: 'How :AGGREGATED edges are materialized and rolled up',
     importFn: () => import('@docs/AGGREGATION_PIPELINE.md?raw'),
   },
+  {
+    slug: 'property-storage',
+    section: 'architecture',
+    title: 'Property Storage',
+    description: 'How entity properties are stored, indexed and kept within each graph store’s limits',
+    importFn: () => import('@docs/PROPERTY_STORAGE.md?raw'),
+  },
+  {
+    slug: 'domain-ownership',
+    section: 'architecture',
+    title: 'Database Domain Ownership',
+    description: 'Which part of the backend owns which tables in the management database',
+    importFn: () => import('@root/backend/app/db/DOMAIN_OWNERSHIP.md?raw'),
+  },
 
   // Setup & Development
   {
     slug: 'setup',
     section: 'dev-workflow',
-    title: 'Setup Guide',
-    description: 'Docker and local development setup',
+    title: 'Developer Setup',
+    description: 'Run the stack, sign in, load demo data — New Engineers start here',
     importFn: () => import('@docs/SETUP.md?raw'),
+  },
+  {
+    slug: 'testing-and-ci',
+    section: 'dev-workflow',
+    title: 'Testing & CI',
+    description: 'What runs on a pull request, and how to run every check locally',
+    importFn: () => import('@docs/TESTING_AND_CI.md?raw'),
+  },
+  {
+    slug: 'feature-flags-lifecycle',
+    section: 'dev-workflow',
+    title: 'Feature Switch Lifecycle',
+    description: 'Add, ship and retire a feature switch without the guard failing',
+    importFn: () => import('@docs/features/feature-flags.md?raw'),
   },
   {
     slug: 'integration-testing',
@@ -245,28 +345,42 @@ export const docEntries: DocEntry[] = [
 
   // Backend, API & Frontend
   {
+    slug: 'api-guide',
+    section: 'reference',
+    title: 'API Guide',
+    description: 'Sign in from a script, find endpoints, and automate common jobs — Integrators start here',
+    importFn: () => import('@docs/API_GUIDE.md?raw'),
+  },
+  {
     slug: 'backend',
     section: 'reference',
     title: 'Backend Reference',
-    description: 'API routes, services, and repositories',
+    description: 'The router map, the request pipeline, and where each API area is documented',
     importFn: () => import('@docs/BACKEND.md?raw'),
   },
   {
     slug: 'frontend',
     section: 'reference',
     title: 'Frontend Reference',
-    description: 'Components, stores, and hooks',
+    description: 'How the frontend is organised, and where to look for each part',
     importFn: () => import('@docs/FRONTEND.md?raw'),
   },
   {
     slug: 'api-features',
     section: 'reference',
-    title: 'Feature Flags API',
-    description: 'Feature flag endpoints and contracts',
+    title: 'Feature Switches API',
+    description: 'The feature switch endpoints, every switch, and the routes each one closes',
     importFn: () => import('@docs/API_FEATURES.md?raw'),
   },
 
   // Platform Services
+  {
+    slug: 'onboarding-a-source',
+    section: 'services',
+    title: 'Onboarding a Data Source',
+    description: 'From provider to first build, then freshness, profiling and limits — Data Engineers start here',
+    importFn: () => import('@docs/ONBOARDING_A_SOURCE.md?raw'),
+  },
   {
     slug: 'services-overview',
     section: 'services',
@@ -329,6 +443,13 @@ export const docEntries: DocEntry[] = [
     title: 'Search & Display Rules Reference',
     description: 'The query model, search and view-library endpoints, the library pack format, and scripting recipes',
     importFn: () => import('@docs/features/search-and-rules-reference.md?raw'),
+  },
+  {
+    slug: 'top-level-nodes-performance',
+    section: 'services',
+    title: 'Top-Level Nodes Performance',
+    description: 'How the first level of a large graph loads quickly, and what to tune when it doesn’t',
+    importFn: () => import('@docs/TOP_LEVEL_NODES_PERFORMANCE.md?raw'),
   },
 
   // Versioning
@@ -440,6 +561,13 @@ export const docEntries: DocEntry[] = [
 
   // Security & Identity
   {
+    slug: 'security-overview',
+    section: 'security-identity',
+    title: 'Security Overview',
+    description: 'Every control — how it works, how to configure it, where it lives — Security Reviewers start here',
+    importFn: () => import('@docs/SECURITY_OVERVIEW.md?raw'),
+  },
+  {
     slug: 'rbac',
     section: 'security-identity',
     title: 'RBAC',
@@ -472,8 +600,15 @@ export const docEntries: DocEntry[] = [
     slug: 'signup-service',
     section: 'security-identity',
     title: 'User & Sign-up Service',
-    description: 'How sign-up, approval, and user management work today',
+    description: 'How sign-up, approval and password reset work today, and which parts of the original plan shipped',
     importFn: () => import('@docs/SIGNUP_USER_SERVICE_PLAN.md?raw'),
+  },
+  {
+    slug: 'sso-backchannel-contract',
+    section: 'security-identity',
+    title: 'Back-channel SSO Contract',
+    description: 'What an Enterprise gateway must implement to sign people in through its back channel',
+    importFn: () => import('@docs/SSO_BACKCHANNEL_CONTRACT.md?raw'),
   },
 
   // Deployment & Operations
@@ -481,8 +616,50 @@ export const docEntries: DocEntry[] = [
     slug: 'deployment',
     section: 'operations',
     title: 'Self-Host Deployment',
-    description: 'Deploy on a VM with Docker Compose — backup, restore, hardening',
+    description: 'Docker Compose on a VM: install, upgrade, back up, and the production hardening checklist — Operators start here',
     importFn: () => import('@docs/DEPLOYMENT.md?raw'),
+  },
+  {
+    slug: 'kubernetes',
+    section: 'operations',
+    title: 'Deploying on Kubernetes',
+    description: 'Deploy with Helm or kustomize, what each path includes, and fixing a rollout that fails',
+    importFn: () => import('@docs/KUBERNETES.md?raw'),
+  },
+  {
+    slug: 'kubernetes-cluster-overlay',
+    section: 'operations',
+    title: 'Production Cluster Overlay',
+    description: 'Running the graph store as a cluster when one FalkorDB pod is no longer enough',
+    importFn: () => import('@root/deploy/k8s/overlays/production-cluster/README.md?raw'),
+  },
+  {
+    slug: 'configuration',
+    section: 'operations',
+    title: 'Configuration Reference',
+    description: 'Every environment variable the backend reads, with its default — generated from the code',
+    importFn: () => import('@docs/CONFIGURATION.md?raw'),
+  },
+  {
+    slug: 'observability',
+    section: 'operations',
+    title: 'Observability',
+    description: 'Health checks, metrics, logs, and what to alert on',
+    importFn: () => import('@docs/OBSERVABILITY.md?raw'),
+  },
+  {
+    slug: 'runbooks',
+    section: 'operations',
+    title: 'Runbooks',
+    description: 'Backups, restores, upgrades, password resets and other routine operations',
+    importFn: () => import('@docs/RUNBOOKS.md?raw'),
+  },
+  {
+    slug: 'upgrade-2026-09-10',
+    section: 'operations',
+    title: 'Upgrade Note: Graph Availability',
+    description: 'What changed in the 2026-09-10 release for graph availability, and how to upgrade to it',
+    importFn: () => import('@docs/UPGRADE_2026-09-10_graph-availability.md?raw'),
   },
   {
     slug: 'migrations',
@@ -516,7 +693,7 @@ export const docEntries: DocEntry[] = [
     slug: 'falkordb-dr',
     section: 'operations',
     title: 'FalkorDB Disaster Recovery',
-    description: 'Runbook for recovering FalkorDB with PostgreSQL as source of truth',
+    description: 'Back up and recover the graph store: snapshots, rebuilding version-controlled sources from Postgres, and region loss',
     importFn: () => import('@docs/FALKORDB_DR_RUNBOOK.md?raw'),
   },
   {
@@ -550,7 +727,7 @@ export const faqEntries: FAQEntry[] = [
     category: 'General',
     question: 'What is {brand}?',
     answer:
-      '{brand} is a **data lineage visualization platform** that connects to graph databases (FalkorDB, Neo4j, DataHub) and renders interactive lineage maps. It helps teams understand how data flows across systems — from source to dashboard.',
+      '{brand} is a **data lineage visualization platform** that connects to graph databases (FalkorDB, Neo4j, Google Cloud Spanner Graph and DataHub) and renders interactive lineage maps. It helps teams understand how data flows across systems — from source to dashboard.',
   },
   {
     category: 'General',
@@ -570,25 +747,25 @@ export const faqEntries: FAQEntry[] = [
     category: 'Setup',
     question: 'How do I get started quickly?',
     answer:
-      'Run `docker compose up --build` from the repo root. This starts the full stack (frontend, viz-service, FalkorDB, PostgreSQL, Redis). Open http://localhost:3080 and log in with `admin@nexuslineage.local` / `admin123`. See the [Setup Guide](/docs/setup) for details.',
+      'Clone the repository and run `./dev.sh` from its root. The first run creates `.env.dev` with a fresh signing key, builds the images, applies the database migrations and starts every service. Open http://localhost:5173, sign in with the administrator from `.env.dev`, and choose a new password when asked. See [Developer Setup](/docs/setup).',
   },
   {
     category: 'Setup',
     question: 'How do I connect my first graph database?',
     answer:
-      'After logging in, navigate to **Admin → Unified Registry → Connections**. Click **Add Connection**, choose your provider type (FalkorDB, Neo4j, or DataHub), enter connection details, and test connectivity. The platform bootstraps a default FalkorDB connection on first boot.',
+      'Nothing is connected on first boot. As a Super Admin, open **Ingestion → Providers** and select **Register Provider**: choose FalkorDB, Neo4j, Google Cloud Spanner Graph or DataHub, enter the connection details, then **Test connection** and **Create provider**. Onboard its graphs from the **Data Sources** tab — see [Onboarding a Data Source](/docs/onboarding-a-source).',
   },
   {
     category: 'Setup',
     question: 'What happens on first boot?',
     answer:
-      'On first boot, the viz-service creates all database tables, seeds the feature registry and ontology templates, creates an admin user, and bootstraps a default provider, workspace, and data source from environment variables.',
+      'A one-shot `upgrade` job builds the database schema and writes the built-in roles and permissions before any service starts. The API then seeds the feature switches and the Context View layer templates, and creates the first administrator from `ADMIN_EMAIL` and `ADMIN_PASSWORD` when the database has no users. No provider, workspace or data source is created: you register those yourself — see [Developer Setup](/docs/setup).',
   },
   {
     category: 'Setup',
     question: 'How do I seed demo data?',
     answer:
-      'Run `docker compose --profile seed up --build` to populate FalkorDB with enterprise demo scenarios (finance, ecommerce, HR, marketing). Configure scenarios, scale, and depth via environment variables. See the [Setup Guide](/docs/setup) for all options.',
+      'Run `./dev.sh exec viz-service python backend/scripts/seed_falkordb.py --graph nexus_lineage` to write a demo lineage graph into the development FalkorDB. It stays invisible in the app until you register the graph store as a provider and onboard the graph as a data source; [Load demo data](/docs/setup#load-demo-data) walks through both.',
   },
 
   // Concepts
@@ -614,19 +791,19 @@ export const faqEntries: FAQEntry[] = [
     category: 'Concepts',
     question: 'What is a Workspace?',
     answer:
-      'A **Workspace** is the top-level organizational unit that binds a catalog item (data source) with an ontology. Users interact with workspaces to explore lineage, create views, and apply context lenses.',
+      'A **Workspace** is a team’s or a project’s area: it holds data sources (each one a graph from a provider, with its semantic layer), the views built on them, and its members, each with a role. See [Key Concepts](/guide/key-concepts#workspaces).',
   },
   {
     category: 'Concepts',
-    question: 'What are Projection Modes?',
+    question: 'What kinds of view are there?',
     answer:
-      'Projection modes control how lineage data is visualized: **Graph** (free-form force-directed), **Hierarchy** (tree layout), **Context View** (dependency matrix), and **Layered Lineage** (horizontal flow by data tier). Each mode offers a different perspective on the same underlying data.',
+      'Every view draws its data on one of three canvases, chosen when it is created: **Context View** (entities sorted into columns you define, with lineage between them — the recommended default), **Graph** (entities and relationships positioned freely) and **Hierarchy** (entities nested inside their parents). See [Creating Views](/guide/creating-views).',
   },
   {
     category: 'Concepts',
-    question: 'What are Context Lenses?',
+    question: 'What is the Lineage Lens?',
     answer:
-      'Context Lenses are saved view configurations that highlight specific aspects of your lineage — such as a particular data domain, pipeline stage, or ownership boundary. They allow teams to focus on what matters without modifying the underlying graph.',
+      'The **Lineage Lens** is a focused view of one entity’s lineage inside a view: everything upstream and downstream of it, folded into as much or as little detail as you choose with **Density**, including what sits just outside the view. See [The Lineage Lens & Context View](/guide/lineage-lens).',
   },
 
   // Architecture
@@ -640,7 +817,7 @@ export const faqEntries: FAQEntry[] = [
     category: 'Architecture',
     question: 'What is the tech stack?',
     answer:
-      'Frontend: **React 19 + TypeScript + Vite + Tailwind CSS**. Backend: **Python 3.13 + FastAPI + SQLAlchemy 2.0 async**, with schema migrations managed by **Alembic**. Graph DB: **FalkorDB** (default). Management DB: **PostgreSQL**, in every environment. Cache/session store: a dedicated **Redis**. State: **Zustand**. Visualization: **React Flow**.',
+      'Frontend: **React 19 + TypeScript + Vite + Tailwind CSS**. Backend: **Python 3.14 + FastAPI + SQLAlchemy 2.0 async**, with schema migrations managed by **Alembic**. Graph DB: **FalkorDB** (default). Management DB: **PostgreSQL**, in every environment. Cache/session store: a dedicated **Redis**. State: **Zustand**. Visualization: **React Flow**.',
   },
 
   // Troubleshooting
@@ -654,13 +831,13 @@ export const faqEntries: FAQEntry[] = [
     category: 'Troubleshooting',
     question: 'I see "No data source for workspace" error',
     answer:
-      'This means the workspace was created without a data source binding. Run `docker compose down -v` to clear stale data, then `docker compose up --build` for a clean bootstrap.',
+      'The workspace has no data source yet, or its data source was removed. Add one: onboard a graph from **Ingestion → Data Sources**, as [Onboarding a Data Source](/docs/onboarding-a-source) describes. Don’t run `docker compose down -v` to “reset” it — that deletes every volume, including the management database.',
   },
   {
     category: 'Troubleshooting',
     question: 'Docker Compose fails with port conflicts',
     answer:
-      'Another process is using one of the required ports (6379, 5432, 8000, 3080). Stop the conflicting process or change the port mapping in `docker-compose.yml`.',
+      'Another process is using a port the stack publishes: 5173 (frontend in development), 3080 (frontend in a Compose install), 8000 (API), 8091 (aggregation control plane), 5432 (PostgreSQL), 6380 (Redis), 6379 (FalkorDB) or 3000 (FalkorDB browser). Stop the other process, or move the port as [Ports](/docs/setup#ports) describes.',
   },
 ]
 
