@@ -1,16 +1,18 @@
 # {brand}: Project Overview, Vision & Roadmap
 
-The starting point for understanding {brand} — what it is, the problem it solves, what has shipped, and where it's headed.
+*For anyone new to {brand} — engineers, architects, operators, integrators, security reviewers and data engineers.*
 
-**Who it's for:** anyone new to the platform — admins, data engineers, business stakeholders, and developers looking for orientation before the deeper design docs.
+Read this page to learn what {brand} is, the problem it solves, what has shipped and where it is headed — and to find the pages to read next for your role.
 
 **What you'll find here:**
-- Key terms and a role-based reading guide
+- Key terms and a reading path for each role
 - The problem, the vision, and core design principles
-- Shipped capabilities and honest maturity assessment
-- Competitive positioning and forward-looking roadmap
+- Shipped capabilities and an honest maturity assessment
+- Competitive positioning and the forward-looking roadmap
 
 > **Tip:** Skim the [Key Terms](#key-terms) table first — the four-entity vocabulary (Provider, CatalogItem, Ontology, Workspace) recurs across every other doc.
+
+> **Note:** Here to use {brand} rather than build or run it? Start with the [User Guide](/guide/welcome).
 
 ---
 
@@ -24,15 +26,15 @@ The starting point for understanding {brand} — what it is, the problem it solv
 
 | Term | Definition |
 |------|-----------|
-| **Provider** | Infrastructure connection to a graph database (FalkorDB, Neo4j, DataHub). Stores host, port, credentials, TLS settings. |
+| **Provider** | Infrastructure connection to a graph database (FalkorDB, Neo4j or Google Spanner Graph) or to DataHub. Stores host, port, credentials, TLS settings. |
 | **Ontology** | Versioned semantic schema defining entity types (e.g., Dataset, SchemaField) and relationship types (e.g., CONTAINS, TRANSFORMS). Formerly called "Blueprint". |
 | **Workspace** | Operational context for a team or project. Contains data sources, views, and context models. Provides isolation between teams. |
 | **CatalogItem** | Governed data product abstraction. Represents a discovered or registered graph/schema from a Provider, with permission control. Bridges Providers and DataSources. |
 | **DataSource** | Binding of a Provider + CatalogItem + Ontology within a Workspace. The unit of data access. |
-| **View** | Saved graph exploration with layout, filters, and visibility scoping (enterprise/team/personal). |
+| **View** | Saved graph exploration with layout, filters, and a visibility: **Private**, **Workspace** or **Enterprise**. |
 | **Context Model** | Layer configuration for organizing complex graphs. Defines how entities are grouped and displayed. |
 | **Projection Mode** | How aggregated lineage edges are stored. `in_source` writes them in the original graph; `dedicated` creates a separate projection graph to preserve source data integrity. |
-| **Granularity** | Level of detail in lineage visualization. Can be aggregated (domain → table) or fine-grained (column-level). |
+| **Granularity** | Level of detail in lineage visualization. Can be aggregated (domain → table) or fine-grained (column-level). You change it by opening and closing containers: lineage between closed containers is shown rolled up. |
 | **Containment Hierarchy** | Parent-child relationships between entities (e.g., Domain contains Dataset contains SchemaField). |
 | **Three-Layer Ontology Resolution** | How ontologies are assembled: system defaults + workspace-assigned definitions + provider-introspected types. Cached, and invalidated on every pod whenever an ontology or its assignment changes (5-minute backstop). |
 
@@ -40,27 +42,17 @@ The starting point for understanding {brand} — what it is, the problem it solv
 
 ## Reading Guide
 
-**New Platform Admin:**
-1. This document (vision & capabilities)
-2. [SETUP.md](SETUP.md) -- get the platform running
-3. [ARCHITECTURE.md](ARCHITECTURE.md) -- understand core concepts
-4. [BACKEND.md](BACKEND.md) -- Admin Infrastructure section
+Find the row that matches your role. Read its first page, then the others in the order listed.
 
-**Data Engineer:**
-1. Steps 1--4 above
-2. [FRONTEND.md](FRONTEND.md) -- graph exploration & canvas
-3. Return to this doc -- "For Data Engineers" workflows
-
-**Developer:**
-1. [ARCHITECTURE.md](ARCHITECTURE.md) -- system design
-2. [BACKEND.md](BACKEND.md) -- full API reference
-3. [FRONTEND.md](FRONTEND.md) -- component architecture
-4. [DECISIONS.md](DECISIONS.md) -- architectural trade-offs
-5. `docs/TECHNICAL_DEBT.md` -- known risks
-
-**Deep Dive:**
-- [DATA_ARCHITECTURE.md](DATA_ARCHITECTURE.md) -- all schema details
-- [API_FEATURES.md](API_FEATURES.md) -- feature flag contract
+| You are | Start with | Then read |
+|---|---|---|
+| A new engineer | [Setup Guide](/docs/setup) — get the stack running on your machine | [Contributing](/docs/contributing), [Testing & CI](/docs/testing-and-ci), [Architecture](/docs/architecture), [Backend Reference](/docs/backend), [Frontend Reference](/docs/frontend) |
+| An architect or tech lead | [Architecture](/docs/architecture) — every process and store, and how a request flows | [Data Architecture](/docs/data-architecture), [Design Decisions](/docs/decisions), [Scaling Architecture](/docs/scaling-architecture) |
+| A platform operator | [Self-Host Deployment](/docs/deployment) — run it with Docker Compose | [Kubernetes](/docs/kubernetes), [Configuration Reference](/docs/configuration) |
+| An integrator | [API Guide](/docs/api-guide) — call the API from your own code | [Backend Reference](/docs/backend), [Feature Flags API](/docs/api-features) |
+| A security reviewer | [Security Overview](/docs/security-overview) — the controls and how to configure them | [RBAC](/docs/rbac), [SSO (Operator Guide)](/docs/sso) |
+| A data engineer | [Onboarding a Source](/docs/onboarding-a-source) — bring a graph in, end to end | [Platform Services Overview](/docs/services-overview), [Aggregation Pipeline](/docs/aggregation-pipeline) |
+| A product administrator | [Admin Setup](/guide/admin-setup) in the User Guide — your first hour as an administrator | [Users & Access](/guide/users-access), [Feature Switches](/guide/feature-switches) |
 
 ---
 
@@ -69,12 +61,12 @@ mindmap
   root(({brand}))
     Interactive Lineage
       Trace upstream/downstream
-      Multi-granularity zoom
-      Column → Table → Domain
+      Open and close containers
+      Semantic zoom
       Aggregated edge rollups
     Semantic Governance
       Versioned ontologies
-      Evolution policies
+      Breaking-change protection
       Impact analysis
       Schema drift detection
       Audit Trail (OntologyAuditLog)
@@ -89,20 +81,21 @@ mindmap
       External-degree signal
       Curated-view chip
       Layer Strip
-      Anchor Rail + one-page-ahead pagination
+      Off-screen partner trays + one-page-ahead pagination
     Data Catalog
       CatalogItems
       Workspace Bindings
       Impact Analysis
     Guided Onboarding
-      First-Run Hero
+      First-run card
       Setup Wizard
       Progress Tracker
       Asset Onboarding
     Multi-Backend
       FalkorDB (primary)
       Neo4j (enterprise)
-      DataHub (catalog)
+      Google Spanner Graph
+      DataHub (connectivity)
       Extensible provider ABC
     Workspace Isolation
       Multi-tenant by design
@@ -111,9 +104,9 @@ mindmap
       Scoped views & lenses
     Visual Experience
       Glass morphism design
-      Persona toggle (biz/tech)
-      Layer Studio (WYSIWYG)
-      ELK layout (Web Worker)
+      Business and Technical names
+      Three-panel layer editor
+      ELK auto-layout
 ```
 
 ---
@@ -154,7 +147,7 @@ graph LR
 | **Ontology-First** | Entity types, relationships, visual styling, and hierarchy defined in versioned, immutable ontologies | Schema governance without code changes; teams customize independently |
 | **Workspace-Centric** | Provider (infrastructure) + Ontology (semantics) + Workspace (context) as independent entities | Multi-tenancy, team isolation, and infrastructure reuse built in from day one |
 | **Interactive-First** | Canvas-based exploration with trace, expand, filter, and zoom -- not static reports | Users discover relationships through interaction, not pre-built dashboards |
-| **Dual-Audience** | Persona toggle transforms the same graph into business-level or technical-level views | One source of truth, two experiences; bridges the gap between data teams and stakeholders |
+| **Dual-Audience** | The top bar's **Business** / **Technical** toggle shows the names people use, or adds each entity's qualified name (or URN) under its name, on the canvas and in the entity drawer | One source of truth, two experiences; bridges the gap between data teams and stakeholders |
 
 ---
 
@@ -163,42 +156,42 @@ graph LR
 ### For Data Engineers
 
 ```mermaid
-graph LR
-    A["Connect Provider<br/>(FalkorDB, Neo4j)"] --> B["Discover & Catalog<br/>(assets, schemas)"]
+flowchart LR
+    A["Register Provider<br/>(FalkorDB, Neo4j, Spanner)"] --> B["Discover & Catalog<br/>(assets, schemas)"]
     B --> C["Assign Ontology<br/>(entity types, hierarchy)"]
     C --> D["Create Workspace<br/>(team/project context)"]
-    D --> E["Explore Lineage<br/>(trace, filter, aggregate)"]
+    D --> E["Explore Lineage<br/>(trace, open, close)"]
     E --> F["Save Views<br/>(share with team)"]
 
 ```
 
-1. **Connect** a graph database (FalkorDB, Neo4j, or DataHub) via the admin panel
-2. **Discover & catalog** available graphs and schemas from the connected provider
-3. **Define or assign** an ontology that describes the entity types and relationships in the graph
-4. **Create a workspace** that binds the provider, catalog items, and ontology into an operational context
-5. **Explore** the graph interactively: trace upstream/downstream lineage, zoom between granularity levels (column -> table -> domain), filter by edge type
-6. **Save and share** views with the team, with visibility scoping (private, team, enterprise)
+1. **Register** a graph database — FalkorDB, Neo4j or Google Spanner Graph — or DataHub, with **Register Provider** on **Ingestion → Providers**. Only platform administrators can register a provider.
+2. **Discover & catalog** available graphs and schemas from the connected provider (**Ingestion → Data Sources**)
+3. **Define or assign** an ontology that describes the entity types and relationships in the graph (**Semantic Layers**)
+4. **Create a workspace** that binds the provider, catalog items, and ontology into an operational context (**Workspaces**)
+5. **Explore** the graph interactively: trace lineage with the trace dock's **Upstream depth** and **Downstream depth** sliders, and open or close containers to change the level of detail — lineage between closed containers is shown rolled up
+6. **Save and share** views with your team, with **Private**, **Workspace** or **Enterprise** visibility
 
 ### For Business Stakeholders
 
-1. **Toggle to business persona** in the top bar
-2. **Search** for a domain, dataset, or business term on the dashboard
-3. **See high-level data flow** -- domains, applications, and their relationships
-4. **Drill down** by toggling to technical persona or expanding containment hierarchy
-5. **Bookmark** frequently-accessed views for quick return
+1. **Switch to business names** — choose **Business** in the top bar's **Business** / **Technical** toggle, so every entity shows the name people use
+2. **Search** the **Dashboard** for a view, workspace or data source, or press ⌘K / Ctrl-K anywhere to search pages, views, workspaces and docs
+3. **Open a view** to see the high-level flow — with containers closed, the lineage between domains and applications is shown rolled up
+4. **Drill down** by opening containers; switch to **Technical** to see each entity's qualified name (or URN) under its name
+5. **Favorite** the views you return to in the **Explorer**; they appear under **Favorites** in the top bar
 
 ### For Platform Admins
 
-1. **Register Provider** -- connect to your graph database (FalkorDB, Neo4j, DataHub)
-2. **Discover Schema** -- introspect provider to discover available graphs and schemas
-3. **Register Catalog Items** -- promote discovered assets into governed data products
-4. **Onboard Assets** -- guided 4-step wizard (workspace allocation, aggregation, semantics, review)
-5. **Configure Ontology** -- define or customize entity and relationship types
-6. **Create Workspace** -- bind providers, catalog items, and ontologies into team contexts
-7. **Manage users** -- approve signups, assign roles (admin/user/viewer)
-8. **Manage feature flags** -- toggle experimental features, set experimental notices
+1. **Register Provider** — on **Ingestion → Providers**, connect your graph database (FalkorDB, Neo4j or Google Spanner Graph) or DataHub
+2. **Discover Schema** — introspect the provider to discover the graphs and schemas it holds
+3. **Register Catalog Items** — promote discovered assets into governed data products (**Ingestion → Data Sources**)
+4. **Onboard Assets** — the five-step **Asset Onboarding** wizard: **Workspace**, **Aggregation**, **Semantic Layer**, **Schema Review**, **Review**
+5. **Configure Ontology** — define or customize entity and relationship types (**Semantic Layers**)
+6. **Create Workspace** — bind providers, catalog items, and ontologies into team contexts (**Workspaces**)
+7. **Manage users** — accounts and sign-up approvals live in **Administration → User Management**. The built-in roles are **Super admin**, **Org admin** and **Org auditor** across the platform, and **Workspace admin**, **Data engineer**, **Workspace member** and **Workspace viewer** within a workspace; see [RBAC](/docs/rbac) for what each carries
+8. **Manage feature switches** — turn features on or off in **Administration → Features** (see [Feature Switches](/guide/feature-switches))
 
-> **Note:** If this is a fresh platform with no providers, the **FirstRunHero** will guide you through this flow automatically.
+> **Note:** On a platform with no providers yet, **Ingestion → Providers** opens on a **Set Up Your Data Intelligence Platform** card that lays out this flow: **Register Provider**, **Register Data Sources**, **Create Workspace**, **Configure Semantics**.
 
 ---
 
@@ -221,12 +214,12 @@ graph TB
         D1["Sales"] -->|"flows to"| D2["Analytics"]
     end
 
-    Column -.->|"Zoom out"| Table
-    Table -.->|"Zoom out"| Domain
+    Column -.->|"Close containers"| Table
+    Table -.->|"Close containers"| Domain
 
 ```
 
-Trace lineage at any level of the ontology hierarchy. The server aggregates fine-grained edges (column-to-column) into coarser edges (table-to-table, domain-to-domain) on the fly, driven by the ontology's hierarchy levels.
+Trace lineage at any level of the ontology hierarchy. The aggregation pipeline rolls fine-grained lineage (column to column) up the containment hierarchy into `AGGREGATED` edges (table to table, domain to domain), and re-runs when those edges fall out of step with the graph. You choose the level of detail by opening and closing containers — lineage between closed containers is shown rolled up — and on the Graph canvas, zooming in and out opens and closes them for you.
 
 ### 2. Ontology-Driven Schema Governance
 
@@ -243,7 +236,7 @@ graph LR
 ```
 
 - **Three-layer resolution:** System defaults + workspace-assigned ontology + introspected gap-fill
-- **Evolution policies:** `reject` (block breaking changes), `deprecate` (mark removed), `migrate` (auto-remap)
+- **Breaking-change protection:** Publishing a version that removes entity or relationship types the previous published version had is blocked; an administrator can force-publish to override
 - **Impact analysis:** Before publishing, see which workspaces and data sources are affected
 - **Schema drift detection:** Automatic flagging when graph data contains types not in the ontology
 
@@ -251,31 +244,30 @@ graph LR
 
 - **Canvas-first:** Pan, zoom, trace, expand -- not a static chart
 - **Schema-driven rendering:** `GenericNode` renders any entity type from ontology visual config
-- **ELK layout in Web Worker:** Responsive UI even with 1000+ nodes
-- **Context menus, inline editing, command palette (Cmd+K):** Power-user interactions
-- **Level of detail:** Automatic granularity switching based on zoom level
+- **ELK auto-layout:** The Graph canvas lays itself out with elkjs, in the browser
+- **Context menus, inline editing, command palette (⌘K / Ctrl-K):** Power-user interactions
+- **Semantic zoom:** On the Graph canvas, zooming in opens containers and zooming out closes them, following each entity type's hierarchy level in the ontology
 
-### 4. Layer Studio & Smart Assignment
+### 4. Layers & Smart Assignment
 
 ```mermaid
-graph LR
-    subgraph Studio["Layer Studio (WYSIWYG)"]
-        Left["Layer Hierarchy<br/>(drag-drop ordering)"]
-        Center["Entity Browser<br/>(assign to layers)"]
+flowchart LR
+    subgraph Editor["Assignments step (Context View)"]
+        Left["Layer hierarchy<br/>(drag-drop ordering)"]
+        Center["Entity browser<br/>(assign to layers)"]
         Right["Live Preview<br/>(instant feedback)"]
     end
 
     subgraph Smart["Smart Features"]
-        Auto["Auto-Organize<br/>(ML suggestions)"]
-        Rules["Smart Rule Builder<br/>(rule-based assignment)"]
-        Conflict["Conflict Resolution<br/>(overlapping rules)"]
+        Auto["Auto-Organize<br/>(heuristic suggestions)"]
+        Rules["Type rules<br/>(a layer's entity types place entities)"]
     end
 
-    Studio --> Smart
+    Editor --> Smart
 
 ```
 
-Organize complex graphs into meaningful layers. The Layer Studio provides a three-panel WYSIWYG editor with drag-drop, undo/redo, and AI-powered organization suggestions.
+Organize complex graphs into meaningful layers. When you build a Context View, the **Assignments** step of the **Create View** wizard is a three-panel editor — the layer hierarchy, an entity browser and a **Live Preview** — with drag-and-drop and undo/redo. **Auto-Organize** suggests placements from heuristics, and nothing changes until you accept them. A layer's entity types act as its placement rule: entities of those types land in that layer, and the entities they contain follow.
 
 ### 5. Workspace Isolation & Multi-Tenancy
 
@@ -293,24 +285,24 @@ Organize complex graphs into meaningful layers. The Layer Studio provides a thre
 
 ### 7. Guided Onboarding
 
-- **FirstRunHero** for empty platforms -- detects no providers and launches guided setup
-- **OnboardingProgress tracker** -- step-by-step progress through platform configuration
-- **AssetOnboardingWizard** for streamlined setup -- 4-step guided flow (workspace allocation, aggregation, semantics, review)
+- **First-run card** for empty platforms — with no providers registered, **Ingestion → Providers** opens on **Set Up Your Data Intelligence Platform**, which lays out the four stages (`FirstRunHero`)
+- **Onboarding progress tracker** — platform administrators see the stages **Provider**, **Assets**, **Workspace** and **Semantics** at the top of **Ingestion**, each a click away (`OnboardingProgress`)
+- **Asset Onboarding wizard** for streamlined setup — five guided steps: **Workspace**, **Aggregation**, **Semantic Layer**, **Schema Review**, **Review** (`AssetOnboardingWizard`)
 - **Reduces time-to-first-value** for new admins -- from manual multi-step configuration to guided flow
 
 ### 8. Graph Versioning & Change Control (Shipped)
 
 - **Drafts + review & merge:** Edit on a draft branch (`?branchId=`), then review and merge PR-style before it hits `main`
 - **Publish, revert, restore:** Publish a draft, **revert** a change ("Undo this change"), or **restore** the graph to a historical commit ("Restore to this point", with a diff preview)
-- **Version-control master switch:** An admin flag (`versioningEnabled`) gates every `/graph` write
+- **Version-control master switch:** The **Version control** switch on **Administration → Features** (`versioningEnabled`) gates every `/graph` write
 - **Resumable enable-VC bootstrap:** Turning on version control for a data source runs an async, resumable job that copies the whole source graph into the versioned store as an integrity-checked `import` commit — verified on a 7.7M-entity graph
 
 ### 9. Lineage Lens / Context View (Shipped)
 
-- **Context View:** Layer-organized, curated exploration with a **Layer Strip**, **resizable layer columns**, and one-page-ahead pagination
-- **Lineage Lens:** Ego-graph overlay — click a node to see immediate upstream/downstream neighbors grouped by type, regardless of canvas scale
+- **Context View:** Layer-organized, curated exploration with the **Layer Strip** (the navigator docked at the bottom of the canvas, one chip per layer), **resizable layer columns**, and one-page-ahead pagination
+- **Lineage Lens:** Click an entity to see its lineage at any canvas scale — the entity centred, its sources on the left and its consumers on the right — and walk from neighbour to neighbour, with a **Density** control for how much detail the board shows
 - **External-degree signal:** Total lineage degree per node (`POST /{ws_id}/graph/nodes/degree`) drives each card's lineage ports; curated views also count the partners that sit outside the view
-- **Anchor Rail:** Keeps the focal entity stable as columns paginate and resize
+- **Off-screen partner trays:** When the selected or hovered entity's partners are scrolled out of sight, each column docks them as chips under **Off-screen above** or **Off-screen below**, so every line still has an end; past five chips in a column, a chip such as **12 more in the lens** opens the rest in the Lineage Lens
 
 ---
 
@@ -335,12 +327,12 @@ quadrantChart
 
 | Aspect | {brand} | DataHub | Atlas | Marquez |
 |--------|---------|---------|-------|---------|
-| **Graph Backend** | Pluggable (FalkorDB, Neo4j, DataHub) | Neo4j only | JanusGraph | PostgreSQL |
-| **Schema Model** | Versioned ontologies with evolution policies | Fixed schema | Fixed schema | OpenLineage spec |
+| **Graph Backend** | Pluggable (FalkorDB, Neo4j, Google Spanner Graph, DataHub) | Elasticsearch or Neo4j | JanusGraph | PostgreSQL |
+| **Schema Model** | Versioned ontologies with breaking-change protection | Fixed schema | Fixed schema | OpenLineage spec |
 | **Multi-Tenancy** | Workspace-centric, built-in | UI-scoped | Not supported | Not supported |
 | **Visualization** | Interactive canvas (Figma-like) | Static DAG | Static | Static |
 | **Dual Audience** | Business + Technical persona toggle | Technical focus | Technical focus | Technical focus |
-| **Governance** | Impact analysis, drift detection, evolution policies | Basic | Basic | None |
+| **Governance** | Impact analysis, drift detection, breaking-change protection | Basic | Basic | None |
 | **Deployment** | Docker/K8s, self-hosted or SaaS-ready | Docker/K8s | Docker | Docker |
 
 ### {brand}'s Differentiators
@@ -364,13 +356,14 @@ graph TB
     end
 
     subgraph Frontend["React 19 Frontend"]
-        Canvas["Interactive Canvas<br/>@xyflow + ELK Worker"]
+        Canvas["Interactive Canvas<br/>@xyflow + elkjs"]
         Admin["Admin Panels<br/>Workspaces, Providers, Users"]
         Dashboard["Dashboard<br/>Search, KPIs, Views"]
     end
 
     subgraph Backend["FastAPI Backend"]
         VizSvc["Visualization Service :8000<br/>Auth, Workspaces, Graph Queries,<br/>Ontology, Provider Connectivity"]
+        Workers["Background Services<br/>Aggregation, Versioning, Stats"]
     end
 
     subgraph Semantic["Semantic Layer"]
@@ -380,9 +373,9 @@ graph TB
 
     subgraph Data["Data Layer"]
         MgmtDB[(Management DB<br/>PostgreSQL)]
+        Redis[("Redis<br/>Job Streams, Caches, Sessions")]
         FDB[(FalkorDB)]
-        Neo[(Neo4j)]
-        DH[(DataHub)]
+        Others[("Neo4j, Spanner Graph,<br/>DataHub")]
     end
 
     BU --> Dashboard
@@ -395,26 +388,27 @@ graph TB
     VizSvc --> Registry
 
     Registry --> FDB
-    Registry --> Neo
-    Registry --> DH
+    Registry --> Others
     Ontology --> MgmtDB
     VizSvc --> MgmtDB
+    VizSvc --> Redis
+    Workers --> MgmtDB
+    Workers --> FDB
 
 ```
 
 For detailed architecture documentation, see:
-- [ARCHITECTURE.md](ARCHITECTURE.md) -- System design, service architecture, deployment
-- [BACKEND.md](BACKEND.md) -- API reference, services, providers
-- [FRONTEND.md](FRONTEND.md) -- Component architecture, state management, UX patterns
-- [DATA_ARCHITECTURE.md](DATA_ARCHITECTURE.md) -- Data models, entity relationships, caching
-- [DECISIONS.md](DECISIONS.md) -- Architectural Decision Records (ADRs)
-- `docs/TECHNICAL_DEBT.md` -- Risk assessment and remediation plan
+- [Architecture](ARCHITECTURE.md) — every process and store, the request lifecycle, deployment
+- [Backend Reference](BACKEND.md) — the router map, authentication, middleware, startup, providers
+- [Frontend Reference](FRONTEND.md) — how the app is organised, state, the canvases
+- [Data Architecture](DATA_ARCHITECTURE.md) — data models, entity relationships, caching
+- [Design Decisions](DECISIONS.md) — the Architectural Decision Records (ADRs)
 
 ---
 
 ## Current State & Roadmap
 
-*As of 2026-10-09. `PLAN.md` at the repository root is the one-page version; the technical-debt register (`docs/TECHNICAL_DEBT.md`) is what is wrong today.*
+*As of 2026-10-09. `PLAN.md` at the repository root is the one-page version; the technical-debt register in the repository lists what is wrong today.*
 
 ### Current State: Shipped Platform
 
@@ -441,13 +435,13 @@ timeline
                           : Permission-controlled asset registration
                           : Impact analysis before deletion
     section Exploration (Shipped)
-        Canvas            : Interactive canvas with ELK layout (Web Worker)
+        Canvas            : Interactive canvas with ELK auto-layout
                           : Schema-driven GenericNode rendering
                           : Persona toggle (business/technical)
         Lineage Lens      : Lineage Lens / Context View
                           : External-degree signal (POST /nodes/degree)
                           : Layer Strip + resizable layer columns
-                          : Anchor Rail + root pagination past 200 per layer
+                          : Off-screen partner trays + root pagination past 200 per layer
         Trace & Search    : Trace up to 25 entities as one picture
                           : Advanced Search and Display Rules with view libraries
     section Change Control (Shipped)
@@ -466,7 +460,7 @@ timeline
         Operations        : Web, worker and control-plane tiers on Kubernetes with autoscaling
                           : Sharded FalkorDB cluster option
     section Forward-Looking
-        Hardening         : Production safeguards on in every shipped config
+        Hardening         : Production hardening of the shipped configs
                           : Metrics scraped and alerted on
         Views             : Server-side membership for the placement contract
         Integrations      : Additional provider adapters (Apache Atlas, dbt, Airflow)
@@ -478,7 +472,7 @@ timeline
 
 | Area | Item | Status |
 |------|------|--------|
-| Hardening | Production safeguards switched on in the shipped configs, FalkorDB persistence on Kubernetes, metrics scraped and alerted on, complete Kubernetes deploy paths, and a setup script that cannot overwrite live secrets | Next — the technical-debt register in the repository sets the order |
+| Hardening | Production hardening of the shipped deployment configs, FalkorDB persistence on Kubernetes, metrics scraped and alerted on, and complete Kubernetes deploy paths | Next — the technical-debt register in the repository sets the order |
 | Views | Server-side membership, so `placementContractEnabled` can default on | Next — the placement contract ships as a preview behind that flag |
 | Versioning | Re-sync above 250,000 entities, version control beyond FalkorDB, retention and incremental Merkle for drafts | Planned — [Versioning: Scale, Limits & Roadmap](versioning/09-scale-limits-and-roadmap.md) |
 | Integrations | Additional provider adapters (Apache Atlas, dbt, Airflow) | Not started |
@@ -489,7 +483,7 @@ timeline
 | Enterprise | A general access-policy engine | Not started — workspace-scoped roles, group bindings, custom roles and per-view grants cover most needs today |
 | Collaboration | Comments and annotations | Not started — change proposals ship as versioning pull requests with reviewers |
 
-> Every shipped deployment runs the process split: web, worker and control-plane processes (`SYNODIC_ROLE`), plus the versioning worker and the stats service, as separate services in Compose and on Kubernetes, where they autoscale. The single-process `dev` role is only the fallback when `SYNODIC_ROLE` is unset — for example, uvicorn run on the host. The end-state items still open are in [architecture-when-scaling.md](architecture-when-scaling.md).
+> **Note:** Every shipped deployment runs the process split: web, worker and control-plane processes (`SYNODIC_ROLE`), plus the versioning worker and the stats service, as separate services in Compose and on Kubernetes, where they autoscale. The single-process `dev` role is only the fallback when `SYNODIC_ROLE` is unset — for example, uvicorn run on the host. The end-state items still open are in [Scaling Architecture](architecture-when-scaling.md).
 
 ---
 
@@ -500,19 +494,19 @@ timeline
 - **Architecture is right:** The four-entity model (Provider + CatalogItem + Ontology + Workspace), provider abstraction, and ontology system are well-designed for the target use cases
 - **Ontology system is powerful:** Versioning, impact analysis, and three-layer resolution provide genuine schema governance
 - **Change control is shipped:** Graph versioning (drafts, review & merge, publish, revert, restore) plus the version-control master switch, a resumable enable-VC bootstrap job verified on a 7.7M-entity graph, and imports and exports at tens of gigabytes
-- **Exploration is differentiated:** Canvas-first exploration with persona toggle, Lineage Lens / Context View, multi-entity trace, external-degree signals, the Layer Strip, and the Anchor Rail put this ahead of static lineage tools
+- **Exploration is differentiated:** Canvas-first exploration with the Business / Technical toggle, Lineage Lens / Context View, multi-entity trace, external-degree signals, the Layer Strip, and the off-screen partner trays put this ahead of static lineage tools
 - **Identity is enterprise-ready:** SSO over OIDC and SAML 2.0, HttpOnly cookie sessions with CSRF protection, and RBAC with custom roles and group bindings
 - **Multi-tenant from day one:** Workspace isolation is architectural, not bolted on
 
 ### Areas for Improvement
 
-- **Production safeguards are not switched on:** The checks exist and are tested, but they key off `ENV=production`, which no shipped deployment config sets
+- **Production hardening:** The safeguards exist and are tested; hardening the shipped deployment configs is next on the roadmap
 - **Observability:** Metrics are exported but off by default, and nothing scrapes or alerts on them
 - **Unproven at scale:** No load or chaos run has been recorded, and two FalkorDB manifest defects on Kubernetes have not been checked
 - **Deployment parity:** The Helm chart lacks the versioning worker and other pieces the Kubernetes manifests have, and the zero-config quickstart does not boot
 - **Legacy code:** The pre-workspace connection path is unreachable dead code still waiting to be deleted
 
-Each of these is an entry, with evidence, in the technical-debt register (`docs/TECHNICAL_DEBT.md`).
+Each of these is an entry, with evidence, in the technical-debt register in the repository.
 
 ### Honest State
 
@@ -521,10 +515,10 @@ Each of these is an entry, with evidence, in the technical-debt register (`docs/
 | Architecture | Strong | Four-entity model, provider abstraction, workspace isolation, catalog governance |
 | Ontology System | Strong | Versioning, impact analysis, drift detection |
 | Change Control | Strong | Graph versioning shipped (drafts, merge, publish, revert, restore); enable-VC bootstrap verified at 7.7M entities; re-sync guarded above 250,000 entities |
-| Frontend UX | Strong | Canvas, persona, Lineage Lens, multi-entity trace, Layer Strip, Anchor Rail, guided onboarding |
+| Frontend UX | Strong | Canvas, Business / Technical names, Lineage Lens, multi-entity trace, Layer Strip, off-screen partner trays, guided onboarding |
 | Backend API | Solid | About 500 endpoints, clear REST patterns |
 | Identity | Strong | SSO, cookie sessions with CSRF protection, RBAC with custom roles and group bindings |
-| Security posture | Needs Work | Strong controls that the shipped configs do not switch on yet; open hardening items are tracked in the repository |
+| Security posture | Needs Work | Strong controls; open hardening items are tracked in the repository |
 | Operability | Needs Work | Metrics off by default and unalerted; Helm chart behind the Kubernetes manifests |
 | Scale-out | Deployed, unmeasured | Three tiers on Kubernetes with autoscaling; no recorded load test |
 
@@ -556,62 +550,49 @@ graph TB
 ## Getting Started
 
 ### Prerequisites
-- Python 3.13+ (the container images use 3.14)
-- Node.js 20.19+ or 22.12+ (the image and `frontend/.nvmrc` use 24)
-- Docker (for PostgreSQL, Redis and FalkorDB)
+
+- Docker Engine or Docker Desktop with the Compose v2 plugin — every service runs in a container
+- Only to run the apps on your machine: Python 3.14 (what the backend images use) and Node.js 24 (`frontend/.nvmrc`)
 
 ### Quick Start
 
-```bash
-# 1. Clone the repository and create the dev env file
-git clone <repo-url> && cd synodic
-cp .env.example .env.dev
+1. Clone the repository and change into it:
 
-# 2. Start PostgreSQL, Redis and FalkorDB in Docker
-./dev.sh infra
+   ```bash
+   git clone <repository-url>
+   cd <repository-directory>
+   ```
 
-# 3. Install backend dependencies
-pip install -r backend/requirements.txt
+2. Start the whole stack:
 
-# 4. Start Visualization Service against that infra
-set -a && source .env.dev && set +a
-uvicorn backend.app.main:app --port 8000 --reload
+   ```bash
+   ./dev.sh
+   ```
 
-# 5. Install frontend dependencies
-cd frontend && npm install
+   On the first run it creates `.env.dev` from `.env.example`, builds the images, applies the database migrations and starts every service. When it returns, it prints:
 
-# 6. Start Frontend
-npm run dev
-```
+   ```
+     Frontend     http://localhost:5173
+     Backend API  http://localhost:8000/docs
+     Logs:        ./dev.sh logs [service]
+     Status:      ./dev.sh ps
+   ```
 
-Open http://localhost:5173 and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env.dev`. A password published in this repository, like the example file's, has to be changed at first sign-in. `./dev.sh` with no argument runs the whole stack in containers instead — see [SETUP.md](SETUP.md).
+3. Open http://localhost:5173 and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env.dev`. A password published in this repository, like the example file's, has to be changed at first sign-in.
+
+To run the API and the frontend on your machine instead, with only PostgreSQL, Redis and FalkorDB in Docker, follow the [Setup Guide](/docs/setup): that path needs one extra step, applying the migrations yourself, because the API never migrates the database on its own.
 
 ### Environment Variables
 
-See [BACKEND.md](BACKEND.md#8-startup-lifecycle) for the full environment variable reference.
+Every variable the backend reads is in the [Configuration Reference](/docs/configuration). Before a production deployment, work through its [Must set in production](/docs/configuration#must-set-in-production) list.
 
-Key variables for production:
-```bash
-ENV=production                                                        # Required — turns on the production safeguards
-MANAGEMENT_DB_URL=postgresql+asyncpg://user:pass@host:5432/synodic  # Required
-CREDENTIAL_ENCRYPTION_KEY=<fernet-key>                                # Required
-JWT_SECRET_KEY=<random-32-chars>                                      # Required
-AGGREGATION_INTERNAL_TOKEN=<random-48-chars>                          # Required — authenticates the control plane
-CORS_ALLOWED_ORIGINS=https://your-domain.com                          # Required
-ADMIN_EMAIL=admin@your-org.com                                        # Recommended
-ADMIN_PASSWORD=<strong-random-password>                                # Recommended
-```
-
-> **Warning:** Without `ENV=production`, the production-only checks — the 15-minute token cap, shared replay caches, credential encryption, the control-plane token, and readiness on shared revocation — only log a warning. None of the shipped deployment configs set it yet; see `docs/TECHNICAL_DEBT.md` §1.1.
+> **Warning:** The production safeguards — among them the 15-minute access-token cap, shared replay caches, credential encryption, the control-plane token and readiness on shared revocation — apply only when `ENV=production` is set. Without it they only log a warning, so set it in every production deployment.
 
 ---
 
-## Related
+## Where to next
 
-- [Architecture](/docs/architecture) — system design, service topology, deployment
-- [Data Architecture](/docs/data-architecture) — data models, entity relationships, caching, Redis topology
-- [Decisions](/docs/decisions) — the ADRs behind the four-entity model and beyond
-- [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
-- The technical-debt register, `docs/TECHNICAL_DEBT.md` in the repository — known risks and the remediation plan
-- [Architecture When Scaling](/docs/scaling-architecture) — the deployed three-tier split, and the end-state items still open
-- [Versioning: Scale, Limits & Roadmap](/docs/versioning-scale-and-roadmap) — the versioned store's limits and roadmap
+- [Architecture](/docs/architecture) — when you want every process and store, and how a request reaches the data
+- [Setup Guide](/docs/setup) — when you want the stack running on your machine
+- [Design Decisions](/docs/decisions) — when you want to know why the platform is built this way
+- [Scaling Architecture](/docs/scaling-architecture) — when you want the deployed three-tier split and the end-state items still open

@@ -1,834 +1,293 @@
 # {brand} Platform Architecture
 
-> **{brand}** is a workspace-centric graph visualization and data lineage platform. It enables teams to explore, trace, and manage data relationships across heterogeneous graph backends through a unified semantic layer.
+*For architects and tech leads.*
 
-> **See also:** [Platform Services overview](/docs/services-overview) for the current service/process-role topology (WEB, WORKER, CONTROLPLANE, DEV).
+How is {brand} built, and why that way? After this page you can name every process and store in a deployment, follow a request from sign-in to a lineage trace, and find each part in the code.
 
-This is the system-design reference: how the frontend, backend, semantic layer, and graph providers fit together, and how a request flows through them.
+## Your path
 
-**Who it's for:** developers and architects who need the end-to-end picture before diving into a subsystem.
+Read these next, in order:
 
-**What you'll find here:**
-- The three-layer system topology and the four-entity core model
-- Service architecture and the request lifecycle
-- Authentication, security controls, and scalability caveats
-- Deployment (Docker Compose + Kubernetes) and the technology stack
+1. [Data Architecture](/docs/data-architecture) — what each store holds, the caches, and the two Redis roles.
+2. [Decisions](/docs/decisions) — why each major choice was made, and what it costs.
+3. [Platform Services](/docs/services-overview) — the process roles and the background services in more depth.
+4. [Versioning: Overview & Architecture](/docs/versioning-overview) — how drafts, review and publish sit on PostgreSQL and FalkorDB.
+5. [Security Overview](/docs/security-overview) — the security controls, end to end.
+6. [Architecture When Scaling](/docs/scaling-architecture) — how the tiers scale, and what is still open.
 
----
+## The system at a glance
 
-## System Overview
+{brand} is a React single-page app served by nginx, one FastAPI web API, and a set of background processes. The API and the background processes share one Python code base and three kinds of store:
 
-{brand} is composed of three primary layers: a **React 19 frontend**, a **FastAPI backend service**, and **pluggable graph data providers** (FalkorDB, Neo4j, Spanner Graph, and a connectivity-level DataHub adapter).
+- **PostgreSQL** — the management database (users, workspaces, providers, ontologies, views, settings), the job tables, and the version store for graph version control.
+- **Redis** — work queues and event streams, locks, rate limits, the session store, and caches. It is a dedicated Redis; nothing operational ever lives on FalkorDB.
+- **Graph stores** — FalkorDB by default, holding the lineage graph only. Neo4j, Google Cloud Spanner Graph and DataHub can be registered as further providers.
 
-```mermaid
-graph TB
-    subgraph Frontend["Frontend (React 19 + Vite)"]
-        UI[UI Components<br/>Radix UI + Tailwind]
-        Stores[Zustand Stores<br/>auth, workspaces, schema, canvas]
-        GPC[GraphProviderContext<br/>RemoteGraphProvider]
-        RQ[TanStack React Query]
-    end
+Two pictures show how they connect: the path a user's request takes, and what runs behind it.
 
-    subgraph VizService["Visualization Service (Port 8000)"]
-        Auth[Auth Middleware<br/>JWT + Argon2id]
-        API[FastAPI Routers<br/>/api/v1/*]
-        CE[ContextEngine<br/>Query Orchestration]
-        PR[ProviderRegistry<br/>Singleton Cache]
-        OS[OntologyService<br/>Three-Layer Resolver]
-        Repos[Repository Layer<br/>SQLAlchemy 2.0 Async]
-    end
-
-    subgraph Storage["Data Layer"]
-        MgmtDB[(Management DB<br/>PostgreSQL)]
-        FDB[(FalkorDB<br/>Redis Protocol)]
-        Neo4j[(Neo4j)]
-        DH[(DataHub<br/>GraphQL)]
-    end
-
-    UI --> Stores
-    Stores --> GPC
-    GPC --> RQ
-    RQ -->|HTTP + JWT| API
-
-    API --> Auth
-    Auth --> CE
-    CE --> PR
-    CE --> OS
-    OS --> Repos
-    PR -->|Cached Instances| FDB
-    PR -->|Cached Instances| Neo4j
-    PR -->|Cached Instances| DH
-    Repos --> MgmtDB
-
-```
-
----
-
-## Core Entity Model (Four Entities)
-
-The core architectural concept is the **Provider + CatalogItem + Ontology + Workspace** quartet, bound together by `WorkspaceDataSource`:
+### How a request reaches the data
 
 ```mermaid
-erDiagram
-    Provider ||--o{ WorkspaceDataSource : "hosts"
-    Provider ||--o{ CatalogItem : "registered assets"
-    CatalogItem ||--o| WorkspaceDataSource : "consumed by"
-    Ontology ||--o{ WorkspaceDataSource : "defines semantics"
-    Workspace ||--o{ WorkspaceDataSource : "contains"
-    WorkspaceDataSource ||--o| CatalogItem : "references"
-    Workspace ||--o{ View : "scopes"
-    Workspace ||--o{ ContextModel : "scopes"
-
-    Provider {
-        text id PK "prov_*"
-        text name
-        text provider_type "falkordb | neo4j | datahub | spanner | mock"
-        text host
-        int port
-        text credentials "Fernet-encrypted JSON"
-        bool tls_enabled
-        json permitted_workspaces "['*'] or [ws_id, ...]"
-    }
-
-    Ontology {
-        text id PK "bp_*"
-        text name
-        int version
-        bool is_published "immutable when true"
-        text scope "universal | workspace"
-        text evolution_policy "reject | deprecate | migrate"
-        json entity_type_definitions
-        json relationship_type_definitions
-    }
-
-    Workspace {
-        text id PK "ws_*"
-        text name
-        text description
-        bool is_default
-        bool is_active
-    }
-
-    WorkspaceDataSource {
-        text id PK "ds_*"
-        text workspace_id FK
-        text provider_id FK
-        text graph_name
-        text ontology_id FK
-        text label
-        bool is_primary
-        text projection_mode "in_source | dedicated"
-        text access_level "read | write | admin"
-    }
-
-    CatalogItem {
-        text id PK "cat_*"
-        text provider_id FK
-        text source_identifier
-        text name
-        text description
-        json permitted_workspaces
-        text status
-        datetime created_at
-        datetime updated_at
-    }
-
-    View {
-        text id PK "view_*"
-        text workspace_id FK
-        text data_source_id FK
-        text visibility "enterprise | team | personal"
-        json config
-    }
-
-    ContextModel {
-        text id PK
-        text workspace_id FK
-        text data_source_id FK
-        json layers_config
-        bool is_template
-    }
-
-    ontology_audit_log {
-        text id PK
-        text ontology_id FK
-        text action
-        text changed_by
-        json diff
-        datetime created_at
-    }
-
-    announcements {
-        text id PK
-        text title
-        text message
-        text type "info | warning | critical"
-        bool is_active
-        datetime starts_at
-        datetime expires_at
-        datetime created_at
-    }
+flowchart LR
+    B["Browser"] --> FE["frontend (nginx)"]
+    FE -->|"/api/*"| API["viz-service (web API)"]
+    API --> PG[("PostgreSQL")]
+    API --> RD[("Redis")]
+    API --> FDB[("FalkorDB")]
+    API --> EXT[("Neo4j, Spanner, DataHub (optional)")]
+    API -->|"aggregation endpoints"| CP["Aggregation control plane"]
 ```
 
-### Why Four Entities?
-
-| Entity | Responsibility | Reusability |
-|--------|---------------|-------------|
-| **Provider** | Infrastructure connection (host, port, credentials) | Shared across workspaces |
-| **CatalogItem** | Data product abstraction | Abstracts physical provider graphs into governed data products with permission control and impact analysis |
-| **Ontology** | Semantic schema (entity types, relationship types, hierarchy) | Versioned, reusable, immutable when published |
-| **Workspace** | Operational context (team project, environment) | Contains data sources, views, context models |
-| **DataSource** | Binding of Provider + Graph + Ontology within a Workspace | Unique per (workspace, provider, graph_name) |
-
-> **Important:** A `WorkspaceDataSource` is the only unit of data access, and it is unique per `(workspace_id, provider_id, graph_name)`. This invariant is what keeps tenants isolated — no view or query can reach a graph that isn't bound into its workspace.
-
-> See [ADR-001](/docs/decisions#adr-001-three-entity-model-provider--ontology--workspace) for the rationale behind this design.
-
----
-
-## Service Architecture
-
-### Visualization Service (Port 8000)
-
-The primary backend service handling all authenticated, stateful operations.
+### What runs in the background
 
 ```mermaid
-graph LR
-    subgraph Routes["API Routes (/api/v1)"]
-        AuthR["/auth/*<br/>login, signup, reset"]
-        AdminR["/admin/*<br/>providers, workspaces,<br/>ontologies, features,<br/>catalog, announcements,<br/>context-model-templates"]
-        GraphR["/{ws_id}/graph/*<br/>trace, nodes, edges"]
-        ViewR["/views/*<br/>CRUD, favourites"]
-        AssetR["/{ws_id}/assets/*<br/>rule-sets"]
-        CMR["/{ws_id}/context-models"]
-    end
-
-    subgraph Services["Business Logic"]
-        CE2[ContextEngine]
-        OntSvc[OntologyService]
-        AssignEng[AssignmentEngine]
-        FeatSvc[FeatureService]
-    end
-
-    subgraph Data["Data Access"]
-        PR2[ProviderRegistry]
-        RepoLayer["Repositories<br/>(workspace, provider,<br/>ontology, view, user,<br/>catalog, data_source,<br/>announcement)"]
-        DB2[(Management DB)]
-    end
-
-    subgraph Providers["Graph Providers"]
-        FP[FalkorDBProvider]
-        NP[Neo4jProvider]
-        DP[DataHubProvider]
-        SP[SpannerGraphProvider]
-    end
-
-    AuthR --> Services
-    AdminR --> Services
-    GraphR --> CE2
-    ViewR --> RepoLayer
-    AssetR --> Services
-    CMR --> Services
-
-    CE2 --> PR2
-    CE2 --> OntSvc
-    OntSvc --> RepoLayer
-    RepoLayer --> DB2
-
-    PR2 --> FP
-    PR2 --> NP
-    PR2 --> DP
-    PR2 --> SP
-
+flowchart LR
+    UP["upgrade job"] -->|"builds and migrates schema"| PG[("PostgreSQL")]
+    CP["Aggregation control plane"] -->|"job stream"| RD[("Redis")]
+    CP --> PG
+    RD --> AW["Aggregation worker"]
+    AW -->|"rollup edges"| FDB[("FalkorDB")]
+    VW["Versioning worker"] -->|"reads commits"| PG
+    VW -->|"projects main"| FDB
+    ST["Stats service"] -->|"counts and schema"| PG
+    ST -->|"polls"| FDB
+    ST -->|"polls"| EXT[("Neo4j, Spanner, DataHub")]
 ```
 
-### In-Process Provider Connectivity
+### Every process and store
 
-Pre-registration provider testing (list supported provider types, test connectivity before registration, enumerate available graphs/databases) is handled **inside viz-service** via `/admin/providers/test-connection`, which is bulkheaded from the stateful request path.
+As deployed by `docker-compose.yml`. The Kubernetes manifests in `deploy/k8s/base/` run the same processes as Deployments and StatefulSets; how each Kubernetes path runs the schema job is in [Kubernetes](/docs/kubernetes).
 
-A standalone `graph-service` (port 8001) once hosted this probe surface as a separate process, but it was built and deployed yet never actually invoked. The standalone HTTP service was removed; the same provider connectivity now lives in-process, while the underlying Neo4j/DataHub/Spanner adapters (`backend/graph/adapters/`) survive and are imported directly by viz-service.
+| Process (Compose service) | Started with | `SYNODIC_ROLE` | Port | What it does | Scales |
+|---|---|---|---|---|---|
+| `frontend` | nginx serving the built app (`frontend/Dockerfile`) | — | 80 (3080 on the Compose host) | Serves the app, proxies `/api/` to the API, sets the security headers on the page | Horizontally |
+| `viz-service` | `gunicorn backend.app.main:app` with uvicorn workers (4 by default) | `web` | 8000 | The HTTP API: sign-in, workspaces, views, graph reads and writes, traces, version control, administration. Forwards the aggregation endpoints to the control plane | Horizontally; it holds no session state |
+| `upgrade` | `python -m backend.scripts.upgrade upgrade` (`backend/Dockerfile.upgrade`) | — | — | Builds and migrates the PostgreSQL schema, then exits. In Compose every backend service waits for it; the Helm chart runs it as a pre-install/pre-upgrade hook | Once per deploy |
+| `aggregation-controlplane` | `python -m backend.app.services.aggregation.controlplane` | `controlplane` | 8091 | The aggregation job and settings API, the scheduler, crash recovery, stuck-job reconciliation, drift probes, and the state sync that mirrors job status into the management database | One replica in the base; production runs two, because each loop is single-flight |
+| `aggregation-worker` | `python -m backend.app.services.aggregation` | `worker` | 8090 (health) | Takes aggregation jobs off a Redis stream and writes `:AGGREGATED` rollup edges into the graph | Horizontally |
+| `versioning-worker` | `python -m backend.app.services.versioning` | `worker` | — | Projects each version-controlled graph's `main` into FalkorDB, and runs the "enable version control", import and export jobs the API queues | Horizontally |
+| `stats-service` | `python -m backend.insights_service` (`backend/Dockerfile.insights`) | `stats` | 8092 (health) | Polls every data source for counts and schema so the API serves cached stats; also runs asset discovery, purges and the profiling sweeps | Horizontally; a per-source claim in Redis keeps at most one pending poll per source |
+| `postgres` | PostgreSQL 16 | — | 5432 | The management database, the `aggregation` schema and the `graphver` version store (which `GRAPHVER_DB_URL` can move to its own instance) | — |
+| `redis` | Redis 7 | — | 6379 (6380 on the Compose host) | The `STREAMS` role (job and event streams, locks, session store) and the `CACHE` role (response and provider caches) | Compose shares one instance between the roles (DB 0 and DB 1); production uses two |
+| `falkordb` | FalkorDB | — | 6379 | The lineage graph, and dedicated-mode `{graph}_proj` projection graphs. Nothing else | Standalone, Sentinel or a sharded cluster |
 
-> See [DECISIONS.md ADR-018](DECISIONS.md#adr-018-retire-the-graph-service) for why the standalone service was retired.
+`SYNODIC_ROLE` selects which role-gated subsystems a process starts. The code knows `web`, `worker`, `controlplane` and `dev`; `dev` — also what an unset or unrecognised value becomes — starts every role-gated subsystem in one API process, for local development. The stats service, the versioning worker and the upgrade job run their own entry points rather than the API's startup.
 
----
+Compose also has an opt-in `seed` service (`docker compose --profile seed up`) that loads demo graphs into FalkorDB.
 
-## Request Lifecycle
+## The core entity model
+
+Everything a user sees is reached through four entities bound together by a data source:
+
+```mermaid
+flowchart LR
+    P["Provider"] --> C["Catalog item"]
+    C --> DS["Data source"]
+    O["Ontology"] --> DS
+    W["Workspace"] --> DS
+    DS --> V["Views"]
+    DS --> CM["Context models"]
+```
+
+| Entity | What it holds | Reuse |
+|---|---|---|
+| **Provider** | A connection to a graph store: type (`falkordb`, `neo4j`, `datahub` or `spanner`), host, port, and credentials encrypted with `CREDENTIAL_ENCRYPTION_KEY` | One provider can serve many workspaces |
+| **Catalog item** | One graph on a provider, registered as a governed asset, with the workspaces allowed to use it | Registered once per `(provider, graph)` |
+| **Ontology** | The semantic layer: entity types, relationship types, hierarchy and styling. Published versions are immutable | One ontology can be assigned to many data sources |
+| **Workspace** | A team's or project's operating context | Holds data sources, views and context models |
+| **Data source** | The binding of a provider's graph and an ontology into a workspace | Unique per `(workspace, provider, graph)` among live data sources; a catalog item backs at most one live data source |
+
+> **Important:** A data source is the only unit of data access. Every graph route is addressed as `/api/v1/{ws_id}/graph/...`, naming a data source in the query (or falling back to the workspace's primary one), so a view or query can only reach a graph that is bound into its workspace.
+
+Views and context models are scoped to a workspace and data source. A view's visibility is **Private**, **Workspace** or **Enterprise**.
+
+Why the entities were split this way: [ADR-001](/docs/decisions#adr-001-three-entity-model-provider--ontology--workspace) and [ADR-013](/docs/decisions#adr-013-catalogitem-abstraction-layer). The schema behind them: [Data Architecture](/docs/data-architecture).
+
+## Request lifecycle
+
+The same four steps cover most of what a user does: sign in, open a view, trace lineage, and get an answer from the cache or the graph.
+
+### 1. Sign in: cookies, not bearer tokens
 
 ```mermaid
 sequenceDiagram
-    participant FE as Frontend
-    participant MW as Auth Middleware
-    participant EP as API Endpoint
-    participant CE as ContextEngine
-    participant PR as ProviderRegistry
-    participant OS as OntologyService
-    participant GP as GraphProvider
-    participant DB as Management DB
-
-    FE->>MW: GET /api/v1/{ws_id}/graph/trace<br/>(Bearer JWT)
-    MW->>MW: Verify JWT (HS256)
-    MW->>EP: Authenticated Request
-
-    EP->>CE: get_context_engine(ws_id, ds_id?)
-    CE->>DB: Fetch WorkspaceDataSource
-    CE->>PR: get_provider_for_workspace()
-
-    alt Cache Hit
-        PR-->>CE: Cached GraphProvider
-    else Cache Miss
-        PR->>DB: Fetch Provider + Credentials
-        PR->>PR: Decrypt (Fernet) + Instantiate
-        PR-->>CE: New GraphProvider (cached)
-    end
-
-    CE->>OS: resolve_ontology()
-    OS->>DB: Fetch assigned ontology
-    OS->>OS: Merge: System Default + Assigned + Introspected
-    OS-->>CE: ResolvedOntology (cached 5 min)
-
-    CE->>GP: get_trace_lineage(urn, depth, ...)
-    GP-->>CE: LineageResult (nodes + edges)
-
-    CE->>CE: Apply granularity aggregation
-    CE-->>EP: Enriched LineageResult
-    EP-->>FE: JSON Response
+    participant SPA as Browser app
+    participant API as viz-service
+    participant PG as PostgreSQL
+    participant RD as Redis
+    SPA->>API: POST /api/v1/auth/login
+    API->>PG: Look up the user, then verify the Argon2id hash
+    API->>RD: Store the session's workspace grants
+    API-->>SPA: 200, the user, Set-Cookie nx_access, nx_refresh, nx_csrf, nx_access_exp
+    SPA->>API: GET /api/v1/auth/me (on every page load)
+    SPA->>API: Writes carry X-CSRF-Token
+    SPA->>API: POST /api/v1/auth/refresh (before nx_access expires)
 ```
 
-> See [DECISIONS.md ADR-005](DECISIONS.md#adr-005-providerregistry-singleton-with-lazy-initialization) for caching strategy rationale.
+1. The sign-in form posts to `/api/v1/auth/login`. The API rate-limits by address and by account, checks the Argon2id password hash, and creates a session.
+2. The response body carries the user, never a token. The session arrives as cookies: `nx_access` and `nx_refresh` are `HttpOnly`, so page scripts cannot read them; `nx_csrf` and `nx_access_exp` are readable so the app can echo the CSRF token and renew in time. With `AUTH_ENVIRONMENT_ID` set, every cookie name carries it as a suffix.
+3. On each page load the app asks `GET /api/v1/auth/me` who is signed in; nothing about the session is kept in web storage.
+4. Every `POST`, `PUT`, `PATCH` and `DELETE` must send the `nx_csrf` value in an `X-CSRF-Token` header (double-submit). The token is bound to the session by HMAC, and the request's origin must be the app's own or a configured CORS origin.
+5. The app renews the session before `nx_access` expires (it reads the expiry from `nx_access_exp`) and, as a fallback, once on a `401`. Refresh tokens rotate on every use.
 
----
+Single sign-on ends the same way: the identity provider's callback sets the same cookies. Details: [Multi-Environment Sessions](/docs/multi-environment-sessions), [SSO](/docs/sso), and [ADR-024](/docs/decisions#adr-024-cookie-sessions-with-csrf-double-submit-not-bearer-tokens).
 
-## Authentication & Security
+### 2. Open a view
+
+1. The browser opens `/views/<viewId>`. nginx serves the app, which fetches the view's definition from `GET /api/v1/views/{view_id}`.
+2. The view's layout picks the canvas: **Graph**, **Hierarchy** or **Context View**.
+3. The canvas loads its data from the workspace-scoped graph routes, `/api/v1/{ws_id}/graph/...`, adding `dataSourceId`, `viewId` and — inside a draft — `branchId` to the query. For example, a page of top-level entities with their edges and rollups comes from one `POST .../graph/canvas/bootstrap`, and opening a container asks for its children and their edges (`GET .../graph/nodes/{urn}/children-with-edges`).
+4. Each graph request is authorised against the workspace, or against the caller's access to the view it names.
+5. On the Graph canvas, layout runs with ELK.js (`useElkLayout`) on the browser's main thread — asynchronously, but not in a Web Worker. The Context View lays out its own layer columns.
+
+### 3. Trace lineage
+
+The trace endpoints live in `backend/app/api/v1/endpoints/graph.py`, under `/api/v1/{ws_id}/graph`:
+
+| Endpoint | Used by | Returns |
+|---|---|---|
+| `POST .../trace/v2` | The Graph and Hierarchy canvases' trace | A skeleton-first picture at one hierarchy level (top level by default), with rollup edges between those entities |
+| `POST .../trace/expand` | Opening one rolled-up edge of that picture | The finer entities and edges inside it |
+| `POST .../trace/expand-batch` | Opening a traced container with many rolled-up edges | The same, for many edges in one request |
+| `POST .../trace/closure` | The Context View's trace and the Lineage Lens | One page of a focus-centred walk over raw lineage, with a frontier and cursors to continue; a `coarse` first page paints rollups in milliseconds |
+
+The original `POST .../trace` is retired and answers `410 Gone`.
+
+Every trace is bounded on the server: a node budget (`TRACE_MAX_NODES`, default 2,000) and a time budget (`TRACE_TIMEOUT_SECS`, default 120 seconds). A trace that hits either still answers `200`, marked `truncated` with a reason, so the app can show what it has. Trace endpoints answer only while the **Lineage trace** feature switch is on.
+
+The trace controls users see are the dock's **Upstream depth** and **Downstream depth** sliders; how fine the picture is follows which containers are open, and the Lineage Lens's **Density** control.
+
+### 4. Caching and load shedding
+
+A graph read passes several guards before it reaches a graph store:
 
 ```mermaid
-graph TB
-    subgraph AuthFlow["Authentication Flow"]
-        Login[POST /auth/login<br/>email + password]
-        Signup[POST /auth/signup<br/>name, email, password]
-        Approve["POST /admin/users/{id}/approve<br/>Admin only"]
-    end
-
-    subgraph Security["Security Layers"]
-        Argon[Argon2id<br/>Password Hashing]
-        JWT[JWT HS256<br/>60-min expiry]
-        Fernet[Fernet Encryption<br/>Credential at-rest]
-        CSP[Security Headers<br/>CSP, X-Frame-Options]
-        Rate[Rate Limiting<br/>slowapi]
-    end
-
-    subgraph Roles["Authorization (see RBAC.md)"]
-        GlobalR[Global-tier roles<br/>organization-wide]
-        WSR[Workspace-scoped roles<br/>per-workspace]
-        Scopes[Permission scopes<br/>checked per request]
-    end
-
-    Login --> Argon
-    Argon -->|Constant-time verify| JWT
-    Signup --> Argon
-    Signup -->|status=pending| Approve
-    Approve -->|status=active| JWT
-
-    JWT --> Scopes
-    Scopes --> GlobalR
-    Scopes --> WSR
-
+flowchart LR
+    R["Graph request"] --> A{"Admitted for this data source?"}
+    A -->|"no"| S1["429 + Retry-After"]
+    A -->|"yes"| C{"In the response cache?"}
+    C -->|"yes"| OK["Cached answer"]
+    C -->|"no"| L{"Provider slot free?"}
+    L -->|"no"| S2["429 + Retry-After"]
+    L -->|"yes"| G["Query the graph store"]
 ```
 
-Authorization separates **global-tier roles** (organization-wide) from **workspace-scoped roles** (per-workspace), enforced through a permission-scope system checked on every request rather than a fixed set of coarse roles. See [RBAC.md](RBAC.md) for the current role and permission catalogue.
-
-### Security Controls
-
-| Layer | Mechanism | Details |
-|-------|-----------|---------|
-| **Password** | Argon2id | OWASP-recommended, constant-time comparison |
-| **Session transport** | HttpOnly cookies | `nx_access` / `nx_refresh`. **No token is ever in web storage** — see [SSO.md §1.1](SSO.md) |
-| **Access token** | JWT (HS256, key ring) | 15 min; carries `sub`, `email`, `sid` and global permission claims. Per-workspace grants live in the session store, not the token |
-| **Refresh token** | JWT (HS256), rotating | 7 days, allow-by-record, reuse detection with family revocation |
-| **Session ceilings** | idle + absolute | 12 h idle, 7 d absolute, on every session; 24 h IdP re-auth for SSO |
-| **CSRF** | double-submit bound to `sid`, plus Origin | See [SSO_INTEGRATION.md §10](SSO_INTEGRATION.md) |
-| **Credentials** | Fernet | Symmetric encryption for provider credentials at rest; fails closed in prod |
-| **Headers** | CSP, HSTS, X-Frame-Options | On API responses via middleware, **and on the SPA document via `frontend/nginx.conf`** — the backend never sees the request for `index.html` |
-| **Rate Limiting** | slowapi + a per-account limiter | Per-IP is a coarse flood guard; the per-account window is the brute-force control |
-| **CORS** | Configurable origins | `CORS_ALLOWED_ORIGINS` env var, no wildcard default |
-
-### Production Security Notes
-
-> **Note:** This section previously warned about JWTs in `localStorage`.
-> That has not been true for some time — sessions ride HttpOnly cookies
-> and no token reaches web storage. The stale warning is recorded here
-> rather than silently deleted, because it was still being read as
-> current.
-
-- **Signing key**: `JWT_SECRET_KEY` is required, must be ≥32 characters,
-  and published placeholder values are denylisted — the process refuses
-  to start otherwise. Rotate via `JWT_SECRET_KEY_PREVIOUS`; see
-  [MULTI_ENVIRONMENT_SESSIONS.md §4](MULTI_ENVIRONMENT_SESSIONS.md).
-- **Credential Encryption**: Optional in development
-  (`CREDENTIAL_ENCRYPTION_KEY` unset falls back to plaintext).
-  **Fails closed in production** — generate a key via
-  `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
-- **Default Admin Password**: the bootstrap accepts `ADMIN_PASSWORD`,
-  but an account seeded with a value published in this repo
-  (`changeme`, `admin123`) is created with `must_change_password`, and
-  every route outside the password-change allowlist returns
-  `403 password_change_required` until it is rotated.
-- **Host allowlist**: set `ALLOWED_HOSTS` when using SAML — it is what
-  the assertion's `Destination` is validated against.
-- **Ports**: the compose file binds Postgres, Redis, FalkorDB and the
-  aggregation control plane to `127.0.0.1`. Only the frontend port is
-  published.
-
-### Scalability Considerations
-
-- **Per-process provider caches**: Each process keeps its own provider cache. A provider edit is broadcast over Redis, and the web, aggregation-worker and versioning-worker processes drop their copies; the stats service and the control plane do not listen yet (`docs/TECHNICAL_DEBT.md` §2.3).
-- **PostgreSQL only**: There is no SQLite branch. Any `MANAGEMENT_DB_URL` that is not a `postgresql+asyncpg://` URL is rejected at startup, in every environment.
-
----
-
-## Deployment Architecture
-
-```mermaid
-graph TB
-    subgraph Dev["Development (Local)"]
-        Vite[Vite Dev Server<br/>:5173]
-        Uvicorn1[Uvicorn<br/>backend.app :8000]
-        PGDev[(PostgreSQL<br/>Docker :5432)]
-        Docker[Docker<br/>FalkorDB :6379]
-    end
-
-    subgraph Prod["Production"]
-        Static[Static Files<br/>React Build]
-        Gunicorn1[Gunicorn + Uvicorn Workers<br/>backend.app :8000]
-        PG[(PostgreSQL)]
-        FDB2[(FalkorDB Cluster)]
-    end
-
-    Vite -->|proxy| Uvicorn1
-    Uvicorn1 --> PGDev
-    Uvicorn1 --> Docker
-
-    Static -->|nginx| Gunicorn1
-    Gunicorn1 --> PG
-    Gunicorn1 --> FDB2
-
-```
-
-### Quick Start
-
-**Option A — Docker Compose (recommended for first-time setup):**
-
-```bash
-# Full platform — builds & starts all services
-docker compose up --build
-
-# With demo data (enterprise finance + ecommerce scenarios):
-docker compose --profile seed up --build
-
-# Open the app:
-#   Frontend:              http://localhost:3080
-#   Viz Service (direct):  http://localhost:8000/health
-#   FalkorDB Browser:      http://localhost:3000
-#
-# Default admin login:
-#   Email:    admin@nexuslineage.local
-#   Password: admin123
-```
-
-**Option B — Local development (hot-reload):**
-
-```bash
-# 1. Start infrastructure only
-docker compose up -d falkordb postgres
-
-# 2. Start Backend (Visualization Service)
-GRAPH_PROVIDER=falkordb uvicorn backend.app.main:app --port 8000 --reload
-
-# 3. Start Frontend
-cd frontend && npm run dev
-```
-
----
-
-## Directory Structure
-
-```
-synodic/
-├── backend/
-│   ├── app/                          # Visualization Service (port 8000)
-│   │   ├── main.py                   # FastAPI app, lifespan, middleware
-│   │   ├── api/v1/endpoints/         # Route handlers
-│   │   ├── auth/                     # JWT, password hashing, dependencies
-│   │   ├── db/                       # Engine, models, repositories
-│   │   ├── middleware/               # Security headers, logging, request ID
-│   │   ├── ontology/                 # Service, resolver, defaults, adapters
-│   │   ├── providers/                # FalkorDB provider, provider manager, versioned + draft wrappers
-│   │   ├── registry/                 # ProviderRegistry singleton
-│   │   └── services/                 # ContextEngine, AssignmentEngine
-│   ├── common/                       # Shared kernel
-│   │   ├── interfaces/provider.py    # GraphDataProvider ABC
-│   │   └── models/                   # Pydantic DTOs (graph, management, auth)
-│   ├── graph/                        # Provider adapters (imported in-process by viz-service)
-│   │   └── adapters/                 # Neo4j, DataHub, Spanner connectivity
-│   └── insights_service/             # Insights collection & caching background service
-├── frontend/
-│   ├── src/
-│   │   ├── components/               # React components by feature
-│   │   │   ├── admin/                # Admin panels
-│   │   │   │   ├── AssetOnboardingWizard/  # 4-step asset onboarding wizard
-│   │   │   │   └── AdminAnnouncements/     # Announcement management UI
-│   │   │   ├── auth/                 # Login, signup, reset
-│   │   │   ├── canvas/               # Graph visualization canvases
-│   │   │   ├── layout/               # AppLayout, TopBar, SidebarNav
-│   │   │   ├── panels/               # Node/edge detail panels
-│   │   │   ├── schema/               # Schema editor
-│   │   │   ├── views/                # View wizard, layer editor
-│   │   │   └── ui/                   # Reusable primitives
-│   │   ├── hooks/                    # 40+ custom React hooks
-│   │   ├── pages/                    # Route page components
-│   │   ├── providers/                # GraphProviderContext
-│   │   ├── services/                 # API client modules
-│   │   │   ├── catalogService.ts     # Catalog API client
-│   │   │   └── announcementService.ts # Announcement API client
-│   │   ├── store/                    # Zustand state stores
-│   │   ├── styles/                   # Global CSS, Tailwind config
-│   │   └── workers/                  # Web Workers (ELK layout)
-│   ├── Dockerfile                    # Multi-stage Node build + Nginx
-│   ├── nginx.conf                    # Reverse proxy + SPA config
-│   └── package.json
-│   ├── Dockerfile.viz                   # Visualization Service container
-│   ├── requirements.txt                 # Python dependencies
-│   └── scripts/
-│       ├── seed_falkordb.py             # Enterprise data generator
-│       ├── seed_neo4j.py                # Neo4j data generator
-│       └── docker_seed.py              # Docker-aware seed entrypoint
-├── docs/                             # Documentation
-├── docker-compose.yml                # Full-stack orchestration
-├── .dockerignore                     # Docker build exclusions
-└── .env.example                      # Environment variable reference
-```
-
----
-
-## Technology Stack
-
-| Layer | Technology | Version | Purpose |
-|-------|-----------|---------|---------|
-| **Frontend Framework** | React | 19.0.0 | UI rendering |
-| **Build Tool** | Vite | 6.0.5 | Bundling, HMR |
-| **Type System** | TypeScript | 5.7.2 | Type safety |
-| **State Management** | Zustand | - | Lightweight stores |
-| **Graph Rendering** | @xyflow/react | 12.10.0 | Node/edge canvas |
-| **Layout Algorithms** | ELK.js, Dagre | - | Graph layout (Web Worker) |
-| **UI Primitives** | Radix UI | - | Accessible components |
-| **Styling** | Tailwind CSS | 3.4.17 | Utility-first CSS |
-| **Animations** | Framer Motion | 11.15.0 | Transitions |
-| **Backend Framework** | FastAPI | >=0.100.0 | Async API |
-| **ORM** | SQLAlchemy | >=2.0.0 | Async database access |
-| **Password Hashing** | argon2-cffi | >=23.1.0 | Argon2id |
-| **Tokens** | PyJWT | >=2.8.0 | JWT creation/verification |
-| **Encryption** | cryptography | >=41.0.0 | Fernet for credentials |
-| **Graph DB (Primary)** | FalkorDB | >=1.4.0 | Redis-based graph |
-| **Graph DB (Alt)** | Neo4j | >=5.14.0 | Enterprise graph |
-| **Management DB** | PostgreSQL | 16+ | Metadata storage |
-
----
-
-## Containerization & Deployment
-
-### Container Images
-
-The platform ships as two container images. Source files:
-
-| Image | Dockerfile | Description |
-|-------|-----------|-------------|
-| **Frontend** | `frontend/Dockerfile` | Multi-stage: Node 20 build + Nginx 1.27 serving |
-| **Visualization Service** | `backend/Dockerfile.viz` | Python 3.13 + Gunicorn/Uvicorn, port 8000 |
-
-Supporting files:
-- `frontend/nginx.conf` — Reverse-proxies `/api/*` to viz-service; SPA fallback routing; static asset caching
-- `.dockerignore` — Excludes `.git`, `node_modules`, `__pycache__`, local DB files, secrets
-
-### Docker Compose
-
-The `docker-compose.yml` at the repo root defines the full platform:
-
-| Service | Image / Build | Ports | Purpose |
-|---------|--------------|-------|---------|
-| `falkordb` | `falkordb/falkordb:latest` | 6379, 3000 (Browser UI) | Graph database |
-| `postgres` | `postgres:16-alpine` | 5432 | Management DB |
-| `viz-service` | `backend/Dockerfile.viz` | 8000 | Auth, workspaces, graph queries, ontology, provider connectivity |
-| `frontend` | `frontend/Dockerfile` | 3080 | React SPA + nginx reverse proxy |
-| `seed` | *(profile: seed)* | — | One-shot demo data loader |
-
-**What happens on first boot:**
-1. PostgreSQL and FalkorDB start and pass health checks
-2. `viz-service` starts, runs `init_db()` (creates all tables in PostgreSQL)
-3. Seeds context model templates, feature registry, system default ontology
-4. Bootstraps admin user (`admin@nexuslineage.local` / `admin123`)
-5. Bootstraps a default FalkorDB provider + workspace from env vars
-6. Frontend becomes available at `http://localhost:3080`
-
-### Demo Data Seeding
-
-The `seed` service (opt-in via `--profile seed`) generates enterprise graph scenarios into FalkorDB:
-
-```bash
-# Seed with defaults (finance + ecommerce, ~2k nodes)
-docker compose --profile seed up --build
-
-# Customise via environment variables in docker-compose.yml:
-#   SEED_SCENARIOS: finance,hr,marketing,ecommerce  (or "all")
-#   SEED_SCALE: 1          (multiplier, 1 = ~1k nodes/scenario)
-#   SEED_BREADTH: 1        (parallel system chains)
-#   SEED_DEPTH: 1          (transformation layers)
-#   SEED_FORCE: true       (re-seed even if data exists)
-```
-
-The seeder (`backend/scripts/docker_seed.py`) waits for FalkorDB, checks whether data already exists (skips if so), then generates a realistic containment hierarchy: Domain > Platform > Container > Dataset > SchemaField, with TRANSFORMS lineage edges and a consumption layer (Dashboards, Charts).
-
-**Usage:**
-
-```bash
-# Build and start all services
-docker compose up --build
-
-# Run in background
-docker compose up --build -d
-
-# View logs
-docker compose logs -f viz-service
-
-# Tear down (preserves volumes)
-docker compose down
-
-# Tear down and remove data
-docker compose down -v
-```
-
-### Kubernetes Deployment
-
-A basic Kubernetes deployment targeting a namespace called `synodic`, for illustration. The maintained manifests are the kustomize base and overlays in `deploy/k8s/` and the Helm chart in `deploy/helm/dataviz/`. These examples assume container images are pushed to a registry you control, written `<registry>` below.
-
-#### Namespace & ConfigMap
-
-```yaml
-# k8s/namespace.yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: synodic
----
-# k8s/configmap.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: synodic-config
-  namespace: synodic
-data:
-  GRAPH_PROVIDER: "falkordb"
-  FALKORDB_HOST: "falkordb"
-  FALKORDB_PORT: "6379"
-  MANAGEMENT_DB_URL: "postgresql+asyncpg://synodic:synodic@postgres:5432/synodic"
-  JWT_ALGORITHM: "HS256"
-  JWT_EXPIRY_MINUTES: "15"
-  # Trust the ingress's X-Forwarded-For. Without it gunicorn keeps its
-  # 127.0.0.1 default, discards the header, and every caller is recorded
-  # as the ingress — which puts the whole cluster in one rate-limit bucket.
-  FORWARDED_ALLOW_IPS: "*"
-```
-
-#### Secrets
-
-```yaml
-# k8s/secrets.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: synodic-secrets
-  namespace: synodic
-type: Opaque
-stringData:
-  JWT_SECRET_KEY: "CHANGE-ME-in-production"
-  CREDENTIAL_ENCRYPTION_KEY: "CHANGE-ME-fernet-key"
-  POSTGRES_PASSWORD: "synodic"
-```
-
-#### Visualization Service
-
-```yaml
-# k8s/viz-service.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: viz-service
-  namespace: synodic
-  labels:
-    app: viz-service
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: viz-service
-  template:
-    metadata:
-      labels:
-        app: viz-service
-    spec:
-      containers:
-        - name: viz-service
-          image: <registry>/viz-service:latest
-          ports:
-            - containerPort: 8000
-          envFrom:
-            - configMapRef:
-                name: synodic-config
-            - secretRef:
-                name: synodic-secrets
-          resources:
-            requests:
-              cpu: 250m
-              memory: 256Mi
-            limits:
-              cpu: "1"
-              memory: 512Mi
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 15
-            periodSeconds: 20
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: viz-service
-  namespace: synodic
-spec:
-  selector:
-    app: viz-service
-  ports:
-    - port: 8000
-      targetPort: 8000
-```
-
-#### Frontend
-
-```yaml
-# k8s/frontend.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: frontend
-  namespace: synodic
-  labels:
-    app: frontend
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: frontend
-  template:
-    metadata:
-      labels:
-        app: frontend
-    spec:
-      containers:
-        - name: frontend
-          image: <registry>/frontend:latest
-          ports:
-            - containerPort: 80
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 200m
-              memory: 128Mi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: frontend
-  namespace: synodic
-spec:
-  selector:
-    app: frontend
-  ports:
-    - port: 80
-      targetPort: 80
-```
-
-#### Ingress
-
-```yaml
-# k8s/ingress.yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: synodic-ingress
-  namespace: synodic
-  annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: synodic.example.com
-      http:
-        paths:
-          - path: /api
-            pathType: Prefix
-            backend:
-              service:
-                name: viz-service
-                port:
-                  number: 8000
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: frontend
-                port:
-                  number: 80
-  tls:
-    - hosts:
-        - synodic.example.com
-      secretName: synodic-tls
-```
-
-#### Deploying
-
-```bash
-# Apply all manifests
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/
-
-# Check rollout status
-kubectl -n synodic rollout status deployment/viz-service
-kubectl -n synodic rollout status deployment/frontend
-
-# View pods
-kubectl -n synodic get pods
-
-# View logs
-kubectl -n synodic logs -l app=viz-service -f
-```
-
-> **Note:** FalkorDB and PostgreSQL are shown inline in the Docker Compose setup. For Kubernetes, use managed services (e.g., AWS ElastiCache, Cloud SQL, RDS) or deploy them via Helm charts (`bitnami/postgresql`, `falkordb/falkordb`) with persistent volume claims.
-
----
-
-## Related
-
-- [Overview](/docs/overview) — vision, capabilities, and roadmap
-- [Data Architecture](/docs/data-architecture) — schemas, entity relationships, caching, Redis topology
-- [Decisions](/docs/decisions) — ADRs behind the entity model, services, and Redis design
-- [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
-- [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are materialized
-- The technical-debt register, `docs/TECHNICAL_DEBT.md` in the repository — security, scaling, and testing risks
-- [Architecture When Scaling](/docs/scaling-architecture) — the deferred horizontal-scale plan
+- **Readiness gate.** Until startup finishes, the API answers everything except its health probes with `503` and `Retry-After`.
+- **Request deadlines.** Each path has a time budget (graph and trace routes get more than the 30-second default); a request that overruns answers `504`.
+- **Per-data-source admission.** Before a request takes a database connection, it is admitted against a per-process ceiling in which every data source keeps a reserved share. One slow data source therefore cannot starve the others. A refused request gets `429` with `Retry-After`.
+- **Response cache.** Answers are cached in Redis per workspace, data source, branch and physical graph. A write bumps a generation counter, so stale entries are never read again. Concurrent identical misses collapse into one query — inside a process by sharing the result, across processes by electing one to compute. If the store is down or times out, the last good answer is served with `X-Cache-Status: stale-fallback`.
+- **Provider slots.** A cache miss must take a slot: per process (`PROVIDER_MAX_CONCURRENCY`, default 8) and across the whole fleet. When none is free the request is shed with `429` rather than piling onto the graph store.
+- **Fair share (optional).** With `FAIR_SHARE_ENABLED`, each workspace gets its own token bucket on the hot read paths, including `trace/closure`.
+- **Circuit breakers.** Each provider sits behind a breaker; while it is open, requests fail fast with `503` instead of waiting on a dead store.
+
+The app honours `Retry-After` on reads, so a shed request usually becomes a short pause rather than an error.
+
+## Provider connectivity
+
+All providers run in the API process and the workers, behind one interface (`GraphDataProvider` in `backend/common/interfaces/provider.py`):
+
+| Provider type | Implementation | Can write |
+|---|---|---|
+| `falkordb` | `backend/app/providers/falkordb_provider.py` | Yes; the default store, and the one version control projects into |
+| `neo4j` | `backend/graph/adapters/neo4j_provider.py` | Creates only (no edge update or delete) |
+| `spanner` | `backend/graph/adapters/spanner_provider.py` | Yes |
+| `datahub` | `backend/graph/adapters/datahub_provider.py` | No — a read-only view of an external catalog |
+
+Testing a connection before registering it (`POST /api/v1/admin/providers/test-connection`) and discovering graphs also run inside the API, behind their own bulkheads. A separate `graph-service` once hosted this probe surface; it was never called and was removed — see [ADR-018](/docs/decisions#adr-018-retire-the-graph-service).
+
+## Security controls at a glance
+
+| Layer | Control |
+|---|---|
+| Passwords | Argon2id hashes; sign-in is rate-limited per address and per account |
+| Session transport | `HttpOnly`, `Secure`, `SameSite=Lax` cookies (`nx_access`, `nx_refresh`); no token in web storage |
+| Access token | A JWT (HS256) carrying the user, the session id and global permission claims; workspace grants stay in the server-side session store. Lifetime is `JWT_EXPIRY_MINUTES`: 5 minutes by default in code; the Compose files, the Kubernetes manifests and the example environment files set 15, and the Helm chart's values set 60. With `ENV=production`, startup refuses a value above `MAX_ACCESS_TTL_MINUTES` (default 15) |
+| Refresh token | Rotates on every use, 7 days by default (`JWT_REFRESH_EXPIRY_DAYS`); each one is backed by a database record, and replaying a used one outside a short grace window revokes its whole family |
+| Session ceilings | 12 hours idle and 7 days absolute for every session; SSO sessions re-authenticate with the identity provider every 24 hours |
+| CSRF | Double-submit token bound to the session, plus an origin check |
+| Signing keys | `JWT_SECRET_KEY` must be at least 32 characters and not a published placeholder; `JWT_SECRET_KEY_PREVIOUS` lets you rotate without signing everyone out |
+| Credentials at rest | Provider and identity-provider secrets are Fernet-encrypted with `CREDENTIAL_ENCRYPTION_KEY`; with `ENV=production`, storing one without a key is refused |
+| Headers | CSP, HSTS, `X-Frame-Options` and related headers on API responses and, from `frontend/nginx.conf`, on the app's page |
+| Requests | Body size caps (8 MiB by default, larger for bulk imports), optional host allowlist (`ALLOWED_HOSTS`), CORS limited to `CORS_ALLOWED_ORIGINS` |
+| Internal calls | The control plane requires a shared bearer token (`AGGREGATION_INTERNAL_TOKEN`); with `ENV=production` it will not start without one |
+| Authorisation | Global and workspace-scoped roles resolved to permission claims, checked on every request — see [RBAC](/docs/rbac) |
+
+The full picture, with how to configure each control: [Security Overview](/docs/security-overview). Every variable named here is in the [configuration reference](/docs/configuration).
+
+## Scalability considerations
+
+- **A stateless web tier.** Sessions live in cookies and the Redis session store, and caches are shared through Redis, so any API replica can serve any request. The API, the aggregation worker and the frontend autoscale on Kubernetes.
+- **Per-process provider caches.** Each process keeps its own cache of connected providers (`ProviderManager`), keyed by provider and graph, capped (`PROVIDER_CACHE_MAX`, default 256) and reaped when idle (`PROVIDER_CACHE_IDLE_TTL_SECS`, default 900 seconds). A provider edit is broadcast over Redis, and the web, aggregation-worker and versioning-worker processes drop their copies; the stats service and the control plane are not subscribed to that broadcast. Background: [ADR-005](/docs/decisions#adr-005-providerregistry-singleton-with-lazy-initialization).
+- **PostgreSQL only.** There is no SQLite branch: any `MANAGEMENT_DB_URL` that is not a `postgresql+asyncpg://` URL is rejected at startup, in every environment. The schema is owned by the `upgrade` job — see [ADR-025](/docs/decisions#adr-025-postgresql-only-management-database-schema-owned-by-an-upgrade-job).
+- **Version control on two stores.** PostgreSQL holds commits and FalkorDB a rebuildable projection of `main` — see [ADR-023](/docs/decisions#adr-023-postgresql-as-the-version-store-falkordb-as-a-rebuildable-read-cache).
+
+What the scale-out plan still leaves open: [Architecture When Scaling](/docs/scaling-architecture).
+
+## Deployment
+
+Three shapes run the same code:
+
+- **Docker Compose** (`docker-compose.yml`) runs every process and store in the tables above — see [Deployment](/docs/deployment).
+- **Kubernetes.** The maintained manifests are a kustomize base with `dev`, `staging`, `production` and `production-cluster` overlays in `deploy/k8s/`, and a Helm chart in `deploy/helm/dataviz/`. How to deploy, configure and scale them is in [Kubernetes](/docs/kubernetes).
+- **A developer laptop.** `./dev.sh up` runs the whole stack in containers with hot reload, or `./dev.sh infra` runs just PostgreSQL, Redis and FalkorDB for an API and app started on the host — see [Developer Setup](/docs/setup).
+
+### Container images
+
+Seven backend Dockerfiles and one frontend Dockerfile:
+
+| Dockerfile | Base image | Runs |
+|---|---|---|
+| `backend/Dockerfile.viz` | `python:3.14-slim` | The API (`viz-service`) under gunicorn |
+| `backend/Dockerfile.controlplane` | `python:3.14-slim` | The aggregation control plane |
+| `backend/Dockerfile.aggregation` | `python:3.14-slim` | The aggregation worker; Compose and Kubernetes also run the versioning worker from it, with its own command |
+| `backend/Dockerfile.insights` | `python:3.14-slim` | The stats service |
+| `backend/Dockerfile.upgrade` | `python:3.14-slim` | The `upgrade` job, and the schema check backend pods wait on in the Helm chart |
+| `backend/Dockerfile.seed` | `python:3.14-slim` | The demo-data seeder |
+| `backend/Dockerfile.viz-quickstart` | `python:3.14-slim` | A quickstart variant of the API, used only by `docker-compose.quickstart.yml` |
+| `frontend/Dockerfile` | `node:24-alpine` to build, `nginx:1.31-alpine` to serve | The app and its reverse proxy |
+
+### Technology stack
+
+| Layer | Technology | Version (`package.json` / `requirements.txt` range) |
+|---|---|---|
+| UI | React | ^19.3.0 |
+| Language and build | TypeScript, Vite | ~5.7.2, ^8.3.3 |
+| Client state | Zustand, TanStack React Query | ^5.0.15, ^5.104.1 |
+| Graph canvas and layout | @xyflow/react, elkjs | ^12.12.0, ^0.12.0 |
+| Styling and primitives | Tailwind CSS, Radix UI | ^3.4.17, per-component packages |
+| Node.js | for builds and the dev server | 24 (`frontend/.nvmrc`) |
+| API | FastAPI on gunicorn + uvicorn, Python 3.14 in the images | fastapi >=0.141.1 |
+| Data access | SQLAlchemy (async) with asyncpg, Alembic | >=2.0.54, >=0.31.0, >=1.19.2 |
+| Auth | argon2-cffi, PyJWT, Authlib (OIDC), python3-saml | >=23.1.0, >=2.13.0, >=1.8.0, >=1.16.0 |
+| Graph clients | FalkorDB, neo4j, google-cloud-spanner | >=1.7.1,<2, >=5.14.0, >=3.71.0 |
+| Stores | PostgreSQL, Redis, FalkorDB | 16.14, 7, v4.18.11 (the Compose images) |
+
+## Where in the code
+
+| Concern | Where |
+|---|---|
+| Process roles | `backend/app/runtime/role.py` (`SynodicRole`, `current_role`) |
+| API app, middleware and startup | `backend/app/main.py` (`app`, `lifespan`) |
+| Routers | `backend/app/api/v1/api.py` (`api_router`) |
+| Trace endpoints | `backend/app/api/v1/endpoints/graph.py` (`trace_v2`, `trace_closure`, `trace_expand`, `trace_expand_batch`) |
+| Query orchestration | `backend/app/services/context_engine.py` (`ContextEngine.for_workspace`) |
+| Provider cache and admission | `backend/app/providers/manager.py` (`ProviderManager`, `admit_graph_request`) |
+| Provider interface and capabilities | `backend/common/interfaces/provider.py` (`GraphDataProvider`, `PROVIDER_CAPABILITIES`) |
+| Response cache | `backend/app/services/graph_cache.py` (`GraphCache.get_or_compute`) |
+| Sessions and CSRF | `backend/auth_service/cookies.py`, `backend/auth_service/csrf.py` (`CSRFMiddleware`) |
+| Aggregation control plane and worker | `backend/app/services/aggregation/controlplane.py`, `backend/app/services/aggregation/__main__.py` |
+| Versioning worker | `backend/app/services/versioning/__main__.py` |
+| Stats service | `backend/insights_service/__main__.py` |
+| Schema ownership | `backend/scripts/upgrade.py`, `backend/app/db/engine.py` (`init_db`) |
+| The app's request wrapper and graph client | `frontend/src/services/fetchWithTimeout.ts`, `frontend/src/providers/RemoteGraphProvider.ts` |
+| Graph-canvas layout | `frontend/src/hooks/useElkLayout.ts` |
+| Deployment | `docker-compose.yml`, `deploy/k8s/base/`, `deploy/helm/dataviz/` |
+
+## See also
+
+- [Overview](/docs/overview) — what the platform does and where it is heading
+- [Data Architecture](/docs/data-architecture) — schemas, caches and the Redis roles
+- [Decisions](/docs/decisions) — the ADRs behind the choices on this page
+- [Backend Reference](/docs/backend) — the router map, middleware and startup
+- [Frontend Reference](/docs/frontend) — how the app is organised
+- [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are built

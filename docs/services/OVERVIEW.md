@@ -1,5 +1,7 @@
 # Platform Services
 
+*For engineers and platform operators who need to know which process does what.*
+
 > **At a glance:** The catalog of backend services that make up {brandShort} — what each is responsible for, the process role it runs under, and how they fit together at runtime. Start here, then follow the links into each service page.
 
 **This page covers:**
@@ -28,7 +30,7 @@ The services documented in this section:
 |---------|------|----------------|
 | Insights service | [Insights](/docs/services-insights) | Background collection of per–data-source stats, schema profiling, and pre-registration asset discovery. |
 | Search | [Search](/docs/services-search) | Deep Search (provider-agnostic contract) and Advanced Search (structured, view-scoped predicate queries) over the graph. |
-| Context Engine | [Context Engine](/docs/services-context-engine) | Query orchestration that binds a workspace's provider and ontology; the layer behind reads, lineage, and context lenses. |
+| Context Engine | [Context Engine](/docs/services-context-engine) | Query orchestration that binds a workspace's provider and ontology; the layer behind reads, lineage, and the Lineage Lens. |
 | Assignment Engine | [Assignments](/docs/services-assignments) | Computes per-view layer assignments for rendered entities, plus foreign-schema (ontology) mapping. |
 
 ## Where it runs
@@ -77,7 +79,7 @@ flowchart TD
     INS[Insights service<br/>python -m backend.insights_service]
     VER[Versioning projection worker]
 
-    PG[(PostgreSQL /<br/>SQLite)]
+    PG[(PostgreSQL)]
     RD[(Redis<br/>cache + streams)]
     GP[(Graph providers<br/>FalkorDB / Neo4j /<br/>DataHub / Spanner)]
 
@@ -111,13 +113,14 @@ Each service page lists its own real endpoint paths. As orientation:
 Role selection and infrastructure wiring are environment-driven:
 
 - `SYNODIC_ROLE` — process role (`web` / `worker` / `controlplane` / `dev`).
-- `MANAGEMENT_DB_URL` — PostgreSQL/SQLite connection for the management DB.
+- `MANAGEMENT_DB_URL` — the PostgreSQL connection for the management DB (`postgresql+asyncpg://…`; SQLite is not supported).
 - `REDIS_URL` — Redis connection for cache, sessions, and job streams.
 - `AGGREGATION_DISPATCH_MODE` — how aggregation jobs are dispatched
   (`redis` / `postgres` / `dual` / `inprocess` / `auto`).
 
 Service-specific knobs (`STATS_*`, `DEEP_SEARCH_*`, `INSIGHTS_*`, `GRAPHVER_*`)
-are documented on the individual service pages.
+are documented on the individual service pages, and every variable is in the
+[Configuration Reference](/docs/configuration).
 
 ## How it appears in the product
 
@@ -135,3 +138,10 @@ the health of these services to platform administrators.
   locally (see the Insights page for the split-process caveat).
 - The topology diagram is deliberately simplified; it omits the auth service,
   the outbox relay's delivery targets, and per-pool database session routing.
+
+## See also
+
+- [Architecture](/docs/architecture) — every process and store as deployed, and how a request reaches the data
+- [Insights](/docs/services-insights) — the stats service in detail
+- [Aggregation Pipeline](/docs/aggregation-pipeline) — the control plane and the aggregation workers
+- [Configuration Reference](/docs/configuration) — every environment variable, with its default
