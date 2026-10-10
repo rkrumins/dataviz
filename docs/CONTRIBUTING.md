@@ -89,7 +89,7 @@ Patterns the code relies on:
 - **Endpoints name the permission they need** with `requires("<permission>")` from `backend/app/auth/dependencies.py`. A route any signed-in user may call depends on `get_current_user` instead.
 - **Feature switches are enforced by the server first**: `require_feature("<key>")` on routes, and `useFeature('<key>')` wherever the UI offers the feature.
 - **Settings are environment variables**, read in the backend and described in `.env.example`; the [Configuration reference](/docs/configuration) is generated from both.
-- **The product name is never hard-coded.** The UI reads it with `useBrand()` (`frontend/src/store/branding.ts`); documentation writes `{brand}` or `{brandShort}`.
+- **The product name is never hard-coded.** The UI reads it with `useBrand()` (`frontend/src/store/branding.ts`); documentation writes &#123;brand} or &#123;brandShort}.
 - **Comments record why.** Many explain the incident that shaped a line. Read them before you change it, and leave the same for the next person.
 
 ## Common tasks
@@ -191,7 +191,7 @@ The full contract, with the reasons, is in [Feature switch lifecycle](/docs/feat
    - A guide page: add an entry to `guideEntries` in `frontend/src/components/guide/guideConfig.ts` with `slug`, `section`, `persona`, `title`, `description` and `importFn: () => import('@docs/guide/<FILE>.md?raw')`.
 3. For a doc, give it a Diátaxis type in `DOC_TYPES` in `frontend/src/components/docs/reading/DocTypeBadge.tsx` (`tutorial`, `how-to`, `reference` or `explanation`); the test fails without one. If other docs will link to the file by name, add `'<FILE>.md': '<slug>'` to `filenameMap` in `frontend/src/components/docs/MarkdownComponents.tsx`.
 4. Write for the reader:
-   - `{brand}` and `{brandShort}` instead of the product name; the reader substitutes the live brand.
+   - &#123;brand} and &#123;brandShort} instead of the product name; the reader substitutes the live brand.
    - Link with routes: `/docs/<slug>`, `/guide/<slug>`, `/docs/<slug>#<heading-anchor>`. A doc may also link a registered file relatively (`MIGRATIONS.md`); a guide page may not.
    - No raw HTML (the reader shows it as text), no GitHub links, and no links to repository-only files such as the technical-debt register, `docs/security/` or the release notes. Name those in `code` instead.
    - Mermaid diagrams must parse; keep them small (`flowchart`, `sequenceDiagram` or `stateDiagram-v2`) and quote any label with punctuation.
