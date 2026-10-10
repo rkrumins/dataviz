@@ -1,9 +1,17 @@
 # Upgrading an existing deployment — graph availability
 
-**Companion to [`RELEASE_NOTES_2026-09-09_graph-availability.md`](RELEASE_NOTES_2026-09-09_graph-availability.md).**
-The release notes say what was broken and why the fix is shaped the way it is.
-This says what an operator has to touch to actually get the fixed values, in the
-order to touch them.
+*For platform operators upgrading a deployment that predates the 2026-09-10 release.*
+
+This page says what you have to touch to actually get that release's fixed values, in the
+order to touch them. Its companion, the release notes in the repository
+(`docs/RELEASE_NOTES_2026-09-09_graph-availability.md`), says what was broken and why the fix
+is shaped the way it is.
+
+> **Note:** later releases moved some of these values again. Today `HTTP_TIMEOUT_GRAPH_SECS`
+> defaults to 120 and `FALKORDB_NODES_QUERY_TIMEOUT` to 45, and the load balancer and
+> ingress read timeouts in §4 are an hour, so streamed exports can finish. The advice in §2
+> still holds: remove stale overrides and let the code defaults apply. Current values are in
+> the [Configuration reference](/docs/configuration).
 
 There is **no database migration** and **no newly required environment
 variable**. Deploy the images and most of the fix is live.
@@ -257,7 +265,7 @@ four per pod) — and it makes the manifest mean what it says. `GRAPH_INFLIGHT_H
 and `PROVIDER_SOURCE_RESERVED` override the derivation directly if you would
 rather not resize the pool.
 
-If you followed the at-scale recipe in `INFRASTRUCTURE_LAUNCH_SCALE.md`
+If you followed the at-scale recipe in [Infrastructure: Launch Scale](/docs/infra-launch-scale)
 (`DB_GRAPH_READ_POOL_SIZE=6`, overflow 4), your ceiling is 6 per worker and the
 reserve is 1. That is deliberate there — the guidance is to scale connections
 by adding pods, not by growing pools — and 6 per worker is 24 per pod, well
@@ -295,7 +303,7 @@ Every one has a working default. Set them only to override:
 The read-pressure trio is the readers-first path: when the web tier sees
 FalkorDB starving an interactive read, aggregation writers on that endpoint
 pace themselves down until it clears. It fails open — if Redis is unreachable,
-writers run at their normal pace. See `docs/AGGREGATION_PIPELINE.md`.
+writers run at their normal pace. See [Aggregation Pipeline](/docs/aggregation-pipeline).
 
 ---
 
@@ -359,3 +367,9 @@ The FalkorDB args revert by restoring `THREAD_COUNT 4` and the 4 CPU / 10Gi
 limits and restarting the pod (downtime again). The frontend reverts by
 deploying the previous image. The 180s proxy timeouts are safe to leave at 180
 whatever else you roll back — they only ever move which layer answers first.
+
+## Where to next
+
+- [Runbooks](/docs/runbooks#upgrade-to-a-new-release) — the upgrade procedure every release follows.
+- [Concurrency and Timeout Tuning](/docs/concurrency-tuning) — what each timeout and concurrency ceiling does today.
+- [Observability](/docs/observability) — to watch the breaker and admission counters this release introduced.
