@@ -59,7 +59,7 @@ matching the data.
    as of** and **Next rebuild**, its automation settings, and **Recent
    activity**.
 
-[screenshot-pending]: # "data-freshness-freshness-tab — Ingestion → Freshness with the Overlay integrity panel, the row of tiles with Needs attention selected, and a table of sources grouped by provider showing Up to date, Recomputing and Would not fit in the Freshness column"
+![Ingestion → Freshness with the Overlay integrity panel, the row of tiles with Needs attention selected, and a table of sources grouped by provider showing Up to date, Recomputing and Would not fit in the Freshness column](/docs-assets/guide/data-freshness-freshness-tab.png)
 
 | The Freshness column says | It means | Do this |
 | --- | --- | --- |

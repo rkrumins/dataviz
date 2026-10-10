@@ -52,6 +52,8 @@ middle as a highlighted card, its **data sources** (upstream) fan out to the
 left and its **data consumers** (downstream) to the right, connected by
 direction-tinted edges.
 
+![The Lineage Lens on fact_revenue: the focused dataset in the middle with its fields, its data sources fanning out to the left and its data consumers to the right, and the Density, Wires, Walk, Steps and Next controls along the top](/docs-assets/guide/lineage-lens-hero.png)
+
 Data flows **left to right** throughout, so the layout reads the same way the
 canvas does. Each connected entity appears **once**, however many
 relationships reach it — when more than one hop connects it to your focus, the

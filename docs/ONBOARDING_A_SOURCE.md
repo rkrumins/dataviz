@@ -41,7 +41,7 @@ Parts 2 to 4 happen in one wizard, **Onboard Sources**; parts 1 and 2 live on th
 **Setup Progress** bar there with the same stages: **Provider**, **Assets**, **Workspace**,
 **Semantics**.
 
-[screenshot-pending]: # "onboarding-a-source-ingestion — The Data Ingestion page with the Setup Progress bar (Provider, Assets, Workspace, Semantics) and the Providers, Data Sources, Job History, Freshness and Profiling tabs"
+![The Data Ingestion page with the Setup Progress bar (Provider, Assets, Workspace, Semantics) and the Providers, Data Sources, Job History, Freshness and Profiling tabs](/docs-assets/docs/onboarding-a-source-ingestion.png)
 
 ## Check the prerequisites
 
@@ -120,7 +120,7 @@ the graphs it finds on the selected provider as **assets**.
 > means the scan is running; "Discovery failed on the last attempt" is not proof the provider is
 > empty — it retries on the next background sweep. Check that the graph exists on the store.
 
-[screenshot-pending]: # "onboarding-a-source-assets — The Data Sources tab with a FalkorDB provider selected, one graph Queued, and the Onboard Sources (1) button"
+![The Data Sources tab with a FalkorDB provider selected, one graph Queued, and the Onboard Sources (1) button](/docs-assets/docs/onboarding-a-source-assets.png)
 
 ## 3. Give it a workspace and a semantic layer
 

@@ -231,7 +231,7 @@ Branding is versioned, so two admins can't silently overwrite each other.
   top of their version — then select **Save changes** again) or **Discard
   mine**. If you hadn't changed anything, select **Load version *N***.
 
-[screenshot-pending]: # "governance-ops-branding — Administration → Branding with the Identity section filled in and the Live preview of the sign-in card on the right"
+![Administration → Branding with the Identity section filled in and the Live preview of the sign-in card on the right](/docs-assets/guide/governance-ops-branding.png)
 
 ---
 

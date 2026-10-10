@@ -19,7 +19,7 @@ flowchart TB
   B -->|"No"| N["Analytics isn't open on this deployment"]
 ```
 
-[screenshot-pending]: # "analytics-overview — Analytics on the Overview tab with the range control set to 14d, the What changed strip expanded with three findings, and the active-user tiles below"
+![Analytics on the Overview tab with the range control set to 14d, the What changed strip expanded with three findings, and the active-user tiles below](/docs-assets/guide/analytics-overview.png)
 
 ---
 

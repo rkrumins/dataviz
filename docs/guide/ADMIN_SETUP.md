@@ -93,7 +93,7 @@ Select **Continue to data sources** to go straight to step 3.
 > provider that failed its test, but it is saved with a warning, and you can't
 > continue to data sources until it connects.
 
-[screenshot-pending]: # "admin-setup-providers — Ingestion → Providers tab with the Register Provider button and one connected provider card showing Test, Discover Sources and Edit"
+![Ingestion → Providers tab with the Register Provider button and one connected provider card showing Test, Discover Sources and Edit](/docs-assets/guide/admin-setup-providers.png)
 
 ---
 
@@ -244,7 +244,7 @@ see [Requesting Access](/guide/requesting-access). Their requests appear under
 accounts directly with **Add people**, approving self-registered accounts, and
 every role are covered in [Users & Access](/guide/users-access).
 
-[screenshot-pending]: # "admin-setup-invite — the Invite by link wizard on its first step, Who it's for, with the four audience cards and the seats and lifetime each one sets"
+![the Invite by link wizard on its first step, Who it's for, with the four audience cards and the seats and lifetime each one sets](/docs-assets/guide/admin-setup-invite.png)
 
 ---
 

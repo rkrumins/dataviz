@@ -64,7 +64,8 @@ match the code.
 - **Request access** on the Access denied card can't load its list of roles for most accounts, so
   the request isn't sent; and **Add member** on a workspace's Members tab works fully only for
   Super Admins. *Requesting Access* and *Workspace Admin* describe the routes that work today.
-- Some guide pages still mark where a screenshot belongs rather than show one.
+- Two screens still have a placeholder rather than a screenshot: a semantic layer's **Health** tab, and
+  Administration → **Infrastructure** on the Observability page.
 
 ---
 

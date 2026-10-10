@@ -9,7 +9,7 @@ safely, then describes all 28 switches on **Administration → Features**.
 > permission). Nobody else sees **Features** under **Administration**, and the
 > server refuses changes from anyone else.
 
-[screenshot-pending]: # "feature-switches-list — Administration → Features: the This deployment summary bar across the top, the switch list grouped by category on the left, and Version control selected in the right-hand pane showing What changes"
+![Administration → Features: the This deployment summary bar across the top, the switch list grouped by category on the left, and Version control selected in the right-hand pane showing What changes](/docs-assets/guide/feature-switches-list.png)
 
 ```mermaid
 flowchart LR

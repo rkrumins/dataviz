@@ -70,7 +70,7 @@ viewer** is enough, because their organization-wide role supplies the rest.
 binding with a duration shows how long it has left, in an **Expires in …**
 badge.
 
-[screenshot-pending]: # "workspace-admin-members — a workspace's Members tab with the Add member dialog open, showing the User and Group toggle, the Role list and the Access duration choices"
+![a workspace's Members tab with the Add member dialog open, showing the User and Group toggle, the Role list and the Access duration choices](/docs-assets/guide/workspace-admin-members.png)
 
 | If they should… | Give them | Because |
 | --- | --- | --- |

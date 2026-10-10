@@ -111,7 +111,7 @@ applied immediately afterwards. An invite is only applied to an account that has
 no access yet: somebody who is already set up has already been onboarded, so a
 forwarded link cannot add grants to an established account.
 
-[screenshot-pending]: # "users-access-invite-wizard — the Invite by link wizard on its Safety step, with the Reach meter and the Link expires in and How many people can use it choices"
+![the Invite by link wizard on its Safety step, with the Reach meter and the Link expires in and How many people can use it choices](/docs-assets/guide/users-access-invite-wizard.png)
 
 ### Managing what you have handed out
 

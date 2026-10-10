@@ -8,7 +8,7 @@ it — or exactly what to tell your administrator.
 > and view? Do you have **access** to it? Is its **provider** — the connection
 > to the graph database — healthy?
 
-[screenshot-pending]: # "troubleshooting-state-card — A view's canvas dimmed behind the 'Taking a little longer than usual' card, showing the 'Retrying automatically…' status line and the 'Retry now' button"
+![A view's canvas dimmed behind the 'Taking a little longer than usual' card, showing the 'Retrying automatically…' status line and the 'Retry now' button](/docs-assets/guide/troubleshooting-state-card.png)
 
 ---
 

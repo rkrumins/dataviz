@@ -48,7 +48,7 @@ flowchart LR
    changes yet* at first), and the toolbar shows **Undo**, **Redo**, **Review &
    Save** and **Done**.
 
-[screenshot-pending]: # "editing-in-a-draft-edit-mode — A Context View in edit mode: the amber draft strip above the canvas (change counts, Committed, Publish, discard icon) and the toolbar with Undo, Redo, Review & Save (with a count) and Done"
+![A Context View in edit mode: the amber draft strip above the canvas (change counts, Committed, Publish, discard icon) and the toolbar with Undo, Redo, Review & Save (with a count) and Done](/docs-assets/guide/editing-in-a-draft-edit-mode.png)
 
 You can also start from where you are:
 
@@ -77,7 +77,7 @@ You can also start from where you are:
 **Cancel** throws the edit away. `Esc` first leaves the field you're typing in,
 then closes the drawer.
 
-[screenshot-pending]: # "editing-in-a-draft-stage-bar — An entity drawer on the Edit tab with a changed Description; the footer shows 'Unsaved changes', Cancel and Stage changes (hover tip showing the keyboard shortcut)"
+![An entity drawer on the Edit tab with a changed Description; the footer shows 'Unsaved changes', Cancel and Stage changes (hover tip showing the keyboard shortcut)](/docs-assets/guide/editing-in-a-draft-stage-bar.png)
 
 ### If you leave before staging
 

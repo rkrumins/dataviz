@@ -22,7 +22,7 @@ flowchart LR
   M --> G["Graphs whose names hash to shard A"]
 ```
 
-[screenshot-pending]: # "graph-store-topology-overview — Administration → Graph store: the strip of fleet totals, the View cache card, and one store opened on the Replication view with a master tile and its two replicas"
+![Administration → Graph store: the strip of fleet totals, the View cache card, and one store opened on the Replication view with a master tile and its two replicas](/docs-assets/guide/graph-store-topology-overview.png)
 
 ---
 
@@ -176,7 +176,7 @@ miss re-reads the graph, which costs around 55 queries on the replicas that
 serve that source. Its hit rate is most of the difference between a view
 that opens at once and one that takes seconds.
 
-[screenshot-pending]: # "graph-store-topology-view-cache — the View cache card with Served from cache at 86% (412 of 479), a Fell back count, Answer size against its cap, the per-kind rows below, and the Rebuild cache button"
+![the View cache card with Served from cache at 86% (412 of 479), a Fell back count, Answer size against its cap, the per-kind rows below, and the Rebuild cache button](/docs-assets/guide/graph-store-topology-view-cache.png)
 
 | On the card | Meaning |
 | --- | --- |

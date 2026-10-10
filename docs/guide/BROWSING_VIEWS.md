@@ -153,7 +153,7 @@ changed on it. The other buttons (**Edit layout & scope**, **Edit details**,
 **Share** and, when you may, **Delete**) are for people who manage the view; see
 [Managing & Sharing Views](/guide/managing-views).
 
-[screenshot-pending]: # "browsing-views-preview — The Explorer with one card clicked and the preview panel open on the right, showing the built-on chain, Usage and the Open Full View button"
+![The Explorer with one card clicked and the preview panel open on the right, showing the built-on chain, Usage and the Open Full View button](/docs-assets/guide/browsing-views-preview.png)
 
 ## Open a view
 
@@ -202,7 +202,7 @@ in a draft, through **Edit** ([Editing in a Draft](/guide/editing-in-a-draft)).
 Favourites are personal: yours don't change anyone else's list. The heart
 number on a card is how many people, in total, have favourited it.
 
-[screenshot-pending]: # "browsing-views-favorites — The top-bar Favorites popover open, listing three favourite views with their workspaces and a Recent section below"
+![The top-bar Favorites popover open, listing three favourite views with their workspaces and a Recent section below](/docs-assets/guide/browsing-views-favorites.png)
 
 ## Bring back a deleted view
 

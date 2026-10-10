@@ -7,7 +7,7 @@ show more or less detail until the picture answers your question.
 ```tour-explore-lineage
 ```
 
-![A real lineage picture: domains and datasets grouped into Raw, Curated, and Aggregated layers](/docs-assets/guide/reading-lineage-hero.png)
+![A Context View: entities in layer columns from Staging to Report, a dataset's lineage drawn across them, and below, the trace's overview — 78 entities, 32 upstream and 4 downstream](/docs-assets/guide/reading-lineage-hero.png)
 
 *Try it: click a node below to trace its lineage — upstream, downstream, and blast radius.*
 

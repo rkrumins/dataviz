@@ -41,9 +41,9 @@ the advice next to it.
 | **Analytics isn't open on this deployment** | Not a permission at all: Analytics hasn't been opened to everyone. | Nothing to request — ask an administrator if you need it ([Feature Switches](/guide/feature-switches)). |
 | **This feature is turned off** (or a named version, such as **Reviews are turned off**) | An administrator has switched the feature off. | Nothing to request — ask an administrator if you need it ([Feature Switches](/guide/feature-switches)). |
 
-[screenshot-pending]: # "requesting-access-denied-panel — The full-page You don't have access panel (amber shield icon, This section requires … permission, Ask your workspace admin or system administrator if you should have it)"
+![The full-page You don't have access panel (amber shield icon, This section requires … permission, Ask your workspace admin or system administrator if you should have it)](/docs-assets/guide/requesting-access-denied-panel.png)
 
-[screenshot-pending]: # "requesting-access-denied-card — The Access denied card at the bottom of the screen with the Request access button and Details link, after a refused action in a workspace"
+![The Access denied card at the bottom of the screen with the Request access button and Details link, after a refused action in a workspace](/docs-assets/guide/requesting-access-denied-card.png)
 
 > **Tip:** The **Access denied** card disappears after a few seconds. Click
 > **Details** to keep it open — it shows technical details that are useful if you

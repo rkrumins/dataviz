@@ -66,7 +66,7 @@ even in a draft.
 Your existing data is never changed by turning version control on. If the copy
 stops part-way, the strip explains why and offers **Resume** or to start over.
 
-[screenshot-pending]: # "versioning-change-control-enable — The canvas strip after turning on version control: 'Everything checked out', the list of passed checks, and the View history and Done buttons"
+![The canvas strip after turning on version control: 'Everything checked out', the list of passed checks, and the View history and Done buttons](/docs-assets/guide/versioning-change-control-enable.png)
 
 ## The life of a change
 

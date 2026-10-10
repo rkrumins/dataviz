@@ -82,6 +82,8 @@ Choose **Semantic Layers** in the sidebar. The page has two parts:
   and can't be edited or deleted.
 - **The detail pane** — the layer you select, or the **Deployment Dashboard**.
 
+![The Semantic Layers page: the list of layers on the left, and on the right the summary — layers, data sources, unassigned sources and views — above the Deployment Dashboard's view of which layer each workspace's data sources use](/docs-assets/guide/semantic-layer-hero.png)
+
 Selecting a layer opens it on these tabs:
 
 | Tab | What it's for |
@@ -210,7 +212,7 @@ capitalisation — invisible to anything that depends on exact naming), or
 **Unmapped** (not in your semantic layer at all), with a plain-language verdict
 up top.
 
-![The Health tab showing a fully-aligned ontology, with a per-source breakdown below](/docs-assets/guide/semantic-layer-hero.png)
+[screenshot-pending]: # "semantic-layer-health — A layer's Health tab: each type marked Exact, Case drift or Unmapped, with the plain-language verdict at the top"
 
 ---
 

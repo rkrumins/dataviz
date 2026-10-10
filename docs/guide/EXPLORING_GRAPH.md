@@ -16,8 +16,6 @@ result, and hand the trace to someone else as a link.
 ```tour-explore-lineage
 ```
 
-![A Context View with an entity selected and its details panel open, showing the Root Cause, Impact and Full Lineage buttons](/docs-assets/guide/exploring-graph-hero.png)
-
 ```mermaid
 flowchart LR
   A["Press / and search"] --> B["Click the entity"]
@@ -86,7 +84,7 @@ this browser*. Click **Continue** to draw the rest. If a step fails at the data
 source, the capsule says *Part of the lineage could not be loaded* and offers
 **Try again**; everything already drawn stays.
 
-[screenshot-pending]: # "exploring-graph-trace — A trace in progress on a Context View: the capsule at the top of the canvas, partner cards showing N on this lineage, and the trace dock at the bottom with its direction buttons, Share and Recent"
+![A trace in progress on a Context View: the capsule at the top of the canvas, partner cards showing N on this lineage, and the trace dock at the bottom with its direction buttons, Share and Recent](/docs-assets/guide/exploring-graph-trace.png)
 
 ## Narrow a trace by direction and depth
 
@@ -134,7 +132,7 @@ it away.
   [Lineage Lens](/guide/lineage-lens) on the selection as a whole.
 - **Clear** in the bar empties the selection.
 
-[screenshot-pending]: # "exploring-graph-multi-select — A Context View with three rows selected and the selection bar at the bottom showing 3 entities, their names, and the Focus all 3, Trace all 3 and Clear buttons"
+![A Context View with three rows selected and the selection bar at the bottom showing 3 entities, their names, and the Focus all 3, Trace all 3 and Clear buttons](/docs-assets/guide/exploring-graph-multi-select.png)
 
 ## Handing a trace to someone else
 
@@ -206,7 +204,7 @@ The lineage settings work only while **Lineage** in the header is on; when it's
 off, the menu says *Turn on Lineage to adjust edge appearance*. A trace draws
 every line it walks, whatever **Edge Density** is set to.
 
-[screenshot-pending]: # "exploring-graph-display — The Display popover open from the view header, showing the Canvas section and the Lineage appearance section with Edge Density set to On Hover"
+![The Display popover open from the view header, showing the Canvas section and the Lineage appearance section with Edge Density set to On Hover](/docs-assets/guide/exploring-graph-display.png)
 
 ## Sort the entities in a column
 

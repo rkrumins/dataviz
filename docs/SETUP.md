@@ -88,7 +88,7 @@ The API creates one administrator the first time it starts against an empty data
 4. Fill in **Current password**, **New password** and **Confirm new password**, then select **Set new password**. The new password needs at least 8 characters and a strength rating of **Strong** or better.
 5. You're signed out. Sign in again with the new password. The dashboard opens.
 
-[screenshot-pending]: # "setup-new-password — The Choose a new password page shown at the first sign-in: Current password, New password with its strength meter, Confirm new password, and the Set new password button"
+![The Choose a new password page shown at the first sign-in: Current password, New password with its strength meter, Confirm new password, and the Set new password button](/docs-assets/docs/setup-new-password.png)
 
 > **Note:** The administrator is created only while the database has no users, and only the published defaults force a new password. If you put your own `ADMIN_PASSWORD` in `.env.dev` before the first start, you skip steps 3 to 5. Editing either value afterwards changes nothing; to recover a forgotten password, see [If it goes wrong](#if-it-goes-wrong).
 

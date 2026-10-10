@@ -32,7 +32,7 @@ flowchart LR
    name of your last view, once you've opened one). Further down are **Your
    work**, **Activity in your workspaces** and **Your business areas**.
 
-[screenshot-pending]: # "quick-start-dashboard — The Dashboard right after sign-in: sidebar on the left (Dashboard, Explore, Workspaces, Ingestion, Semantic Layers, Analytics), top bar with the search box, Business/Technical switch, Favorites star, Inbox bell and Help, and the greeting with Build a new view and Browse all views"
+![The Dashboard right after sign-in: sidebar on the left (Dashboard, Explore, Workspaces, Ingestion, Semantic Layers, Analytics), top bar with the search box, Business/Technical switch, Favorites star, Inbox bell and Help, and the greeting with Build a new view and Browse all views](/docs-assets/guide/quick-start-dashboard.png)
 
 Now take a moment to learn the layout. **The sidebar** on the left is your main
 navigation:

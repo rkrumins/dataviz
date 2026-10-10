@@ -67,7 +67,7 @@ You'll also land here from other places:
 > **Note:** {brand} doesn't notify anyone when a request is submitted. Send
 > your reviewer the link.
 
-[screenshot-pending]: # "review-center-list — The workspace Reviews tab: the four count cards (Open requests, Ready to merge, Needs attention, Raised by you), the Open / Raised by you / All switch with search and filters, and several requests with status badges, a 'behind 2' chip and change counts"
+![The workspace Reviews tab: the four count cards (Open requests, Ready to merge, Needs attention, Raised by you), the Open / Raised by you / All switch with search and filters, and several requests with status badges, a 'behind 2' chip and change counts](/docs-assets/guide/review-center-list.png)
 
 ## Find the requests that need you
 
@@ -128,7 +128,7 @@ requests. To list only the ready or troubled ones, use the **Status** filter.
    (shown when the draft was started from a View). That View opens on the
    draft, with its changes marked.
 
-[screenshot-pending]: # "review-center-drawer — A request's drawer: status badge and Overview with Browse this branch's changes, the Changes and Files changed sections, and the action bar with Merge and Dismiss"
+![A request's drawer: status badge and Overview with Browse this branch's changes, the Changes and Files changed sections, and the action bar with Merge and Dismiss](/docs-assets/guide/review-center-drawer.png)
 
 People who can manage the workspace's data sources can fix a request's title
 or description: choose the pencil (**Edit title & description**), make the

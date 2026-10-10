@@ -122,7 +122,7 @@ question your View answers:
 | Explore how things connect, without a fixed structure | **Graph** | Entities are positioned freely (a force-directed or DAG layout), so relationships stand out |
 | Browse what contains what — domain, schema, table, column | **Hierarchy** | Entities are nested inside their parents as a tree you expand and collapse |
 
-[screenshot-pending]: # "creating-views-layout-step — The Create New View wizard on the Layout step: the Graph, Hierarchy and Context View cards (Context View marked Recommended and selected), with Quick Start Templates underneath"
+![The Create New View wizard on the Layout step: the Graph, Hierarchy and Context View cards (Context View marked Recommended and selected), with Quick Start Templates underneath](/docs-assets/guide/creating-views-layout-step.png)
 
 If you choose **Context View**, the step continues with its layers — the
 columns of the canvas:
