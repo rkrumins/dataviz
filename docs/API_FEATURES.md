@@ -1,316 +1,344 @@
-# Features API Contract
+# Feature Switches API
 
-> **At a glance:** The full HTTP contract for the admin feature-flag system — reading and updating flag values, managing feature definitions, and the authoritative flag set. Written for engineers building against or extending the Features admin surface.
+*For integrators and engineers who read or change feature switches through the API, or need
+to know which endpoint a switch turns off.*
 
-**This doc covers:**
+This page is the reference for the feature-switch API behind **Administration → Features**:
+every route with its request and answer, how a change is saved safely, and all 28 switches
+with their defaults and the server routes each one controls.
 
-- The **read/write endpoints** (`GET`/`PATCH /features`, definition CRUD, deprecate)
-- **Optimistic concurrency** — how `version` prevents lost updates
-- The **authoritative flag set** and each flag's server-side enforcement
-- **Backend data sources**, migrations, and **frontend** fallback behaviour
+- **Administrators:** what each switch does on screen, and how to change one, is in
+  [Feature Switches](/guide/feature-switches).
+- **Contributors:** adding, shipping or retiring a switch is in
+  [Feature flags: adding one, and ending one](/docs/feature-flags-lifecycle).
 
-Admin feature flags: schema and categories come from the database; values are stored in `feature_flags`; page-level experimental notice is stored in `feature_registry_meta`. Base path: **`/api/v1/admin/features`**.
+> **Before you start:** every route under `/api/v1/admin/features` needs `system:admin` (the
+> **Super admin** role). Scripts sign in as described in
+> [Sign in from a script](/docs/api-guide#sign-in-from-a-script).
 
-> **Important:** Every flag in the authoritative set is enforced **server-side** — each has a real backend gate, not a UI-only toggle. A `capability` flag **fails open** when it cannot be resolved; a `security` flag **fails closed**.
+## How to read this page
 
----
+A **switch** has a **definition** (its key, the name and help an administrator reads, its type
+and default) and a **value** (what is in force now). Three types exist:
 
-## GET `/api/v1/admin/features`
+| Type | Value | Example |
+|---|---|---|
+| `boolean` | `true` or `false` | `traceEnabled` |
+| `string[]` | A list of the option ids it governs; at least one | `allowedViewModes` |
+| `string` | Exactly one option id — a choice between levels | `enterpriseViewPolicy` |
 
-Returns the current feature flag schema, categories, values, experimental notice (when enabled), and last updated time.
+Every switch also has a **posture**, which decides what the server assumes when it can't read
+the value (a database blip): a **capability** switch fails open — the feature stays available —
+and a **security** switch fails closed. Its **stage** is `active`, `experimental` (a preview
+that ships off) or `deprecated` (on its way out).
 
-### Response (200)
+## Routes
+
+| Method · path | What it does |
+|---|---|
+| `GET /api/v1/admin/features` | Every definition, category and value, the change log's latest entries, and the version to save against |
+| `PATCH /api/v1/admin/features` | Save values, and the page's preview notice |
+| `POST /api/v1/admin/features/definitions` | Add a definition of your own |
+| `PATCH /api/v1/admin/features/definitions/{key}` | Change a definition |
+| `POST /api/v1/admin/features/definitions/{key}/deprecate` | Retire a definition |
+| `GET /api/v1/admin/features/{key}/history` | Every change to one switch, newest first |
+| `GET /api/v1/admin/features/{key}/impact` | What turning one switch off would touch here |
+
+To read only the values — what the app loads when it starts — use
+`GET /api/v1/features/values`, which answers `{values, version, updatedAt}`.
+
+## Read the switches
+
+`GET /api/v1/admin/features` answers:
 
 ```json
 {
   "schema": [
     {
-      "key": "editModeEnabled",
-      "name": "Edit mode",
-      "description": "Allow users to edit...",
-      "category": "editing",
+      "key": "traceEnabled",
+      "name": "Lineage trace",
+      "description": "Follow a node's lineage upstream and downstream across the graph, from the graph and context views.",
+      "impactWhenOff": "The Trace button disappears from the toolbars and the server refuses trace requests. …",
+      "category": "lineage",
       "type": "boolean",
       "default": true,
-      "userOverridable": true,
       "options": null,
       "helpUrl": null,
-      "adminHint": null,
-      "sortOrder": 0,
+      "adminHint": "Trace can be expensive on very large graphs. …",
+      "sortOrder": 1,
       "deprecated": false,
-      "implemented": false
+      "stage": "active",
+      "posture": "capability",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "serverGates": ["POST /graph/trace — upstream/downstream lineage traversal"],
+      "uiSurfaces": ["Trace button in the graph and context view toolbars"],
+      "stillAllowed": ["Browsing and expanding the graph by hand"],
+      "dependsOn": []
     }
   ],
   "categories": [
-    {
-      "id": "editing",
-      "label": "Editing",
-      "icon": "Pencil",
-      "color": "indigo",
-      "sortOrder": 0,
-      "preview": true,
-      "previewLabel": "Not yet wired",
-      "previewFooter": "Your settings here are saved..."
-    }
+    {"id": "lineage", "label": "Lineage", "icon": "GitBranch", "color": "amber", "sortOrder": 3,
+     "preview": false, "previewLabel": null, "previewFooter": null}
   ],
-  "values": {
-    "editModeEnabled": true,
-    "allowedViewModes": ["graph", "hierarchy", "reference", "layered-lineage"],
-    "signupEnabled": false,
-    "traceEnabled": true
-  },
-  "updatedAt": "2025-03-15T12:00:00.000000+00:00",
-  "version": 0,
-  "experimentalNotice": {
-    "enabled": true,
-    "title": "Early access",
-    "message": "This area is in early access...",
-    "updatedAt": "2025-03-15T12:00:00.000000+00:00"
+  "values": {"traceEnabled": true, "allowedViewModes": ["graph", "hierarchy", "reference", "layered-lineage"], "…": "…"},
+  "updatedAt": "2026-10-01T09:30:00+00:00",
+  "version": 4,
+  "experimentalNotice": {"enabled": true, "title": "Early access", "message": "…"},
+  "lastChanges": {
+    "traceEnabled": {"id": "…", "key": "traceEnabled", "from": true, "to": false,
+                     "actorId": "usr_…", "actorName": "Dana Smith", "at": "2026-10-01T09:30:00+00:00"}
   }
 }
 ```
 
-- **schema**: Feature definitions (from `feature_definitions`). Deprecated entries are excluded. Each has `key`, `name`, `description`, `category`, `type` (`"boolean"` \| `"string[]"`), `default`, `userOverridable`, `options` (for `string[]`), `helpUrl`, `adminHint`, `sortOrder`, `deprecated`, `implemented` (when `false`, the UI shows a “not yet wired” badge for that feature).
-- **categories**: Category metadata (from `feature_categories`). Each has `id`, `label`, `icon`, `color`, `sortOrder`, and `preview`, `previewLabel`, `previewFooter` for per-card “not yet wired” copy (when `preview` is true, the UI shows the badge and footer).
-- **values**: Current flag values. Keys match `schema[].key`. Missing keys use `schema[].default`.
-- **updatedAt**: ISO 8601 timestamp of last PATCH, or `null` if never persisted.
-- **version**: Integer, incremented on every write to feature flags (optimistic concurrency). Required in PATCH so the server can reject conflicting updates.
-- **experimentalNotice**: When the notice is configured, returns `enabled` (boolean), `title`, `message`, and when enabled optionally `updatedAt` (ISO 8601). When disabled (`enabled: false`), title and message are still returned so the UI can show “Enable notice”. When no row or no title, `null`.
+- **`schema`** — the definitions, deprecated ones left out. `stage`, `posture`, `implemented`,
+  `enforcedServerSide`, `serverGates`, `uiSurfaces`, `stillAllowed` and `dependsOn` are facts
+  read from the code (`backend/app/config/feature_wiring.py`), not from the database: no request
+  can change them. `implemented` is `true` when the switch changes anything at all.
+- **`values`** — every switch's value in force: the saved value, or the definition's default
+  where nothing has been saved.
+- **`version`** — the token you send back when you save.
+- **`experimentalNotice`** — the banner text on the Features page; `null` when there is none.
+- **`lastChanges`** — the most recent change to each switch that has ever changed.
 
----
+## Change switch values
 
-## PATCH `/api/v1/admin/features`
+A save replaces the whole set of values, so always start from what is there now.
 
-Updates feature flag values, experimental notice copy, and/or per-feature “implemented” (not-yet-wired) status. Feature keys are validated against DB definitions and merged with defaults.
+1. Read the current values and version:
 
-### Request body
+   ```bash
+   api GET /api/v1/admin/features | jq '{version, values}' > features.json
+   ```
 
-> **Warning:** An empty body `{}` resets **all** feature values to their schema defaults (equivalent to "Reset to defaults"). To update a subset without touching the rest, send those keys explicitly — omitted keys keep their current value only when at least one key is present.
+2. Change the keys you mean to, keeping every other key, and send them with the version:
 
-JSON object with **`version`** (required, integer from last GET), any subset of feature keys, and optionally **`experimentalNotice`** and **`implemented`**:
+   ```bash
+   jq '.values + {traceEnabled: false, version: .version}' features.json |
+     api PATCH /api/v1/admin/features -d @- | jq '{version, traceEnabled: .values.traceEnabled}'
+   ```
 
-```json
-{
-  "version": 0,
-  "editModeEnabled": false,
-  "allowedViewModes": ["graph", "hierarchy"],
-  "experimentalNotice": {
-    "enabled": true,
-    "title": "Early access",
-    "message": "Optional body text..."
-  },
-  "implemented": {
-    "editModeEnabled": true,
-    "traceEnabled": false
-  }
-}
-```
+   The answer has the same shape as the read, with the new `version`.
 
-- **version** (required): integer returned by the last GET. If the stored version has changed (e.g. another admin saved), the server returns **409 Conflict** so the client can reload and retry.
-- **Feature keys**: same as GET; unknown keys are rejected.
-- **boolean** features: `true` or `false`.
-- **string[]** features: array of option ids; at least one required; each id must be in that feature's `options`.
-- **experimentalNotice** (optional): object with optional `enabled` (boolean), `title` (string, max 200 chars), `message` (string, max 2000 chars). Only provided fields are updated in the DB.
-- **implemented** (optional): object mapping feature key to boolean. Sets `feature_definitions.implemented` for each key; when `true`, the UI does not show the “Not yet wired” badge for that feature. Unknown keys are rejected.
+3. Allow up to 30 seconds for every server process to act on the change: each one keeps the
+   values for 30 seconds, and only the process that handled your save forgets them at once.
 
-**Note:** A payload that contains only feature keys (no `experimentalNotice`) is merged with current values; missing keys keep their current value. An empty body `{}` results in all feature values being reset to schema defaults (same as “Reset to defaults” for flags).
+> **Warning:** A key you leave out is reset to its default — the server merges what you send
+> onto the definitions' defaults, not onto the saved values. A body of just `{"version": 4}`
+> resets every switch. Send every key from `values`, as the steps above do.
 
-### Response (200)
+| Answer | `detail.code` | When |
+|---|---|---|
+| `400` | `VALIDATION` | `version` missing; an unknown key; a value of the wrong type; an option the switch doesn't govern; an empty `string[]` |
+| `400` | `READ_ONLY` | The body has `implemented` — it comes from the code and can't be set |
+| `400` | `EXPERIMENTAL_NOTICE_VALIDATION` | `experimentalNotice.title` over 200 characters, or `message` over 2,000 |
+| `409` | `CONFLICT` | Someone saved since your read. Read again, re-apply your change, save again |
+| `429` | `RATE_LIMIT` | More than 30 saves in 60 seconds from one address; the body says `retryAfter` |
 
-Same shape as GET: `schema`, `categories`, `values`, `updatedAt`, **`version`** (new value after this write), `experimentalNotice` (current state from DB).
+Errors here nest one level: `{"detail": {"detail": "…", "code": "…", "field": "…"}}`.
 
-### Error responses
+To change the preview notice in the same save, add
+`"experimentalNotice": {"enabled": true, "title": "…", "message": "…"}`; fields you leave out
+keep their value. Every save records who changed which switch from what to what — that log is
+what `lastChanges` and `/{key}/history` read.
 
-**400 Bad Request** — Missing or invalid `version`, or other validation (unknown key, wrong type, invalid option, or “at least one required” for list types).
+## Add, change and retire definitions
 
-**409 Conflict** — Optimistic concurrency: the `version` in the request does not match the current stored version (e.g. another admin saved). Client should reload (GET), then retry PATCH with the new `version`.
+The 28 built-in switches ship with the code. These routes add switches of your own and adjust
+definitions; they answer the same shape as the read.
 
-```json
-{
-  "detail": {
-    "detail": "Feature flags were updated elsewhere. Reload and try again.",
-    "code": "CONFLICT",
-    "field": "version"
-  }
-}
-```
-
-**400 Bad Request** (validation) — Validation error (unknown key, wrong type, invalid option, or “at least one required” for list types).
+**Add** — `POST /api/v1/admin/features/definitions`:
 
 ```json
-{
-  "detail": {
-    "detail": "At least one option must be selected",
-    "code": "VALIDATION",
-    "field": "allowedViewModes"
-  }
-}
+{"key": "myNewFeature", "name": "My new feature", "description": "What it does.",
+ "category": "editing", "type": "boolean", "default": false,
+ "helpUrl": null, "adminHint": null, "sortOrder": 10}
 ```
 
-**429 Too Many Requests** — Rate limit (30 PATCH requests per 60 seconds per IP).
+`key`, `name`, `description`, `category` (an existing category id), `type` and `default` are
+required. `type` is `boolean` or `string[]`; a `string[]` switch also needs
+`options: [{"id", "label"}]`. A definition added here has no gate in the code, so it reports
+`implemented: false` until someone wires it.
 
-```json
-{
-  "detail": {
-    "detail": "Too many updates. Please wait a moment before saving again.",
-    "code": "RATE_LIMIT",
-    "retryAfter": 60
-  }
-}
-```
+**Change** — `PATCH /api/v1/admin/features/definitions/{key}` takes any of `name`,
+`description`, `category`, `type`, `default`, `options`, `helpUrl`, `adminHint`,
+`impactWhenOff`, `sortOrder` and `deprecated`.
 
----
+> **Warning:** `options`, `helpUrl`, `adminHint` and `impactWhenOff` are cleared when you leave
+> them out. Send their current values with every change.
 
-## POST `/api/v1/admin/features/definitions`
+> **Note:** For the 28 built-in switches, the API service rewrites `name`, `description`,
+> `adminHint`, `impactWhenOff`, `helpUrl`, `category`, `type`, `options` and `sortOrder` from
+> the code every time it starts, so a change to those lasts only until the next restart.
+> Change the text in `backend/app/config/features_seed.py` instead.
 
-Creates a new feature definition. The new key is added to `feature_flags` with its default value.
+**Retire** — `POST /api/v1/admin/features/definitions/{key}/deprecate` marks the definition
+deprecated and removes its value. It stays in the database, but leaves `schema` and `values`.
+An unknown key answers `404`.
 
-### Request body
+## Read one switch's history and impact
 
-```json
-{
-  "key": "myNewFeature",
-  "name": "My new feature",
-  "description": "Optional description.",
-  "category": "editing",
-  "type": "boolean",
-  "default": false,
-  "userOverridable": false,
-  "options": null,
-  "helpUrl": null,
-  "adminHint": null,
-  "sortOrder": 10,
-  "implemented": false
-}
-```
+- `GET /api/v1/admin/features/{key}/history?limit=20` (1–500) answers `{key, history}`; each
+  entry is `{id, key, from, to, actorId, actorName, at}`. A retired switch keeps its history.
+- `GET /api/v1/admin/features/{key}/impact` counts what turning the switch off would touch in
+  this deployment: `{known: true, facts: [{count, label, consequence, tone, detail}]}`.
+  `known: false` means the count is not available — not that nothing would be affected.
 
-- **key** (required): unique id; must not already exist.
-- **name**, **description**, **category** (category id), **type** (`boolean` | `string[]`), **default** (required).
-- **options**: required when type is `string[]` (array of `{ id, label }`).
-- **category** must exist in `feature_categories`.
+## Feature flags (authoritative set)
 
-### Response (200)
+All 28 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+an administrator sees. **When it is off** names the routes the server refuses — `403` with
+`{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
+says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
+stage is `active` is enforced by the server; a switch that only hid a button would leave the
+feature open to anyone who knows the URL.
 
-Same shape as GET. 400 if key exists or category invalid.
+### Analytics
 
----
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| Analytics for everyone | `analyticsPublicEnabled` | Off | `GET /admin/analytics/*` refuses anyone without `system:audit:read`, `system:org-admin` or `system:admin`. On, they get a redacted view | Security |
+| What everyone can see | `analyticsPrivacyMode` | Show colleagues (`internal`) | Not a switch: `GET /admin/analytics/*` shows a non-privileged reader aggregates only (`strict`, Aggregate only), adds people (`internal`, Show colleagues), or adds operational health too (`full`, Show colleagues and operations) | Security; an unreadable value acts as `strict` |
+| Show every workspace in Analytics | `analyticsWorkspaceVisibility` | Off | `GET /admin/analytics/*` reports only the workspaces the reader belongs to; others are counted but unnamed. On, it names every workspace — it grants no access to them | Security |
+| Let people contact each other from Analytics | `analyticsShowEmailAddresses` | Off | `GET /admin/analytics/*` leaves out the email address beside a view's creator and a workspace's contributors | Security; never on the platform-wide ranking |
 
-## PATCH `/api/v1/admin/features/definitions/{key}`
+### Editing
 
-Updates a feature definition (metadata). Partial update: only provided fields are changed.
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| Edit mode | `editModeEnabled` | On | `POST /{ws_id}/graph/nodes/create`, `POST /{ws_id}/graph/edges`, `PATCH` and `DELETE /{ws_id}/graph/edges/{edge_id}`, `POST /{ws_id}/graph/changes` | Reading and exporting keep working |
 
-### Request body
+### View Modes
 
-Any subset of: `name`, `description`, `category`, `type`, `default`, `userOverridable`, `options`, `helpUrl`, `adminHint`, `sortOrder`, `deprecated`, `implemented`.
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| View modes | `allowedViewModes` | All four: Graph (`graph`), Hierarchy (`hierarchy`), Context View (`reference`), Layered Lineage (`layered-lineage`) | A list, not a switch: `POST /views` and `PUT /views/{view_id}` refuse a view type that isn't in it | Views already built in a removed type keep working. At least one must stay |
 
-### Response (200)
+### Authentication
 
-Same shape as GET. 404 if key not found.
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| Self-registration | `signupEnabled` | Off | `POST /auth/signup` refuses a sign-up that carries no valid invite | Security. Invited people can always sign up |
+| Invite links | `inviteLinksEnabled` | On | `POST /admin/users/invite` and `/admin/users/invite/bulk` refuse to create links; `GET /auth/verify-invite` reports every link unusable; `POST /auth/signup` and `POST /auth/redeem-invite` refuse invite links with `400` | Kills links already sent; turning it back on revives those that haven't expired |
 
----
+### Lineage
 
-## POST `/api/v1/admin/features/definitions/{key}/deprecate`
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| Version control | `versioningEnabled` | On | Every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; `POST /{ws_id}/graph/bootstrap`, `…/bootstrap/retry`, `…/bootstrap/abandon` and `POST /{ws_id}/graph/resync`; view packages and staging a view import in a draft; and every write through a versioned graph | Reads stay open and history is kept. The widest switch: it withdraws editing too |
+| Lineage trace | `traceEnabled` | On | `POST /{ws_id}/graph/trace/v2`, `…/trace/closure`, `…/trace/expand`, `…/trace/expand-batch`, and the retired `…/trace` | Browsing and expanding by hand keep working |
 
-Soft-deletes a feature: sets `deprecated=true` and removes its value from `feature_flags`. The definition remains in the DB but is excluded from schema and values.
+### Data Governance
 
-### Response (200)
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| Export graph data | `graphExportEnabled` | On | With version control: `GET …/versioning/graphs/{graph_id}/exports/plan` and `/exports/stream`, `POST …/exports`, `GET …/exports/{job_id}/download`. Without: `GET /{ws_id}/graph/export/plan` and `/stream`. Search: `POST /{ws_id}/graph/search/exports` and its download. View packages: `POST /views/transfer/packages` | Files already downloaded are not recalled |
+| Publishing views to everyone | `enterpriseViewPolicy` | Workspaces decide (`workspaces`) | A ceiling, not a switch. `off` (Not available): `POST /views` as Enterprise, `PUT /views/{view_id}/visibility` to Enterprise and `POST /views/{view_id}/publish-request/approve` refuse. `request` (Always require approval): someone without the publish permission must ask, and a publisher approves | Unpublishing is never blocked. An unreadable value acts as `workspaces` |
+| Build lineage from scratch | `blankModelsEnabled` | On | `POST /{ws_id}/versioning/blank-graphs` | Needs Version control. Models already built keep working |
+| View versions, import and export | `viewPortabilityEnabled` | Off | Every `/views/transfer/*` and `/views/{view_id}/versions/*` route | Experimental preview. Versions keep being recorded while it is off |
+| Export views | `viewExportEnabled` | On | `POST /views/transfer/export`, `/views/transfer/export/preview`, `/views/transfer/packages` | Needs View versions, import and export |
+| Import views | `viewImportEnabled` | On | `POST /views/transfer/inspect`, `/reconcile`, `/import`, `/packages/inspect`, `/packages/{upload_id}/data` | Needs View versions, import and export |
 
-Same shape as GET. 404 if key not found.
+### Display & UI
 
----
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| Node sorting controls | `nodeSortingEnabled` | On | Not refused: every view-layout write has `nodeSortMode`, `orderKey` and `defaultNodeSortMode` stripped out, so a canvas save still succeeds | Orders already saved still render |
 
-## Version evolution and production behaviour
+### Semantic Layers
 
-- **How versions evolve**: `feature_flags.version` is a monotonic integer. It increments by 1 on every write: PATCH (value upsert), create definition (when the new key is written into the row), and deprecate (when keys are removed). GET always returns the current version. So: client GETs → version N → user edits → client PATCHes with `version: N` → server accepts only if the row’s version is still N, then sets version to N+1.
-- **Why “patching an old version” happens**: Users don’t do it on purpose. It happens when the client’s view is **stale**: e.g. two admins both load (both see version 5), one saves (version becomes 6), the other saves without reloading (sends version 5). Without OCC the second save would overwrite the first. With OCC the server returns 409 so the second client can reload and retry instead of silently overwriting.
-- **Ensuring correctness**: The server performs an **atomic** update: `UPDATE feature_flags SET ... WHERE id = 1 AND version = :expected_version`. Only one concurrent PATCH can match; the other gets 0 rows updated and receives 409. So the version check is enforced in the database, not in application code, and is safe under concurrent requests.
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| Edit semantic layers | `semanticLayerEditMode` | On | `POST /admin/ontologies`, `PUT` and `DELETE /admin/ontologies/{ontology_id}`, `POST …/{ontology_id}/restore`, `…/{ontology_id}/new-version`, `POST /admin/ontologies/import` and `…/{ontology_id}/import` — for everyone, administrators included | Publishing, cloning and exporting keep working |
+| Let non-admins edit layers | `semanticLayerNonAdminEditing` | On | Every semantic-layer write (create, update, delete, restore, new version, publish, clone, import) refuses anyone without `system:admin` or `system:org-admin` | Security: an unreadable value means administrators only. Needs Edit semantic layers |
+| Import layers | `semanticLayerImportEnabled` | On | `POST /admin/ontologies/import`, `POST /admin/ontologies/{ontology_id}/import` | Needs Edit semantic layers |
+| Export layers | `semanticLayerExportEnabled` | On | `GET /admin/ontologies/{ontology_id}/export` | |
+| Suggest from graph | `semanticLayerAutoSuggest` | On | `POST /admin/ontologies/suggest` | Choosing a layer by hand keeps working |
+| Layer history & audit | `semanticLayerVersionHistory` | On | `GET /admin/ontologies/{ontology_id}/versions`, `GET /admin/ontologies/{ontology_id}/audit` | Hidden, not deleted |
 
-> **Tip:** On a `409 Conflict`, re-`GET` to pick up the new `version`, re-apply the user's edits, then re-`PATCH`. Never blindly retry with the old `version` — it will conflict again.
+### Notifications
 
----
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| Announcements | `announcementsEnabled` | On | Not refused: `GET /announcements` answers an empty list | Announcements are hidden, not deactivated |
 
-## Feature Flags (authoritative set)
+### Experimental
 
-The authoritative flag set lives in `backend/app/config/feature_wiring.py`; definitions are seeded at
-startup via `backend/app/db/seed_feature_registry.py`. **Every flag below is enforced server-side and
-wired** — each has a real backend gate (not a UI-only toggle). A `capability` flag **fails open** if it
-cannot be resolved; a `security` flag **fails closed**.
+| Switch | Key | Default | When it is off | Notes |
+|---|---|---|---|---|
+| Guided product tours | `toursEnabled` | Off | Nothing on the server — the app shows no tours | Experimental, in the app only |
+| Fold distant layers | `canvasLayerFoldEnabled` | Off | Nothing on the server — the Context View offers no **Fold** button | Experimental, in the app only |
+| Roll up lineage to unloaded entities | `canvasLineageRollupEnabled` | Off | Nothing: the switch is retired and nothing reads it | Deprecated; to be removed |
+| One placement rule for every view surface | `placementContractEnabled` | Off | While it is **on**: `POST /{ws_id}/graph/assignments/compute` places entities with one shared rule; a view-scoped import pins a new top-level entity to a layer only where that rule would place it elsewhere; `POST /views` and `PUT /views/{view_id}/layout` refuse a new or changed layer rule that can never match | Experimental. Read with "off" as the fallback |
 
-**Lifecycle stages** (`stage`): `experimental` (half-built, must default OFF), `active` (fully wired,
-the steady state), `deprecated` (on its way out; gates being removed). All flags below are `active`.
+## How a switch is enforced
 
-| Key | Type | Posture | Depends on | Server-side enforcement |
-|-----|------|---------|-----------|-------------------------|
-| `versioningEnabled` | boolean | capability | — | `versioning_gate.py` — every `/graph` write (drafts, commits, merges, reverts) and the enable-VC bootstrap job |
-| `traceEnabled` | boolean | capability | — | `POST /graph/trace` — upstream/downstream lineage traversal |
-| `editModeEnabled` | boolean | capability | — | Graph mutation routes — node/edge create, update, delete |
-| `allowedViewModes` | string[] | capability | — | `POST/PUT /views` — refuses a view whose type is not in the list |
-| `signupEnabled` | boolean | **security** (default OFF) | — | `POST /auth/register` — refuses strangers without an invite |
-| `inviteLinksEnabled` | boolean | capability (default ON) | — | `POST /admin/users/invite` refuses to mint; `GET /auth/verify-invite` and `POST /auth/signup` refuse links already in circulation |
-| `announcementsEnabled` | boolean | capability | — | `GET /announcements` — serves an empty list when off |
-| `graphExportEnabled` | boolean | capability | — | Graph export routes |
-| `blankModelsEnabled` | boolean | capability | `versioningEnabled` | `POST /blank-graphs` — provision a lineage model with no data source |
-| `semanticLayerEditMode` | boolean | capability | — | Semantic-layer (ontology) edit routes |
-| `semanticLayerImportEnabled` | boolean | capability | `semanticLayerEditMode` | Ontology import routes |
-| `semanticLayerExportEnabled` | boolean | capability | — | `GET /admin/ontologies/{id}/export` — download the definition as JSON |
-| `semanticLayerAutoSuggest` | boolean | capability | — | `POST /admin/ontologies/suggest` — score layers against a graph |
-| `semanticLayerVersionHistory` | boolean | capability | — | Ontology version-history routes |
-| `semanticLayerNonAdminEditing` | boolean | **security** | `semanticLayerEditMode` | Allows non-admins to edit the semantic layer (fails closed) |
-| `nodeSortingEnabled` | boolean | capability | — | `view_repo._gate_node_ordering` — strips `nodeSortMode` / `orderKey` / `defaultNodeSortMode` from every view-layout write. Strips rather than refuses: the canvas rewrites the whole layout on each gesture, so a 403 would block unrelated edits. Orders already stored still render. |
-| `toursEnabled` | boolean | capability, **experimental** (ships OFF) | — | None — a tour renders guidance the user could read anyway, so there is no request for the server to refuse. Client-side only, by design. |
-| `placementContractEnabled` | boolean | capability, **experimental** (ships OFF) | — | `POST /graph/assignments/compute` places with the shared placement contract; view-scoped imports pin a new top-level entity only where the contract would place it elsewhere; `POST /views` and `PUT /views/{id}/layout` refuse a new or changed layer rule that can never match. Every read passes `default=False`. The Context View columns, trace lanes, search badges, wizard, Layer Studio, Build Mode and rail create switch with it; export, scoped replace and the search Layer filter do not. |
+| Gate | File · symbol | Used for |
+|---|---|---|
+| Per route: refuse when off | `backend/app/api/v1/feature_gate.py` · `require_feature` | Most switches |
+| Per router: refuse every write, keep reads | `backend/app/api/v1/versioning_gate.py` · `versioning_write_gate` | Version control |
+| Refuse non-administrators only | `feature_gate.py` · `require_admin_unless` | Let non-admins edit layers |
+| A list of allowed values | `feature_gate.py` · `ensure_view_mode_allowed` | View modes |
+| A level, not a switch | `feature_gate.py` · `resolve_enterprise_view_policy` | Publishing views to everyone |
+| Strip instead of refuse | `backend/app/db/repositories/view_repo.py` · `_gate_node_ordering` | Node sorting controls |
+| A refusal raised deeper in a service | `backend/app/services/feature_flags.py` · `FeatureDisabledError`, answered by `_feature_disabled_handler` in `backend/app/main.py` | Writes through a versioned graph |
 
-> **Experimental flags** (`stage: "experimental"`) are exempt from the server-gate requirement:
-> the feature is still being built, so the halves are not required to exist yet. They must ship
-> OFF. Active flags are always required to have a real server gate — a switch that only hides a
-> button is decoration, because anyone who knows the URL still has the feature.
+Each gate reads the value through `backend/app/services/feature_flags.py` (`feature_flags`),
+which keeps it for 30 seconds, and falls back by posture (`fail_safe_default` in
+`backend/app/config/feature_wiring.py`). The message in a refusal comes from
+`REFUSAL_MESSAGES` in `backend/app/config/features_seed.py`.
 
-> A `depends_on` flag is only effective when its parent is also on (e.g. `blankModelsEnabled` requires
-> `versioningEnabled`; `semanticLayerImportEnabled` and `semanticLayerNonAdminEditing` require
-> `semanticLayerEditMode`).
+## Where the data lives
 
-> The `announcementsEnabled` flag gates the public `/api/v1/announcements` endpoint — when `false`, the endpoint returns an empty list regardless of active announcements in the database.
+| What | Where | Owned by |
+|---|---|---|
+| Definitions | `feature_definitions` table | The code: the 28 built-in definitions are seeded, and their text and structure rewritten, each time the API service starts |
+| Categories | `feature_categories` table | The code: seeded the same way |
+| Values and version | `feature_flags` table, one row | Administrators: seeded once with the defaults, never reset by a deployment |
+| Change log | `feature_flag_changes` table | Written by every save |
+| Preview notice | `feature_registry_meta` table, one row | Administrators |
 
----
+The tables themselves are created and upgraded by the `upgrade` job
+(`python -m backend.scripts.upgrade upgrade`, which runs the Alembic migrations), never by the
+API service; the API refuses readiness until the schema is current. The seeding is
+`seed_feature_registry`, `seed_feature_flags` and `seed_feature_registry_meta` in
+`backend/app/db/seed_feature_registry.py`. A switch added after the first seed has no saved
+value, so it reads as its default until an administrator saves.
 
-## Backend data sources and migrations
+**In the app.** The frontend calls the same routes, relative to its own address. Two
+fallbacks keep it working when it can't read them:
 
-- **Schema and categories**: `feature_definitions` (each has `implemented` for per-feature "not yet wired" badge), `feature_categories` (seeded at startup from `backend/app/db/seed_feature_registry.py`). Definitions support full CRUD via API.
-- **Flag values**: `feature_flags` (single row). Returned values only include non-deprecated keys.
-- **Experimental notice**: `feature_registry_meta` (single row: `experimental_notice_enabled`, `experimental_notice_title`, `experimental_notice_message`, `updated_at`). Seeded at startup; editable via PATCH or Admin UI "Edit notice".
-- **Migrations**: Tables are created and upgraded (e.g. `feature_flags.version`) on app startup via `backend/app/db/engine.py`. For a one-off migration without starting the app: use `python backend/scripts/migrate_feature_registry.py` for full setup (all four tables); or `python backend/scripts/migrate_feature_flags.py` for the `feature_flags` table only. Both scripts are idempotent and include the `version` column.
+- The app reads the values from `GET /api/v1/features/values` at start, again whenever its
+  tab becomes visible, and on a slow timer while it stays open (`loadFeatures()` and
+  `startFeaturesSync()` in `frontend/src/store/features.ts`). Until then, and whenever the
+  fetch fails, it uses `DEFAULT_FEATURES`, which mirror the server's defaults — except that
+  security switches read as closed and previews as off. The server's `403` is the real
+  enforcement either way.
+- The Features page's `featuresService.get()` never throws: it falls back from the API to a
+  generated file (`frontend/src/generated/featuresFallback.json`, rebuilt before every build,
+  or by `npm run generate:features-fallback` in `frontend/`) and then to a short built-in list
+  (`FAILSAFE_VALUES` in `frontend/src/services/featuresService.ts`).
 
-## Frontend configuration
+## Where in the code
 
-- **API URL**: Same-origin — the frontend calls the relative path `/api/v1/admin/features` (proxied by the frontend nginx `location /api/`), exactly like every other service. There is no per-service API-base override.
-- **Fallback**: When the API is unavailable, the frontend uses generated fallback data. From the repo root, run `cd frontend && npm run generate:features-fallback` (requires Python and backend seed at `backend/app/db/seed_feature_registry.py`). This writes `frontend/src/generated/featuresFallback.json`. Regenerate after changing the backend seed so the fallback stays in sync.
-- **Fail-safe**: `featuresService.get()` never throws. Order: (1) API, (2) fallback JSON (loaded at runtime), (3) hard-coded defaults (e.g. `signupEnabled: false`, `editModeEnabled: true`, `traceEnabled: true`, `allowedViewModes`) so the app never hangs or crashes when the backend or fallback file is missing or corrupt.
+| Concern | File | Symbol |
+|---|---|---|
+| Routes | `backend/app/api/v1/endpoints/features.py` | `get_features`, `patch_features`, `create_definition`, `patch_definition`, `deprecate_definition`, `get_feature_history`, `get_feature_impact`, `get_feature_values` |
+| Mounting and the `system:admin` gate | `backend/app/api/v1/api.py` | `features.router`, `features.public_router` |
+| Value validation and the merge onto defaults | `backend/app/config/features.py` | `validate_and_merge_values` |
+| Saving with the version check | `backend/app/db/repositories/feature_flags_repo.py` | `upsert_feature_flags`, `record_changes`, `get_last_changes` |
+| Definition rows | `backend/app/db/repositories/feature_registry_repo.py` | `_row_to_definition`, `update_definition` |
+| Built-in text and defaults | `backend/app/config/features_seed.py` | `SEED_DEFINITIONS`, `SEED_CATEGORIES`, `REFUSAL_MESSAGES` |
+| What each switch enforces | `backend/app/config/feature_wiring.py` | `FEATURE_WIRING`, `wiring_payload` |
+| Impact counts | `backend/app/services/feature_impact.py` | `probe` |
+| The app's client and fallbacks | `frontend/src/services/featuresService.ts`, `frontend/src/store/features.ts` | `featuresService` |
 
----
+## See also
 
-## Design summary (evaluation)
-
-The Admin Features stack is designed for full lifecycle management with a single source of truth in the DB.
-
-| Capability | Backend | Frontend |
-|------------|---------|----------|
-| **Read** schema, categories, values, notice | GET | `featuresService.get()` |
-| **Update** feature values | PATCH (body: `version` + feature keys) | `featuresService.update({ ...values, version })` |
-| **Update** experimental notice | PATCH (body: `experimentalNotice`) | `featuresService.update({ ..., experimentalNotice })` |
-| **Update** per-feature “implemented” | PATCH (body: `implemented`) | `featuresService.update({ ..., implemented })` |
-| **Create** feature definition | POST `/definitions` | `featuresService.createDefinition(body)` |
-| **Update** definition metadata | PATCH `/definitions/{key}` | `featuresService.updateDefinition(key, body)` |
-| **Delete** (soft) feature | POST `/definitions/{key}/deprecate` | `featuresService.deprecateDefinition(key)` |
-| **Reset** values to defaults | PATCH with current `version` | `featuresService.reset(version)` |
-
-- **Values** returned by GET (and used in validation) only include non-deprecated keys. Deprecating a feature removes it from `feature_flags` config and from the response.
-- **Categories** are still seed-only; definition CRUD validates that `category` exists. Adding category CRUD would follow the same pattern (repo + routes + service).
-- **Frontend** components are schema-driven: they render from `schema` and `categories`; new or updated definitions appear after reload or after calling `createDefinition` / `updateDefinition` / `deprecateDefinition` and refreshing state from the returned response.
-
----
-
-## Related
-
-- [Backend guide](/docs/backend) — where these routes live and how they are wired
-- [Frontend & UX](/docs/frontend) — the schema-driven Admin Features UI
-- [Developer Setup](/docs/setup) — env vars and the feature-registry seed/migration scripts
-- [Platform Services overview](/docs/services-overview) · [RBAC](/docs/rbac)
+- [Feature Switches](/guide/feature-switches) — what each switch does, for administrators.
+- [Feature flags: adding one, and ending one](/docs/feature-flags-lifecycle) — the rules for
+  adding and retiring a switch, and the test that enforces them.
+- [API Guide for Integrators](/docs/api-guide) — signing in, conventions and errors.
+- [RBAC](/docs/rbac) — the roles and permissions named on this page.
+- [Backend](/docs/backend) — where these routes sit among the others.

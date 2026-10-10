@@ -489,8 +489,8 @@ it. Watch `connected_clients` in `INFO clients`.
   shares the proxy's bucket; the k8s `common-config` sets the RFC 1918 ranges. When
   thousands of people sign in from behind one corporate NAT, the per-IP login limit is the
   one to check.
-- **There is no global per-user API rate limit.** `DEEP_SEARCH_RATE_LIMIT_PER_MIN` is read
-  but not enforced. For graph routes, the shedding in §5.4 is the protection.
+- **Graph routes are protected by load shedding, not a per-user rate limit.** The shedding
+  in §5.4 is what keeps one heavy user from starving the rest.
 
 ### 7.2 Advanced search
 

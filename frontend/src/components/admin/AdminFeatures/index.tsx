@@ -236,7 +236,7 @@ export function AdminFeatures() {
             </button>
           )}
           <a
-            href="/docs/features"
+            href="/guide/feature-switches"
             target="_blank"
             rel="noopener noreferrer"
             className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex items-center gap-2"

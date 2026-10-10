@@ -5,8 +5,6 @@ import {
   Rocket,
   BookMarked,
   Eye,
-  Layers,
-  Settings2,
   GitBranch,
   Save,
   Share2,
@@ -15,8 +13,11 @@ import {
   Users,
   History,
   GitPullRequest,
-  ArrowLeftRight,
-  Boxes,
+  KeyRound,
+  PenLine,
+  Gauge,
+  ToggleLeft,
+  LifeBuoy,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -55,7 +56,6 @@ export interface GuideEntry {
   persona?: string
   title: string
   description: string
-  readingTime: string
   importFn: () => Promise<{ default: string }>
 }
 
@@ -66,7 +66,6 @@ export interface KeyJourney {
   slug: string
   persona: string
   icon: LucideIcon
-  time: string
 }
 
 /** A glossary chip shown on the hub's acronym strip. */
@@ -90,7 +89,7 @@ export const guidePersonas: GuidePersona[] = [
     icon: Compass,
     tagline: 'Find, read, and trace your data',
     intro:
-      'Browse curated views, read lineage fluently, and explore the graph to answer your own questions — no setup required.',
+      'Find views in the Explorer, read their lineage, and trace it to answer your own questions — no setup required.',
     startSlug: 'browsing-views',
     accent: {
       gradient: 'from-sky-500 to-indigo-600',
@@ -106,7 +105,7 @@ export const guidePersonas: GuidePersona[] = [
     icon: Hammer,
     tagline: 'Create, organise, and share',
     intro:
-      'Turn explorations into durable, shareable Views, organise them for your team, and shape what your data means through the semantic layer.',
+      'Build views with New View, share them at the right visibility, and shape what your data means through the semantic layer.',
     startSlug: 'creating-views',
     accent: {
       gradient: 'from-violet-500 to-fuchsia-600',
@@ -122,7 +121,7 @@ export const guidePersonas: GuidePersona[] = [
     icon: ShieldCheck,
     tagline: 'Connect, govern, and operate',
     intro:
-      'Connect data sources, manage users and access, and keep the platform healthy, trustworthy, and well-communicated.',
+      'Connect data sources, manage users and access, keep data fresh, and decide which features everyone gets.',
     startSlug: 'admin-setup',
     accent: {
       gradient: 'from-emerald-500 to-teal-600',
@@ -138,7 +137,7 @@ export const guidePersonas: GuidePersona[] = [
     icon: History,
     tagline: 'Draft, review, and roll back safely',
     intro:
-      'Every change to a graph goes through a draft and a review before it publishes — with a full history you can always undo or roll back. Spans Builders (making changes) and Administrators (reviewing them).',
+      'Change data in a private draft, get it reviewed in the Review Center, and undo one change or restore an earlier point when you need to.',
     startSlug: 'versioning-change-control',
     accent: {
       gradient: 'from-amber-500 to-orange-600',
@@ -171,24 +170,21 @@ export const guideEntries: GuideEntry[] = [
     slug: 'welcome',
     section: 'start-here',
     title: 'Welcome to {brand}',
-    description: 'What {brand} is, who it’s for, and how to use this guide',
-    readingTime: '4 min',
+    description: 'What {brand} is, the path for your role, and where to get help',
     importFn: () => import('@docs/guide/WELCOME.md?raw'),
   },
   {
     slug: 'key-concepts',
     section: 'start-here',
     title: 'Key Concepts',
-    description: 'The ten-word vocabulary that makes everything click',
-    readingTime: '8 min',
+    description: 'Workspaces, data sources, views, lineage and roles — how the pieces fit together',
     importFn: () => import('@docs/guide/KEY_CONCEPTS.md?raw'),
   },
   {
     slug: 'quick-start',
     section: 'start-here',
     title: 'Quick Start',
-    description: 'Your first 10 minutes, from sign-in to your first View',
-    readingTime: '6 min',
+    description: 'Your first 10 minutes: sign in, open a view, trace it and keep it one click away',
     importFn: () => import('@docs/guide/QUICK_START.md?raw'),
   },
 
@@ -197,9 +193,8 @@ export const guideEntries: GuideEntry[] = [
     slug: 'browsing-views',
     section: 'viewer',
     persona: 'viewer',
-    title: 'Browsing Views',
-    description: 'Find, open, and favourite curated explorations',
-    readingTime: '5 min',
+    title: 'Finding Views',
+    description: 'Find a view in the Explorer, check it before you open it, and keep favourites close',
     importFn: () => import('@docs/guide/BROWSING_VIEWS.md?raw'),
   },
   {
@@ -207,17 +202,15 @@ export const guideEntries: GuideEntry[] = [
     section: 'viewer',
     persona: 'viewer',
     title: 'Reading Lineage',
-    description: 'Interpret nodes, edges, colours, and granularity',
-    readingTime: '7 min',
+    description: 'Read entities, lines and roll-ups, and show more or less detail',
     importFn: () => import('@docs/guide/READING_LINEAGE.md?raw'),
   },
   {
     slug: 'exploring-graph',
     section: 'viewer',
     persona: 'viewer',
-    title: 'Exploring the Graph',
-    description: 'Search, trace, expand, and filter on the open canvas',
-    readingTime: '7 min',
+    title: 'Tracing Lineage on the Canvas',
+    description: 'Search inside a view, trace one entity or several, narrow the result and share it as a link',
     importFn: () => import('@docs/guide/EXPLORING_GRAPH.md?raw'),
   },
   {
@@ -226,7 +219,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'viewer',
     title: 'Advanced Search',
     description: 'Find every match in a View, act on it on the canvas, and save the searches you reuse',
-    readingTime: '10 min',
     importFn: () => import('@docs/guide/ADVANCED_SEARCH.md?raw'),
   },
   {
@@ -235,7 +227,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'viewer',
     title: 'The Lineage Lens & Context View',
     description: 'Focus on one thing’s upstream and downstream — and what sits just outside the view',
-    readingTime: '8 min',
     importFn: () => import('@docs/guide/LINEAGE_LENS.md?raw'),
   },
   {
@@ -243,9 +234,16 @@ export const guideEntries: GuideEntry[] = [
     section: 'viewer',
     persona: 'viewer',
     title: 'Navigating Layers',
-    description: 'The Layer Strip, resizable columns, load-more paging, and the Anchor Rail',
-    readingTime: '7 min',
+    description: 'The Layer Strip, resizable columns, load-more paging, and off-screen partners',
     importFn: () => import('@docs/guide/NAVIGATING_LAYERS.md?raw'),
+  },
+  {
+    slug: 'requesting-access',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Requesting Access',
+    description: 'What an access message means, how to ask for access, and where to see the answer',
+    importFn: () => import('@docs/guide/REQUESTING_ACCESS.md?raw'),
   },
 
   // For Builders
@@ -254,17 +252,15 @@ export const guideEntries: GuideEntry[] = [
     section: 'builder',
     persona: 'builder',
     title: 'Creating Views',
-    description: 'The View Wizard, layers, visibility, and tagging',
-    readingTime: '7 min',
+    description: 'The Create New View wizard step by step: data, layout, layers and who can see it',
     importFn: () => import('@docs/guide/CREATING_VIEWS.md?raw'),
   },
   {
     slug: 'managing-views',
     section: 'builder',
     persona: 'builder',
-    title: 'Managing Views',
-    description: 'Edit, share, co-own, and keep your collection tidy',
-    readingTime: '6 min',
+    title: 'Managing & Sharing Views',
+    description: 'Who can see a view, sharing and publishing, versions, and keeping a workspace tidy',
     importFn: () => import('@docs/guide/MANAGING_VIEWS.md?raw'),
   },
   {
@@ -273,7 +269,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'builder',
     title: 'Display Rules',
     description: 'Tag every entity that matches a search with a coloured chip, and share rules between Views',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/DISPLAY_RULES.md?raw'),
   },
   {
@@ -281,8 +276,7 @@ export const guideEntries: GuideEntry[] = [
     section: 'builder',
     persona: 'builder',
     title: 'The Semantic Layer',
-    description: 'Ontologies, types, hierarchy, and safe versioning',
-    readingTime: '8 min',
+    description: 'Entity and relationship types, how they look, and changing them safely',
     importFn: () => import('@docs/guide/SEMANTIC_LAYER.md?raw'),
   },
 
@@ -292,9 +286,24 @@ export const guideEntries: GuideEntry[] = [
     section: 'versioning',
     persona: 'versioning',
     title: 'Versioning & Change Control',
-    description: 'Drafts, review and merge, and undo vs. restore',
-    readingTime: '9 min',
+    description: 'How change control works, whether it’s on for your data, and undo vs. restore',
     importFn: () => import('@docs/guide/VERSIONING_CHANGE_CONTROL.md?raw'),
+  },
+  {
+    slug: 'editing-in-a-draft',
+    section: 'versioning',
+    persona: 'versioning',
+    title: 'Editing in a Draft',
+    description: 'Change entities and relationships privately, stage and save your edits, then publish them',
+    importFn: () => import('@docs/guide/EDITING_IN_A_DRAFT.md?raw'),
+  },
+  {
+    slug: 'review-center',
+    section: 'versioning',
+    persona: 'versioning',
+    title: 'The Review Center',
+    description: 'Find merge requests, check what they change, pull in the latest, and merge or dismiss them',
+    importFn: () => import('@docs/guide/REVIEW_CENTER.md?raw'),
   },
   {
     slug: 'import-export',
@@ -302,7 +311,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'versioning',
     title: 'Import & Export',
     description: 'Bulk-load or back up data through the same review flow, and move views between environments',
-    readingTime: '6 min',
     importFn: () => import('@docs/guide/IMPORT_EXPORT.md?raw'),
   },
 
@@ -312,8 +320,7 @@ export const guideEntries: GuideEntry[] = [
     section: 'admin',
     persona: 'admin',
     title: 'Admin Setup',
-    description: 'From a fresh platform to a workspace your team can use',
-    readingTime: '8 min',
+    description: 'From a fresh deployment to your team’s first view, in six checked steps',
     importFn: () => import('@docs/guide/ADMIN_SETUP.md?raw'),
   },
   {
@@ -321,8 +328,7 @@ export const guideEntries: GuideEntry[] = [
     section: 'admin',
     persona: 'admin',
     title: 'Workspace Admin',
-    description: 'Day-2 workspace ops: wizards, moves, Views, and ontology health',
-    readingTime: '8 min',
+    description: 'Members, data sources, aggregation, views, profiling, reviews and ontology health',
     importFn: () => import('@docs/guide/WORKSPACE_ADMIN.md?raw'),
   },
   {
@@ -330,8 +336,7 @@ export const guideEntries: GuideEntry[] = [
     section: 'admin',
     persona: 'admin',
     title: 'Users & Access',
-    description: 'Approvals, roles, groups, scopes, and grants',
-    readingTime: '8 min',
+    description: 'Invites, accounts, roles, groups and permissions',
     importFn: () => import('@docs/guide/USERS_ACCESS.md?raw'),
   },
   {
@@ -340,7 +345,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Single Sign-On',
     description: 'Connect an identity provider, map claims, rehearse, publish',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/SSO_SETUP.md?raw'),
   },
   {
@@ -349,17 +353,39 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Running Single Sign-On',
     description: 'Access rules, sign-in posture, linking, and why a sign-in failed',
-    readingTime: '9 min',
     importFn: () => import('@docs/guide/SSO_OPERATIONS.md?raw'),
   },
   {
     slug: 'governance-ops',
     section: 'admin',
     persona: 'admin',
-    title: 'Governance & Operations',
-    description: 'Provider health, audits, announcements, and flags',
-    readingTime: '6 min',
+    title: 'The Admin Console',
+    description: 'Every Administration page: overview, infrastructure, Redis & graph store, branding, telemetry, announcements and the audit log',
     importFn: () => import('@docs/guide/GOVERNANCE_OPS.md?raw'),
+  },
+  {
+    slug: 'feature-switches',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Feature Switches',
+    description: 'Turn capabilities on or off for everyone, what each switch does, and who notices',
+    importFn: () => import('@docs/guide/FEATURE_SWITCHES.md?raw'),
+  },
+  {
+    slug: 'data-freshness',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Data Freshness & Ingestion',
+    description: 'Check that lineage is current, refresh or rebuild a source, and read the five Ingestion tabs',
+    importFn: () => import('@docs/guide/DATA_FRESHNESS.md?raw'),
+  },
+  {
+    slug: 'analytics',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Analytics',
+    description: 'Who can open Analytics, what each of the six tabs answers, and what is hidden from whom',
+    importFn: () => import('@docs/guide/ANALYTICS.md?raw'),
   },
   {
     slug: 'graph-store-topology',
@@ -367,7 +393,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'The Graph Store: Shards, Replicas & Placement',
     description: 'What every figure on the Graph store page means, and what to do when one looks wrong',
-    readingTime: '8 min',
     importFn: () => import('@docs/guide/GRAPH_STORE_TOPOLOGY.md?raw'),
   },
   {
@@ -376,7 +401,6 @@ export const guideEntries: GuideEntry[] = [
     persona: 'admin',
     title: 'Rollup Capacity & Large Graphs',
     description: 'What a rebuild measures before it writes, the limits you set, and what "would not fit" means',
-    readingTime: '7 min',
     importFn: () => import('@docs/guide/ROLLUP_CAPACITY.md?raw'),
   },
 
@@ -385,8 +409,7 @@ export const guideEntries: GuideEntry[] = [
     slug: 'ways-of-working',
     section: 'reference',
     title: 'Ways of Working',
-    description: 'Conventions and habits that make {brand} shine for teams',
-    readingTime: '7 min',
+    description: 'Team habits for naming, tagging, sharing and tidying views',
     importFn: () => import('@docs/guide/WAYS_OF_WORKING.md?raw'),
   },
   {
@@ -394,15 +417,13 @@ export const guideEntries: GuideEntry[] = [
     section: 'reference',
     title: 'Glossary & Acronyms',
     description: 'Every term and acronym, in plain language',
-    readingTime: '6 min',
     importFn: () => import('@docs/guide/GLOSSARY.md?raw'),
   },
   {
     slug: 'troubleshooting',
     section: 'reference',
     title: 'Troubleshooting',
-    description: 'Common situations and how to resolve them',
-    readingTime: '6 min',
+    description: 'Look up a message or symptom and see what to do',
     importFn: () => import('@docs/guide/TROUBLESHOOTING.md?raw'),
   },
 ]
@@ -411,28 +432,18 @@ export const guideEntries: GuideEntry[] = [
 
 export const keyJourneys: KeyJourney[] = [
   {
-    title: 'Trace a dataset’s lineage',
-    outcome: 'Follow data upstream and downstream to see its blast radius',
-    slug: 'exploring-graph',
-    persona: 'viewer',
-    icon: GitBranch,
-    time: '7 min',
-  },
-  {
-    title: 'Open and favourite a View',
-    outcome: 'Find curated explorations and pin the ones you use most',
+    title: 'Find and favourite a view',
+    outcome: 'Search the Explorer and keep the views you use most one click away',
     slug: 'browsing-views',
     persona: 'viewer',
     icon: Eye,
-    time: '5 min',
   },
   {
-    title: 'Read a lineage graph',
-    outcome: 'Decode nodes, edges, colours, and granularity at a glance',
-    slug: 'reading-lineage',
+    title: 'Trace a dataset’s lineage',
+    outcome: 'Follow data upstream to its source and downstream to everything it affects',
+    slug: 'exploring-graph',
     persona: 'viewer',
-    icon: Network,
-    time: '7 min',
+    icon: GitBranch,
   },
   {
     title: 'Focus with the Lineage Lens',
@@ -440,95 +451,69 @@ export const keyJourneys: KeyJourney[] = [
     slug: 'lineage-lens',
     persona: 'viewer',
     icon: Eye,
-    time: '8 min',
   },
   {
-    title: 'Save & share a View',
-    outcome: 'Turn an exploration into a durable asset for your team',
+    title: 'Ask for the access you need',
+    outcome: 'Request a role in a workspace and follow your request until it’s answered',
+    slug: 'requesting-access',
+    persona: 'viewer',
+    icon: KeyRound,
+  },
+  {
+    title: 'Create a view',
+    outcome: 'Build a saved view with New View: pick the data, the layout and what it shows',
     slug: 'creating-views',
     persona: 'builder',
     icon: Save,
-    time: '7 min',
   },
   {
-    title: 'Organise and co-own Views',
-    outcome: 'Keep your team’s collection tidy, shareable, and trusted',
+    title: 'Share and co-own views',
+    outcome: 'Choose who can see a view, add co-editors, and keep the collection tidy',
     slug: 'managing-views',
     persona: 'builder',
     icon: Share2,
-    time: '6 min',
   },
   {
-    title: 'Shape the semantic layer',
-    outcome: 'Define what your data means with a versioned ontology',
-    slug: 'semantic-layer',
-    persona: 'builder',
-    icon: Layers,
-    time: '8 min',
-  },
-  {
-    title: 'Connect your first data source',
-    outcome: 'Provider → catalog → workspace → data source, end to end',
-    slug: 'admin-setup',
-    persona: 'admin',
-    icon: PlugZap,
-    time: '8 min',
-  },
-  {
-    title: 'Manage users & access',
-    outcome: 'Approve people and grant exactly the right access',
-    slug: 'users-access',
-    persona: 'admin',
-    icon: Users,
-    time: '8 min',
-  },
-  {
-    title: 'Operate the platform',
-    outcome: 'Keep providers healthy and changes well-governed',
-    slug: 'governance-ops',
-    persona: 'admin',
-    icon: Settings2,
-    time: '6 min',
-  },
-  {
-    title: 'Undo or roll back a change',
-    outcome: 'Know exactly when to reverse one edit vs. reset to a point in time',
-    slug: 'versioning-change-control',
+    title: 'Edit data in a draft',
+    outcome: 'Change entities and relationships privately, then stage and save your edits',
+    slug: 'editing-in-a-draft',
     persona: 'versioning',
-    icon: History,
-    time: '9 min',
+    icon: PenLine,
   },
   {
     title: 'Review and merge a draft',
-    outcome: 'Approve, request changes, or resolve a conflicting edit',
-    slug: 'versioning-change-control',
+    outcome: 'Approve, merge or dismiss a merge request — pulling in the latest changes first',
+    slug: 'review-center',
     persona: 'versioning',
     icon: GitPullRequest,
-    time: '9 min',
   },
   {
-    title: 'Bulk-import or export data',
-    outcome: 'Load a spreadsheet of changes or take a full, re-importable backup',
-    slug: 'import-export',
+    title: 'Undo or roll back a change',
+    outcome: 'Know when to reverse one change and when to restore an earlier point',
+    slug: 'versioning-change-control',
     persona: 'versioning',
-    icon: ArrowLeftRight,
-    time: '6 min',
+    icon: History,
   },
   {
-    title: 'Move a view to another environment',
-    outcome: 'Export it, then import it where the same data source lives: see what matched first',
-    slug: 'import-export',
-    persona: 'builder',
-    icon: ArrowLeftRight,
-    time: '6 min',
-  },
-  {
-    title: 'Move a data source between workspaces',
-    outcome: 'Reassign it safely — only possible when nothing is built on it yet',
-    slug: 'workspace-admin',
+    title: 'Connect your first data source',
+    outcome: 'Register a provider, onboard data sources into a workspace, and watch the first build',
+    slug: 'admin-setup',
     persona: 'admin',
-    icon: Boxes,
-    time: '8 min',
+    icon: PlugZap,
+  },
+  {
+    title: 'Keep data fresh',
+    outcome: 'See which sources are behind, and rebuild their lineage summaries',
+    slug: 'data-freshness',
+    persona: 'admin',
+    icon: Gauge,
+  },
+  {
+    title: 'Turn features on or off',
+    outcome: 'Decide which capabilities everyone gets, and see what each switch hides',
+    slug: 'feature-switches',
+    persona: 'admin',
+    icon: ToggleLeft,
   },
 ]
 
@@ -537,24 +522,45 @@ export const keyJourneys: KeyJourney[] = [
 export const quickStartSteps: string[] = [
   'Sign in and get your bearings',
   'Pick a workspace',
-  'Open a View',
-  'Trace lineage upstream & downstream',
-  'Save and favourite it',
+  'Open a view from the Explorer',
+  'Trace its lineage upstream and downstream',
+  'Favourite it, or build your own with New View',
 ]
 
 // ── Glossary chips (hub acronym strip) ─────────────────────────────
 
 export const glossaryChips: GlossaryChip[] = [
-  { term: 'Lineage', full: 'How data flows between things' },
-  { term: 'View', full: 'A saved, shareable exploration' },
+  { term: 'Lineage', full: 'How data flows from source to use' },
+  { term: 'View', full: 'One saved, curated canvas' },
+  { term: 'Explorer', full: 'The catalogue of saved views' },
   { term: 'Ontology', full: 'The semantic layer — what data means' },
-  { term: 'Workspace', full: 'An isolated team/project context' },
-  { term: 'Granularity', full: 'Zoom level: column → table → domain' },
-  { term: 'Upstream', full: 'Where data came from' },
+  { term: 'Workspace', full: 'A team’s or project’s space' },
+  { term: 'Upstream', full: 'Where data comes from' },
   { term: 'Downstream', full: 'What data feeds' },
+  { term: 'Impact', full: 'Everything downstream a change could affect' },
   { term: 'RBAC', full: 'Role-Based Access Control' },
-  { term: 'Blast Radius', full: 'Everything a change would affect' },
   { term: 'Provider', full: 'A connection to a graph database' },
+]
+
+// ── Hub: jobs-first entry ──────────────────────────────────────────
+
+/** A goal-phrased card in the hub's "What do you want to do?" row. */
+export interface TopJob {
+  title: string
+  outcome: string
+  slug: string
+  icon: LucideIcon
+}
+
+// Jobs-first entry: the hub leads with what people are trying to DO, phrased as
+// goals, each routing straight to the article that gets them there.
+export const topJobs: TopJob[] = [
+  { title: 'See what a change will break', outcome: 'Trace a dataset downstream to everything it feeds', slug: 'exploring-graph', icon: Network },
+  { title: 'Find the right view', outcome: 'Search the Explorer and favourite the views you use most', slug: 'browsing-views', icon: Eye },
+  { title: 'Build and share a view', outcome: 'Create a view with New View and choose who can see it', slug: 'creating-views', icon: Share2 },
+  { title: 'Get access I don’t have', outcome: 'Request a role in a workspace and follow your request', slug: 'requesting-access', icon: KeyRound },
+  { title: 'Fix something that isn’t working', outcome: 'Look up a message or symptom and see what to do', slug: 'troubleshooting', icon: LifeBuoy },
+  { title: 'Give someone the right access', outcome: 'Invite people and grant exactly the access they need', slug: 'users-access', icon: Users },
 ]
 
 // ── Hub FAQs ───────────────────────────────────────────────────────
@@ -564,49 +570,73 @@ export const guideFaqs: GuideFAQ[] = [
     category: 'Getting started',
     question: 'I’m new — where should I begin?',
     answer:
-      'Read [Key Concepts](/guide/key-concepts) for the vocabulary, then do the [Quick Start](/guide/quick-start) in a real workspace. Ten minutes each and everything clicks.',
+      'Start with [Key Concepts](/guide/key-concepts) for the vocabulary, then follow the [Quick Start](/guide/quick-start) in a real workspace — it takes you from signing in to tracing your first lineage.',
   },
   {
     category: 'Getting started',
     question: 'Do I need to be an engineer to use {brand}?',
     answer:
-      'No. This guide is written for everyone. Viewers and Builders never touch code — only Administrators deal with connections, and even that is wizard-driven.',
+      'No. Finding, reading and tracing lineage, and building views, all happen in the browser without code; connecting data is an administrator’s job, done through guided wizards — see [Welcome to {brand}](/guide/welcome).',
   },
   {
     category: 'Using {brand}',
     question: 'What’s the difference between a View and the Explorer?',
     answer:
-      'A **View** is a curated, saved snapshot someone built. The **Explorer** is an open canvas for your own investigations. Start in Views to learn the landscape; use the Explorer to answer new questions. See [Exploring the Graph](/guide/exploring-graph).',
+      'A **View** is one saved, curated canvas built on a data source. The **Explorer** — **Explore** in the sidebar — is the catalogue of every view you can open, across your workspaces, where you search, filter and favourite them; see [Finding Views](/guide/browsing-views).',
   },
   {
     category: 'Using {brand}',
     question: 'Can I break anything by clicking around?',
     answer:
-      'No. Looking, panning, zooming, and tracing never change data. Editing, saving, and sharing always require a deliberate action.',
+      'No. Reading, searching and tracing never change data, and changes to the data go into your own private draft — nothing reaches the published version until it’s reviewed or published; see [Versioning & Change Control](/guide/versioning-change-control).',
+  },
+  {
+    category: 'Using {brand}',
+    question: 'What does “Taking a little longer than usual” mean?',
+    answer:
+      'The server is busy — it runs a limited number of graph reads at once and asks your browser to try again shortly — or a query ran past its time limit. Nothing is lost: the view retries by itself, or you can select **Retry now**; see [Troubleshooting](/guide/troubleshooting#a-view-keeps-saying-taking-a-little-longer-than-usual).',
+  },
+  {
+    category: 'Using {brand}',
+    question: 'Is the data I’m looking at up to date?',
+    answer:
+      'Check the chip next to the data source’s name in the view’s header: **In sync · v12** means current, while a chip such as **1 version behind** or **Refresh failed · 1 version behind** means it isn’t — select it to see when each step last happened. See [Data Freshness & Ingestion](/guide/data-freshness).',
+  },
+  {
+    category: 'Using {brand}',
+    question: 'Can I share a trace with someone?',
+    answer:
+      'Yes. While a trace is open in a Context View, select **Share** in the trace dock, then **Copy link** — anyone who can open the view can open the link, and it re-runs against today’s lineage; see [Tracing Lineage on the Canvas](/guide/exploring-graph).',
   },
   {
     category: 'Access',
     question: 'Why can’t I see a View someone shared?',
     answer:
-      'Either its **visibility** is too narrow or you’re in the wrong **workspace**. Ask the owner to widen visibility or share it explicitly, and confirm you’ve opened the right workspace from the sidebar. See [Browsing Views](/guide/browsing-views).',
+      'Check your **Inbox** and the Explorer’s **Shared** filter first; if it’s not there, its visibility may not include you, so ask the owner to check **Share**. See [I can’t find a View someone shared with me](/guide/troubleshooting#i-cant-find-a-view-someone-shared-with-me).',
   },
   {
     category: 'Access',
     question: 'How do I find out what I’m allowed to do?',
     answer:
-      'Open your **My Access** page — it lists your roles, scopes, and permissions in plain language. See [Users & Access](/guide/users-access).',
+      'Open the avatar menu at the top right and select **My access** — it lists your roles, what they let you do, and any access requests you’ve made; see [Users & Access](/guide/users-access).',
+  },
+  {
+    category: 'Access',
+    question: 'How do I get access to a workspace I can’t open?',
+    answer:
+      'When an **Access denied** card offers **Request access**, choose a role, add a reason if you like, and select **Submit request**. The workspace admin reviews it, and you can follow it under **My access requests** on your **My access** page — see [Requesting Access](/guide/requesting-access).',
   },
   {
     category: 'Using {brand}',
     question: 'I published a mistake — how do I fix it?',
     answer:
-      '**Undo this change** if you know exactly which edit was wrong and want to keep everything since — **Restore to this point** if you need to reset the whole graph to a known-good moment. Both add a new entry to history rather than erasing anything. See [Versioning & Change Control](/guide/versioning-change-control).',
+      'Select **Reviews** in the view’s header to open its history, then open the change’s **⋯** menu: **Undo just this change** reverses it and keeps everything since, while **Restore graph to here** rolls back everything after it. Both add a new revision instead of erasing anything (only people who manage the data source see these actions) — see [Versioning & Change Control](/guide/versioning-change-control).',
   },
   {
     category: 'Using {brand}',
     question: 'Can I bulk-load data from a spreadsheet?',
     answer:
-      'Yes — **Import** (in the header menu, while editing) stages a spreadsheet\'s worth of changes on a draft for you to review before anything publishes. See [Import & Export](/guide/import-export).',
+      'Yes. In a draft, open **Import / Export** in a Context View’s header and choose **Import…** (Excel, CSV, TSV, NDJSON or JSON) — the changes land in your draft for review, and nothing reaches the published version until you publish; see [Import & Export](/guide/import-export).',
   },
 ]
 

@@ -1,11 +1,11 @@
 # Data Architecture
 
-The definitive reference for how {brand} stores and moves data across its two storage layers and its Redis topology.
+*For architects, backend engineers, DBAs and operators.*
 
-**Who it's for:** backend developers, DBAs, and operators who need the concrete schema, cache, and Redis-role details.
+This page explains where {brand} keeps its data and how it moves: what each store holds, how the core management tables relate, how a read travels from a graph store to the canvas, and how caching, credentials, events and schema changes work.
 
 **What you'll find here:**
-- The full management-DB entity-relationship model
+- Where every table belongs, and the core management-database model
 - End-to-end query flow and the graph data model
 - Credential encryption, caching, and Redis role decoupling
 - Stats polling, the transactional outbox, migrations, and data-integrity constraints
@@ -14,17 +14,44 @@ The definitive reference for how {brand} stores and moves data across its two st
 
 ## Overview
 
-{brand}'s data architecture spans two distinct layers:
-1. **Management Database** (PostgreSQL — no SQLite fallback; any non-`postgresql+asyncpg://` URL is rejected at startup) -- stores platform metadata: users, workspaces, providers, ontologies, views, feature flags
-2. **Graph Databases** (FalkorDB default, Neo4j, DataHub, Spanner Graph) -- stores the actual graph data: nodes, edges, lineage, containment hierarchies
+{brand} keeps its data in three kinds of store:
+- **PostgreSQL** — in every environment; there is no SQLite branch, and any `MANAGEMENT_DB_URL` that is not a `postgresql+asyncpg://` URL is rejected at startup. It holds the management database (users, workspaces, providers, ontologies, views, feature switches), the `aggregation` job tables, and the `graphver` version store for graph version control, which `GRAPHVER_DB_URL` can move to its own instance.
+- **Graph databases** (FalkorDB by default; Neo4j, DataHub and Google Cloud Spanner Graph as further providers) — the graph itself: nodes, edges, lineage and containment hierarchies.
+- **Redis** — job and event streams, locks, rate limits, the session store and caches. Never on FalkorDB; see [Redis Topology & Decoupling](#redis-topology--decoupling).
 
-The management layer is accessed through SQLAlchemy 2.0 async ORM. Graph data is accessed through the pluggable `GraphDataProvider` interface. Redis backs the cache and aggregation streams.
+The management database is accessed through the SQLAlchemy 2.0 async ORM, and its schema is built and migrated only by the `upgrade` job ([§8](#8-schema-migration-strategy)). Graph data is accessed through the pluggable `GraphDataProvider` interface.
 
-> **See also:** [Platform Services overview](/docs/services-overview) for the service/process-role topology (`SYNODIC_ROLE`: WEB, WORKER, CONTROLPLANE, DEV) that operates over these data layers.
+> **See also:** [Platform Services](/docs/services-overview) for the process roles (`SYNODIC_ROLE`: `web`, `worker`, `controlplane`, `dev`) that operate over these stores.
+
+## Where every table belongs
+
+The ORM maps 87 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
+
+| Area | Schema | Tables | Examples |
+|---|---|---|---|
+| Identity and sessions | `public` | 9 | `users`, `user_identities`, `refresh_tokens`, `revoked_refresh_jti`, `invites` |
+| Access control | `public` | 8 | `roles`, `permissions`, `role_bindings`, `groups`, `resource_grants`, `access_requests` |
+| Single sign-on | `public` | 4 | `idp_providers`, `idp_group_role_mappings`, `sso_backchannel_hosts`, `app_auth_config` |
+| Workspaces and data sources | `public` | 3 | `workspaces`, `workspace_data_sources`, `assignment_rule_sets` |
+| Providers and catalog | `public` | 5 | `providers`, `catalog_items`, `provider_admission_config`, `asset_discovery_cache` |
+| Semantic layer | `public` | 3 | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` |
+| Views | `public` | 10 | `views`, `view_versions`, `view_favourites`, `context_models`, `object_store_objects` |
+| Stats and profiling | `public` | 4 | `data_source_stats`, `data_source_count_snapshots`, `data_source_count_rollups`, `data_source_count_alerts` |
+| Aggregation and freshness | `public` | 2 | `data_source_polling_configs`, `refresh_events` |
+| Platform settings | `public` | 11 | `feature_flags`, `feature_definitions`, `platform_settings`, `application_branding`, `announcements` |
+| Events and audit | `public` | 4 | `outbox_events`, `auth_audit_log`, `product_events`, `notifications` |
+| Legacy | `public` | 1 | `graph_connections` — do not write to it |
+| Aggregation jobs | `aggregation` | 6 | `aggregation_jobs`, `data_source_state`, `reconcile_runs`, `job_event_log` |
+| Version store | `graphver` (`GRAPHVER_SCHEMA`) | 13 | `graphs`, `branches`, `commits`, `node_versions`, `edge_versions`, `entity_heads`, `merge_requests` |
+| Property side index | `propidx` | 4 | `node_props`, `prop_keys`, `graph_state`, `hot_indexes` — created, not yet used ([Property storage](/docs/property-storage)) |
+
+The version store's design is in [Versioning: Data Model](/docs/versioning-data-model).
 
 ---
 
 ## 1. Entity-Relationship Diagram
+
+The core management tables and how they relate. Two related tables are not drawn: a user's sign-in identities (one row per linked identity provider) live in `user_identities`, and role assignments live in `role_bindings` — `user_roles` is a legacy copy kept for display. See [RBAC](/docs/rbac).
 
 ```mermaid
 erDiagram
@@ -50,7 +77,7 @@ erDiagram
     providers {
         text id PK "prov_*"
         text name
-        text provider_type "falkordb|neo4j|datahub|spanner|mock"
+        text provider_type "falkordb|neo4j|datahub|spanner"
         text host
         int port
         text credentials "Fernet-encrypted JSON"
@@ -141,9 +168,9 @@ erDiagram
         text workspace_id FK
         text data_source_id FK "nullable"
         text context_model_id FK "nullable"
-        text visibility "enterprise|team|personal"
-        text owner_user_id
-        text creator_user_id
+        text visibility "private|workspace|enterprise"
+        text created_by
+        text updated_by
         json config
         json tags
         bool is_pinned
@@ -215,8 +242,7 @@ erDiagram
         text first_name
         text last_name
         text status "pending|active|suspended"
-        text auth_provider "local|saml2|oidc"
-        text external_id
+        text signup_source "local_signup|sso_jit|invite|admin_created|admin_linked"
         json metadata "SSO claims"
         text reset_token_hash
         datetime reset_token_expires_at
@@ -228,7 +254,7 @@ erDiagram
     user_roles {
         text id PK
         text user_id FK
-        text role_name "admin|user|viewer"
+        text role_name "legacy copy of the global role"
         datetime created_at
     }
 
@@ -291,7 +317,8 @@ erDiagram
 | Table | Purpose | Key Fields |
 |-------|---------|------------|
 | `feature_flags` | Global feature toggle values | `config` (JSON), `version` (optimistic concurrency) |
-| `feature_registry_meta` | Admin UI experimental notice | `experimental_notice_enabled`, `title`, `message` |
+| `feature_registry_meta` | Admin UI experimental notice | `experimental_notice_enabled`, `experimental_notice_title`, `experimental_notice_message` |
+| `platform_settings` | Platform-wide defaults | node identity and name properties, profiling retention and alert policy |
 
 ### Feature Definition Tables
 
@@ -304,78 +331,41 @@ erDiagram
 
 | Table | Purpose | Status |
 |-------|---------|--------|
-| `graph_connections` | Pre-workspace connection model | **Deprecated** -- being replaced by Provider + WorkspaceDataSource |
+| `graph_connections` | Pre-workspace connection model | **Deprecated** — replaced by Provider + WorkspaceDataSource; do not write to it |
 
 ---
 
 ## 2. Data Flow: End to End
 
 ```mermaid
-graph TB
-    subgraph External["External Graph Databases"]
-        FDB[(FalkorDB<br/>Redis Protocol)]
-        Neo[(Neo4j<br/>Bolt Protocol)]
-        DH[(DataHub<br/>GraphQL)]
-    end
-
-    subgraph Backend["Backend Processing"]
-        PR["ProviderRegistry<br/>Cache: (provider_id, graph_name)"]
-        CE["ContextEngine<br/>Query Orchestration"]
-        OS["OntologyService<br/>Three-layer resolver"]
-        Agg["Granularity Aggregation<br/>Column→Table projection"]
-    end
-
-    subgraph MgmtDB["Management Database"]
-        Providers["providers"]
-        DataSources["workspace_data_sources"]
-        Ontologies["ontologies"]
-        Stats["data_source_stats<br/>Materialized cache"]
-    end
-
-    subgraph Frontend["Frontend"]
-        GPC["GraphProviderContext"]
-        Stores["Zustand Stores"]
-        Canvas["Canvas Renderer<br/>@xyflow/react"]
-        Worker["ELK Worker<br/>Layout computation"]
-    end
-
-    FDB --> PR
-    Neo --> PR
-    DH --> PR
-
-    Providers --> PR
-    DataSources --> PR
-    Ontologies --> OS
-
-    PR --> CE
+flowchart LR
+    GS[("Graph stores")] --> PM["ProviderManager"]
+    MDB[("Management database")] --> PM
+    MDB --> OS["Ontology service"]
+    PM --> CE["ContextEngine"]
     OS --> CE
-    CE --> Agg
-
-    Agg -->|JSON Response| GPC
-    GPC --> Stores
-    Stores --> Canvas
-    Canvas --> Worker
-    Worker --> Canvas
-
-    Stats -.->|Cached| CE
-
+    CE --> GC["Response cache (Redis)"]
+    GC --> RGP["RemoteGraphProvider (browser)"]
+    RGP --> CV["Canvas store and canvas"]
 ```
 
 ### Detailed Query Flow
 
-1. **Frontend** sends `POST /api/v1/{ws_id}/graph/trace` with JWT
-2. **Auth middleware** validates JWT, extracts user
-3. **Endpoint** calls `get_context_engine(ws_id, data_source_id?)`
-4. **ContextEngine factory** resolves:
-   - WorkspaceDataSource from management DB
-   - Provider from ProviderRegistry (cached or instantiated)
-   - Ontology via OntologyService (system default + assigned + introspected, cached 5 min)
-5. **ContextEngine** calls provider's `get_trace_lineage(urn, direction, depth, containment_edges, lineage_edges)`
-6. **Provider** (e.g., FalkorDB) executes Cypher queries against graph DB
-7. **ContextEngine** applies granularity aggregation if requested (collapses fine-grained edges to coarser entity type levels)
-8. **Response** serialized as JSON with camelCase aliases and returned to frontend
-9. **Frontend** stores nodes/edges in `useCanvasStore`, triggers ELK layout in Web Worker
-10. **Canvas** renders updated graph
+A lineage trace on the Graph canvas, from click to picture:
+
+1. **The app** sends `POST /api/v1/{ws_id}/graph/trace/v2` with the session cookies and the data source in the query.
+2. **The API** authenticates the session (`get_current_user`) and checks access to the workspace, or to the view the request names.
+3. **Admission.** The request is admitted for its data source before it takes a database connection, or shed with `429` and `Retry-After`.
+4. **`get_context_engine`** builds a `ContextEngine` for the workspace and data source (`ContextEngine.for_workspace`), which resolves:
+   - the data source from the management database;
+   - its provider from `ProviderManager` — cached per process, or connected and cached on first use;
+   - its ontology — system defaults, plus the assigned ontology, plus types introspected from the graph — from a process-wide cache that a Redis generation bump refreshes on every change, with a 5-minute backstop.
+5. **The response cache** answers if it can; otherwise one caller computes while identical requests wait for it.
+6. **`ContextEngine.trace`** asks the provider for the trace at the requested hierarchy level (`trace_at_level`); FalkorDB runs it as set-based Cypher, bounded by the node and time budgets.
+7. **The response** is serialised as JSON with camelCase names, cached, and returned; a capped trace says `truncated: true`.
+8. **The app** merges the nodes and edges into `useCanvasStore`, and the Graph canvas lays them out with ELK.js on the browser's main thread.
+
+The other trace endpoints, and the guards a read passes, are described in [Architecture → Request lifecycle](/docs/architecture#request-lifecycle).
 
 ---
 
@@ -458,7 +448,7 @@ graph LR
     end
 
     subgraph Use["At Use"]
-        Registry["ProviderRegistry<br/>Decrypts on cache miss"]
+        Registry["ProviderManager<br/>Decrypts when connecting"]
         Provider["GraphDataProvider<br/>Uses decrypted creds"]
     end
 
@@ -469,56 +459,31 @@ graph LR
 
 ```
 
-**Credential fields** (per `ConnectionCredentials` Pydantic model):
-- `username: Optional[str]`
-- `password: Optional[str]`
-- `token: Optional[str]`
+**Credential fields** (the `ConnectionCredentials` Pydantic model): `username`, `password` and `token`, plus provider-specific secrets — a Spanner service-account key (`service_account_json`) and the credentials of a dedicated cache or Sentinel endpoint.
 
-> **Warning:** If `CREDENTIAL_ENCRYPTION_KEY` is unset, credentials are stored as **plaintext** — a development convenience that becomes a real risk in any shared or production environment. Generate a key with `Fernet.generate_key()` and set it before storing any real provider credentials. See [ADR-008](/docs/decisions#adr-008-fernet-for-credential-encryption).
+> **Important:** Set `CREDENTIAL_ENCRYPTION_KEY` before you store real credentials. With it set, credentials are Fernet-encrypted at rest. Without it, a development deployment stores them unencrypted, and with `ENV` set to `prod` or `production` the write is refused. Generate a key with `Fernet.generate_key()`. See [ADR-008](/docs/decisions#adr-008-fernet-for-credential-encryption).
 
 **Security rules:**
-- Credentials are **never returned in API responses** (stripped from ProviderResponse, ConnectionResponse)
-- Decrypted only when instantiating a provider connection
-- Falls back to plaintext if `CREDENTIAL_ENCRYPTION_KEY` not set (development only)
-- Fernet key: base64-encoded 32-byte key, generate with `Fernet.generate_key()`
+- Credentials are **never returned in API responses**; a provider's response says only whether a secret is set, and secrets inside `extra_config` are masked.
+- They are decrypted in the backend when a provider is connected, and when an update merges new values into the stored set.
+- Identity-provider settings (`idp_providers`) are encrypted the same way, with the same key.
+- The Fernet key is a base64-encoded 32-byte key from `Fernet.generate_key()`.
 
 ---
 
 ## 5. Caching Strategy
 
-```mermaid
-graph TB
-    subgraph ProviderCache["Provider Cache (In-Memory)"]
-        PC["ProviderRegistry._providers<br/>Dict[(provider_id, graph_name), Provider]"]
-        PL["Per-key asyncio.Lock<br/>Prevents thundering herd"]
-    end
+Four layers of cache sit between a graph store and the canvas. None is a source of truth: each can be dropped and rebuilt.
 
-    subgraph OntologyCache["Ontology Cache (In-Memory)"]
-        OC["ContextEngine._resolved_ontology_cache<br/>TTL: 5 minutes"]
-    end
-
-    subgraph StatsCache["Stats Cache (Database)"]
-        SC["data_source_stats table<br/>Materialized per data source"]
-    end
-
-    subgraph FECache["Frontend Cache"]
-        RQ["React Query<br/>staleTime: 5 min"]
-        ZS["Zustand Stores<br/>Ontology by scope key"]
-    end
-
-    ProviderCache -.->|"Evict on config change"| ProviderCache
-    OntologyCache -.->|"Expire after 5 min"| OntologyCache
-    StatsCache -.->|"Refresh on poll"| StatsCache
-
-```
-
-| Cache | Location | Key | TTL | Invalidation |
+| Cache | Location | Key | Lifetime | Invalidation |
 |-------|----------|-----|-----|--------------|
-| **Provider instances** | ProviderRegistry (process memory) | `(provider_id, graph_name)` | Forever (until evicted) | `evict_provider()`, `evict_workspace()`, `evict_all()` |
-| **Resolved ontology** | ContextEngine (per instance) | Per ContextEngine | 5 minutes | `invalidate_ontology_cache()` or TTL expiry |
-| **Graph stats** | `data_source_stats` table | `data_source_id` | Manual refresh | Polling service or API trigger |
-| **Frontend ontology** | Zustand `useSchemaStore` | `workspaceId/dataSourceId` | Until scope change | Scope key change |
-| **Frontend queries** | React Query | Per query key | 5 minutes | Automatic stale/refetch |
+| **Provider instances** | `ProviderManager`, in each process's memory | `(provider_id, graph_name)` | Until evicted; at most `PROVIDER_CACHE_MAX` (256), and reaped after `PROVIDER_CACHE_IDLE_TTL_SECS` (900 s) idle | A provider edit is broadcast over Redis; also `evict_provider()`, `evict_data_source()`, `evict_workspace()`, `evict_all()` |
+| **Resolved ontology** | Process-wide (`backend/app/services/resolved_ontology_cache.py`) | `(workspace_id, data_source_id)` | 300 s backstop | Any ontology change or reassignment bumps a Redis generation counter (`ontgen:{ws}:{ds}`), so every process re-resolves on its next read |
+| **Graph read responses** | Redis: payloads on the `CACHE` role, generation counters on the `STREAMS` role | Workspace, data source, branch, physical graph, generation, endpoint and parameters | 300 s for traces; 3,600 s for children, rollups, top-level pages and canvas pages; a last-known-good copy for 24 h | Every graph write bumps the generation; the last-known-good copy is served only when the store is down or times out |
+| **Graph stats** | `data_source_stats` table | `data_source_id` | Until the next poll | The stats service refreshes it; write paths ask for a poll within seconds, and the reconcile interval is 900 s by default |
+| **Graph responses in the browser** | `RemoteGraphProvider` | `GET` requests, by URL | 2 seconds by default, up to 60 seconds for metadata | Expiry |
+| **Frontend ontology** | `useSchemaStore` | Scope key, `workspaceId/dataSourceId` | Until the scope changes | Scope change |
+| **Frontend queries** | React Query | Query key | 5 minutes stale time | Automatic refetch |
 
 ---
 
@@ -538,8 +503,9 @@ application data on it. We forbid that **by construction** (ADR-020): a FalkorDB
 restart/OOM must never wipe the cache or make cache traffic contend with graph
 queries on FalkorDB's single-threaded process. `build_cache_client` returns
 `None` (cache disabled, best-effort) rather than ever building on FalkorDB
-nodes, and deployed roles fail fast at startup without a dedicated
-`CACHE_REDIS_URL`.
+nodes. At startup a deployed role must resolve the `STREAMS` endpoint; the
+`CACHE` role may be configured globally or only per provider, so it is
+resolved and logged rather than required.
 
 ### Role-prefixed config surface
 
@@ -572,8 +538,8 @@ whole-endpoint override that never inherits the global cache's password or CA
 | Cancel bridge | **Pub/Sub** | `REDIS_URL` | Ephemeral |
 | Exec / advisory locks | `SET NX PX` / PG lock | `REDIS_URL` / Postgres | TTL (design-tolerant) |
 | Rate-limit (fair-share, admission) | Lua token-bucket | `REDIS_URL` | TTL (self-heals) |
-| Token revocation (auth) | KV | dedicated Redis | TTL (JWT-bounded) |
-| Aggregated-read cache (`graph_cache`) | KV cache | `REDIS_URL` db0 | TTL (recomputable) |
+| Session store: revocation tombstones and workspace grants | KV | `REDIS_URL` | TTL (session-bounded) |
+| Graph read response cache (`graph_cache`) | KV cache + generation counters | payloads on `CACHE_REDIS_URL` db1, counters on `REDIS_URL` db0 | TTL (recomputable) |
 | FalkorDB ancestor/URN/stats cache | KV/Hash cache | `CACHE_REDIS_URL` db1 | TTL (recomputable) |
 
 ### Streams vs Cache vs Pub/Sub — why they differ
@@ -675,74 +641,55 @@ eviction / failover domain.
   client certificate for the cache's TLS; it now uses system-trust TLS for the
   cache — correct per the decoupling above, but a behavior delta for that one
   shape.
-- **Known limitation.** A data source's `extra_config.cacheConnection` can
-  still shallow-override the provider's at the top level
-  (`_merge_extra_config`); secret/cluster smuggling is blocked by validation on
-  both, but the override *precedence* itself remains.
+- **Override precedence.** A data source's `extra_config.cacheConnection`
+  overrides the provider's at the top level (`_merge_extra_config`);
+  validation on both refuses secrets and cluster settings there.
 
 ---
 
 ## 6. Stats Polling Service
 
-The Stats Polling Service (`backend/insights_service/`, superseding the retired `backend/stats_service/` per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)) is a standalone async process that periodically refreshes materialized statistics for each active data source.
+The stats service (`python -m backend.insights_service`, image `backend/Dockerfile.insights`) keeps `data_source_stats` fresh, so the API serves cached counts and schema instead of querying a provider on every read. It replaced the retired `backend/stats_service/` skeleton ([ADR-018](/docs/decisions#adr-018-retire-the-graph-service)).
 
 ```mermaid
-graph TB
-    subgraph Poller["Stats Polling Service (standalone process)"]
-        Loop["scheduled_polling_loop()<br/>10s check interval"]
-        Poll["poll_data_source()<br/>Per data source"]
-    end
-
-    subgraph MgmtDB["Management Database"]
-        DSTable["workspace_data_sources<br/>(active sources)"]
-        PollCfg["data_source_polling_configs<br/>(intervals, status)"]
-        StatsTable["data_source_stats<br/>(materialized cache)"]
-    end
-
-    subgraph Providers["Graph Providers"]
-        FDB["FalkorDB"]
-        Neo["Neo4j"]
-    end
-
-    Loop -->|"JOIN ds + config<br/>check is_due"| DSTable
-    Loop -->|"read config"| PollCfg
-    Loop -->|"spawn tasks"| Poll
-    Poll -->|"get_stats()<br/>get_schema_stats()"| Providers
-    Poll -->|"upsert_data_source_stats()"| StatsTable
-    Poll -->|"update last_polled_at<br/>last_status"| PollCfg
-
+flowchart LR
+    SCH["Scheduler (every 30 s)"] -->|"due sources"| RS[("Redis streams")]
+    RS --> WK["Workers, per-lane budgets"]
+    WK -->|"counts and schema"| GP[("Graph providers")]
+    WK -->|"upsert"| ST[("data_source_stats")]
+    WK -->|"status, last poll"| PC[("data_source_polling_configs")]
 ```
 
 **Polling lifecycle:**
-1. Loop wakes every 10 seconds and queries all active data sources joined with their polling configs
-2. Auto-creates default config (enabled, 300s interval) for any unconfigured data source
-3. Checks elapsed time since `last_polled_at` against `interval_seconds`
-4. Due sources are polled concurrently via `asyncio.gather`
-5. Each poll creates its own DB session and instantiates a `ContextEngine` to access the provider
-6. Four queries run concurrently per source: `get_stats()`, `get_schema_stats()`, `get_ontology_metadata()`, `get_graph_schema()`
-7. Results are upserted to `data_source_stats` and polling config is updated with status/timestamp
-8. On failure, error status and message are recorded in the polling config
+1. Each scheduler tick (`STATS_SCHEDULER_TICK_SECS`, 30 seconds by default) finds the data sources that are due, creating a polling config for any that has none (enabled, `STATS_DEFAULT_INTERVAL_SECS` — 900 seconds by default).
+2. Due sources are put on Redis streams; a per-source claim keeps at most one pending poll per source across replicas.
+3. Workers in the same process take them off the streams in separate lanes — quick counts, deep schema scans, discovery and purges — each with its own concurrency budget, so a slow scan never holds up counts.
+4. Results are upserted into `data_source_stats`, and the polling config records the status and time of the poll.
+
+The interval is a safety net, not the freshness mechanism: the API's write paths ask for a counts poll within seconds, and a read of stale stats queues one. If Redis is down the pipeline pauses and the API keeps serving the last stored stats, marked stale. Lanes, knobs and limits: [Insights](/docs/services-insights).
 
 ---
 
 ## 7. Transactional Outbox Pattern
 
-The `outbox_events` table implements a transactional outbox for domain events, ensuring reliable event publishing alongside database writes.
+The `outbox_events` table implements a transactional outbox for domain events, so an event is recorded if and only if the change it describes is committed.
 
 | Column | Type | Purpose |
 |--------|------|---------|
 | `id` | `evt_*` text | Unique event ID |
 | `event_type` | text | Domain event name (e.g. `user.created`, `user.approved`) |
+| `event_version` | integer | Payload schema version, bumped on an incompatible change |
+| `aggregate_type`, `aggregate_id` | text | The kind of entity the event is about, and its id |
 | `payload` | JSON text | Serialized event data |
-| `processed` | boolean | Whether event has been consumed |
+| `processed` | boolean | Whether the event has been consumed |
 | `created_at` | text (ISO) | Event timestamp |
 
-**Index:** `idx_outbox_processed_created` on `(processed, created_at)` for efficient consumer queries.
+**Indexes:** `idx_outbox_processed_created` on `(processed, created_at)` for the consumer, plus indexes on the aggregate and on the event type.
 
 **Usage pattern:**
-- Events are written in the same transaction as the domain operation (e.g., user signup writes both the user row and the outbox event)
-- A consumer process polls for `processed = false` events, processes them, and marks them as processed
-- This decouples domain actions from side effects (email notifications, audit logs) without distributed transactions
+- Events are written in the same transaction as the domain operation (for example, a sign-up writes both the user row and the outbox event).
+- The outbox relay (`backend/app/services/outbox_relay.py`) drains unprocessed events into the append-only `auth_audit_log` and marks them processed in the same transaction. A unique source-event id means a retry cannot record an event twice.
+- This decouples domain actions from their side effects, such as the audit trail, without distributed transactions.
 
 ---
 
@@ -756,25 +703,28 @@ alongside the SQLAlchemy ORM models. Migrations live in
 `0001_baseline` forward), and are the authoritative record of every schema
 change.
 
-**Applying migrations** is owned by a dedicated `synodic-upgrade` service
-(`backend/scripts/upgrade.py`) — a Helm pre-install/pre-upgrade hook Job in
-Kubernetes, or a one-shot `upgrade` service (`depends_on`) in docker-compose.
-Developers running `uvicorn` directly apply them first with:
+**Applying migrations** is owned by a dedicated `synodic-upgrade` job
+(`backend/scripts/upgrade.py`, image `backend/Dockerfile.upgrade`) — a one-shot
+`upgrade` service that every backend service waits for in Docker Compose, and a
+pre-install/pre-upgrade hook Job in the Helm chart. On an empty database it
+builds the schema at head from `0001_baseline`, seeds the RBAC reference rows and
+stamps head, rather than replaying every revision. Developers running `uvicorn`
+directly apply migrations first with:
 
 ```bash
 python -m backend.scripts.upgrade upgrade   # alembic upgrade head, under pg_advisory_lock
 python -m backend.scripts.upgrade check     # exits 0 iff the DB matches every head
 ```
 
-**The API process never mutates the schema.** `init_db()`
-(`backend/app/db/engine.py`) only *verifies*, read-only, that
-`alembic_version` matches the expected head(s):
+**The API process never migrates the schema.** `init_db()`
+(`backend/app/db/engine.py`) only *verifies* that `alembic_version` matches the
+expected head(s):
 
 ```python
-# backend/app/db/engine.py: init_db()
+# backend/app/db/engine.py: init_db() (abridged)
 expected_heads = sorted(ScriptDirectory.from_config(cfg).get_heads())
-applied = sorted({r[0] for r in await conn.execute(
-    sa_text("SELECT version_num FROM alembic_version")).fetchall()})
+result = await conn.execute(sa_text("SELECT version_num FROM alembic_version"))
+applied = sorted({r[0] for r in result.fetchall()})
 
 at_head = applied == expected_heads
 # missing alembic_version  → BootstrapError("schema_not_initialised") (degraded mode)
@@ -784,9 +734,15 @@ at_head = applied == expected_heads
 **Characteristics:**
 - Full version tracking and ordering via the Alembic revision graph
 - Rollback capability (`downgrade`) where migrations define it
-- Migrations run exactly once, under a `pg_advisory_lock`, by the upgrade service
-- In Kubernetes a `wait-for-schema` initContainer gates every backend Pod on
-  the migration having already completed
+- Migrations run exactly once, under a `pg_advisory_lock`, by the upgrade job
+- With the Helm chart, a `wait-for-schema` init container (`upgrade check --wait`)
+  holds every backend pod until the migration has completed
+- The aggregation control plane and worker still create their own `aggregation`
+  tables if missing (`create_all(checkfirst=True)` in
+  `backend/app/services/aggregation/db_init.py`), as a safety net for start-order
+  races
+
+Why the schema is owned this way: [ADR-025](/docs/decisions#adr-025-postgresql-only-management-database-schema-owned-by-an-upgrade-job). The rules a new migration has to follow: [Migrations](/docs/migrations).
 
 ### Migration History
 
@@ -838,7 +794,7 @@ stateDiagram-v2
 
 ### Primary Keys
 
-All tables use text UUIDs with semantic prefixes:
+Most management tables use text ids with semantic prefixes:
 - `prov_*` -- Providers
 - `bp_*` -- Ontologies
 - `ws_*` -- Workspaces
@@ -848,7 +804,9 @@ All tables use text UUIDs with semantic prefixes:
 - `cat_*` -- Catalog Items
 - `ann_*` -- Announcements
 - `oal_*` -- Ontology Audit Log
-- `conn_*` -- Legacy Connections
+- `evt_*` -- Outbox events
+
+The legacy `graph_connections` table uses unprefixed UUIDs.
 
 ### Foreign Keys & Cascades
 
@@ -868,7 +826,8 @@ All tables use text UUIDs with semantic prefixes:
 
 | Constraint | Purpose |
 |-----------|---------|
-| `workspace_data_sources(workspace_id, provider_id, graph_name)` | One binding per triple |
+| `workspace_data_sources(workspace_id, provider_id, graph_name)`, among live rows (`deleted_at IS NULL`) | One binding per triple |
+| `workspace_data_sources(catalog_item_id)`, among live rows | A catalog item backs at most one live data source |
 | `users.email` | Unique emails |
 | `user_roles(user_id, role_name)` | No duplicate roles |
 | `view_favourites(view_id, user_id)` | One favourite per user per view |
@@ -879,17 +838,34 @@ All tables use text UUIDs with semantic prefixes:
 | Table | Constraint |
 |-------|-----------|
 | `feature_flags` | `id = 1` always |
-| `feature_registry_meta` | Single row by convention |
+| `feature_registry_meta` | `id = 1` always |
+| `platform_settings` | `id = 1` always |
 | `management_db_config` | `id = 1` always |
 | `announcement_config` | `id = 1` always |
 
 ---
 
-## Related
+## Where in the code
 
-- [Architecture](/docs/architecture) — system topology and the request lifecycle
-- [Decisions](/docs/decisions) — ADRs behind the entity model, Redis roles, and outbox
+| Concern | Where |
+|---|---|
+| Management tables | `backend/app/db/models.py` |
+| Aggregation, version-store and property-index tables | `backend/app/services/aggregation/models.py`, `backend/app/jobs/models.py`, `backend/app/services/versioning/models.py`, `backend/app/db/propidx_models.py` |
+| Engine, pools and the schema check | `backend/app/db/engine.py` (`init_db`) |
+| Migrations | `backend/alembic/versions/`, `backend/scripts/upgrade.py` |
+| Provider cache | `backend/app/providers/manager.py` (`ProviderManager`) |
+| Resolved-ontology cache | `backend/app/services/resolved_ontology_cache.py` |
+| Response cache | `backend/app/services/graph_cache.py` (`GraphCache`) |
+| Redis roles | `backend/common/adapters/redis_endpoint.py` (`resolve_redis_config`, `build_redis_client`) |
+| Credential encryption | `backend/app/db/repositories/connection_repo.py` (`_encrypt`, `_decrypt`) |
+| Outbox relay | `backend/app/services/outbox_relay.py` |
+| Stats service | `backend/insights_service/` |
+
+## See also
+
+- [Architecture](/docs/architecture) — the processes, the stores and a request's lifecycle
+- [Domain Ownership](/docs/domain-ownership) — which module owns which table
+- [Decisions](/docs/decisions) — the ADRs behind the entity model, the Redis roles and the schema ownership
+- [Versioning: Data Model](/docs/versioning-data-model) — the version store's tables
 - [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are computed and written
-- [Services Overview](/docs/services-overview) — process-role topology over these data layers
-- [Technical Debt](/docs/technical-debt) — SQLite, migrations, and outbox-consumer risks
-- [Overview](/docs/overview) — platform vision and key terms
+- [Migrations](/docs/migrations) — how the schema is built and changed

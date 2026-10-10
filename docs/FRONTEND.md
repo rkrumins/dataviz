@@ -1,723 +1,243 @@
-# Frontend & UX Documentation
+# Frontend Reference
 
-> **At a glance:** The architecture, state model, and design system of the {brand} single-page app. Written for frontend engineers and anyone tracing how a user action becomes a rendered graph.
+*For frontend engineers.*
 
-**This doc covers:**
+Use this page to find your way around the single-page app in `frontend/`: how it is organised, how it talks to the backend, the handful of stores and hooks everything else builds on, and where each major surface lives. Exact behaviour is in the code; this page tells you which file to open.
 
-- The **technology stack** and **component architecture**
-- Core **user flows** — auth, workspace navigation, graph exploration, view management
-- **State management** (Zustand stores) and the **data-fetching** layer
-- The **design system**, **performance** techniques, the **admin/onboarding** surface, and the **Layer System**
+## Technology stack
 
-## Overview
+From `frontend/package.json` (ranges, as declared):
 
-The {brand} frontend is a **React 19** single-page application built with **Vite**, **TypeScript**, **Tailwind CSS**, and **Zustand** for state management. It provides a rich graph visualization experience powered by **@xyflow/react** with layout computation offloaded to **Web Workers** (ELK.js).
+| Technology | Version | Used for |
+|---|---|---|
+| React | ^19.3.0 | UI |
+| TypeScript | ~5.7.2 | Types |
+| Vite | ^8.3.3 | Dev server and build |
+| Zustand | ^5.0.15 | Client state |
+| TanStack React Query | ^5.104.1 | Server state and caching |
+| React Router | ^7.18.4 (`react-router-dom`) | Routing |
+| @xyflow/react | ^12.12.0 | The graph canvases |
+| elkjs | ^0.12.0 | Graph-canvas layout |
+| Tailwind CSS | ^3.4.17 | Styling |
+| Radix UI | per-component packages | Dialogs, menus, popovers, tabs, tooltips, switches |
+| Framer Motion | ^11.15.0 | Transitions |
+| Lucide React | ^1.52.0 | Icons |
+| react-markdown, mermaid | ^10.1.0, ^11.16.1 | The documentation and guide readers |
+| Vitest | ^4.1.11 | Tests |
 
----
+Node.js 24 is pinned in `frontend/.nvmrc`, and the production image builds on `node:24-alpine` and serves from `nginx:1.31-alpine`.
 
-## 1. Technology Stack
+## How the frontend is organised
 
-| Technology | Version | Purpose |
-|-----------|---------|---------|
-| React | 19.0.0 | UI framework (Suspense, concurrent features) |
-| Vite | 6.0.5 | Bundler with HMR |
-| TypeScript | 5.7.2 | Type safety |
-| Tailwind CSS | 3.4.17 | Utility-first styling with dark mode |
-| Zustand | - | Lightweight state management |
-| @xyflow/react | 12.10.0 | Graph visualization canvas |
-| ELK.js | 0.11.0 | Hierarchical graph layout (Web Worker) |
-| Dagre | 0.8.5 | DAG layout |
-| Radix UI | - | Accessible component primitives |
-| Framer Motion | 11.15.0 | Animations and transitions |
-| Lucide React | 0.468.0 | SVG icon library |
-| TanStack React Query | v5 | Server state management |
-| React Router DOM | 7.13.1 | Client-side routing |
+| Folder (`frontend/src/`) | What lives there | Start with |
+|---|---|---|
+| `main.tsx`, `App.tsx` | Boot: branding and feature-switch values are fetched, then the app tree mounts — query client, session bootstrap, graph provider, router | `App.tsx` (`App`, `AuthBootstrap`) |
+| `routes.tsx` | Every route. Pages are lazy-loaded with a retrying import, each behind its own error boundary | `router` |
+| `pages/` | Route-level pages: Explorer, the view page, Ingestion, Workspaces, the semantic-layer page, Administration, Analytics, your account, the docs and guide shells | `ViewPage.tsx`, `ExplorerPage.tsx` |
+| `components/` | UI by area: `canvas/` (the canvases, trace dock, Context View and Lineage Lens), `views/` (the Create View wizard and layer editing), `admin/`, `ingestion/`, `workspaces/`, `schema/`, `panels/` (detail panels), `layout/` (app shell, sidebar, top bar, command palette), `auth/` (sign-in pages and route guards), `docs/` and `guide/` (the readers), `ui/` (shared primitives) | `components/canvas/CanvasRouter.tsx` |
+| `features/` | Self-contained features: `versioning`, `reviews`, `import-export`, `view-transfer`, `view-versions`, `canvas-drafts`, `ontology`, `sync-status`, `tour` | `features/versioning/` |
+| `store/` | Most of the app's Zustand stores (about 40 in all; a few live beside the feature that owns them) | See [The central stores](#the-central-stores) |
+| `hooks/` | About 110 hooks: data loading, tracing, layout, interactions | See [The central hooks](#the-central-hooks) |
+| `services/` | API clients, one module per backend area, and the shared request wrapper | `fetchWithTimeout.ts`, `apiClient.ts` |
+| `providers/` | The graph data client and its React context | `RemoteGraphProvider.ts`, `GraphProviderContext.tsx` |
+| `lib/` | Pure helpers: the query client, display labels, permission and navigation rules, formatting | `queryClient.ts`, `domainLabels.ts`, `navPermissions.ts` |
+| `config/` | Timeouts, polling intervals and page sizes | `timeouts.ts` |
+| `types/`, `generated/` | Shared types; generated files such as the feature registry snapshot the admin Features page falls back to | `generated/featuresFallback.json` |
+| `styles/` | Global CSS and the shared component classes | `globals.css` |
+| `test/`, `harness/` | Test helpers and the visual harness pages | `test/lensView.ts` |
 
----
-
-## 2. Component Architecture
-
-```mermaid
-graph TB
-    subgraph App["Application Shell"]
-        Main["main.tsx<br/>QueryClient + GraphProvider + Router"]
-        AppComp["App.tsx<br/>Auth gate + theme"]
-        Layout["AppLayout<br/>TopBar + SidebarNav + Content"]
-    end
-
-    subgraph Pages["Pages (Lazy-loaded)"]
-        Dashboard["DashboardPage"]
-        Explorer["ExplorerPage"]
-        Lenses["LensesPage"]
-        Schema["SchemaPage"]
-        Admin["AdminPage"]
-    end
-
-    subgraph Canvas["Canvas Components"]
-        Lineage["LineageCanvas<br/>Primary graph view"]
-        Hierarchy["HierarchyCanvas<br/>Tree/containment"]
-        Reference["ReferenceModelCanvas"]
-        Layered["LayeredLineageCanvas"]
-        ContextView["ContextViewCanvas"]
-    end
-
-    subgraph CanvasParts["Canvas Building Blocks"]
-        GenericNode["GenericNode<br/>Schema-driven renderer"]
-        GhostNode["GhostNode<br/>Placeholder"]
-        LineageEdge["LineageEdge<br/>Custom edge renderer"]
-        AggEdge["AggregatedEdge"]
-    end
-
-    subgraph Panels["Detail Panels"]
-        NodePanel["NodeDetailsPanel"]
-        EdgePanel["EdgeDetailPanel"]
-    end
-
-    subgraph Modals["Modals & Wizards"]
-        ViewWizard["ViewWizard<br/>5-step creation"]
-        LayerEditor["LayerEditor"]
-        CmdPalette["CommandPalette<br/>Cmd+K"]
-    end
-
-    Main --> AppComp --> Layout
-    Layout --> Pages
-    Pages --> Canvas
-    Canvas --> CanvasParts
-    Canvas --> Panels
-    Layout --> Modals
-
-```
-
-### Key Design Patterns
-
-1. **Schema-Driven Rendering:** `GenericNode` handles all entity types dynamically -- visual properties (color, icon, shape) come from ontology definitions via `useSchemaStore`, not hardcoded per type.
-
-2. **Provider Pattern:** `GraphProviderContext` wraps the entire app, providing workspace-aware graph data access through `RemoteGraphProvider`.
-
-3. **Lazy Loading:** All route-level pages use React's `lazy()` + `Suspense` for code splitting. Heavy dependencies (MockProvider ~113kB, zxcvbn) are loaded on demand.
-
-4. **Web Worker Layout:** ELK layout computation runs in `elk-layout.worker.ts` to keep the UI thread responsive for large graphs.
-
----
-
-## 3. User Flows
-
-### Authentication Flow
+## From URL to screen
 
 ```mermaid
-graph LR
-    Login["Login Page<br/>Glass panel + motion"]
-    Signup["Sign Up Page<br/>zxcvbn strength meter"]
-    Forgot["Forgot Password"]
-    Reset["Reset Password<br/>Token-based"]
-    Dashboard["Dashboard"]
-    Pending["Pending Approval<br/>Message"]
-
-    Login -->|"Create account"| Signup
-    Signup -->|Success| Pending
-    Login -->|"Forgot?"| Forgot
-    Forgot --> Reset
-    Reset -->|Success| Login
-    Login -->|"JWT issued"| Dashboard
-
+flowchart LR
+    M["main.tsx"] --> A["App.tsx"]
+    A --> R["routes.tsx"]
+    R --> L["AppLayout (shell)"]
+    L --> CL["CanvasLayout"]
+    CL --> VP["ViewPage"]
+    VP --> CR["CanvasRouter"]
+    CR --> G["Graph, Hierarchy or Context View canvas"]
 ```
 
-### Workspace & Data Source Navigation
-
-```mermaid
-graph TB
-    Sidebar["SidebarNav<br/>EnvironmentSwitcher"]
-    WSSelect["Workspace Selection<br/>Color-coded avatars"]
-    DSSelect["Data Source Selection<br/>Within workspace"]
-    SchemaReload["Schema Invalidation<br/>+ Reload"]
-    CanvasUpdate["Canvas Re-render<br/>New data source context"]
-
-    Sidebar --> WSSelect
-    WSSelect --> DSSelect
-    DSSelect --> SchemaReload
-    SchemaReload --> CanvasUpdate
-
-```
-
-> **Note:** Views and ontology cache are keyed by the composite scope `${workspaceId}/${dataSourceId}`. Switching workspace or data source invalidates that cache and forces a schema reload — so a stale ontology never leaks across scopes.
-
-**Workspace scoping:** Navigation is workspace-aware. Changing workspaces or data sources triggers:
-1. `useWorkspacesStore` updates active IDs
-2. `useSchemaStore.setActiveScopeKey()` invalidates ontology cache
-3. `GraphProvider` creates new `RemoteGraphProvider({ workspaceId })`
-4. Canvas re-renders with new graph data
-
-### Graph Exploration Flow
-
-```mermaid
-graph TB
-    Explorer["Explorer Page<br/>Browse all entities"]
-    Search["Search + Filter"]
-    Select["Select Node"]
-    Trace["Trace Lineage<br/>Upstream/Downstream"]
-    Expand["Expand Children<br/>Containment hierarchy"]
-    Detail["Node Detail Panel<br/>Properties, edges, tags"]
-
-    Explorer --> Search --> Select
-    Select --> Trace
-    Select --> Expand
-    Select --> Detail
-
-    subgraph Controls["Canvas Controls"]
-        Mode["Mode: full/collapsed/aggregated"]
-        Gran["Granularity: domain/app/asset/column"]
-        Depth["Trace Depth: 1-N levels"]
-        Filter["Edge Type Filtering"]
-    end
-
-    Trace --> Controls
-
-```
-
-**Canvas interactions:**
-- **Right-click:** Context menu for node/edge actions
-- **Double-click node label:** Inline editing
-- **Double-click canvas / Cmd+N:** Quick create
-- **Cmd+K:** Command palette
-- **Minimap, grid, snap-to-grid:** Toggle via toolbar
-
-### View Management Flow
-
-```mermaid
-graph LR
-    Create["ViewWizard<br/>5-step modal"]
-    Step1["1. Basics<br/>Name, description"]
-    Step2["2. Entities<br/>Select visible types"]
-    Step3["3. Assignment<br/>Layer config"]
-    Step4["4. Layout<br/>Canvas type"]
-    Step5["5. Preview<br/>Visualize before save"]
-    Save["Save View"]
-    Browse["Browse Views<br/>Sidebar quick access"]
-
-    Create --> Step1 --> Step2 --> Step3 --> Step4 --> Step5 --> Save
-    Save --> Browse
-
-```
-
-**View scoping:** Views are scoped to `{workspaceId}/{dataSourceId}`. Bookmarks and recent views provide cross-workspace access.
-
----
-
-## 4. State Management
-
-### Zustand Store Architecture
-
-```mermaid
-graph TB
-    subgraph Persisted["Persisted (localStorage)"]
-        Auth["useAuthStore<br/>JWT, user profile"]
-        WS["useWorkspacesStore<br/>Active workspace/datasource IDs"]
-        Prefs["usePreferencesStore<br/>Theme, sidebar, canvas settings"]
-        Persona["usePersonaStore<br/>Business vs Technical"]
-        SchemaUI["useSchemaStore (partial)<br/>activeViewId, activeScopeKey"]
-    end
-
-    subgraph Runtime["Runtime Only"]
-        Canvas["useCanvasStore<br/>Nodes, edges, selection, viewport"]
-        Nav["useNavigationStore<br/>Current tab"]
-        Conn["useConnectionsStore<br/>Legacy connection management"]
-        SchemaData["useSchemaStore (data)<br/>Ontology definitions, views"]
-    end
-
-    WS -->|"workspace change"| SchemaUI
-    SchemaUI -->|"scope key"| SchemaData
-    Auth -->|"JWT"| WS
-
-```
-
-| Store | Key State | Persistence | Update Pattern |
-|-------|-----------|-------------|----------------|
-| `useAuthStore` | JWT token, user object, login/logout | localStorage | Login/logout actions |
-| `useWorkspacesStore` | Workspace list, active workspace/datasource IDs | Active IDs only | Workspace switch |
-| `useSchemaStore` | Ontology definitions, entity/relationship types, views | UI state only | Scope key change |
-| `useCanvasStore` | Graph nodes, edges, selection, viewport, trace state | Viewport + activeLensId | Graph operations |
-| `usePreferencesStore` | Theme (light/dark/system), sidebar, grid, minimap | All preferences | User toggles |
-| `usePersonaStore` | Business vs Technical mode | User preference | Persona toggle |
-| `useNavigationStore` | Current tab (dashboard/explore/lenses/schema) | None | Route sync |
-| `useConnectionsStore` | Legacy connection management | Active ID only | Legacy flow |
-
-**Cross-store coordination:**
-- `useWorkspacesStore` calls `useSchemaStore.setActiveScopeKey()` on workspace change
-- `GraphProvider` loads workspaces & connections on mount via both stores
-- `AppLayout` syncs React Router location with `useRouteSync()` hook
-
-**Performance techniques:**
-- `partialize` middleware controls what gets persisted
-- Selector hooks for granular subscriptions (`useNodes()`, `useSelectedNodes()`)
-- No-op writes: stores compare state before updating to prevent unnecessary renders
-- Atomic batch updates: `setGraph(nodes, edges)` prevents flash-of-no-edges
-- `_nodeIndex` / `_edgeIndex` Sets for O(1) deduplication
-
----
-
-## 5. Data Fetching
-
-Component data flows from React Query and the graph provider down through a single authenticated `fetch` wrapper:
-
-```mermaid
-graph LR
-    Comp["Component / Hook"]
-    RQ["React Query<br/>cache + staleTime"]
-    RGP["RemoteGraphProvider<br/>workspace-scoped"]
-    Svc["Service modules<br/>authService, viewApiService, …"]
-    AF["authFetch()<br/>JWT inject · 401 logout"]
-    BE["Backend API<br/>/api/v1/…"]
-    Mock["MockProvider<br/>(fallback)"]
-
-    Comp --> RQ
-    Comp --> RGP
-    RQ --> Svc
-    RGP --> Svc
-    RGP -.->|backend unreachable| Mock
-    Svc --> AF --> BE
-
-```
-
-### API Client
-
-**File:** `frontend/src/services/apiClient.ts`
-
-`authFetch()` wraps native `fetch()` with:
-- Automatic JWT Bearer token injection from `useAuthStore`
-- 401 handling: auto-logout on token expiry
-- JSON error parsing with fallback to status text
-
-### Service Modules
-
-| Service | File | API Base |
-|---------|------|----------|
-| `authService` | `services/authService.ts` | `/api/v1/auth/*` |
-| `workspaceService` | `services/workspaceService.ts` | `/api/v1/admin/workspaces` |
-| `connectionService` | `services/connectionService.ts` | `/api/v1/connections` (legacy) |
-| `viewApiService` | `services/viewApiService.ts` | `/api/v1/views` |
-| `contextModelService` | `services/contextModelService.ts` | `/api/v1/{ws_id}/context-models` |
-| `ontologyDefinitionService` | `services/ontologyDefinitionService.ts` | `/api/v1/admin/ontologies` |
-| `catalogService` | `services/catalogService.ts` | `/api/v1/admin/catalog` |
-| `providerService` | `services/providerService.ts` | `/api/v1/admin/providers` |
-| `adminUserService` | `services/adminUserService.ts` | `/api/v1/admin/users` |
-| `featuresService` | `services/featuresService.ts` | `/api/v1/admin/features` |
-| `announcementService` | `services/announcementService.ts` | `/api/v1/announcements`, `/api/v1/admin/announcements` |
-
-### Graph Provider
-
-**File:** `frontend/src/providers/RemoteGraphProvider.tsx`
-
-`RemoteGraphProvider({ workspaceId? })` abstracts backend graph API:
-- Path-based workspace routing: `/v1/{wsId}/graph/...`
-- Fallback to legacy `?connectionId=` params
-- Methods: `getStats()`, `getNode(urn)`, `getChildren(urn)`, `getFullLineage(urn, depth)`, `searchNodes(query)`
-- Falls back to MockProvider if backend unreachable
-
-### React Query Configuration
-
-```typescript
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 5 * 60 * 1000,  // 5 minutes
-      retry: 1,
-      refetchOnWindowFocus: false,
-    },
-  },
-});
-```
-
----
-
-## 6. Custom Hooks
-
-The frontend has 40+ custom hooks. Key ones:
-
-| Hook | Purpose |
-|------|---------|
-| `useLineageExploration` | Manages granularity, focus, upstream/downstream filtering |
-| `useUnifiedTrace` | Trace logic: direction, depth control, statistics |
-| `useElkLayout` | Async ELK layout computation via Web Worker |
-| `useCanvasInteractions` | Centralized interaction state (context menu, inline edit, quick create) |
-| `useCanvasKeyboard` | Global keyboard shortcuts |
-| `useLevelOfDetail` | Automatic zoom-to-granularity mapping |
-| `useBookmarkedViews` | Local bookmark history tracking |
-| `useRecentViews` | Recent views history with timestamps |
-| `useRouteSync` | React Router location sync with Zustand |
-| `useViewEditorModal` | View editor open/close with isolated state |
-| `useEntityLoader` | Entity loading with synthetic containment edges |
-
----
-
-## 7. Design System
-
-### Visual Language
-
-```mermaid
-graph LR
-    subgraph Theme["Glass Morphism Design"]
-        GP["glass-panel<br/>Backdrop blur + translucent bg"]
-        GPS["glass-panel-subtle<br/>Lighter variant"]
-        GT["gradient-text<br/>Accent gradients"]
-    end
-
-    subgraph Colors["Accent Palette"]
-        Lineage["Lineage<br/>Indigo/Blue"]
-        Business["Business<br/>Warm Orange/Red"]
-        Technical["Technical<br/>Teal/Cyan"]
-        WS["Workspace Avatars<br/>6 rotating gradient pairs"]
-    end
-
-    subgraph Typography["Fonts"]
-        Outfit["Outfit<br/>Display headings"]
-        Inter["Inter<br/>Body text"]
-        JBMono["JetBrains Mono<br/>Code/monospace"]
-    end
-
-```
-
-### Styling Approach
-
-- **Utility-first:** Tailwind CSS classes for all styling
-- **`cn()` helper:** `clsx` + `tailwind-merge` for conditional class composition
-- **Dark mode:** `dark:` prefix utilities, system preference detection with manual override
-- **CSS variables:** Adaptive color system in `tailwind.config.js` (`canvas`, `glass`, `accent`, `ink`)
-- **Radix UI:** Accessible primitives for dialogs, dropdowns, popovers, tabs, tooltips, switches
-- **Lucide icons:** Dynamic icon lookup by name from ontology definitions
-- **Framer Motion:** Stagger effects, fade-in/slide-up transitions, smooth loading states
-
-### Responsive Design
-
-- Sidebar collapses to 16px width on small screens
-- Mobile-friendly modals and forms
-- Touch-safe button sizes (min 44px)
-- Viewport-aware canvas rendering
-
----
-
-## 8. Performance Optimizations
-
-### Bundle
-
-- Vite manual chunks for vendor libraries (react, UI, state management)
-- Route-level lazy loading with `React.lazy()` + `Suspense`
-- Tree-shaking via Tailwind CSS purge
-- Dynamic imports for heavy dependencies (MockProvider, zxcvbn)
-
-### Canvas Rendering
-
-- **ELK layout in Web Worker:** Keeps UI thread free during layout computation
-- **Signature-based layout skip:** If node/edge IDs unchanged, skip re-layout
-- **Viewport stabilization:** Anchors to focus node during expansion
-- **Deduplication:** Canvas store uses `_nodeIndex`/`_edgeIndex` Sets for O(1) lookups
-- **Atomic updates:** `setGraph(nodes, edges)` prevents render flashing
-- **Cancellation tokens:** `cancelled` flag in `useEffect` prevents stale updates
-
-### State
-
-- Granular selector hooks prevent unnecessary re-renders
-- `useMemo` for expensive entity type map computations
-- No-op store updates (compare before set)
-- `partialize` controls localStorage persistence scope
-
----
-
-## 9. Admin System
-
-The admin system provides platform governance through dedicated panels under `/admin/*`:
-
-```mermaid
-graph TB
-    subgraph Admin["Admin Hub (/admin)"]
-        Overview["AdminOverview<br/>System-wide KPIs"]
-        Registry["AdminRegistry<br/>Tab-based management"]
-        Users["AdminUsers<br/>User approval & roles"]
-        Features["AdminFeatures<br/>Feature flag toggles"]
-    end
-
-    subgraph RegistryTabs["Registry Tabs"]
-        WSReg["RegistryWorkspaces<br/>Workspace CRUD"]
-        ConnReg["RegistryConnections<br/>Legacy connections"]
-        AssetReg["RegistryAssets<br/>Provider management"]
-    end
-
-    subgraph UserMgmt["User Management"]
-        Pending["Pending Approvals"]
-        RoleAssign["Role Assignment<br/>admin | user | viewer"]
-        ResetPwd["Password Reset<br/>Admin-generated tokens"]
-    end
-
-    Registry --> RegistryTabs
-    Users --> UserMgmt
-
-```
-
-### Admin Routes
-
-| Route | Component | Purpose |
-|-------|-----------|---------|
-| `/admin` | AdminPage | Admin hub with navigation |
-| `/admin/overview` | AdminOverview | System KPIs dashboard |
-| `/admin/registry` | AdminRegistry | Workspace, connection, asset management |
-| `/admin/registry/workspaces/:wsId` | AdminWorkspaceDetail | Detailed workspace configuration |
-| `/admin/users` | AdminUsers | User approval, roles, password resets |
-| `/admin/features` | AdminFeatures | Feature flag toggles with boolean/multi-select configs |
-
-### Admin Components
-
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| `AdminFeatures/` | `components/admin/AdminFeatures/` | 6 files for feature toggle management |
-| `AdminRegistry` | `components/admin/AdminRegistry.tsx` | Tab-based registry UI. Shows `FirstRunHero` when `providers.length === 0`, `OnboardingProgress` bar when partially configured. Three tabs: Connections (providers), Assets (catalog items), Workspaces |
-| `RegistryWorkspaces` | `components/admin/RegistryWorkspaces.tsx` | Workspace CRUD operations |
-| `RegistryConnections` | `components/admin/RegistryConnections.tsx` | Provider cards with health status (colored dot + latency in ms). Actions: Test connection, Discover Sources, Edit, Delete. Schema mapping for Neo4j/external DBs (discovery + mapping form) |
-| `RegistryAssets` | `components/admin/RegistryAssets.tsx` | Provider asset management |
-| `AssetOnboardingWizard` | `components/admin/AssetOnboardingWizard/` | 4-step wizard: workspace allocation, aggregation strategy, semantic layer, review. Centralized formData, canProceed via useMemo, spring animations |
-| `FirstRunHero` | `components/admin/FirstRunHero.tsx` | Full-page hero for empty platforms (no providers), shows 4-stage progress |
-| `OnboardingProgress` | `components/admin/OnboardingProgress.tsx` | 4-stage progress tracker, dismissable, persists to localStorage |
-| `AdminAnnouncements` | `components/admin/AdminAnnouncements/` | Announcement management UI (CRUD + config) |
-| `AdminWizard` | `components/admin/AdminWizard.tsx` | Generic multi-step wizard shell with step validation and animated transitions |
-| `DeleteProviderDialog` | `components/admin/DeleteProviderDialog.tsx` | Provider deletion with impact analysis warning |
-
----
-
-## 9a. Platform Onboarding
-
-When a platform has no registered providers, the admin sees the **FirstRunHero** -- a full-page onboarding experience that guides them through initial setup. Once the first provider is registered, the **OnboardingProgress** bar replaces the hero, tracking the remaining stages until the platform is fully configured.
-
-### Onboarding Stages
-
-1. **FirstRunHero** -- Full-page hero shown when `providers.length === 0`. Displays 4 stages: Register Provider, Register Data Sources, Create Workspace, Configure Semantics.
-2. **AdminWizard** -- Provider registration wizard. Multi-step form with type selection, credentials, and connection testing.
-3. **Schema Discovery** -- Provider introspection to discover available graphs/schemas. Triggered via the "Discover Sources" action on a provider card.
-4. **Catalog Registration** -- Register discovered assets as `CatalogItem` entries in the platform catalog.
-5. **AssetOnboardingWizard** -- 4-step guided wizard:
-   - **Step 1: Workspace Allocation** -- Assign catalog items to new or existing workspaces
-   - **Step 2: Aggregation Strategy** -- Choose `in_source` vs `dedicated` projection mode
-   - **Step 3: Semantic Layer** -- Select ontology per catalog item
-   - **Step 4: Review & Confirm** -- Summary of all selections and submit
-6. **OnboardingProgress** -- Persistent progress tracker (4 stages, dismissable, localStorage-backed). Shown in `AdminRegistry` header once at least one provider exists but setup is incomplete.
-
-### Onboarding Flow
-
-```mermaid
-graph LR
-    A[FirstRunHero] --> B[AdminWizard<br/>Register Provider]
-    B --> C[Discover Schema]
-    C --> D[Register<br/>Catalog Items]
-    D --> E[AssetOnboardingWizard]
-    E --> F[Step 1: Workspace<br/>Allocation]
-    F --> G[Step 2: Aggregation<br/>Strategy]
-    G --> H[Step 3: Semantic<br/>Layer]
-    H --> I[Step 4: Review<br/>& Confirm]
-    I --> J[Platform Ready]
-```
-
-### Key Implementation Details
-
-- **FirstRunHero** renders when `AdminRegistry` detects `providers.length === 0` after the initial fetch.
-- **OnboardingProgress** receives counts (`providerCount`, `catalogItemCount`, `workspaceCount`, `hasOntology`) and highlights the next incomplete stage.
-- **AssetOnboardingWizard** mirrors the `ViewWizard` architecture: centralized `OnboardingFormData` state, `canProceed` guard via `useMemo`, `AnimatePresence` step transitions, and a `previousSteps` stack for back-navigation.
-- The wizard is triggered from `RegistryAssets` after catalog items are registered from a provider's discovered schemas.
-
----
-
-## 10. Layer System & View Customization
-
-The Layer System is one of the most sophisticated frontend features, providing a WYSIWYG editor for organizing complex graphs into meaningful layers.
-
-### Layer Studio
-
-```mermaid
-graph LR
-    subgraph Studio["Layer Studio (3-Panel WYSIWYG)"]
-        Left["Left Panel<br/>Layer hierarchy<br/>Drag-drop ordering"]
-        Center["Center Panel<br/>Entity browser<br/>Assign to layers"]
-        Right["Right Panel<br/>Live preview<br/>Instant feedback"]
-    end
-
-    subgraph Features["Capabilities"]
-        Undo["Undo/Redo"]
-        Auto["Autosave"]
-        Draft["Draft saves"]
-        AutoOrg["Auto-Organize<br/>(ML suggestions)"]
-    end
-
-    Studio --> Features
-
-```
-
-### Key Components
+1. `main.tsx` starts the branding and feature-switch fetches, then mounts `App`.
+2. `App` wraps everything in the React Query client, `AuthBootstrap` (which resolves the session), and `GraphProvider` (which owns the graph data client for the active workspace), then renders the router.
+3. Signed-in routes render inside `AppLayout` — the top bar, the sidebar and the page. The Explorer and view routes also sit inside `CanvasLayout`, which loads the semantic layer first.
+4. `ViewPage` opens a view, and `CanvasRouter` picks the canvas from its layout type:
+
+| Layout type | Canvas | Label on screen |
+|---|---|---|
+| `graph` (and the legacy `layered-lineage`) | `GraphCanvas` | **Graph** |
+| `hierarchy`, `tree` | `HierarchyCanvas` | **Hierarchy** |
+| `reference` | `ContextViewCanvas` (exported as `ReferenceModelCanvas`) | **Context View** |
+
+Every entity type renders through one schema-driven node component, `components/canvas/nodes/GenericNode.tsx`, styled from the semantic layer — see [ADR-009](/docs/decisions#adr-009-schema-driven-frontend-rendering).
+
+On the Graph canvas, layout runs with ELK.js in `hooks/useElkLayout.ts`. It runs on the browser's main thread — asynchronously and debounced, but not in a Web Worker — because ELK's worker build does not load under Vite's ESM bundling. The Context View lays out its own layer columns.
+
+## Talking to the backend
+
+Every request goes through one wrapper, `services/fetchWithTimeout.ts`:
+
+- **Cookies, not tokens.** It always sends `credentials: 'include'`, so the `HttpOnly` session cookies ride along. The app never sees or stores a token.
+- **CSRF.** On every `POST`, `PUT`, `PATCH` and `DELETE` it copies the `nx_csrf` cookie into an `X-CSRF-Token` header.
+- **Session renewal.** `store/sessionKeepalive.ts` renews the session ahead of expiry, using the expiry the server publishes in `nx_access_exp`. As a fallback, a `401` triggers one silent `POST /api/v1/auth/refresh` and a retry. Concurrent refreshes share one request, and tabs share a Web Lock, so they never race. If the refresh fails, the wrapper signals that the session is lost and the auth store marks you signed out.
+- **Back-pressure.** On a `429` or `503` to a `GET`, `HEAD` or `OPTIONS` request it waits for `Retry-After` (up to 5 seconds) and tries once more.
+- **Timeouts.** 45 seconds by default (`TIMEOUTS.DEFAULT_MS` in `config/timeouts.ts`, overridable with `VITE_TIMEOUT_DEFAULT_MS`); slow reads pass their own, such as 150 seconds for traces (`TIMEOUTS.TRACE_MS`), so the server's truncated answer arrives before the client gives up.
+
+On top of it:
+
+- `services/apiClient.ts` (`authFetch`) parses JSON and turns error bodies into readable messages; the service modules in `services/` use it.
+- `providers/RemoteGraphProvider.ts` is the graph data client. It builds workspace-scoped URLs — `/api/v1/{workspaceId}/graph/...` plus `dataSourceId`, `branchId` inside a draft, and `viewId` for access through a view — keeps a short-lived cache of `GET` responses, guards each kind of call with a client-side circuit breaker, and retries idempotent graph reads, honouring `Retry-After`.
+- React Query (`lib/queryClient.ts`) defaults to a 5-minute stale time, one retry, and no refetch on window focus.
+
+The server side of all this: [Backend Reference](/docs/backend#authentication) and [Architecture](/docs/architecture#request-lifecycle).
+
+## Signed-in state, permissions and feature switches
+
+- **The session.** `store/auth.ts` (`useAuthStore`) is derived from the server and never persisted. On boot it calls `GET /api/v1/auth/me`; whether you are signed in is a projection of that answer. A copy of the user record in `sessionStorage` (`store/userCache.ts`) only speeds up the first paint after a reload — it never holds a token or permissions.
+- **Permissions.** The store holds the permission claims for the session. They are advisory: they hide controls and routes, while the server enforces every request. Route guards live in `components/auth/` (`RequireNav`, `RequirePermission`, `RequireAnalytics`) and `components/RequireFeature.tsx`.
+- **Feature switches.** `store/features.ts` (`useFeaturesStore`, `useFeature`) loads the switch values at boot from `GET /api/v1/features/values`, and refreshes them when the tab becomes visible or focused, and every 60 seconds while it is visible. Until the first answer — or if it fails — each switch reads its seed default, which mirrors `backend/app/config/features_seed.py`. Guided tours ship off (`toursEnabled: false`).
+
+## The central stores
+
+About 40 Zustand stores exist; these are the ones most code depends on:
+
+| Store | File | Holds | Persisted |
+|---|---|---|---|
+| `useAuthStore` | `store/auth.ts` | The signed-in user, session status, permission claims | Never |
+| `useWorkspacesStore` | `store/workspaces.ts` | Workspaces and the active workspace and data source | The active ids, in `localStorage` |
+| `useSchemaStore` | `store/schema.ts` | The resolved semantic layer and the views for the active scope | The active view id |
+| `useCanvasStore` | `store/canvas.ts` | Canvas nodes, edges, selection and viewport | The viewport and the active lens |
+| `usePreferencesStore` | `store/preferences.ts` | Theme and per-user display preferences | Yes |
+| `useFeaturesStore` | `store/features.ts` | Feature switch values | No — fetched and refreshed |
+| `useBranchStore` | `store/branchStore.ts` | The draft (branch) the canvas is working in, and whether the diff overlay is on | No — resolved again each session |
+| `useStagedChangesStore` | `store/stagedChangesStore.ts` | Edits staged in a draft, scoped by workspace, data source and branch | Restored after a reload by `features/canvas-drafts/` |
+| `useTraceStore` | `hooks/useUnifiedTrace.ts` | The trace on the Graph and Hierarchy canvases | No |
+
+**Workspace scoping.** Views and the semantic layer are keyed by a scope key, `${workspaceId}/${dataSourceId}` (or `${workspaceId}/default`). Switching workspace or data source calls `useSchemaStore.setActiveScopeKey()`, which reloads the semantic layer, so one scope's ontology never leaks into another. `hooks/useWorkspaceContext.ts` composes the two stores for components that need both.
+
+## The central hooks
+
+| Hook | File | What it does |
+|---|---|---|
+| `useGraphHydration` | `hooks/useGraphHydration.ts` | Loads a canvas's data: the first page of top-level entities (one `canvas/bootstrap` request unless `VITE_CANVAS_BOOTSTRAP=0`), children as containers open, and their edges |
+| `useCanvasTrace`, `useUnifiedTrace` | `hooks/useCanvasTrace.ts`, `hooks/useUnifiedTrace.ts` | The Graph and Hierarchy canvases' trace: `trace/v2`, then `trace/expand` and `trace/expand-batch` as traced containers open |
+| `useLensWalk` | `hooks/useLensWalk.ts` | Walks lineage around a focus through `trace/closure` pages, for the Lineage Lens, the Context View's trace and the node panel's lineage neighbours |
+| `useCanvasTraceWalk`, `useTraceOverlay` | `hooks/useCanvasTraceWalk.ts`, `hooks/useTraceOverlay.ts` | Draws a trace over the Context View without writing to the canvas store |
+| `useExternalDegrees` | `hooks/useExternalDegrees.ts` | Total lineage degree per entity (`POST /{ws_id}/graph/nodes/degree`, 400 per request after an 800 ms settle), which drives the Context View's lineage ports |
+| `useElkLayout` | `hooks/useElkLayout.ts` | Graph-canvas layout with ELK.js, on the main thread |
+| `useWorkspaceContext` | `hooks/useWorkspaceContext.ts` | The active workspace, data source and their views, with switch actions |
+| `useDataSourceSchema` | `hooks/useDataSourceSchema.ts` | Loads the semantic layer for the active data source |
+
+## Tracing in the app
+
+- **What users see.** The trace dock (`components/canvas/trace/`) shows **Upstream depth** and **Downstream depth** sliders. How fine the picture is follows which containers are open — lineage between closed containers is rolled up — and, in the Lineage Lens, its **Density** control. `TraceDockControls.tsx` can also render a level select and an edge-type filter, but only outside native mode, and the dock's one host (`ContextViewCanvas.tsx`, through `TraceBottomDock`) passes `nativeMode={traceActive}`, so users never see them.
+- **Graph and Hierarchy canvases** trace through `useCanvasTrace`: `trace/v2` for the first picture, then `trace/expand` and `trace/expand-batch` as traced containers open.
+- **Context View.** A trace walks the whole flow through `trace/closure` (`useCanvasTraceWalk`) and draws it over the columns as an overlay (`useTraceOverlay`), without changing the canvas store, so leaving the trace restores the canvas. The Lineage Lens is the separate, interactive investigation of one entity, on the same endpoint. The canvas's aggregation level is picked automatically: the coarsest level present.
+
+Endpoint details: [Backend Reference](/docs/backend#the-trace-endpoints).
+
+## Context View and Lineage Lens
+
+The Context View is a layer-organised canvas: entities sit in columns by layer, page in as you scroll, and the Lineage Lens opens on any of them.
 
 | Component | File | Purpose |
-|-----------|------|---------|
-| `LayerStudio` | `components/views/LayerStudio.tsx` | 3-panel WYSIWYG layer editor |
-| `LayerHierarchyPanel` | `components/views/LayerHierarchyPanel.tsx` | Left panel: layer ordering |
-| `EnhancedLayerCard` | `components/views/EnhancedLayerCard.tsx` | Enhanced layer editing card |
-| `SmartAssignmentPanel` | `components/views/SmartAssignmentPanel.tsx` | AI-powered entity assignment |
-| `SmartRuleBuilder` | `components/views/SmartRuleBuilder.tsx` | Rule-based entity assignment |
-| `AssignmentConflictDialog` | `components/views/AssignmentConflictDialog.tsx` | Handles overlapping rule conflicts |
-| `ReferenceModelBuilder` | `components/views/ReferenceModelBuilder.tsx` | Reference model creation |
+|---|---|---|
+| `ContextViewCanvas` | `components/canvas/context-view/ContextViewCanvas.tsx` | The Context View: layer columns, overlays, the trace and Lens entry points, and lineage ports |
+| `LineageLens` | `components/canvas/context-view/LineageLens.tsx` | The focus room: a node's lineage laid out sources → focus → consumers, fetched from `trace/closure` and walked hands-free. The header has a segmented **Direction** control and **Density**, **Wires**, **Walk**, **Steps** and **Next** chips |
+| `useLensWalk` | `hooks/useLensWalk.ts` | The walk driver: a per-focus phase machine (`loading`, `seeding`, `walking`, then `done`, `checkpoint` or `error`); a coarse first paint beside the first fine page; drains seed cursors and cut frontiers in batches (one hop) or to the end (full flow); a one-time memory checkpoint at 20,000 nodes (`TRACE_CHECKPOINT_NODES`); aborts on close |
+| `lens/closure-adapter.ts` | `components/canvas/context-view/lens/` | Turns `trace/closure` pages into one walk model and merges later pages into it |
+| `lens/focus-layout.ts` | `components/canvas/context-view/lens/` | The board: the spine, fan-in bundles, partner grain and wire bundles (thresholds in `lens/focus-cards.ts`) |
+| `lens/FocusGraphView.tsx` | `components/canvas/context-view/lens/` | React Flow rendering of the board (`onlyRenderVisibleElements`), its controls and exports |
+| `lens/useFrameCamera.ts` | `components/canvas/context-view/lens/` | Focus-first camera: fits a board that is readable at `FOCUS_MIN_ZOOM` (0.75), otherwise centres on the focus |
+| `TraceWalkIndicator.tsx` | `components/canvas/context-view/` | The walk's progress capsule on both boards |
+| `LayerColumn` | `components/canvas/context-view/LayerColumn.tsx` | One layer: virtualised, paged rows, and a resize handle. In a draft a new width saves into the view; otherwise it is kept per viewer in `localStorage` (`nx-layer-widths`) |
+| `LayerStrip` | `components/canvas/context-view/LayerStrip.tsx` | A docked navigator at the bottom of the canvas: a chip per layer, lit while on screen, a position rail, and an add-layer chip in edit mode |
+| `AddLayerColumn` | `components/canvas/context-view/AddLayerColumn.tsx` | The "Add layer" tile after the last column, in a draft |
+| `anchorRail` | `components/canvas/context-view/anchorRail.ts`, `store/anchorRail.ts` | Stand-in chips docked in a column for a focused entity's partners that are scrolled out of sight; on screen they sit under **Off-screen above** or **Off-screen below** |
+| `LineageFlowOverlay` | `components/canvas/context-view/LineageFlowOverlay.tsx` | The lineage lines drawn across the layer columns |
 
-### Smart Features
+Tests drive the Lens's controls through `src/test/lensView.ts` (`chooseView`, `viewValue`).
 
-- **Auto-Organize** (`useAutoOrganize` hook): ML-powered suggestions for layer organization with confidence scoring
-- **Smart Rule Builder**: Define rules for automatic entity-to-layer assignment based on type, tags, or properties
-- **Conflict Resolution**: When multiple rules assign the same entity to different layers, a dialog helps resolve conflicts
+## The Create View wizard
 
-### Context View & Lineage Lens
+`components/views/ViewWizard/ViewWizard.tsx` is the wizard behind the **New View** button; its dialog is titled **Create New View** and finishes with **Create View**. The steps, in order:
 
-The **Context View** (a.k.a. the Lineage Lens experience) is **shipped**. It provides a hierarchical, layer-organized visualization of graph data with a curated, paginated column layout and an ego-graph overlay for immediate-neighbor inspection.
+1. **Scope** — the workspace and data source (in create mode).
+2. **Basics** — name and description.
+3. **Layout** — the canvas type.
+4. **Assignments** — which entities go in which layer; Context View only.
+5. **Entities** — which entity types the view shows.
+6. **Preview**.
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| `ContextViewCanvas` | `components/canvas/context-view/ContextViewCanvas.tsx` | Main Context View renderer; wires the Layer Strip, layer columns, overlays, and external-degree signals |
-| `LineageLens` | `components/canvas/context-view/LineageLens.tsx` | The focus room: a node's complete lineage laid out sources → focus → consumers, fetched live from `/trace/closure` and walked hands-free. Header: Direction is an always-expanded segmented control; Density · Wires · Walk · Steps · Next are `ViewControl` chips that open their options. The List body was **removed** (2026-08-23) with its columns and the `lensViewMode` preference (dropped in the v7 migration) — one body, no rollback path |
-| `useLensWalk` | `hooks/useLensWalk.ts` | The walk driver: per-focal phase machine `loading → seeding → walking → done / checkpoint / error`; two-leg first paint (`grain: 'coarse'` beside the first fine page); drains `seedCursor` pages and `cut` frontier entries in batches (One hop) or every frontier (Full flow); one-time checkpoint at 50k nodes; aborts on close |
-| `lens/closure-adapter.ts` | | `toLensClosure` / `mergeClosures` — pages into one `LensWalkModel` (authoritative vs. late-coarse merges) |
-| `lens/lens-subgraph.ts`, `lens/rollup-accounting.ts`, `hooks/lib/traceWireLedger.ts` | | One accounting rule for both boards: `accountRollups` (inner-first — a cell survives only for the flows no finer cell or raw edge explains), `rollupResiduals` (card vs. host), `hopWeight` |
-| `lens/query-dimming.ts`, `lens/model-cache.ts` | | The board-wide filter as a post-pass over a finished board (the layout is independent of what is typed); `ancestorsFor`/`subtreeFor` cached against the model in a WeakMap so an expand does not recompute them |
-| `lens/focus-layout.ts` | | The board: spine walk, **fan-in bundles** (cards sharing a parent fold under it at Overview/Grouped — `BUNDLE_WINDOW` rows), **partner grain** (`OPEN_PARTNERS_PER_BAND`), **wire bundles** (a pair of containers with more than `WIRE_BUNDLE_THRESHOLD` wires draws one; members in `FocusGraph.bundledWires`), band pitch `CARD_W + BAND_GAP` |
-| `lens/wire-bundles.ts` | | `revealedWires` — which hidden members come back for a hovered/selected card, a frame, or a hovered/pinned bundle |
-| `lens/FocusGraphView.tsx` | | React Flow rendering, `onlyRenderVisibleElements`, the control stack (Center on the focus · zoom · Fit · exports), `readerMoved` tracking, the off-screen "Center on the focus" pill (`focusInView` on every move) and the header's `recenterSignal` |
-| `lens/useFrameCamera.ts` | | Focus-first camera: a board readable at its fit zoom (≥ `FOCUS_MIN_ZOOM` 0.75) fits whole, a larger one centres on the focus; re-frames on `recenterKey` (density·steps·direction); holds during a walk and settles once at its end unless the reader moved |
-| `TraceWalkIndicator.tsx` | `components/canvas/context-view/` | The walk capsule on both boards: stages Focus · Picture · Flows · Drawn, counts, "N more to go", elapsed, a beat per page, guidance; no percentage by design |
-| `lens/LensSkeleton.tsx`, `lens/ControlTip.tsx`, `lens/ViewControl.tsx`, `lens/LensStatusBar.tsx`, `lens/useToolbarOverflow.ts` | | The picture's ghost under the first fetch; explain-on-hover popovers; the header's category chips (a chip names the category and its current value and opens a `role=menu` of `menuitemradio` options with meanings — Radix Popover above the Lens); the footer status bar (gestures as keycaps, the wire legend, live board facts); the chips row's fold into a More menu on narrow windows (`fitToolbar`, measured widths, priority `TOOLBAR_ORDER`). Tests choose options through `src/test/lensView.ts` (`chooseView`, `viewValue`) |
-| `hooks/useTraceOverlay.ts`, `hooks/lib/traceViewModel.ts`, `trace/TraceDockNoticeStrip.tsx` | | The canvas trace overlay: seeds from the focus side, opens host paths to partner cards (partners stay closed with counts, `≈N flows` until raw lands), never writes the canvas store; dock strips for the checkpoint (Continue) and failures (Try again) |
-| `LayerStrip` | `components/canvas/context-view/LayerStrip.tsx` | Horizontal strip of layer headers across the top of the canvas — layer navigation, counts, and add-layer affordance |
-| `LayerColumn` | `components/canvas/context-view/LayerColumn.tsx` | Layer-based column layout with **resizable columns** — a right-edge resize handle sets a per-layer custom width; on a draft it saves into the view (`layer.width`, through `persistReferenceLayout`), and `nx-layer-widths` in localStorage keeps a viewer's own override. Renders one-page-ahead paginated items |
-| `AddLayerColumn` | `components/canvas/context-view/AddLayerColumn.tsx` | Inline "add a layer" column affordance |
-| `anchorRail` | `components/canvas/context-view/anchorRail.ts` | **Anchor Rail** — keeps the focal/anchor entity stable while columns paginate and resize |
-| `LineageFlowOverlay` | `components/canvas/context-view/LineageFlowOverlay.tsx` | Flow visualization overlay drawn across layer columns |
+A view built from a blank model skips **Assignments** and **Entities**. Importing a view file runs its own journey: **File**, then **Target** and **Data** where they apply, **Match**, and the design steps from **Basics** to **Preview**. The **Assignments** step's three-panel editor is `components/views/LayerStudio.tsx`.
 
-**Lineage ports and the "outside this view" cue:** the canvas fetches total lineage degree per URN via `useExternalDegrees` (backed by `POST /{ws_id}/graph/nodes/degree`), and those totals drive each card's lineage ports. The curated-view chip, the per-card cue and the Preview action count the partners the canvas places outside the view (shown when `showMissingConnectionIndicators` is on); they do not subtract loaded degree from the totals.
+## Administration and ingestion
 
----
+Administration lives under `/admin`, rendered by `pages/AdminPage.tsx`; each sub-route has its own guard in `routes.tsx`:
 
-## 11. Additional Custom Hooks
+| Route | Component | Label |
+|---|---|---|
+| `/admin/overview` | `components/admin/AdminOverview.tsx` | **Global Overview** |
+| `/admin/infrastructure` | `components/admin/AdminInfrastructure/` | **Infrastructure** |
+| `/admin/redis` | `components/admin/AdminRedis/` | **Redis & Graph Store** |
+| `/admin/graph-store` | `components/admin/AdminGraphStore/` | **Graph store** |
+| `/admin/branding` | `components/admin/AdminBranding/` | **Branding** |
+| `/admin/features` | `components/admin/AdminFeatures/` | **Features** |
+| `/admin/telemetry` | `components/admin/AdminTelemetry/` | **Telemetry** |
+| `/admin/announcements` | `components/admin/AdminAnnouncements/` | **Announcements** |
+| `/admin/users` | `components/admin/AdminUsers.tsx` | **User Management** |
+| `/admin/groups` | `components/admin/AdminGroups.tsx` | **Groups** |
+| `/admin/permissions` | `components/admin/AdminPermissions.tsx` | **Permissions** |
+| `/admin/sso` | `components/admin/AdminSso.tsx` | **SSO** |
+| `/admin/audit` | `components/admin/AdminAudit.tsx` | **Audit Log** |
 
-Beyond the key hooks listed in Section 6, the codebase includes:
+Registering sources happens on the Ingestion page (`/ingestion`, `pages/IngestionPage.tsx`), whose tabs are **Providers**, **Data Sources**, **Job History**, **Freshness** and **Profiling**:
 
-| Hook | Purpose |
-|------|---------|
-| `useWorkspaces` | Load & manage workspace list with auto-selection |
-| `useDataSourceSchema` | Load ontology for active data source |
-| `useGraphSchema` | Low-level graph API schema introspection |
-| `useGraphHydration` | Converts backend GraphNode/GraphEdge to canvas types. Tracks hydration phases: idle, roots, edges, children, complete. Provides `toCanvasNode()`, `toCanvasEdge()`, `claimedFeedTypes()`, `feedAfter()` |
-| `useExternalDegrees` | Fetches total lineage degree (in/out) per URN via `POST /{ws_id}/graph/nodes/degree`, 400 URNs per request after an 800 ms settle; the totals drive the Context View cards' lineage ports |
-| `useLogicalNodes` | Manage layer-to-node mappings (CRUD) |
-| `useLayerAssignment` | Handle entity-to-layer assignment logic |
-| `useHighlightState` | Track highlighted/traced/dimmed nodes |
-| `useEdgeProjection` | Project edges for aggregated views |
-| `useEntityVisual` | Get visual config for entity types from ontology |
-| `useProjectedGraph` | Graph with persona-based filtering |
-| `useAutoOrganize` | AI suggestions for layer organization |
-| `useSpatialLoading` | Track regional loading states for large graphs |
-| `useKeyboardShortcuts` | Custom shortcuts registration |
-| `useAdminFeatures` | Admin feature flag management |
-| `useConnections` | Legacy connection management (deprecated) |
-| `useWorkspaceContext` | Composition layer (not a store): reads from workspacesStore + schemaStore, provides workspace, dataSource, views (filtered by scope), bookmarks, recentViews. Actions: `switchWorkspace()`, `switchDataSource()`, `openView()` |
+- **Providers** (`components/admin/RegistryConnections.tsx`) — the **Register Provider** button opens `ProviderOnboardingWizard`.
+- **Data Sources** (`components/admin/RegistryAssets.tsx`) — registering a provider's graphs, then binding them into workspaces with `AssetOnboardingWizard`, whose steps are **Workspace**, **Aggregation**, **Semantic Layer**, **Schema Review** and **Review**.
+- With no providers registered, both tabs show `FirstRunHero`; for platform administrators, `OnboardingProgress` tracks setup across the page.
 
-### Workspace Scoping Detail
+The admin user's view of these pages: [Admin Setup](/guide/admin-setup) and [The Admin Console](/guide/governance-ops).
 
-Views and schema are scoped by a composite key: `${workspaceId}/${dataSourceId}`. This scope key:
-- Determines which views are visible (views with matching `scopeKey` or no scope key for legacy views)
-- Keys the ontology cache in `useSchemaStore`
-- Triggers schema reload when workspace or data source changes
-- Is set via `useSchemaStore.setActiveScopeKey()` when workspace selection changes
+## Design system
 
----
+- **Utility-first styling** with Tailwind CSS; `cn()` in `lib/utils.ts` combines `clsx` and `tailwind-merge` for conditional classes.
+- **Colour tokens** — `canvas`, `glass`, `accent` and `ink` families in `tailwind.config.js`, with dark mode through `dark:` utilities.
+- **Shared component classes** such as `glass-panel` and `glass-panel-subtle` in `styles/globals.css`.
+- **Fonts** — Outfit for display, Inter for text, JetBrains Mono for code (`tailwind.config.js`).
+- **Primitives** — Radix UI for accessible dialogs, menus and popovers; Lucide icons, looked up by name where the semantic layer names them; Framer Motion for transitions, respecting reduced-motion preferences.
+- **Keyboard** — ⌘K / Ctrl-K opens the command palette (`components/layout/CommandPalette.tsx`).
 
-## 12. Inline Canvas Interactions
+## Performance techniques
 
-| Component | Trigger | Purpose |
-|-----------|---------|---------|
-| `InlineNodeEditor` | Double-click node label | Rename nodes directly on canvas |
-| `QuickCreateNode` | Double-click canvas or Cmd+N | Create new entities inline |
-| `CanvasContextMenu` | Right-click node/edge | Actions menu (trace, pin, edit, delete) |
-| `CommandPalette` | Cmd+K | Power-user command discovery |
-| `NodeToolbar` | Select node | Quick actions (trace, expand, pin) |
-| `EntityCreationPanel` | Admin/create action | Full entity creation form |
+- **Route-level code splitting.** Every page is lazy-loaded (`lib/lazyWithRetry.ts`), and Vite's `manualChunks` in `vite.config.ts` splits vendor code.
+- **One request where there were three.** A canvas's first page comes from `canvas/bootstrap`; opening a traced container with many rolled-up edges sends one `trace/expand-batch`.
+- **Cheap canvas updates.** `useCanvasStore` keeps `_nodeIndex` and `_edgeIndex` sets for constant-time de-duplication, and `setGraph(nodes, edges)` replaces both in one update.
+- **Virtualisation.** Layer columns and long lists render only what is on screen (`@tanstack/react-virtual`), and the Lens renders only visible elements.
+- **Server-aware retries.** Reads back off on `Retry-After`, so a shed request becomes a short pause instead of an error.
 
----
+## Where in the code
 
-## 13. Key UX Decisions
+| Concern | Where |
+|---|---|
+| Boot and app tree | `frontend/src/main.tsx`, `frontend/src/App.tsx` |
+| Routes and guards | `frontend/src/routes.tsx`, `frontend/src/components/auth/` |
+| Request wrapper | `frontend/src/services/fetchWithTimeout.ts` |
+| Graph data client | `frontend/src/providers/RemoteGraphProvider.ts` |
+| Session state | `frontend/src/store/auth.ts`, `frontend/src/store/sessionKeepalive.ts` |
+| Feature switches | `frontend/src/store/features.ts` |
+| Canvas selection | `frontend/src/components/canvas/CanvasRouter.tsx` |
+| Graph-canvas layout | `frontend/src/hooks/useElkLayout.ts` |
+| Trace | `frontend/src/hooks/useUnifiedTrace.ts`, `frontend/src/hooks/useLensWalk.ts`, `frontend/src/components/canvas/trace/` |
+| Context View | `frontend/src/components/canvas/context-view/` |
+| Create View wizard | `frontend/src/components/views/ViewWizard/` |
+| Build config | `frontend/vite.config.ts`, `frontend/tailwind.config.js`, `frontend/package.json` |
 
-| Decision | Rationale | Trade-off |
-|----------|-----------|-----------|
-| Schema-driven `GenericNode` | Single component for all entity types; easier maintenance | Less per-type customization |
-| Workspace-scoped views | Data isolation per team/project | Cross-workspace views need bookmarking |
-| Zustand over Redux | Lighter API, less boilerplate | Smaller middleware ecosystem |
-| No pre-built UI library | Full design control, no theme limitations | Higher maintenance burden |
-| ELK layout in Web Worker | Responsive UI for large graphs | More complex debugging |
-| Client-side filtering | Instant feedback, no latency | Doesn't scale to 100k+ nodes |
-| Glass morphism design | Modern, distinctive aesthetic | Requires careful contrast management |
-| Persona toggle (business/technical) | Different users see relevant views | Two rendering paths to maintain |
-| Framer Motion animations | Production-quality transitions | ~11kB gzipped overhead |
-| Lazy route loading | Smaller initial bundle | Navigation spinners |
+## See also
 
----
-
-## 14. Directory Structure
-
-```
-frontend/src/
-├── main.tsx                    # App root: QueryClient, GraphProvider, Router
-├── App.tsx                     # Auth gate, theme application, schema loading
-├── routes.tsx                  # React Router config, lazy loading, Suspense
-├── components/
-│   ├── admin/                  # Admin panel, workspace management
-│   │   ├── AssetOnboardingWizard/
-│   │   │   ├── AssetOnboardingWizard.tsx
-│   │   │   ├── steps/
-│   │   │   │   ├── WorkspaceStep.tsx
-│   │   │   │   ├── AggregationStep.tsx
-│   │   │   │   ├── SemanticStep.tsx
-│   │   │   │   └── ReviewStep.tsx
-│   │   │   └── index.ts
-│   │   ├── AdminAnnouncements/
-│   ├── auth/                   # LoginPage, SignUpPage, ResetPasswordPage
-│   ├── canvas/                 # Graph visualization
-│   │   ├── LineageCanvas.tsx   # Main lineage view (~950 lines)
-│   │   ├── HierarchyCanvas.tsx # Tree/containment view
-│   │   ├── ReferenceModelCanvas.tsx
-│   │   ├── LayeredLineageCanvas.tsx
-│   │   ├── context-view/       # Hierarchical context components
-│   │   ├── edges/              # LineageEdge, AggregatedEdge
-│   │   └── nodes/              # GenericNode, GhostNode
-│   ├── dashboard/              # Dashboard landing
-│   ├── layout/                 # AppLayout, AppShell, TopBar, SidebarNav
-│   ├── panels/                 # NodeDetailsPanel, EdgeDetailPanel
-│   ├── persona/                # Business/Technical toggle
-│   ├── schema/                 # Schema editor
-│   ├── ui/                     # Reusable components
-│   ├── views/                  # ViewWizard, LayerEditor
-│   └── workspaces/             # Workspace management
-├── hooks/                      # 40+ custom hooks
-├── pages/                      # Route page components
-├── providers/                  # GraphProviderContext
-├── services/                   # API client modules
-├── store/                      # Zustand stores
-│   ├── auth.ts
-│   ├── workspaces.ts
-│   ├── connections.ts
-│   ├── schema.ts               # ~650 lines
-│   ├── canvas.ts               # ~300 lines
-│   ├── preferences.ts
-│   ├── navigation.ts
-│   └── persona.ts
-├── styles/                     # globals.css, Tailwind utilities
-├── types/                      # TypeScript type definitions
-├── utils/                      # Utility functions
-├── lib/                        # Shared library code
-└── workers/                    # elk-layout.worker.ts
-```
-
----
-
-## Related
-
-- [Backend guide](/docs/backend) — the API this app consumes
-- [Features API contract](/docs/api-features) — feature flags that gate frontend surfaces
-- [Developer Setup](/docs/setup) — running the Vite dev server locally
-- [Platform Services overview](/docs/services-overview) · [Search](/docs/services-search) · [Assignments](/docs/services-assignments)
+- [Backend Reference](/docs/backend) — the API this app calls
+- [Architecture](/docs/architecture) — how a request flows from the browser to the stores
+- [Features API](/docs/api-features) — the feature switches that gate parts of the app
+- [Versioning: Frontend Integration](/docs/versioning-frontend-integration) — drafts, review and publish in the app
+- [Developer Setup](/docs/setup) — running the dev server

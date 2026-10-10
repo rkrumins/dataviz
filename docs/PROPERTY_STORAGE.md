@@ -1,6 +1,20 @@
 # Property storage: the bag leaves the schema
 
-**Status:** decided 2026-09-14; phase 1 in progress on `claude/falkordb-resilience-eval-itgtwx`.
+*For architects and engineers working on graph storage, search and ingestion.*
+
+This is the design record for taking user property names out of FalkorDB's schema: why a
+graph can run out of property names, the storage design chosen, how writes and reads route,
+and what has shipped. The decision itself is summarised in
+[ADR-026](/docs/decisions#adr-026-property-storage-in-a-postgresql-side-index).
+
+**Status:** decided 2026-09-14. Phase 1 slice A has shipped: the `propidx` schema (Alembic
+revision `20260916_1000_property_index`) and its client, `PostgresPropertyIndex`
+(`backend/app/providers/property_index.py`), are in the code but wired to nothing — no
+request path imports them, and graphs behave exactly as before. Slices B and C are paused:
+reserving the platform's own property names plus the 50,000-name native budget keep a graph
+off the ceiling in practice, so the rest waits until `db.propertyKeys()` has been checked on
+more sources.
+
 **Supersedes:** the native property budget (`FALKORDB_NATIVE_PROPERTY_BUDGET`) and the
 attribute pre-flight's role as the line of defence. Both stay until phase 1 lands and
 phase 5 retires them.
@@ -368,3 +382,9 @@ Before phase 1 ships: leave the 241k-node graph as it is; do not reload it under
 writer and do not run the blob migration script on it. Prepare 8-13 GB of Postgres disk
 and 2-4 GB of cache per 1M-node source, `pg_trgm`, and `maintenance_work_mem` of at least
 1 GB for the migration's GIN builds.
+
+## Where to next
+
+- [Design Decisions](/docs/decisions#adr-026-property-storage-in-a-postgresql-side-index) — when you want the decision in one page, with its consequences
+- [Data Architecture](/docs/data-architecture) — when you want to see where the `propidx` schema sits among the other stores
+- [Aggregation Pipeline](/docs/aggregation-pipeline) — when a graph has hit the ceiling and you need the recreate runbook

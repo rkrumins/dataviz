@@ -1,652 +1,202 @@
-# Backend Technical Documentation
-
-> **At a glance:** How the {brand} backend fits together — its services, the HTTP API surface, the graph-provider abstraction, and the request/startup machinery that ties them together. Written for backend and full-stack engineers working in `backend/`.
-
-**This doc covers:**
-
-- The **API reference** — auth, admin infrastructure, ontology, graph operations, versioning, views, features, announcements
-- **Core services** — ContextEngine, ProviderRegistry, Ontology Service
-- The **Graph Data Provider** system and in-process connectivity adapters
-- **Repositories**, the **middleware stack**, and the **startup lifecycle**
-
-> **Tip:** Reading the codebase alongside this doc? Every section lists the concrete `backend/…` file paths so you can jump straight to source.
-
-## Overview
-
-The {brand} backend is a single FastAPI application (the **Visualization Service**), supported by an out-of-process aggregation pipeline (a control plane plus worker(s)) and an insights service:
-
-| Service | Port | Entry Point | Responsibility |
-|---------|------|-------------|----------------|
-| **Visualization Service** | 8000 | `backend/app/main.py` | Auth, workspaces, graph queries, ontology, provider connectivity/discovery/testing |
-| **Aggregation Control Plane** | 8091 | `backend/app/services/aggregation/controlplane.py` | Orchestrates the rollup/materialization pipeline (schedules + dispatches to worker(s)) |
-| **Insights Service** | -- | `backend/insights_service/__main__.py` | Background collection of schema/stats and cache warming |
-
-> A standalone `graph-service` (`:8001`, `backend/graph/main.py`) once handled provider connectivity testing. It was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service) -- it was built and deployed but never invoked. Its Neo4j/DataHub/Spanner adapters survive in `backend/graph/adapters/` and are now imported **in-process** by the Visualization Service.
-
-> **See also:** [Platform Services overview](/docs/services-overview) for the current service topology and process roles (`SYNODIC_ROLE`: WEB, WORKER, CONTROLPLANE, DEV).
-
----
-
-## 1. API Reference
-
-### Authentication & Users
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant FE as Frontend
-    participant BE as Backend
-    participant DB as Management DB
-
-    U->>FE: Submit signup form
-    FE->>BE: POST /api/v1/auth/signup
-    BE->>BE: Validate email + password (zxcvbn)
-    BE->>BE: Hash password (Argon2id)
-    BE->>DB: Insert user (status=pending)
-    BE->>DB: Insert user_approval (status=pending)
-    BE->>DB: Insert outbox_event (user.created)
-    BE-->>FE: 201 Created
-
-    Note over U,DB: Admin Approval Required
-
-    U->>FE: Login attempt
-    FE->>BE: POST /api/v1/auth/login
-    BE->>DB: Fetch user by email
-    BE->>BE: Verify password (constant-time)
-    alt status != active
-        BE-->>FE: 403 "Pending approval"
-    else status == active
-        BE->>BE: Generate JWT (60-min)
-        BE-->>FE: 200 { access_token, user }
-    end
-```
-
-| Endpoint | Method | Auth | Rate Limit | Purpose |
-|----------|--------|------|------------|---------|
-| `/api/v1/auth/signup` | POST | Public | 20/min | User registration |
-| `/api/v1/auth/login` | POST | Public | 10/min | JWT token generation |
-| `/api/v1/auth/forgot-password` | POST | Public | 3/min | Flag a reset request (mints no token — see below) |
-| `/api/v1/auth/reset-password` | POST | Public | 5/min | Apply password reset |
-| `/api/v1/users/me` | GET | Bearer | - | Current user profile |
-| `/api/v1/users/me` | PATCH | Bearer | - | Edit own name / display name / avatar |
-| `/api/v1/users/me/password` | POST | Bearer | 5/min | Change own password (signs out everywhere) |
-| `/api/v1/users/me/sessions/revoke-all` | POST | Bearer | - | Sign out on every device |
-| `/api/v1/users/me/activity` | GET | Bearer | - | Own account-security history |
-| `/api/v1/admin/users` | GET | Admin | - | List users (filterable by status) |
-| `/api/v1/admin/users/{id}/approve` | POST | Admin | - | Approve pending signup |
-| `/api/v1/admin/users/{id}/reject` | POST | Admin | - | Reject with reason |
-| `/api/v1/admin/users/{id}/suspend` | POST | Admin | - | Disable account |
-| `/api/v1/admin/users/{id}/reactivate` | POST | Admin | - | Re-enable account |
-| `/api/v1/admin/users/{id}/role` | PUT | Admin | - | Assign role |
-| `/api/v1/admin/users/{id}/reset-password` | POST | Admin | - | Set a password directly |
-| `/api/v1/admin/users/{id}/generate-reset-token` | POST | Admin | - | Generate a shareable reset token |
-
-**IdP-owned profile fields.** `complete_sso_login` re-applies the name claims it
-receives on every sign-in and records which fields it asserted in
-`users.metadata_` (see `backend/common/identity_provenance.py`). `PATCH
-/users/me` and `PATCH /admin/users/{id}` both refuse those fields with `409
-{"error": "idp_managed_field", "fields": [...]}`. Ownership is claimed per
-login from what actually arrived — never inferred from a linked identity row —
-so a provider that stops releasing a claim hands the field back at the next
-sign-in, and the snapshot is replaced rather than merged, which is what makes
-"most recently authenticated provider wins" fall out without a precedence
-table. `display_name` is never IdP-owned.
-
-**Self-service password change** returns `409` when the account has no local
-password (SSO-only), and `403` — deliberately not `401` — when `currentPassword`
-is wrong. The frontend treats `401` as a dead session and would silently refresh,
-retry, and sign the user out over a typo.
-
-**Session revocation** has two halves, and both are needed. Tombstoning a `sid`
-in Redis covers only the life of the access token, because `/auth/refresh` mints
-a *fresh* `sid` on every rotation and does not consult the revoked set — so a
-client that silently refreshes walks straight back in. `users.sessions_valid_from`
-is the durable half: a refresh token minted before that instant is refused and its
-family killed. Anything calling `revoke_subject_sessions` for a security purpose
-should stamp the cutoff too (see `_revoke_every_session` in `endpoints/users.py`).
-
-**Forced rotation.** `users.must_change_password` rides in the access token as the
-`mcp` claim and is enforced in `get_current_user`: every route except a short
-allowlist (`_PASSWORD_CHANGE_ALLOWED_PATHS`) returns `403 {"error":
-"password_change_required"}`. It is set on the bootstrap admin when
-`ADMIN_PASSWORD` is one of the values published in this repo's setup docs.
-
-### Admin Infrastructure
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/v1/admin/providers` | GET, POST | List/create providers |
-| `/api/v1/admin/providers/{id}` | GET, PUT, DELETE | Provider CRUD |
-| `/api/v1/admin/providers/{id}/test` | POST | Test connectivity |
-| `/api/v1/admin/providers/{id}/discover-schema` | POST | Discover available graphs/schemas |
-| `/api/v1/admin/catalog` | GET, POST | List/create catalog items |
-| `/api/v1/admin/catalog/{id}` | GET, PUT, DELETE | Catalog item CRUD |
-| `/api/v1/admin/catalog/{id}/impact` | GET | Blast-radius analysis before deletion |
-| `/api/v1/admin/catalog/cleanup` | POST | Deduplicate catalog items by (provider_id, source_identifier), keeps earliest |
-| `/api/v1/admin/catalog/bindings` | GET | List catalog items enriched with workspace binding info |
-| `/api/v1/admin/workspaces` | GET, POST | List/create workspaces |
-| `/api/v1/admin/workspaces/{ws_id}` | GET, PUT, DELETE | Workspace CRUD |
-| `/api/v1/admin/workspaces/{ws_id}/set-default` | POST | Set as default workspace |
-| `/api/v1/admin/workspaces/{ws_id}/data-sources` | GET, POST | Manage data sources |
-| `/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}` | PUT, DELETE | Data source CRUD |
-| `/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}/set-primary` | POST | Set as primary data source |
-| `/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}/projection-mode` | PATCH | Configure projection mode |
-| `/api/v1/admin/workspaces/{ws_id}/data-sources/{ds_id}/impact` | GET | Blast-radius analysis |
-
-### Ontology Management
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/v1/admin/ontologies` | GET, POST | List/create ontology definitions |
-| `/api/v1/admin/ontologies/{id}` | GET, PUT, DELETE | Ontology CRUD |
-| `/api/v1/admin/ontologies/{id}/publish` | POST | Mark version immutable (with impact check) |
-| `/api/v1/admin/ontologies/{id}/clone` | POST | Copy to new editable draft |
-| `/api/v1/admin/ontologies/{id}/validate` | POST | Check for cycles, missing refs |
-| `/api/v1/admin/ontologies/{id}/coverage` | POST | Analyze against graph schema stats |
-| `/api/v1/admin/ontologies/suggest` | POST | Auto-generate from graph introspection |
-| `/api/v1/admin/ontologies/{id}/assignments` | GET | List workspaces using this ontology |
-| `/api/v1/admin/ontologies/{id}/export` | GET | Export full ontology definition as downloadable JSON |
-| `/api/v1/admin/ontologies/import` | POST | Import ontology from exported JSON, creating a new draft |
-| `/api/v1/admin/ontologies/{id}/import` | POST | Import into existing ontology (draft: in-place update; published: new version) |
-| `/api/v1/admin/ontologies/{id}/audit` | GET | Audit trail for ontology (all versions, paginated, filterable by action) |
-
-### Graph Operations (Workspace-Scoped)
-
-All graph endpoints are scoped to a workspace: `/api/v1/{ws_id}/graph/...`
-
-Optional query params: `?dataSourceId=` (target specific source), `?connectionId=` (legacy).
-
-```mermaid
-graph LR
-    subgraph Queries["Read Operations"]
-        Trace["POST /trace<br/>Lineage traversal"]
-        Nodes["GET /nodes/{urn}<br/>Fetch node"]
-        Search["POST /search<br/>Full-text search"]
-        Edges["GET /edges<br/>Query edges"]
-        Map["GET /map/{urn}<br/>Node + neighbors"]
-        Stats["GET /stats<br/>Graph statistics"]
-        Meta["GET /metadata/*<br/>Schema discovery"]
-    end
-
-    subgraph Hierarchy["Hierarchy"]
-        Parent["GET /nodes/{urn}/parent"]
-        Children["GET /nodes/{urn}/children"]
-        Ancestors["GET /nodes/{urn}/ancestors"]
-        Descendants["GET /nodes/{urn}/descendants"]
-    end
-
-    subgraph Mutations["Write Operations"]
-        CreateNode["POST /nodes/create"]
-        CreateEdge["POST /edges"]
-        UpdateEdge["PATCH /edges/{id}"]
-        DeleteEdge["DELETE /edges/{id}"]
-        Batch["POST /commands/batch"]
-    end
-
-    subgraph Advanced["Advanced"]
-        AggEdges["POST /edges/aggregated"]
-        Materialize["POST /edges/aggregated/materialize"]
-        Between["POST /edges/between"]
-        Allowed["POST /nodes/{urn}/allowed-children"]
-    end
-
-```
-
-**Key Graph Endpoints:**
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/{ws_id}/graph/trace` | POST | Unified lineage (upstream/downstream depth, granularity, edge type filtering) |
-| `/{ws_id}/graph/nodes/{urn}` | GET | Single node by URN |
-| `/{ws_id}/graph/nodes/{urn}/children` | GET | Containment hierarchy children |
-| `/{ws_id}/graph/search` | POST | Full-text node search |
-| `/{ws_id}/graph/edges` | GET | Query edges (type, source, target filters) |
-| `/{ws_id}/graph/stats` | GET | Entity/edge type counts (cached) |
-| `/{ws_id}/graph/nodes/create` | POST | Create node (with optional containment edge) |
-| `/{ws_id}/graph/edges` | POST | Create edge (validates against ontology) |
-| `/{ws_id}/graph/commands/batch` | POST | Batch mutations (fail-fast by default) |
-| `/{ws_id}/graph/edges/aggregated` | POST | Aggregated edges between containers |
-| `/{ws_id}/graph/edges/aggregated/materialize` | POST | Batch-create AGGREGATED edges |
-| `/{ws_id}/graph/nodes/degree` | POST | Total lineage degree (in/out) per URN over the full graph — powers the curated-view "lineage outside this view" chip. Response-cached; a URN absent from the result is UNKNOWN (never zero). Body: `{ urns[], edge_types? }` |
-
-### Graph Versioning & Change Control
-
-> **Note:** The `versioningEnabled` gate is enforced **server-side** on every `/graph` write (drafts, commits, merges, reverts) via `versioning_gate.py` — it is not a UI-only toggle. See the [Features API contract](/docs/api-features#feature-flags-authoritative-set).
-
-Graph versioning (drafts, review & merge, publish, revert, restore) is **shipped** and gated by the `versioningEnabled` feature flag. Enabling version control on a data source is a resumable **async bootstrap job**: it copies the whole source graph into the versioned store as an auditable `import` commit, integrity-checks it against the source, and only then makes it live. Verified on a 7.7M-entity graph.
-
-**Enable-VC bootstrap job** (workspace-scoped, `?dataSourceId=` required):
-
-| Endpoint | Method | Status | Purpose |
-|----------|--------|--------|---------|
-| `/{ws_id}/graph/bootstrap` | POST | **202** (or 200 `alreadyEnabled`) | Start "enable version control" for a data source. Runs on the versioning worker in resumable windows; returns `{ jobId, graphId, status }`. Idempotent — an in-flight job returns itself |
-| `/{ws_id}/graph/bootstrap/status` | GET | 200 | Live progress (phase, counts, percent) and, on a terminal job, the integrity report. Not flag-gated so a job started before versioning was disabled stays observable |
-| `/{ws_id}/graph/bootstrap/retry` | POST | 202 | Resume a failed copy from its last committed window (`mode=resume`) or restart it (`mode=restart`) |
-| `/{ws_id}/graph/bootstrap/abandon` | POST | 200 | Discard everything the job imported; the data source reads exactly as before. Refused (409) once version control is live |
-
-**Draft & restore** (versioning router, prefix `/api/v1/{ws_id}/versioning`):
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore` | POST | Restore the graph to a historical commit ("Restore to this point") as a new commit on `main`. Flag-gated |
-| `/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore-preview` | GET | Preview the diff a restore would apply, without mutating anything |
-
-> Draft lifecycle (open draft, stage/checkpoint, review/merge PR-style, publish, revert "Undo this change") lives on the versioning router; the draft *editing* surface is the normal `/graph` API plus a `?branchId=` query param. See the [draft lineage & merge engineering notes](VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md) and [local-integration-testing.md](local-integration-testing.md).
-
-### Views & Features
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/v1/views` | GET, POST | List/create saved views |
-| `/api/v1/views/{id}` | GET, PUT, DELETE | View CRUD |
-| `/api/v1/views/{id}/favourite` | POST | Toggle favourite |
-| `/api/v1/views/popular` | GET | Most-favourited views |
-| `/api/v1/admin/features` | GET, PATCH | Feature flag management (optimistic concurrency) |
-| `/api/v1/features/values` | GET | **Public**, read-only flag values (no auth, no schema/categories overhead) for client bootstrapping |
-
-### Announcements
-
-| Endpoint | Method | Auth | Purpose |
-|----------|--------|------|---------|
-| `/api/v1/announcements` | GET | Public | Active announcements for banner display (respects feature flag) |
-| `/api/v1/announcements/config` | GET | Public | Global banner config (polling interval, default snooze) |
-| `/api/v1/admin/announcements` | GET | Admin | List all announcements (active and inactive) |
-| `/api/v1/admin/announcements` | POST | Admin | Create announcement (validates banner_type, snooze duration) |
-| `/api/v1/admin/announcements/{id}` | PATCH | Admin | Update announcement |
-| `/api/v1/admin/announcements/{id}` | DELETE | Admin | Delete announcement |
-| `/api/v1/admin/announcements/config` | GET | Admin | Read global announcement config |
-| `/api/v1/admin/announcements/config` | PUT | Admin | Update global announcement config |
-
-### Error Responses
-
-All endpoints use a consistent error response format:
-
-| Status Code | Meaning | Example Causes |
-|-------------|---------|----------------|
-| 400 | Bad Request | Validation failures (e.g. invalid banner_type, negative snooze duration) |
-| 401 | Unauthorized | Missing or invalid JWT token |
-| 403 | Forbidden | Insufficient role (e.g. non-admin accessing admin endpoints, pending user login) |
-| 404 | Not Found | Resource does not exist (provider, ontology, catalog item, announcement) |
-| 409 | Conflict | Duplicate resource, optimistic concurrency failure, deletion blocked by references, publishing blocked by evolution policy |
-| 422 | Unprocessable Entity | Semantic validation error (e.g. malformed ontology import JSON) |
-
----
-
-## 2. Core Services
-
-### ContextEngine
-
-**File:** `backend/app/services/context_engine.py`
-
-The ContextEngine is the **central orchestrator** for all graph queries. It binds a workspace's provider and ontology together for query execution.
-
-```mermaid
-graph TB
-    subgraph Factory["Factory Methods"]
-        FW["for_workspace(ws_id, registry, session)"]
-        FC["for_connection(conn_id, registry, session)<br/>(legacy)"]
-    end
-
-    subgraph Resolution["Resolution"]
-        RP["Resolve Provider<br/>via ProviderRegistry"]
-        RO["Resolve Ontology<br/>Three-layer merge"]
-    end
-
-    subgraph Operations["Operations"]
-        GL["get_lineage()<br/>Upstream/downstream trace"]
-        GC["get_children()<br/>Containment hierarchy"]
-        GS["get_schema_stats()"]
-        GM["get_ontology_metadata()"]
-    end
-
-    FW --> RP
-    FW --> RO
-    FC --> RP
-
-    RP --> Operations
-    RO --> Operations
-
-```
-
-**Key behaviors:**
-- **Ontology-driven edge classification:** No hardcoded edge types; containment/lineage classification comes from the resolved ontology
-- **Granularity aggregation:** Collapses fine-grained lineage (column-level) to coarser levels (table/dataset) using ontology hierarchy levels
-- **TTL caching:** Resolved ontology cached for 5 minutes per ContextEngine instance
-- **Legacy support:** `for_connection()` factory preserves backward compatibility
-
-### ProviderRegistry
-
-**File:** `backend/app/registry/provider_registry.py`
-
-Singleton that manages graph provider lifecycle with lazy initialization and async-safe caching.
-
-```mermaid
-graph TB
-    Request["Incoming Request<br/>ws_id + ds_id"]
-    Cache{"Cache Hit?<br/>(provider_id, graph_name)"}
-    Lock["Acquire async Lock"]
-    Fetch["Fetch Provider ORM<br/>+ Decrypt Credentials"]
-    Instantiate["Instantiate Provider<br/>(FalkorDB/Neo4j/etc.)"]
-    Store["Store in Cache"]
-    Return["Return Provider"]
-
-    Request --> Cache
-    Cache -->|Hit| Return
-    Cache -->|Miss| Lock
-    Lock --> Fetch
-    Fetch --> Instantiate
-    Instantiate --> Store
-    Store --> Return
-
-```
-
-**Cache structure:**
-- **Primary:** `Dict[(provider_id, graph_name), GraphDataProvider]`
-- **Legacy:** `Dict[connection_id, GraphDataProvider]`
-- **Eviction:** `evict_provider()`, `evict_workspace()`, `evict_data_source()`, `evict_all()`
-- **Bootstrap:** `_bootstrap_from_env()` creates Provider + Ontology + Workspace from env vars on empty DB
-
-### Ontology Service
-
-**File:** `backend/app/ontology/service.py`
-
-Implements three-layer ontology resolution:
-
-```mermaid
-graph LR
-    SD["1. System Defaults<br/>Hardcoded base types"]
-    AO["2. Assigned Ontology<br/>Per data-source from DB"]
-    IT["3. Introspected Types<br/>Gap-fill from graph"]
-    RO["ResolvedOntology<br/>Merged result"]
-
-    SD --> RO
-    AO --> RO
-    IT --> RO
-
-```
-
-**Entity Type Definition (per type ID):**
-```
-EntityTypeDefEntry:
-  - name, plural_name, description
-  - visual: icon, color, shape, size, border_style, show_in_minimap
-  - hierarchy: level, can_contain[], can_be_contained_by[], roll_up_fields[]
-  - behavior: selectable, draggable, expandable, traceable, click/double-click actions
-  - fields[]: display configuration per property
-```
-
-**Relationship Type Definition:**
-```
-RelationshipTypeDefEntry:
-  - name, description, category (structural | flow | metadata | association)
-  - is_containment, is_lineage
-  - direction, visual (stroke_color, stroke_width, animated, curve_type)
-  - source_types[], target_types[]
-```
-
-**Versioning rules:**
-- Published ontologies are **immutable** -- updates create new version rows
-- Evolution policy controls breaking changes: `reject` (default), `deprecate`, `migrate`
-- Impact analysis compares draft to latest published version before allowing publish
-
----
-
-## 3. Graph Data Provider System
-
-### Provider Interface
-
-**File:** `backend/common/interfaces/provider.py`
-
-Abstract base class defining the contract for all graph backends:
-
-```mermaid
-classDiagram
-    class GraphDataProvider {
-        <<abstract>>
-        +get_node(urn) GraphNode
-        +get_nodes(query) List~GraphNode~
-        +search_nodes(query, limit, offset) List~GraphNode~
-        +get_edges(query) List~GraphEdge~
-        +get_children(parent_urn) List~GraphNode~
-        +get_parent(child_urn) GraphNode
-        +get_upstream(urn, depth) LineageResult
-        +get_downstream(urn, depth) LineageResult
-        +get_full_lineage(urn) LineageResult
-        +get_trace_lineage(urn, direction) LineageResult
-        +get_aggregated_edges_between() Any
-        +get_stats() Dict
-        +get_schema_stats() GraphSchemaStats
-        +get_ontology_metadata() OntologyMetadata
-        +create_node(request) CreateNodeResult
-        +create_edge(request) EdgeMutationResult
-        +update_edge(edge_id, request) EdgeMutationResult
-        +delete_edge(edge_id) bool
-    }
-    class FalkorDBProvider {
-        -pool: BlockingConnectionPool
-        -graph_name: str
-        +materialize_aggregated_edges_batch()
-        +ensure_indices(entity_types)
-    }
-    class Neo4jProvider {
-        -driver: AsyncDriver
-        -database: str
-    }
-    class DataHubGraphQLProvider {
-        -client: httpx.AsyncClient
-        -base_url: str
-    }
-    class MockGraphProvider {
-        -nodes: Dict
-        -edges: List
-    }
-    GraphDataProvider <|-- FalkorDBProvider
-    GraphDataProvider <|-- Neo4jProvider
-    GraphDataProvider <|-- DataHubGraphQLProvider
-    GraphDataProvider <|-- MockGraphProvider
-```
-
-### Provider Capabilities
-
-| Capability | FalkorDB | Neo4j | DataHub | Mock |
-|-----------|----------|-------|---------|------|
-| Multi-graph | Yes | Yes | No | Yes |
-| Lineage | Yes | Yes | Yes | Yes |
-| Containment | Yes | Yes | No | Yes |
-| Write ops | Yes | No | No | Yes |
-| Aggregation | Yes | No | No | No |
-| Full-text search | Yes | Yes | Yes | Yes |
-
-### FalkorDB Implementation Details
-
-**File:** `backend/app/providers/falkordb_provider.py` (~1000 lines)
-
-- **Connection:** Async Redis BlockingConnectionPool (12 connections, 30s timeout)
-- **Projection modes:** `in_source` (AGGREGATED edges in same graph) or `dedicated` (separate projection graph)
-- **Indexing:** `ensure_indices()` creates indexes for ontology-defined entity types
-- **Aggregation:** `materialize_aggregated_edges_batch()` batch-creates AGGREGATED edges between ancestor pairs using Cypher queries
-
-### Provider Location Note
-
-All providers run **in-process** in the Visualization Service, split across two packages:
-
-| Provider | Location |
-|----------|----------|
-| FalkorDBProvider | `backend/app/providers/falkordb_provider.py` |
-| MockGraphProvider | `backend/app/providers/mock_provider.py` |
-| Neo4jProvider | `backend/graph/adapters/neo4j_provider.py` |
-| DataHubGraphQLProvider | `backend/graph/adapters/datahub_provider.py` |
-
-The `backend/graph/adapters/` package (Neo4j, DataHub, Spanner) was formerly loaded by the standalone graph-service for **pre-registration connectivity testing**; since that service was removed ([ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)) the Visualization Service imports these adapters directly. Workspace-scoped queries are served primarily by the FalkorDB and Mock providers.
-
----
-
-## 4. Provider Connectivity Adapters (In-Process)
-
-Pre-registration provider discovery and connectivity testing runs **in-process** in the Visualization Service. A standalone `graph-service` (`:8001`, `backend/graph/main.py`) previously exposed this over HTTP, but it was built and deployed yet **never invoked**, and was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service). The onboarding wizard calls the Visualization Service's own `POST /admin/providers/test-connection` (and the per-provider `POST /admin/providers/{id}/test`) instead.
-
-The provider adapters that service depended on **survive** and are imported directly by the Visualization Service (`backend/app/providers/manager.py`, `backend/app/registry/provider_registry.py`).
-
-### Provider Adapters
-
-Located in `backend/graph/adapters/`:
-
-| Adapter | File | Purpose |
-|---------|------|---------|
-| `neo4j_provider.py` | Neo4j adapter | Bolt protocol connectivity + queries |
-| `datahub_provider.py` | DataHub adapter | GraphQL endpoint connectivity + queries |
-| `spanner_provider.py` | Spanner adapter | Cloud Spanner connectivity + queries |
-| `schema_mapping.py` | Schema mapper | Provider-specific label/property mapping |
-
----
-
-## 5. Additional Backend Services
-
-### LineageAggregator
-
-**File:** `backend/app/services/lineage_aggregator.py`
-
-Handles lineage edge aggregation logic -- collapsing fine-grained column-level edges into coarser table/domain-level aggregated edges.
-
-### AssignmentEngine
-
-**File:** `backend/app/services/assignment_engine.py`
-
-Computes layer assignments for graph nodes based on rule sets. Called via `POST /{ws_id}/graph/assignments/compute`.
-
-### OntologyDriftDetector
-
-**File:** `backend/app/ontology/drift_detector.py`
-
-Detects schema changes between the introspected graph schema and the defined ontology. Flags unmapped types and suggests closest matches.
-
-### MutationValidator
-
-**File:** `backend/app/ontology/mutation_validator.py`
-
-Validates node/edge creation requests against the resolved ontology. Ensures entity types and relationship types conform to ontology rules before writes are committed.
-
-### Insights Service
-
-**File:** `backend/insights_service/__main__.py`
-
-Out-of-process service that collects schema and statistics for data sources and warms provider caches. Writes results to the `data_source_stats` and `data_source_polling_configs` tables. Supersedes the former `backend/stats_service/` skeleton, which was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service).
-
----
-
-## 6. Repository Pattern
-
-All database operations are abstracted into repositories under `backend/app/db/repositories/`:
-
-| Repository | Table(s) | Key Operations |
-|-----------|----------|----------------|
-| `workspace_repo` | workspaces, workspace_data_sources | CRUD, set_default, list with data sources |
-| `provider_repo` | providers | CRUD, credential encrypt/decrypt |
-| `ontology_definition_repo` | ontologies | CRUD, publish, clone, version management |
-| `data_source_repo` | workspace_data_sources | CRUD, stats cache, polling config |
-| `view_repo` | views, view_favourites | CRUD, favourite toggle, popularity |
-| `user_repo` | users, user_roles, user_approvals | CRUD, role assignment, approval workflow |
-| `connection_repo` | graph_connections | **Legacy** CRUD, credential encryption |
-| `catalog_repo` | catalog_items | CRUD, dedup cleanup, bindings query, impact analysis |
-| `announcement_repo` | announcements, announcement_config | CRUD, config management |
-| `context_model_repo` | context_models | CRUD, template instantiation |
-| `assignment_repo` | assignment_rule_sets | CRUD, default selection |
-| `feature_flags_repo` | feature_flags, feature_definitions | Read/write with optimistic concurrency |
-
-**Pattern:** Repositories accept an `AsyncSession`, perform ORM queries, and return Pydantic DTOs (not ORM objects). This ensures a clean boundary between data access and business logic.
-
----
-
-## 7. Middleware Stack
-
-```mermaid
-graph TB
-    Req[Incoming Request] --> CORS
-    CORS[CORS Middleware<br/>Configurable origins] --> SecH
-    SecH[Security Headers<br/>CSP, HSTS, X-Frame-Options] --> ReqID
-    ReqID[Request ID<br/>X-Request-ID propagation] --> Log
-    Log[Request Logger<br/>Structured JSON] --> Route
-    Route[FastAPI Router<br/>+ Auth Dependency]
-
-```
-
-**Security headers applied to every response:**
-```
-X-Content-Type-Options: nosniff
-X-Frame-Options: DENY
-X-XSS-Protection: 0
-Referrer-Policy: strict-origin-when-cross-origin
-Permissions-Policy: camera=(), microphone=(), geolocation=()
-Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; ...
-Strict-Transport-Security: max-age=31536000 (HTTPS only)
-```
-
----
-
-## 8. Startup Lifecycle
-
-```mermaid
-graph TB
-    Start["App Startup (Lifespan)"]
-    InitDB["1. Initialize Management DB<br/>create_all + inline migrations"]
-    SeedOnt["2. Seed System Ontology<br/>Default entity/relationship types"]
-    SeedFeat["3. Seed Feature Registry<br/>Definitions + categories + meta"]
-    BootAdmin["4. Bootstrap System Admin<br/>If no users exist"]
-    ResolvePrimary["5. Resolve Primary Workspace<br/>or bootstrap from env"]
-    Ready["App Ready"]
-    Shutdown["App Shutdown"]
-    Evict["Evict All Providers<br/>Close connection pools"]
-
-    Start --> InitDB --> SeedOnt --> SeedFeat --> BootAdmin --> ResolvePrimary --> Ready
-    Shutdown --> Evict
-
-```
-
-### Environment Variables
-
-| Variable | Default | Required | Purpose |
-|----------|---------|----------|---------|
-| `GRAPH_PROVIDER` | `falkordb` | No | Provider type: mock, falkordb, neo4j, datahub |
-| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:synodic@localhost:5432/synodic` (dev fallback) | Outside dev | Must be a `postgresql+asyncpg://` URL; anything else is rejected at startup |
-| `CREDENTIAL_ENCRYPTION_KEY` | _(none)_ | Prod | Fernet key for credential encryption |
-| `JWT_SECRET_KEY` | _(none — required)_ | **All** | HS256 signing key, ≥32 chars. There is no fallback: the process refuses to start without it, in every environment — nor with one of the placeholder values this repo publishes in its example files |
-| `JWT_SECRET_KEY_PREVIOUS` | _(none)_ | No | Comma-separated retired keys, verification only. Set this **before** rotating `JWT_SECRET_KEY`, or every live session dies the instant the new value lands — and during a rolling update, pods on the old and new key flip the same user between authenticated and 401 |
-| `AUTH_ENVIRONMENT_ID` | _(none)_ | No | Scopes the session cookie names (`nx_access_uat`) and binds the JWT issuer. Set it when two deployments can be open in the same browser — cookie jars are keyed by domain, not by cluster, so identically-named cookies overwrite each other |
-| `JWT_REFRESH_EXPIRY_DAYS` | `7` | No | Refresh-cookie lifetime — how long "stay signed in" lasts. The window slides on every rotation |
-| `REFRESH_ROTATION_GRACE_SECONDS` | `30` | No | How long a re-presented refresh token reads as a concurrent refresh rather than a stolen chain. `0` = strict rotation, which signs users out of every tab when two rotate at once |
-| `REFRESH_ADOPT_RECORDLESS` | `true` | No | Migration ramp for allow-by-record. Refresh tokens are refused unless a row in `refresh_tokens` says otherwise, and every session live at the deploy holds one with no row — so this accepts such a token once and writes the row it should have had. **Set to `false` once `JWT_REFRESH_EXPIRY_DAYS` have passed since the deploy**; adoptions log at INFO, so watch them drain to zero first. Leaving it on indefinitely keeps the old deny-by-exception behaviour available to anything holding a pre-deploy token |
-| `JWT_CLOCK_SKEW_LEEWAY_SECONDS` | `60` | No | How far outside its stated validity a token we issued is still honoured, absorbing clock drift between replicas — every pod both mints and verifies, so `exp`/`iat`/`nbf` are compared across two clocks. The OIDC path always allowed the same for an IdP. Raising it widens the window a revoked token survives by the same amount, which is why the revocation TTL derives from it |
-| `RBAC_REVOCATION_TTL_SECONDS` | _(derived)_ | No | Leave unset. Derived from `JWT_EXPIRY_MINUTES` + `JWT_CLOCK_SKEW_LEEWAY_SECONDS` + 60s; a value below the window in which an access token is still accepted makes forced revocation stop taking effect before the token does, and startup refuses it |
-| `JWT_EXPIRY_MINUTES` | `5` (code) | No | Access-token lifetime. Global permission claims ride in the token, so this is also how long a revoked or demoted session keeps its old rights, and how long the fail-open revocation tier stays open during a Redis outage. The Kubernetes manifests and both Compose files set `15` (the Compose files used to default to `60`); the Helm chart still ships `60`, and with `ENV` unset nothing refuses it — see [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §1.1. Startup **refuses** a value above `MAX_ACCESS_TTL_MINUTES` (15) when `ENV` is `prod`/`production`, and warns elsewhere — a warning had been in the log the whole time the configs disagreed and nobody read it. The Redis revocation TTL derives from this value, so raising it does not silently break forced sign-out — it just lengthens the window |
-| `MAX_ACCESS_TTL_MINUTES` | `15` | No | Ceiling that `JWT_EXPIRY_MINUTES` is checked against at boot. Raise it only deliberately: it is the revocation latency you are agreeing to |
-| `ADMIN_EMAIL` | `admin@nexuslineage.local` | No | Bootstrap admin email |
-| `ADMIN_PASSWORD` | `admin123` | No | Bootstrap admin password (from `.env.example`) |
-| `CORS_ALLOWED_ORIGINS` | `localhost:3000,5173` | No | Comma-separated origins |
-| `FALKORDB_HOST` | `localhost` | No | FalkorDB/Redis hostname |
-| `FALKORDB_PORT` | `6379` | No | FalkorDB/Redis port |
-| `FALKORDB_GRAPH_NAME` | `nexus_lineage` | No | Default graph name |
-| `FALKORDB_SEED_FILE` | _(none)_ | No | JSON path for seeding graph data |
-| `DB_ECHO` | `false` | No | SQLAlchemy SQL logging |
-
-> **Warning:** In production, set `CREDENTIAL_ENCRYPTION_KEY` and override the bootstrap
-> `ADMIN_PASSWORD`. Without the encryption key, provider credentials are stored in
-> plaintext. `JWT_SECRET_KEY` is mandatory everywhere — the process will not start without
-> one, so there is no auto-generated key to worry about. The strength check is still a
-> **length** check, which cannot tell a weak secret from a strong one; what it does now
-> catch is the case that actually happens, a placeholder copied forward from one of this
-> repo's example files. Those three literals are rejected by name and the error says which
-> file the value came from. Generate yours with
-> `python -c 'import secrets; print(secrets.token_urlsafe(48))'`.
-> See the [Developer Setup — Production Environment Checklist](/docs/setup) and
-> [Multi-Environment Sessions](/docs/multi-environment-sessions) for rotating the key
-> without signing everyone out.
-
----
-
-## Related
-
-- [Developer Setup](/docs/setup) — running the backend locally and env-var reference
-- [Frontend & UX](/docs/frontend) — the SPA that consumes this API
-- [Features API contract](/docs/api-features) — the feature-flag endpoints in depth
-- [Platform Services overview](/docs/services-overview) — process roles and runtime topology
-- [Aggregation pipeline](/docs/aggregation-pipeline) · [RBAC](/docs/rbac)
+# Backend Reference
+
+*For backend engineers and integrators.*
+
+Use this page to find where an API lives: which router serves a path, what that group of endpoints is for, and which page documents it in depth. It also covers how requests are authenticated, the trace endpoints, the middleware every request passes through, what happens at startup, and the graph providers.
+
+## How to use this page
+
+1. Find your area in the [router map](#router-map) and note its path prefix.
+2. Follow the link in **Documented in** for the concepts and the main calls.
+3. For exact paths, parameters and schemas, open the [live API explorer](#explore-the-live-api) on a running deployment — it is generated from the code, so it is always current.
+
+If you are writing a script or an integration rather than changing the backend, start with the [API Guide](/docs/api-guide). Every environment variable named here is described in the [configuration reference](/docs/configuration).
+
+## The backend at a glance
+
+One FastAPI application serves the HTTP API; the other backend processes run in the background and share its code:
+
+| Process | Entry point | Port | Responsibility |
+|---|---|---|---|
+| API (`viz-service`) | `backend/app/main.py` (`app`), under gunicorn | 8000 | Every `/api/v1` route below |
+| Aggregation control plane | `backend/app/services/aggregation/controlplane.py` | 8091 | Aggregation jobs, scheduling and recovery; the API forwards its aggregation endpoints here |
+| Aggregation worker | `backend/app/services/aggregation/__main__.py` | 8090 (health) | Builds `:AGGREGATED` rollup edges |
+| Versioning worker | `backend/app/services/versioning/__main__.py` | — | Projects version-controlled graphs into FalkorDB; runs import and export jobs |
+| Stats service | `backend/insights_service/__main__.py` | 8092 (health) | Keeps per-data-source stats fresh |
+| `upgrade` job | `backend/scripts/upgrade.py` | — | Builds and migrates the database schema |
+
+How they fit together, and how a request flows through them: [Architecture](/docs/architecture). The process roles (`SYNODIC_ROLE`): [Platform Services](/docs/services-overview).
+
+## Router map
+
+`api_router` in `backend/app/api/v1/api.py` mounts every group below under `/api/v1`. Prefixes are shown without that `/api/v1`; `{ws_id}` is a workspace id. A few groups share the bare `/admin` prefix, so one router's paths sit beside another's.
+
+| Group | Path prefix | What it is for | Documented in |
+|---|---|---|---|
+| Graph reads, search and trace | `/{ws_id}/graph` | Nodes, edges, children, search, lineage traces, stats and metadata for one data source; graph edits when editing is on; turning on version control for a data source | [API Guide](/docs/api-guide), [Search](/docs/services-search), [Context Engine](/docs/services-context-engine) |
+| Batched canvas loading | `/{ws_id}/graph/canvas` | One request for a canvas's first page, or for opening a container | [Read-Path Performance](/docs/read-path-performance) |
+| Layer assignment | `/{ws_id}/graph/assignments` | Computing which layer each entity of a view belongs in | [Assignments](/docs/services-assignments) |
+| Graph export | `/{ws_id}/graph/export` | Exporting a whole data source that is not under version control | [Versioning: Import & Export](/docs/versioning-import-export) |
+| Version control | `/{ws_id}/versioning` | Drafts, commits, review and merge, publish, revert, restore, imports and exports | [Versioning API Reference](/docs/versioning-api-reference) |
+| Assignment rule sets | `/{ws_id}/assets` | Saved rule sets that place entities into layers | [Assignments](/docs/services-assignments) |
+| Context models | `/{ws_id}/context-models`, `/admin/context-model-templates` | Layer configurations and the quick-start templates | [Context Engine](/docs/services-context-engine) |
+| Views | `/views`, `/views/{view_id}/grants`, `/views/{view_id}/versions`, `/views/transfer` | Saved views, sharing, a view's design history, and moving views between environments | [View Portability](/docs/feature-view-portability), [Managing & Sharing Views](/guide/managing-views) |
+| Sessions and sign-in | `/auth` | Sign-in, sign-out, session refresh, the current user, single sign-on flows, sign-up, password reset, invites | [Multi-Environment Sessions](/docs/multi-environment-sessions), [SSO](/docs/sso), [Sign-up Service](/docs/signup-service) |
+| Your account | `/users`, `/me` | Your profile, password, sessions and activity; your permissions, linked identities, notifications and access requests | [RBAC](/docs/rbac), [SSO](/docs/sso) |
+| Users, groups and access | `/admin/users`, `/admin/groups`, `/admin/workspaces/{ws_id}/members`, `/admin/role-bindings`, `/admin` (permissions and roles), `/admin/rbac/search`, `/access-requests`, `/admin/access-requests`, `/admin/workspaces/{ws_id}/access-requests`, `/directory`, `/admin/audit` | People, invites, groups, role bindings, custom roles, access requests, the people picker, and the audit log | [RBAC](/docs/rbac), [Users & Access](/guide/users-access) |
+| Single sign-on administration | `/admin/idp-providers`, `/admin/idp-group-mappings`, `/admin/sso/config`, `/admin/sso/activity`, `/admin/sso/failures` | Identity providers, group-to-role mappings, the platform's sign-in posture, and sign-in diagnostics | [SSO](/docs/sso), [SSO Integration](/docs/sso-integration) |
+| Providers, catalog and workspaces | `/admin/providers`, `/admin/catalog`, `/admin/workspaces`, `/admin/ontologies` | Registering graph stores and their graphs, binding them into workspaces as data sources, and the semantic layer | [Onboarding a Source](/docs/onboarding-a-source), [The Semantic Layer](/guide/semantic-layer) |
+| Ingestion operations | `/admin` (aggregation jobs and settings, freshness, stats polling), `/admin/insights`, `/profiling` | Aggregation jobs (forwarded to the control plane), data freshness and refresh, cached asset discovery, and counts over time | [Aggregation Pipeline](/docs/aggregation-pipeline), [Insights](/docs/services-insights), [Data Freshness & Ingestion](/guide/data-freshness) |
+| Feature switches | `/admin/features`, `/features` | Managing feature switches, and reading their values | [Features API](/docs/api-features), [Feature Flags Lifecycle](/docs/feature-flags-lifecycle) |
+| Platform settings and appearance | `/admin/platform`, `/branding`, `/admin/branding`, `/announcements`, `/admin/announcements` | Platform-wide node-identity defaults, white-label branding, and announcement banners | [The Admin Console](/guide/governance-ops) |
+| Analytics and telemetry | `/admin/analytics`, `/insights`, `/telemetry`, `/admin/telemetry` | Platform analytics, usage counts shown on content, and product telemetry | [Analytics](/guide/analytics) |
+| Infrastructure status | `/admin/system`, `/admin/redis`, `/admin/graph-store` | Health of every backing service, the resolved Redis configuration, and graph-store topology | [The Admin Console](/guide/governance-ops), [The Graph Store](/guide/graph-store-topology), [Observability](/docs/observability) |
+| Metrics | `/metrics` | Prometheus scrape endpoint; it answers only when `METRICS_ENABLED` is set | [Observability](/docs/observability) |
+
+`backend/app/main.py` mounts two more groups directly, outside `/api/v1`:
+
+| Group | Paths | What it is for | Documented in |
+|---|---|---|---|
+| Health | `/health/live`, `/health/ready`, `/health/deps`, `/health` (each also under `/api/v1/health/...`), and `/api/v1/health/providers` | Liveness, readiness (a database check), a deep dependency report, and provider health | [Observability](/docs/observability) |
+| Database pool metrics | `/internal/metrics/db` | Connection-pool pressure; it answers only when `INTERNAL_METRICS_ENABLED=true` | [Observability](/docs/observability) |
+
+## Authentication
+
+The API uses cookie sessions, not bearer tokens. In short:
+
+- **Signing in** (`POST /api/v1/auth/login`, or a single sign-on callback) sets four cookies: `nx_access` and `nx_refresh` (both `HttpOnly`), plus `nx_csrf` and `nx_access_exp`, which the app reads. The response body carries the user, never a token. With `AUTH_ENVIRONMENT_ID` set, each cookie name carries it as a suffix.
+- **Every request** is authenticated by `get_current_user` (`backend/app/auth/dependencies.py`), which verifies the access cookie's JWT and checks that the session has not been revoked. `get_permission_claims` adds the session's workspace grants from the session store (Redis, falling back to PostgreSQL); global permission claims ride in the token itself.
+- **Every state-changing request** (`POST`, `PUT`, `PATCH`, `DELETE`) must carry the `nx_csrf` value in an `X-CSRF-Token` header. `CSRFMiddleware` (`backend/auth_service/csrf.py`) checks the header against the cookie, the token's binding to the session, and the request's origin; a failure answers `403` with `csrf_failed`.
+- **Renewal.** `POST /api/v1/auth/refresh` rotates the refresh token and mints a new access token. The app does this before `nx_access` expires, and once more on a `401`.
+- **Permissions.** Each route declares what it needs with the `requires(...)` dependency; the catalogue of roles and permissions is in [RBAC](/docs/rbac).
+
+Rules that are easy to trip over when you change these endpoints:
+
+- **A forced password change.** While `must_change_password` is set on an account — for example a first administrator created with a password published in this repository — every route that requires a signed-in user, except a short allowlist, answers `403 {"error": "password_change_required"}`.
+- **Signing a user out everywhere has two halves.** Tombstoning the session ids in Redis covers live access tokens; stamping `users.sessions_valid_from` makes every refresh token minted before it fail. Anything that revokes sessions for a security reason must do both, as `_revoke_my_every_session` in `backend/app/api/v1/endpoints/users.py` does around `revoke_subject_sessions`.
+- **Changing your own password** answers `409` when the account has no local password (single sign-on only) and `403` — not `401` — when the current password is wrong, because the app treats `401` as a lost session.
+- **Profile fields owned by the identity provider.** A single sign-on login records which name fields the provider asserted (`backend/common/identity_provenance.py`); `PATCH /users/me` and `PATCH /admin/users/{user_id}` refuse those fields with `409 {"error": "idp_managed_field"}`. The display name is never provider-owned.
+
+More: [Multi-Environment Sessions](/docs/multi-environment-sessions) (cookie scoping and key rotation), [SSO](/docs/sso), [Security Overview](/docs/security-overview), and [ADR-024](/docs/decisions#adr-024-cookie-sessions-with-csrf-double-submit-not-bearer-tokens).
+
+## The trace endpoints
+
+All under `/api/v1/{ws_id}/graph`, in `backend/app/api/v1/endpoints/graph.py`:
+
+| Endpoint | Request (key fields) | Answers |
+|---|---|---|
+| `POST /trace/v2` | `urn`, `direction`, `upstreamDepth` and `downstreamDepth` (default 25, at most 100), `level` (default `0`, the top-level skeleton), `lineageEdgeTypes` | Entities at one hierarchy level and the rollup edges between them |
+| `POST /trace/expand` | `sourceUrn`, `targetUrn`, `nextLevel`, optional `drillAnchor` | The finer entities and edges inside one rollup edge |
+| `POST /trace/expand-batch` | `pairs` (each `sourceUrn`, `targetUrn`, `nextLevel`), `lineageEdgeTypes` | The merged result for many rollup edges. A pair that fails is left out, and the result is marked truncated when a pair could not be answered right now; if every pair fails it answers `404` with the errors |
+| `POST /trace/closure` | `urn`, `direction`, `upstreamDepth` and `downstreamDepth` (default 1, at most 25), `maxNodes`, `seedUrns`, `excludeUrns`, `afterCursor`, `seedCursor`, `grain` | One page of a walk over raw lineage around a focus, with a frontier and cursors to continue it; `grain: "coarse"` returns the rollup cells around the focus in one shot |
+| `POST /trace` | — | `410 Gone`; the original trace is retired |
+
+What every trace endpoint shares:
+
+- It needs the **Lineage trace** feature switch (Administration → Features); when the switch is off it answers `403` with `feature_disabled`.
+- It is bounded by the server, not the caller: at most `TRACE_MAX_NODES` nodes (default 2,000) and `TRACE_TIMEOUT_SECS` (default 120 seconds). A trace that reaches either limit still answers `200`, with `truncated: true` and a `truncationReason`.
+- Answers are cached per data source and draft (see [Architecture](/docs/architecture#4-caching-and-load-shedding)); when the graph store is saturated a request is shed with `429` and `Retry-After`. `trace/closure` also counts against the optional per-workspace fair share (`FAIR_SHARE_ENABLED`).
+
+## Middleware
+
+Every request passes through this stack, outermost first, as registered in `backend/app/main.py` (pinned by `backend/tests/test_middleware_order.py`):
+
+1. **Timeout** (`_TimeoutMiddleware`) — until startup finishes, answers everything but the health probes with `503` and `Retry-After`; afterwards gives each path a deadline (30 seconds by default, 120 for graph and trace routes) and answers `504` when it passes. Streaming paths are exempt.
+2. **Body size** (`_BodySizeLimitMiddleware`) — refuses an oversized body with `413` before anything parses it: `MAX_REQUEST_BODY_BYTES` (8 MiB by default), or `MAX_IMPORT_BODY_BYTES` (100 MiB) on the bulk-import routes.
+3. **Security headers** (`SecurityHeadersMiddleware`) — `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, a Content Security Policy, and HSTS on HTTPS.
+4. **Host allowlist** (`_TrustedHostMiddleware`) — only when `ALLOWED_HOSTS` is set; another `Host` answers `400`.
+5. **Request id** (`RequestIdMiddleware`) — reads or creates `X-Request-ID` and returns it.
+6. **Access log** (`StructuredLoggingMiddleware`) — one JSON log line per request, and an `X-Process-Time` header.
+7. **Compression** (`GZipMiddleware`) — responses over 1 KB, at level `GZIP_COMPRESSLEVEL` (default 1); downloaded files are left uncompressed.
+8. **CORS** (`CORSMiddleware`) — origins from `CORS_ALLOWED_ORIGINS` (`http://localhost:3000` and `http://localhost:5173` when unset), with credentials.
+9. **CSRF** (`CSRFMiddleware`) — innermost, so even its `403` carries the headers and CORS added above it.
+
+Starlette runs the last-registered middleware outermost, so the code registers them in the reverse of this list.
+
+## What happens at startup
+
+The API never creates or migrates tables. The `upgrade` job builds the schema before the API starts (see [ADR-025](/docs/decisions#adr-025-postgresql-only-management-database-schema-owned-by-an-upgrade-job) and [Migrations](/docs/migrations)). When the API starts (`lifespan` in `backend/app/main.py`), it:
+
+1. **Checks the schema** (`init_db()` in `backend/app/db/engine.py`): connects, retrying for up to `DB_STARTUP_RETRY_TIMEOUT_SECS` (default 60), and compares `alembic_version` with every Alembic head. With no schema at all it starts in degraded mode — database-backed routes answer `503` while a recovery loop retries; a version mismatch is logged loudly and reported by `/health/ready`.
+2. **Seeds reference data**, idempotently: the context-model quick-start templates, the feature registry and switch values, and the system default ontology.
+3. **Creates the first administrator** if there are no users, from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. If the password is one published in this repository, the account must change it at first sign-in.
+4. **Wires sign-in**: the local password provider and the database-backed identity-provider registry. If OIDC or SAML settings are present in the environment and no matching row exists, it records them once as a default identity provider.
+5. **Wires aggregation**: with `AGGREGATION_PROXY_ENABLED=true` (as Compose and Kubernetes set it) the aggregation endpoints are forwarded to the control plane; otherwise a local dispatcher is chosen by `AGGREGATION_DISPATCH_MODE`.
+6. **Starts background loops**: the provider-change listener, a provider warm-up loop, database health and event-loop monitoring, and any loops the process role enables. The versioning projector runs here only when `GRAPHVER_PROJECTION_INPROCESS=1`.
+7. **Opens the readiness gate**, so requests other than health probes are served.
+
+No graph provider, workspace or data source is created from environment variables: you register providers in the app — see [Admin Setup](/guide/admin-setup). On shutdown the API stops its loops, closes every cached provider (allowing 5 seconds) and closes its database pools.
+
+## Graph providers
+
+Every graph store is reached through one interface, `GraphDataProvider` (`backend/common/interfaces/provider.py`), and is instantiated by `ProviderManager._create_provider_instance` (`backend/app/providers/manager.py`):
+
+| Provider type | Implementation | Writes (`PROVIDER_CAPABILITIES`) |
+|---|---|---|
+| `falkordb` | `FalkorDBProvider` in `backend/app/providers/falkordb_provider.py` | Full create, update and delete |
+| `spanner` | `SpannerProvider` in `backend/graph/adapters/spanner_provider.py` | Full create, update and delete |
+| `neo4j` | `Neo4jProvider` in `backend/graph/adapters/neo4j_provider.py` | Create only |
+| `datahub` | `DataHubGraphQLProvider` in `backend/graph/adapters/datahub_provider.py` | None — a read-only view of an external catalog |
+
+How they are used:
+
+- `ProviderManager` (singleton `provider_manager`) caches one instance per provider and graph in each process, wraps each in a circuit breaker, admits graph requests per data source, and drops its copies when a provider edit is broadcast.
+- `ContextEngine` (`backend/app/services/context_engine.py`) binds a workspace's data source to its provider and its resolved ontology for each request (`ContextEngine.for_workspace`). The resolved ontology — system defaults, plus the assigned ontology, plus types introspected from the graph — is cached per process and data source, refreshed whenever an ontology or its assignment changes, with a 5-minute backstop.
+- Draft and history reads go through version-aware wrappers in `backend/app/providers/` (`versioned_branch_provider.py`, `versioned_write_provider.py`, `draft_overlay_provider.py`).
+- Testing a connection before registering it, and discovering a provider's graphs, run in the API: `POST /api/v1/admin/providers/test-connection` and `POST /api/v1/admin/providers/{provider_id}/discover-schema`. The standalone `graph-service` that once did this was retired ([ADR-018](/docs/decisions#adr-018-retire-the-graph-service)).
+
+Data access to the management database goes through about 40 repository modules in `backend/app/db/repositories/`. They take an `AsyncSession` and mostly return Pydantic models rather than ORM rows.
+
+## Explore the live API
+
+The API publishes its own OpenAPI schema and interactive explorers, generated from the code:
+
+| On | Swagger UI | ReDoc | Schema |
+|---|---|---|---|
+| The app's address, through the frontend's nginx | `/viz-docs` | `/viz-redoc` | `/openapi.json` |
+| The API directly (port 8000) | `/docs` | `/redoc` | `/openapi.json` |
+
+They are on unless `ENV` is `prod` or `production`; set `API_DOCS_ENABLED=true` to turn them on there (`_DOCS_ENABLED` in `backend/app/main.py`). On the app's address, `/docs` is this documentation reader, which is why the explorer is published as `/viz-docs`.
+
+## Error responses
+
+| Status | Meaning |
+|---|---|
+| 400 | The request is malformed, names no workspace or data source, or names a host outside `ALLOWED_HOSTS` |
+| 401 | No session, or an expired or invalid one |
+| 403 | Not permitted; also `csrf_failed`, `feature_disabled` and `password_change_required` |
+| 404 | Not found |
+| 409 | A conflict: a duplicate, a stale version, a delete blocked by references, or an identity-provider-owned field |
+| 410 | A retired endpoint (`POST /{ws_id}/graph/trace`) |
+| 413 | The request body is too large |
+| 422 | The request failed validation |
+| 429 | Rate-limited or shed under load; honour `Retry-After` |
+| 503 | Starting up, database unavailable, or a graph provider unavailable, loading or failing over; usually with `Retry-After` |
+| 504 | The request ran past its deadline |
+
+## Where in the code
+
+| Concern | Where |
+|---|---|
+| Router map | `backend/app/api/v1/api.py` (`api_router`) |
+| Endpoints | `backend/app/api/v1/endpoints/` — one module per router |
+| App, middleware, startup, health | `backend/app/main.py` (`app`, `lifespan`, `_TimeoutMiddleware`, `_BodySizeLimitMiddleware`, `_DOCS_ENABLED`) |
+| Session routes | `backend/auth_service/api/router.py` |
+| Cookies and CSRF | `backend/auth_service/cookies.py`, `backend/auth_service/csrf.py` |
+| Request authentication and permissions | `backend/app/auth/dependencies.py` (`get_current_user`, `requires`) |
+| Trace endpoints | `backend/app/api/v1/endpoints/graph.py` (`trace_v2`, `trace_closure`, `trace_expand`, `trace_expand_batch`) |
+| Trace request models | `backend/common/models/graph.py` (`TraceRequest`, `TraceClosureRequest`, `ExpandRequest`) |
+| Query orchestration | `backend/app/services/context_engine.py` (`ContextEngine`) |
+| Provider cache and admission | `backend/app/providers/manager.py` (`ProviderManager`) |
+| Provider interface | `backend/common/interfaces/provider.py` (`GraphDataProvider`) |
+| Response cache | `backend/app/services/graph_cache.py` (`GraphCache`) |
+| Schema check and pools | `backend/app/db/engine.py` (`init_db`) |
+| Repositories | `backend/app/db/repositories/` |
+
+## See also
+
+- [API Guide](/docs/api-guide) — calling the API from scripts and integrations
+- [Architecture](/docs/architecture) — the processes, the stores and a request's lifecycle
+- [Configuration](/docs/configuration) — every environment variable
+- [RBAC](/docs/rbac) — roles, permissions and how they are checked
+- [Frontend Reference](/docs/frontend) — the app that calls this API

@@ -2,64 +2,84 @@
 // Last-updated dates and source paths come from git at build time.
 export interface DocMeta { updated: string; path: string }
 export const docMeta: Record<string, DocMeta> = {
-  "versioning-overview": {
-    "updated": "2026-08-30",
-    "path": "docs/versioning/01-overview-and-architecture.md"
+  "onboarding-a-source": {
+    "updated": "2026-10-10",
+    "path": "docs/ONBOARDING_A_SOURCE.md"
+  },
+  "contributing": {
+    "updated": "2026-10-10",
+    "path": "docs/CONTRIBUTING.md"
   },
   "architecture": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/ARCHITECTURE.md"
   },
   "data-architecture": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/DATA_ARCHITECTURE.md"
   },
   "decisions": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-09-30",
+    "updated": "2026-10-10",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/architecture-when-scaling.md"
   },
   "aggregation-pipeline": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/AGGREGATION_PIPELINE.md"
   },
-  "technical-debt": {
-    "updated": "2026-08-30",
-    "path": "docs/TECHNICAL_DEBT.md"
+  "property-storage": {
+    "updated": "2026-10-10",
+    "path": "docs/PROPERTY_STORAGE.md"
+  },
+  "domain-ownership": {
+    "updated": "2026-10-10",
+    "path": "backend/app/db/DOMAIN_OWNERSHIP.md"
   },
   "setup": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/SETUP.md"
   },
+  "testing-and-ci": {
+    "updated": "2026-10-10",
+    "path": "docs/TESTING_AND_CI.md"
+  },
+  "feature-flags-lifecycle": {
+    "updated": "2026-10-10",
+    "path": "docs/features/feature-flags.md"
+  },
   "integration-testing": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/local-integration-testing.md"
   },
+  "api-guide": {
+    "updated": "2026-10-10",
+    "path": "docs/API_GUIDE.md"
+  },
   "backend": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/BACKEND.md"
   },
   "frontend": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/FRONTEND.md"
   },
   "api-features": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/API_FEATURES.md"
   },
   "services-overview": {
-    "updated": "2026-09-24",
+    "updated": "2026-10-10",
     "path": "docs/services/OVERVIEW.md"
   },
   "services-insights": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/services/INSIGHTS.md"
   },
   "services-search": {
@@ -67,11 +87,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/services/SEARCH.md"
   },
   "services-context-engine": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-08",
     "path": "docs/services/CONTEXT_ENGINE.md"
   },
   "services-assignments": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-04",
     "path": "docs/services/ASSIGNMENTS.md"
   },
   "feature-aggregation-reconciliation": {
@@ -79,7 +99,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/features/aggregation-reconciliation.md"
   },
   "feature-external-change-notification": {
-    "updated": "2026-08-30",
+    "updated": "2026-08-17",
     "path": "docs/features/external-change-notification.md"
   },
   "feature-view-portability": {
@@ -90,44 +110,128 @@ export const docMeta: Record<string, DocMeta> = {
     "updated": "2026-09-29",
     "path": "docs/features/search-and-rules-reference.md"
   },
+  "top-level-nodes-performance": {
+    "updated": "2026-10-10",
+    "path": "docs/TOP_LEVEL_NODES_PERFORMANCE.md"
+  },
+  "versioning-overview": {
+    "updated": "2026-10-09",
+    "path": "docs/versioning/01-overview-and-architecture.md"
+  },
+  "versioning-data-model": {
+    "updated": "2026-07-19",
+    "path": "docs/versioning/02-data-model.md"
+  },
+  "versioning-branching-and-merge": {
+    "updated": "2026-07-15",
+    "path": "docs/versioning/03-branching-commits-merge.md"
+  },
+  "versioning-projection-and-cache": {
+    "updated": "2026-10-09",
+    "path": "docs/versioning/04-projection-and-cache.md"
+  },
+  "versioning-ontology-governance": {
+    "updated": "2026-07-19",
+    "path": "docs/versioning/05-ontology-governance.md"
+  },
   "versioning-api-reference": {
-    "updated": "2026-09-25",
+    "updated": "2026-10-10",
     "path": "docs/versioning/06-api-reference.md"
   },
+  "versioning-frontend-integration": {
+    "updated": "2026-07-05",
+    "path": "docs/versioning/07-frontend-integration.md"
+  },
+  "versioning-import-export": {
+    "updated": "2026-10-09",
+    "path": "docs/versioning/08-import-export.md"
+  },
+  "versioning-scale-and-roadmap": {
+    "updated": "2026-10-10",
+    "path": "docs/versioning/09-scale-limits-and-roadmap.md"
+  },
+  "versioning-authoritative-sources": {
+    "updated": "2026-10-09",
+    "path": "docs/versioning/10-authoritative-sources-datahub-openmetadata.md"
+  },
+  "versioning-resync-at-any-scale": {
+    "updated": "2026-10-09",
+    "path": "docs/versioning/11-resync-at-any-scale.md"
+  },
   "versioning-e2e": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-09",
     "path": "docs/VERSIONING_E2E.md"
   },
   "versioning-deep-dives": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-09",
     "path": "docs/versioning/README-index.md"
   },
+  "versioning-guide": {
+    "updated": "2026-10-10",
+    "path": "docs/versioning/README.md"
+  },
+  "versioning-drafts-and-merge": {
+    "updated": "2026-07-05",
+    "path": "docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md"
+  },
+  "security-overview": {
+    "updated": "2026-10-10",
+    "path": "docs/SECURITY_OVERVIEW.md"
+  },
   "rbac": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/RBAC.md"
   },
   "sso": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/SSO.md"
   },
   "sso-integration": {
-    "updated": "2026-09-26",
+    "updated": "2026-10-10",
     "path": "docs/SSO_INTEGRATION.md"
   },
   "multi-environment-sessions": {
-    "updated": "2026-09-26",
+    "updated": "2026-10-10",
     "path": "docs/MULTI_ENVIRONMENT_SESSIONS.md"
   },
   "signup-service": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/SIGNUP_USER_SERVICE_PLAN.md"
   },
+  "sso-backchannel-contract": {
+    "updated": "2026-10-10",
+    "path": "docs/SSO_BACKCHANNEL_CONTRACT.md"
+  },
   "deployment": {
-    "updated": "2026-09-12",
+    "updated": "2026-10-10",
     "path": "docs/DEPLOYMENT.md"
   },
+  "kubernetes": {
+    "updated": "2026-10-10",
+    "path": "docs/KUBERNETES.md"
+  },
+  "kubernetes-cluster-overlay": {
+    "updated": "2026-10-10",
+    "path": "deploy/k8s/overlays/production-cluster/README.md"
+  },
+  "configuration": {
+    "updated": "2026-10-10",
+    "path": "docs/CONFIGURATION.md"
+  },
+  "observability": {
+    "updated": "2026-10-10",
+    "path": "docs/OBSERVABILITY.md"
+  },
+  "runbooks": {
+    "updated": "2026-10-10",
+    "path": "docs/RUNBOOKS.md"
+  },
+  "upgrade-2026-09-10": {
+    "updated": "2026-10-10",
+    "path": "docs/UPGRADE_2026-09-10_graph-availability.md"
+  },
   "migrations": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/MIGRATIONS.md"
   },
   "falkordb-deployment": {
@@ -139,129 +243,153 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/CONCURRENCY_TUNING.md"
   },
   "scaling-concurrent-users": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/SCALING_CONCURRENT_USERS.md"
   },
   "falkordb-dr": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/FALKORDB_DR_RUNBOOK.md"
   },
   "infra-launch-scale": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/INFRASTRUCTURE_LAUNCH_SCALE.md"
   },
   "infra-scaling-250m": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/INFRASTRUCTURE_SCALING_250M.md"
   },
   "read-path-performance": {
-    "updated": "2026-09-09",
+    "updated": "2026-10-10",
     "path": "docs/read-path-performance/README.md"
   }
 }
 export const guideMeta: Record<string, DocMeta> = {
   "welcome": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/WELCOME.md"
   },
   "key-concepts": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/KEY_CONCEPTS.md"
   },
   "quick-start": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/QUICK_START.md"
   },
   "browsing-views": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/BROWSING_VIEWS.md"
   },
   "reading-lineage": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/READING_LINEAGE.md"
   },
   "exploring-graph": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "lineage-lens": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/LINEAGE_LENS.md"
   },
   "navigating-layers": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/NAVIGATING_LAYERS.md"
   },
+  "requesting-access": {
+    "updated": "2026-10-10",
+    "path": "docs/guide/REQUESTING_ACCESS.md"
+  },
   "creating-views": {
-    "updated": "2026-09-23",
+    "updated": "2026-10-10",
     "path": "docs/guide/CREATING_VIEWS.md"
   },
   "managing-views": {
-    "updated": "2026-09-23",
+    "updated": "2026-10-10",
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "display-rules": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/guide/DISPLAY_RULES.md"
   },
   "semantic-layer": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/SEMANTIC_LAYER.md"
   },
   "versioning-change-control": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/VERSIONING_CHANGE_CONTROL.md"
   },
+  "editing-in-a-draft": {
+    "updated": "2026-10-10",
+    "path": "docs/guide/EDITING_IN_A_DRAFT.md"
+  },
+  "review-center": {
+    "updated": "2026-10-10",
+    "path": "docs/guide/REVIEW_CENTER.md"
+  },
   "import-export": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/guide/IMPORT_EXPORT.md"
   },
   "admin-setup": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/ADMIN_SETUP.md"
   },
   "workspace-admin": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/WORKSPACE_ADMIN.md"
   },
   "users-access": {
-    "updated": "2026-09-26",
+    "updated": "2026-10-10",
     "path": "docs/guide/USERS_ACCESS.md"
   },
   "sso-setup": {
-    "updated": "2026-09-27",
+    "updated": "2026-10-10",
     "path": "docs/guide/SSO_SETUP.md"
   },
   "sso-operations": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-10",
     "path": "docs/guide/SSO_OPERATIONS.md"
   },
   "governance-ops": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/GOVERNANCE_OPS.md"
   },
+  "feature-switches": {
+    "updated": "2026-10-10",
+    "path": "docs/guide/FEATURE_SWITCHES.md"
+  },
+  "data-freshness": {
+    "updated": "2026-10-10",
+    "path": "docs/guide/DATA_FRESHNESS.md"
+  },
+  "analytics": {
+    "updated": "2026-10-10",
+    "path": "docs/guide/ANALYTICS.md"
+  },
   "graph-store-topology": {
-    "updated": "2026-09-12",
+    "updated": "2026-10-10",
     "path": "docs/guide/GRAPH_STORE_TOPOLOGY.md"
   },
   "rollup-capacity": {
-    "updated": "2026-09-13",
+    "updated": "2026-10-10",
     "path": "docs/guide/ROLLUP_CAPACITY.md"
   },
   "ways-of-working": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/WAYS_OF_WORKING.md"
   },
   "glossary": {
-    "updated": "2026-08-30",
+    "updated": "2026-10-10",
     "path": "docs/guide/GLOSSARY.md"
   },
   "troubleshooting": {
-    "updated": "2026-09-12",
+    "updated": "2026-10-10",
     "path": "docs/guide/TROUBLESHOOTING.md"
   }
 }

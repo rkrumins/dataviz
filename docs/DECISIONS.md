@@ -1,12 +1,14 @@
 # Architectural Decision Records (ADRs)
 
-This document captures the key architectural decisions made in {brand} — the context, the decision, its trade-offs, and current status.
+*For architects, tech leads and engineers about to change how the system is built.*
 
-**Who it's for:** developers and architects who want to understand *why* the system is shaped the way it is before changing it.
+This page records why {brand} is shaped the way it is: for each decision, the problem it answered, what was chosen, and what it costs. Read it before you change one of these choices, so you know what you are trading away.
 
 **How to read an ADR:** each record states the **Context** (the problem), the **Decision**, the **Reasoning**, the **Trade-offs** (`+` benefit / `-` cost), and any **Alternatives considered**. Jump to the [Decision Summary](#decision-summary) table for the full index at a glance.
 
-> **Note:** ADRs are historical records, not living docs. A **Superseded** ADR (e.g. [ADR-002](#adr-002-dual-fastapi-services)) is kept for context even though its decision was later reversed — always check the **Status** line before treating an ADR as current.
+> **Note:** ADRs are historical records, not living docs. A **Superseded** ADR (e.g. [ADR-002](#adr-002-dual-fastapi-services)) is kept for context even though its decision was later reversed — always check the **Status** line before treating an ADR as current. Where the code has moved on from a record without a new ADR, the Status line says what changed and when the record was corrected.
+
+ADR-023 to ADR-026 were written after the fact, on 2026-10-10, for decisions the code shows were made but never recorded. Each is dated from the earliest evidence in the repository.
 
 ---
 
@@ -60,7 +62,7 @@ graph LR
 
 ## ADR-002: Dual FastAPI Services
 
-**Status:** Superseded by [ADR-018](#adr-018-retire-the-graph-service) — the standalone `graph-service` was retired and pre-registration connectivity testing now runs in-process in the Visualization Service. Retained here for historical context.
+**Status:** Superseded by [ADR-018](#adr-018-retire-the-graph-service) (2026-07) — the standalone `graph-service` was retired and pre-registration connectivity testing now runs in-process in the Visualization Service (`POST /api/v1/admin/providers/test-connection`). Retained here for historical context.
 **Date:** 2025 Q4
 **Context:** Users need to test database connectivity before registering a provider. This testing should not require database access or authentication.
 
@@ -161,7 +163,7 @@ stateDiagram-v2
 
 ## ADR-005: ProviderRegistry Singleton with Lazy Initialization
 
-**Status:** Accepted
+**Status:** Accepted — implemented today by `ProviderManager` (`backend/app/providers/manager.py`, singleton `provider_manager`); `ProviderRegistry` (`backend/app/registry/provider_registry.py`) remains only as a deprecated alias. The cache is still per process and keyed by `(provider_id, graph_name)`; it is now bounded (`PROVIDER_CACHE_MAX`, default 256, and an idle reaper, `PROVIDER_CACHE_IDLE_TTL_SECS`, default 900), and a provider edit is broadcast over Redis (channel `provider.control`) so other processes drop their copies. Record updated 2026-10-10.
 **Date:** 2025 Q4
 **Context:** Graph database connections are expensive to establish (connection pools, TLS handshakes). Creating a new connection per request is unacceptable.
 
@@ -186,7 +188,7 @@ stateDiagram-v2
 
 ## ADR-006: SQLite for Development, PostgreSQL for Production
 
-**Status:** Superseded — the SQLite branch was removed. The management database is PostgreSQL in every environment, and a non-`postgresql+asyncpg://` URL is rejected at startup (`backend/app/db/engine.py`). Retained here for historical context.
+**Status:** Superseded by [ADR-025](#adr-025-postgresql-only-management-database-schema-owned-by-an-upgrade-job) — the SQLite branch was removed. The management database is PostgreSQL in every environment, and a non-`postgresql+asyncpg://` URL is rejected at startup (`backend/app/db/engine.py`). Retained here for historical context.
 **Date:** 2025 Q4
 **Context:** Need zero-setup development experience while maintaining production-grade database support.
 
@@ -290,7 +292,7 @@ graph LR
 
 ## ADR-010: ELK Layout in Web Worker
 
-**Status:** Accepted
+**Status:** Superseded in code — record corrected 2026-10-10. Layout does not run in a Web Worker. `useElkLayout` (`frontend/src/hooks/useElkLayout.ts`) runs the bundled ELK build (`elkjs/lib/elk.bundled.js`) on the main thread, because ELK's worker build needs a module format Vite's ESM bundling does not load. The call is asynchronous (Promise-based) and debounced, but it shares the UI thread; `elk-layout.worker.ts` does not exist. When the worker was dropped is not recorded. The rest of this record describes the original intent.
 **Date:** 2025 Q4
 **Context:** Graph layout computation (ELK algorithm) blocks the UI thread for 100-500ms on large graphs, causing visible jank.
 
@@ -405,7 +407,7 @@ graph LR
 
 ## ADR-014: Asset Onboarding Wizard
 
-**Status:** Accepted
+**Status:** Accepted — the wizard has since gained a **Schema Review** step, so it now runs Workspace → Aggregation → Semantic Layer → Schema Review → Review (`frontend/src/components/admin/AssetOnboardingWizard/AssetOnboardingWizard.tsx`). Record updated 2026-10-10.
 **Date:** 2026 Q1
 **Context:** Setting up providers, catalog items, workspaces, data sources, and ontologies required navigating multiple admin screens with no guidance on correct ordering. New admins frequently misconfigured data sources or skipped ontology assignment entirely.
 
@@ -553,7 +555,7 @@ graph LR
 
 ## ADR-019: Internal service auth on the aggregation control plane
 
-**Status:** Accepted
+**Status:** Accepted — amended since: with `ENV` set to `prod` or `production`, the control plane refuses to start without `AGGREGATION_INTERNAL_TOKEN` (`assert_auth_mode_allowed` in `backend/app/services/aggregation/internal_auth.py`); in other environments the token stays opt-in and its absence is logged at startup. Record updated 2026-10-10.
 **Date:** 2026-07
 **Context:** The control plane (`:8091`) exposes job trigger/cancel/**delete**/**purge**/settings with **no authentication** — the viz-service is the authenticated edge; the control plane is internal. Anything that could reach `:8091` (a compromised pod, a NetworkPolicy misconfig, lateral movement) could drive a destructive, multi-tenant API. NetworkPolicies help, but on GKE Standard they are **opt-in** (Dataplane V2 / Calico) and a common misconfiguration.
 
@@ -572,7 +574,7 @@ graph LR
 
 ## ADR-020: Dedicated Redis decoupled from FalkorDB by construction
 
-**Status:** Accepted
+**Status:** Accepted — amended by [ADR-022](#adr-022-central-role-keyed-redis-config-cachestreams-independent): a deployed role must resolve the `STREAMS` endpoint at startup, but the `CACHE` role may now be configured per provider, so the startup check (`_assert_redis_roles_configured` in `backend/app/providers/manager.py`) resolves and logs it rather than requiring it. With no cache configured anywhere, the cache is off; it is still never placed on FalkorDB. Record updated 2026-10-10.
 **Date:** 2026-07
 **Context:** FalkorDB is a Redis-module process. The provider's ancestor/URN/stats **cache** could be built **on the FalkorDB instance itself**: `build_cache_client`, when no dedicated `CACHE_REDIS_URL` was set, mirrored the FalkorDB topology onto the graph nodes. That coupling meant a FalkorDB outage would also wipe the cache, and cache traffic would contend with graph queries on FalkorDB's single-threaded process.
 
@@ -655,6 +657,150 @@ Admin visibility: `GET /admin/redis/config` (resolved config + per-field provena
 
 ---
 
+## ADR-023: PostgreSQL as the version store, FalkorDB as a rebuildable read cache
+
+**Status:** Accepted
+**Date:** 2026-06 (the `graphver` schema migration, `20260601_1200_graphver_schema`, is dated 2026-06-01; version control shipped in release 0.2.0 on 2026-07-19). Recorded 2026-10-10.
+**Context:** Graph version control — drafts, review and merge, publish, revert ("Undo this change") and restore ("Restore to this point") — needs transactional writes, an append-only history and point-in-time reads. Graph databases are excellent at traversal but weaker at exactly those guarantees. At the same time, the canvas, trace and aggregation paths already read FalkorDB and had to stay fast.
+
+**Decision:** Split truth from the read model.
+
+```mermaid
+flowchart LR
+    API["API: /versioning and /graph routers"]
+    PG[("PostgreSQL graphver schema<br/>append-only versions + commits")]
+    VW["Versioning worker"]
+    FDB[("FalkorDB<br/>projection of main")]
+
+    API -->|"commits"| PG
+    PG --> VW
+    VW -->|"projects; can rebuild in full"| FDB
+    API -->|"reads"| FDB
+    API -->|"draft and as-of reads"| PG
+```
+
+- PostgreSQL holds the truth: the `graphver` schema keeps an append-only log of per-entity versions and commits, with a small mutable head pointer (`entity_heads`).
+- FalkorDB holds a projection of the published `main` branch. The versioning worker (`python -m backend.app.services.versioning`) builds it and can drop and rebuild it in full from PostgreSQL.
+- A draft is `main` plus a sparse delta, composed from PostgreSQL; publishing squashes it into one commit on `main`.
+- The browser never touches the store. Every read and write goes through the API's `/{ws_id}/versioning` and `/{ws_id}/graph` routers (draft editing adds `?branchId=`).
+- `GRAPHVER_DB_URL` can put the store on its own PostgreSQL; unset, it shares `MANAGEMENT_DB_URL`.
+
+**Reasoning:**
+- Correctness and durability live in an append-only relational log; the graph database is a fast, disposable read model.
+- Append-only versions give full history and audit for free, and make point-in-time reconstruction a range scan.
+- Composing a draft as `main` plus a delta reuses `main`'s caches and rollups and costs `O(delta)`.
+
+**Trade-offs:**
+- (+) The read cache can be lost or corrupted and rebuilt from PostgreSQL.
+- (+) History, audit and restore come from the data model, not from extra machinery.
+- (-) Two stores to keep consistent. The projection trails a commit briefly; reads are routed per request to the freshest correct source (a PostgreSQL composition while the projection catches up).
+- (-) The version tables grow with every commit; retention is on the roadmap.
+- (-) The projection targets FalkorDB; version control beyond FalkorDB is on the roadmap ([Versioning: Scale, Limits & Roadmap](/docs/versioning-scale-and-roadmap)).
+
+**Alternatives considered** (for drafts):
+- Materialising a FalkorDB graph per draft — rejected: it duplicates `main` per draft and cannot reuse its rollups.
+- Recomputing rollups per read — rejected: the cost lands on every request.
+
+Full design: [Versioning: Overview & Architecture](/docs/versioning-overview).
+
+---
+
+## ADR-024: Cookie sessions with CSRF double-submit, not bearer tokens
+
+**Status:** Accepted
+**Date:** 2026 Q2 — in place by June 2026 (the exact switch date is not recorded); hardened in July 2026 by a refresh-rotation grace window (migration dated 2026-07-28) and allow-by-record refresh tokens (migration dated 2026-07-30). Recorded 2026-10-10.
+**Context:** The single-page app used to keep its JWT, and an "is signed in" flag, in `localStorage`. A token in web storage can be read by any script that runs on the page, and a client-side flag cannot be trusted to guard a route. The app also had to support single sign-on, where the identity provider hands the session back through a browser redirect.
+
+**Decision:** The session lives in cookies, and no token is ever exposed to JavaScript.
+
+| Cookie | Holds | Readable by scripts |
+|---|---|---|
+| `nx_access` | the access JWT | No (`HttpOnly`) |
+| `nx_refresh` | the refresh JWT, sent only to `/api/v1/auth/refresh` | No (`HttpOnly`) |
+| `nx_csrf` | the CSRF token | Yes, so the app can echo it |
+| `nx_access_exp` | when `nx_access` expires | Yes, so the app can renew before expiry |
+
+- Cookies are `Secure` and `SameSite=Lax` by default; with `AUTH_ENVIRONMENT_ID` set, every cookie name carries that suffix so two deployments in one browser cannot overwrite each other.
+- Every state-changing request (`POST`, `PUT`, `PATCH`, `DELETE`) must send the `nx_csrf` value in an `X-CSRF-Token` header (double-submit). The token is bound by HMAC to the session id, and the request's `Origin` (or `Referer`) must be the app's own origin or a configured CORS origin.
+- The access token carries the user and global permission claims; per-workspace grants are kept server-side in the session store, keyed by the session id.
+- Refresh tokens rotate on use and are refused unless an active `refresh_tokens` row allows them; presenting a consumed one revokes its whole family, except within a short grace window (`REFRESH_ROTATION_GRACE_SECONDS`, default 30) that absorbs two tabs refreshing at once.
+- The app asks the server who is signed in (`GET /api/v1/auth/me`) instead of trusting stored state, and its shared request wrapper (`frontend/src/services/fetchWithTimeout.ts`) sends credentials, adds the CSRF header and renews the session.
+
+**Reasoning:**
+- `HttpOnly` keeps tokens out of reach of page scripts; the server is the only authority on whether a session is valid.
+- Cookies make cross-site request forgery possible, so the double-submit token, its binding to the session, and the origin check close that door for writes.
+- A short-lived access token plus server-side revocation, idle and absolute session ceilings keep a stolen or demoted session's window small.
+
+**Trade-offs:**
+- (+) Tokens never sit in web storage; sign-out and revocation are enforced by the server.
+- (+) SSO hand-offs set the same cookies as a password sign-in.
+- (-) Every write must carry the CSRF header — scripts and integrations included.
+- (-) Non-browser clients must keep a cookie jar; there are no API tokens or service accounts yet.
+- (-) Two deployments open in one browser need different `AUTH_ENVIRONMENT_ID` values.
+
+**Alternatives considered:**
+- A bearer token in `localStorage` — the previous design; readable by any script on the page.
+- A bearer token in `sessionStorage` — proposed in the sign-up service plan; tab-scoped, but still readable by scripts.
+
+Details: [Multi-Environment Sessions](/docs/multi-environment-sessions), [SSO](/docs/sso) and the [Security Overview](/docs/security-overview).
+
+---
+
+## ADR-025: PostgreSQL-only management database, schema owned by an upgrade job
+
+**Status:** Accepted — supersedes [ADR-006](#adr-006-sqlite-for-development-postgresql-for-production).
+**Date:** 2026 Q2–Q3, in steps: the Alembic baseline (`0001_baseline`) is dated 2026-04-16; until at least June 2026 the API applied migrations as it booted; the `synodic-upgrade` job owned them by the end of July 2026. Recorded 2026-10-10.
+**Context:** Two database dialects (SQLite for laptops, PostgreSQL for production) meant every query and migration had to work on both, which taxed the concurrency work, the schema namespaces and migration discipline. Applying migrations from the API's own startup also tied every schema change to the web tier's boot.
+
+**Decision:**
+- PostgreSQL 16+ through asyncpg in every environment. A `MANAGEMENT_DB_URL` that does not start with `postgresql+asyncpg://` is rejected at startup.
+- Alembic revisions in `backend/alembic/versions/` are the schema's source of truth. Only the `synodic-upgrade` job applies them (`python -m backend.scripts.upgrade upgrade`, image `backend/Dockerfile.upgrade`), under a PostgreSQL advisory lock. On an empty database it builds the schema at head from `0001_baseline`, seeds the RBAC reference rows and stamps head, instead of replaying every revision.
+- The API never migrates. Its startup (`init_db()` in `backend/app/db/engine.py`) checks that `alembic_version` matches every head: with no schema it starts in degraded mode, and a mismatch is logged loudly and reported by `/health/ready`.
+- Docker Compose runs `upgrade` as a one-shot service that every backend service waits for; the Helm chart runs it as a pre-install/pre-upgrade hook, and each backend pod waits for it in a `wait-for-schema` init container (`upgrade check --wait`).
+
+**Reasoning:** One dialect removes the cost of keeping two in step and lets the schema use what PostgreSQL offers — JSONB, partial unique indexes and partitioned tables, which the versioning store and the property side index rely on. One owner of schema changes, under one lock, means a migration runs once, before any backend process starts, and a failure fails a job rather than the API.
+
+**Trade-offs:**
+- (+) One database to test, tune and back up.
+- (+) Schema changes are explicit, ordered and run once.
+- (-) A laptop needs PostgreSQL; `./dev.sh infra` starts it in Docker.
+- (-) Every deploy path must run the job, with the release's own image, before the new backend starts — see [Migrations](/docs/migrations).
+- (-) The aggregation control plane and worker still run an idempotent `create_all(checkfirst=True)` for their own `aggregation` tables at boot, as a safety net for start-order races (`backend/app/services/aggregation/db_init.py`).
+
+**Alternatives considered:**
+- Keeping SQLite for development ([ADR-006](#adr-006-sqlite-for-development-postgresql-for-production)).
+- Running migrations from the API's startup — the earlier behaviour.
+- Running them from the aggregation control plane — an earlier plan (`migration_runner.py`, since removed) that the upgrade job replaced.
+
+---
+
+## ADR-026: Property storage in a PostgreSQL side index
+
+**Status:** Accepted, partly built. Phase 1 slice A — the `propidx` schema (Alembic `20260916_1000_property_index`) and its client `PostgresPropertyIndex` (`backend/app/providers/property_index.py`) — has shipped, but nothing on a request path uses it yet. Phase 1 slices B and C are paused until the property-name counts on other sources show they are needed. Until then a native property budget (`FALKORDB_NATIVE_PROPERTY_BUDGET`, default 50,000) and a reservation of the platform's own property names keep a graph off FalkorDB's ceiling. Recorded 2026-10-10.
+**Date:** 2026-09-14
+**Context:** FalkorDB numbers every distinct property name in a graph with a 16-bit id and never frees one: a graph holds at most 65,534 names. The writers stored every key of a node's property bag as a native attribute, so a source whose records carry tens of thousands of distinct keys can fill the table. After that the graph refuses every new name — no rollup writes, no new indexes — and only recreating the graph frees ids.
+
+**Decision (design "E+"):** keep a constant set of attribute names in the graph and move the long tail to PostgreSQL.
+- The graph keeps topology and a fixed set of names: the platform's reserved keys, the source's identity and name properties, rollup metadata and the edge fields.
+- Each node's complete user property bag goes to PostgreSQL (`propidx.node_props`, one LIST partition per physical graph, with an expression GIN index over a case-folded copy), and unchanged to `n.propertiesRaw` as the copy the Properties panel shows.
+- Predicates, sort, distinct values and key discovery on any key are answered in PostgreSQL and enter FalkorDB as per-label URN index seeks.
+- Writes go to PostgreSQL first and the graph second.
+
+**Reasoning:** Of four designs weighed at 1M nodes × 200 properties × 100k distinct keys, the side index removes the ceiling (about 25 attribute names regardless of the data), keeps every capability, lets a graph already at the ceiling get search back with zero graph writes, and costs the least FalkorDB memory.
+
+**Trade-offs:**
+- (+) No cap, budget or declaration decides which keys are stored or searchable.
+- (+) A graph at the ceiling can be migrated in place.
+- (-) PostgreSQL becomes a hard dependency for predicates on undeclared keys and for every write under the new layout.
+- (-) A long-tail predicate enters the graph as an anchor set or a post-filter, not as one query plan.
+- (-) Two copies of the bag (three for versioned sources), with a write-ordering contract and a drift sweep to maintain.
+
+**Alternatives considered:** declared fields plus a flat key/value array in the graph; an entity-attribute-value tier in the graph; one map-typed property (not buildable — FalkorDB cannot store maps).
+
+Full design record: [Property storage](/docs/property-storage).
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -663,12 +809,12 @@ Admin visibility: `GET /admin/redis/config` (resolved config + per-field provena
 | 002 | Dual FastAPI services | Superseded (ADR-018) | — |
 | 003 | Ontology-driven edge classification | Accepted | Low |
 | 004 | Immutable published ontologies | Accepted | Low |
-| 005 | ProviderRegistry singleton | Accepted | Medium (scaling) |
-| 006 | SQLite dev / PostgreSQL prod | Superseded (PostgreSQL only) | — |
+| 005 | ProviderRegistry singleton (now `ProviderManager`) | Accepted | Medium (scaling) |
+| 006 | SQLite dev / PostgreSQL prod | Superseded (ADR-025) | — |
 | 007 | Zustand over Redux | Accepted | Low |
 | 008 | Fernet credential encryption | Accepted | Medium (key mgmt) |
 | 009 | Schema-driven frontend rendering | Accepted | Low |
-| 010 | ELK layout in Web Worker | Accepted | Low |
+| 010 | ELK layout in Web Worker | Superseded in code (layout runs on the main thread) | — |
 | 011 | Workspace-scoped API paths | Accepted | Low |
 | 012 | Transactional outbox | Accepted | Low |
 | 013 | CatalogItem abstraction layer | Accepted | Medium (migration) |
@@ -677,18 +823,23 @@ Admin visibility: `GET /admin/redis/config` (resolved config + per-field provena
 | 016 | Ontology audit trail | Accepted | Low |
 | 017 | State-sync via control-plane consumer group (off the web tier) | Accepted | Low |
 | 018 | Retire the dead graph-service | Accepted | Low |
-| 019 | Control-plane internal auth (loop-split descoped) | Accepted | Low |
-| 020 | Dedicated Redis decoupled from FalkorDB by construction | Accepted | Low |
+| 019 | Control-plane internal auth (loop-split descoped) | Accepted (amended: required in production) | Low |
+| 020 | Dedicated Redis decoupled from FalkorDB by construction | Accepted (amended by ADR-022) | Low |
 | 021 | Build the FalkorDB client ourselves (never `FalkorDB.__init__`) | Accepted | Low |
 | 022 | Central role-keyed Redis config (cache/streams independent) | Accepted | Low |
+| 023 | PostgreSQL version store, FalkorDB rebuildable read cache | Accepted | Medium (two stores) |
+| 024 | Cookie sessions with CSRF double-submit | Accepted | Low |
+| 025 | PostgreSQL-only management DB, schema owned by an upgrade job | Accepted | Low |
+| 026 | Property storage in a PostgreSQL side index | Accepted, partly built (slice A only) | Medium (not wired in) |
 
 ---
 
-## Related
+## See also
 
-- [Architecture](/docs/architecture) — where these decisions are realized in the system design
-- [Data Architecture](/docs/data-architecture) — Redis topology and schema details behind ADR-017 through ADR-022
-- [Aggregation Pipeline](/docs/aggregation-pipeline) — the pipeline shaped by the provider-protection decisions
-- [Services Overview](/docs/services-overview) — the process-role topology referenced by ADR-017/019
-- [Technical Debt](/docs/technical-debt) — open risks, some of which these ADRs resolved
-- [Overview](/docs/overview) — platform vision and key terms
+- [Architecture](/docs/architecture) — where these decisions show up in the running system
+- [Data Architecture](/docs/data-architecture) — the stores, schemas and Redis roles behind ADR-017 to ADR-022 and ADR-025
+- [Versioning: Overview & Architecture](/docs/versioning-overview) — the full design behind ADR-023
+- [Security Overview](/docs/security-overview) — the controls ADR-024 is part of
+- [Property storage](/docs/property-storage) — the design record behind ADR-026
+- [Migrations](/docs/migrations) — how the upgrade job in ADR-025 builds and changes the schema
+- [Services Overview](/docs/services-overview) — the process roles referenced by ADR-017 and ADR-019

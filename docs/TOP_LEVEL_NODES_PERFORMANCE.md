@@ -1,5 +1,7 @@
 # Top-Level Nodes: Performance Architecture & Timeout Ladder
 
+*For backend engineers and platform operators.*
+
 How `/graph/nodes/top-level` serves 2-3M+ node graphs without timing out,
 what each cache layer does, and which knobs tune it. Written alongside the
 fix for the recurring "~17s failure claiming a 30s timeout" incident; the
@@ -187,3 +189,9 @@ TIMEOUT_MAX".
    fails=N/M`).
 
 Each layer above maps 1:1 to a link in this chain.
+
+## See also
+
+- [Concurrency and Timeout Tuning](/docs/concurrency-tuning) — the full timeout ladder and the order to raise each ceiling in.
+- [Read-Path Performance](/docs/read-path-performance) — the rest of the read-path redesign.
+- [Insights Service](/docs/services-insights) — the service that materializes the top-level payload.

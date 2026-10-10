@@ -1,128 +1,217 @@
 # Quick Start — Your First 10 Minutes
 
+*For anyone new to {brand}.*
+In about ten minutes you'll sign in, find your way around, open a view, trace a
+piece of data upstream and downstream, and keep the view one click away. You
+don't need to know anything about graphs.
+
+> **Before you start:** You need an account and membership of at least one
+> workspace that has a view in it. Not sure you have that? Ask your
+> administrator, or see [Requesting Access](/guide/requesting-access).
+
 ```tour-getting-started
 ```
 
-This is the fastest path from "logged in" to "I get it." Follow the five steps
-below and you'll have traced real lineage and saved your first View. No prior
-graph knowledge required.
-
-> **Important:** Before you start, make sure you can log in and that an
-> administrator has set up at least one workspace with a data source. If you see
-> *"No data source for workspace,"* ask your admin to finish
-> [Admin Setup](/guide/admin-setup).
-
 ```mermaid
 flowchart LR
-  A[1. Sign in] --> B[2. Pick a workspace]
-  B --> C[3. Open a view]
-  C --> D[4. Trace lineage]
-  D --> E[5. Save & favourite]
+  A["1. Sign in"] --> B["2. Pick a workspace"]
+  B --> C["3. Open a view"]
+  C --> D["4. Trace lineage"]
+  D --> E["5. Favourite it"]
 ```
 
 ---
 
 ## Step 1 — Sign in and orient yourself
 
-After logging in you land on the **Dashboard**. Take a moment to notice the
-layout:
+1. Open {brand} and sign in — with your email and password (**Enter
+   Workspace**), or with your organisation's single sign-on (usually a button
+   reading **Continue with** followed by its name).
+2. You land on the **Dashboard**: a greeting, a search box, and the buttons
+   **Build a new view** and **Browse all views** (plus **Pick up**, with the
+   name of your last view, once you've opened one). Further down are **Your
+   work**, **Activity in your workspaces** and **Your business areas**.
 
-- **Left sidebar** — your main navigation: *Dashboard, Explore, Workspaces,
-  Ingestion, Semantic Layers,* and (if you're an admin) *Administration*.
-- **Top bar** — global search across views, pages and actions (press `⌘K` /
-  `Ctrl-K`), the **Business/Technical persona toggle**, notifications, and
-  your profile menu.
-- **Main area** — the Dashboard shows your workspaces and a gallery of popular
-  and recent Views.
+![The Dashboard right after sign-in: sidebar on the left (Dashboard, Explore, Workspaces, Ingestion, Semantic Layers, Analytics), top bar with the search box, Business/Technical switch, Favorites star, Inbox bell and Help, and the greeting with Build a new view and Browse all views](/docs-assets/guide/quick-start-dashboard.png)
 
-> **Tip:** Anything you can *look at* is safe. You can't break data by
-> clicking around — editing always requires a deliberate action.
+Now take a moment to learn the layout. **The sidebar** on the left is your main
+navigation:
+
+| Item | What it's for |
+| --- | --- |
+| **Dashboard** | Overview and workspace activity — where you start |
+| **Explore** | The Explorer: browse and open saved views |
+| **Workspaces** | Your workspaces and what's in them |
+| **Ingestion** | Connect sources and import data |
+| **Semantic Layers** | Define and manage what your data means |
+| **Analytics** | Growth, engagement and platform insights |
+| **Administration** | System settings, users and health |
+
+The items you see depend on your role, so you may have fewer. **Dashboard**,
+**Explore** and **Workspaces** are there for everyone; **Analytics** appears for
+administrators and auditors, or for everyone if your administrator has opened
+it; **Administration** appears only for administrators. At the bottom of the
+sidebar are **Getting started** (your checklist), **User Guide** and
+**Documentation**.
+
+**The top bar** runs across the top, left to right:
+
+| Control | What it does |
+| --- | --- |
+| The {brandShort} name, with **Business View** or **Technical View** under it | Shows which naming mode is on |
+| **Search pages, views, workspaces, docs…** (`⌘K` / `Ctrl-K`) | Opens the command palette: jump to any page, view, workspace or guide page |
+| **Business** / **Technical** | Switches how entities are named — Technical adds each one's qualified name |
+| The star (**Favorites**) | Your favourite views, plus the ones you opened recently |
+| The bell (**Inbox**) | Messages for you — for example, a view someone shared with you |
+| The theme button | Cycles between light, dark and your system's theme |
+| The question mark (**Help**, or press `?`) | Searches this guide and the documentation without leaving the page |
+| The cog (**Administration**) | The admin console — Super Admins and Org Admins only |
+| Your avatar | **Account settings**, **My access**, **Identities**, **Reduce motion** and **Sign Out** |
+
+If you can invite people, there's one more bell, **Invite activity**, showing who
+has joined through your invite links.
+
+> **Tip:** Anything you can *look at* is safe. Browsing, searching and tracing
+> never change data — changing it always takes a deliberate step.
+
+> **If you don't see Your business areas:** when the Dashboard says **Welcome to
+> {brand}** and shows **Setup Progress** steps instead, you don't belong to a
+> workspace yet. Ask an administrator to add you — see
+> [Requesting Access](/guide/requesting-access).
+
+**You should now see** the Dashboard, with the sidebar on the left and the top
+bar above it.
 
 ---
 
 ## Step 2 — Pick a workspace
 
-Open **Workspaces** from the left sidebar to see the ones you have access to,
-then enter the one you want to work in. Each screen shows you which workspace
-you're in — there's no separate global switcher to keep in sync. The workspace
-determines which data you'll see.
+Views live in workspaces, so start with the one your team works in.
 
-When you enter a workspace, {brand} loads its **data source** and its
-**ontology** (the colours and meanings). The canvas will re-render around the new
-context.
+1. On the Dashboard, scroll to **Your business areas**. Each card is one of your
+   workspaces, with its data sources and how many views it has.
+2. On the workspace you want, click **Explore Views**.
+
+There's no global workspace switch to keep in sync: picking a workspace here
+just narrows the list, and every view opens in its own workspace whichever way
+you reach it. Two other routes to the same place:
+
+- Press `⌘K` / `Ctrl-K` and choose a workspace under **Switch Workspace** (shown
+  when you belong to more than one).
+- Click **Workspaces** in the sidebar, open a workspace, and choose its **Views**
+  tab.
+
+**You should now see** the Explorer, with a **Workspace:** chip above the
+results naming the workspace you picked.
 
 ---
 
-## Step 3 — Open a View
+## Step 3 — Open a view
 
-The easiest way to see something meaningful immediately is to open an existing
-**View** — a saved exploration someone has already curated.
+A **view** is a saved, curated picture of part of your data that someone has
+already built.
 
-1. Go to **Views** (the gallery) from the sidebar or Dashboard.
-2. Browse the **Popular** and **Recent** views. Each card shows a name,
-   description, and favourite count.
-3. Click any View to open it on the canvas.
+1. In the Explorer, find a view in the results — or type part of its name in
+   **Search views by name, tag, workspace...** (press `/` to jump there).
+2. Click the view's card. A preview panel slides in from the right with the
+   view's details.
+3. Click **Open Full View**.
 
-The graph appears with the saved layout, filters, and layers already applied.
-You're now looking at real lineage. See [Reading Lineage](/guide/reading-lineage)
-to interpret what's on screen.
+> **Tip:** To skip the preview, hover over a card and click its **Open view**
+> icon. And with no filter applied, the Explorer also shows **Trending** views
+> and **Continue where you left off**.
 
-> **Tip:** No views yet? Open the **Explorer** instead and use the search box to
-> find any node by name — then continue to Step 4.
+> **If you don't see any views:** **No views match your search** means the
+> workspace you picked has no views you can open — click **Clear all filters**
+> to see views from all your workspaces. **No views yet** means there are none
+> you can open anywhere. Either way, ask a colleague to share one, or build your
+> own with **New View** — see [Creating Views](/guide/creating-views).
+
+**You should now see** the view's entities on its canvas, with the view's name
+in the header. [Reading Lineage](/guide/reading-lineage) explains what's on
+screen.
 
 ---
 
 ## Step 4 — Trace lineage
 
-This is the heart of {brand}. Pick any node that interests you and follow its
-connections:
+This is the heart of {brand}: pick one thing and see where its data comes from
+and where it goes.
 
-1. **Click a node** to select it. A details panel opens with its properties,
-   tags, and connected edges.
-2. Use the **Trace** controls (toolbar or right-click menu) to expand
-   **Upstream** (sources) or **Downstream** (consumers).
-3. Adjust the **depth** to follow the chain one hop at a time or several at once.
-4. **Change granularity** (column → table → domain) to zoom out for the big
-   picture or in for precise detail.
+1. Click any entity on the canvas. It's highlighted, and its details panel
+   opens on the right with three buttons at the top: **Root Cause**, **Impact**
+   and **Full Lineage**.
+2. Click **Full Lineage**. {brand} follows the entity's lineage both ways and
+   highlights the chain — upstream (where its data comes from) and downstream
+   (what it feeds). **Root Cause** traces upstream only; **Impact** downstream
+   only.
+3. Look at the header: it now shows **Exit Trace** and a **Depth** chip, and a
+   bar along the bottom of the canvas reads **Tracing** with the entity's name
+   and its upstream and downstream counts.
+4. Click **Depth**. In **Trace settings**, drag **Upstream** or **Downstream**,
+   or pick a preset: **Direct** (one hop each way), **Nearby** (five hops) or
+   **All hops**. The highlighted chain shrinks or grows straight away.
+5. Click **Exit Trace** when you're done.
 
-As you trace, watch how the highlighted path shows the *blast radius* — every
-item that would be affected if your selected node changed.
+> **Tip:** Two shortcuts start the same trace: right-click an entity and
+> choose **Trace Lineage**, or select it and press `T`. In a Context View,
+> **Trace Lineage** is also in the header.
 
-> **Tip:** *Power move* — press `⌘⇧P` / `Ctrl-Shift-P` on a canvas to open
-> the **action palette** and jump straight to trace, filter and layout. `/`
-> focuses the view's own search box and `⌘⇧F` / `Ctrl-Shift-F` shows or
-> hides its results; `⌘K` is the app-wide palette, for getting to another
-> view or page.
+> **Tip:** Steps 3–5 describe a **Context View**, the most common kind of view.
+> In a **Graph** or **Hierarchy** view the trace gets its own toolbar instead:
+> its gear (**Trace settings**) holds **Upstream Depth** and **Downstream
+> Depth**, **Re-trace** applies a change, and **Exit** ends the trace.
 
-Full details: [Exploring the Graph](/guide/exploring-graph).
+> **If you don't see Trace Lineage in a Context View's header:** your
+> administrator has turned off **Lineage trace**. If the header says **Loading
+> lineage…** instead, wait a moment — tracing becomes available as soon as the
+> lineage has loaded.
 
----
-
-## Step 5 — Save and favourite
-
-Found something worth keeping? Capture it so you (and your team) can return
-instantly.
-
-1. Click **Save as View**. A short wizard opens.
-2. Give it a clear **name and description** (see naming tips in
-   [Ways of Working](/guide/ways-of-working)).
-3. Choose which **entity types** stay visible and, optionally, organise nodes
-   into **layers**.
-4. Set **visibility** — *Personal*, *Team*, or *Enterprise*.
-5. Confirm. Your View now appears in the gallery.
-
-Finally, click the **★ favourite** icon on any View to pin it to your sidebar's
-quick-access list. Full walkthrough: [Creating Views](/guide/creating-views).
+**You should now see** the view as it was before the trace — and you know how
+to find any entity's upstream and downstream. More in
+[Tracing Lineage on the Canvas](/guide/exploring-graph).
 
 ---
 
-## You did it 🎉
+## Step 5 — Favourite it
 
-In ten minutes you've used every core idea: workspaces, views, tracing,
-granularity, and saving. Where to go next depends on your role:
+Found a view you'll come back to? Put it one click away.
 
-- **Just looking around?** → [Browsing Views](/guide/browsing-views)
-- **Building things to share?** → [Creating Views](/guide/creating-views)
-- **Running the platform?** → [Admin Setup](/guide/admin-setup)
-- **Want the full vocabulary?** → [Key Concepts](/guide/key-concepts) ·
-  [Glossary](/guide/glossary)
+1. Go back to the Explorer: click **Explore** in the sidebar, and find the
+   view's card (search for its name if you need to).
+2. Hover over the card and click the heart (**Favorite**). The heart fills in.
+3. Click the star (**Favorites**) in the top bar. Your view is in the list —
+   click it any time to open it.
+
+> **If you don't see it in Favorites yet:** reload the page; the list is
+> refreshed when {brand} loads. In the Explorer, the **Favorites** tab above the
+> results always lists all your favourites.
+
+**You should now see** your view in the **Favorites** list in the top bar.
+
+Want a view of your own? Click **New View** in the Explorer to start the
+**Create New View** wizard — see [Creating Views](/guide/creating-views).
+
+---
+
+## Check yourself
+
+You've used every core idea once. You can now:
+
+- find your way around the sidebar and the top bar;
+- narrow the Explorer to one workspace and open a view from it;
+- trace an entity upstream and downstream, and change how far the trace
+  reaches;
+- keep a view one click away in **Favorites**.
+
+---
+
+## Where to next
+
+- [Key Concepts](/guide/key-concepts) — when you want the vocabulary behind what
+  you just did.
+- [Finding Views (the Explorer)](/guide/browsing-views) — when you want to
+  search, filter and sort views like a pro.
+- [Tracing Lineage on the Canvas](/guide/exploring-graph) — when you want to go
+  deeper into tracing.
+- [Creating Views](/guide/creating-views) — when you're ready to build your own.

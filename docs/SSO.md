@@ -1,5 +1,7 @@
 # SSO — operator reference
 
+*For administrators and operators who set up and run single sign-on.*
+
 > **At a glance.** The operator reference for {brand}'s single sign-on: **what exists**
 > and **how to run it**. Covers the OIDC + SAML2 transport, DB-backed per-row IdP
 > providers, multi-identity users, claim mapping, group→role/group mapping, 24h SSO
@@ -137,7 +139,7 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
 | `oidc` | Authorization Code + PKCE + JWKS verify | Entra ID, Auth0, Ping, Keycloak, Okta-OIDC |
 | `saml2` | python3-saml strict mode + replay cache | ADFS, OneLogin, Okta-SAML, PingFederate |
 | `custom_profile` | profile handed over via cookie / browser storage / proxy header | internal deployments where a corporate portal or auth proxy already authenticated the user |
-| `backchannel` | an opaque handle redeemed against the provider's own endpoints — server-to-server when the cookie is on a shared domain, or exchanged by the browser (with mandatory JWT verification) when it is not; the answer may be JSON or a JWT | internal gateways with no OIDC or SAML underneath, including Kerberos-fronted ones. Hand `docs/SSO_BACKCHANNEL_CONTRACT.md` to the team that owns the gateway |
+| `backchannel` | an opaque handle redeemed against the provider's own endpoints — server-to-server when the cookie is on a shared domain, or exchanged by the browser (with mandatory JWT verification) when it is not; the answer may be JSON or a JWT | internal gateways with no OIDC or SAML underneath, including Kerberos-fronted ones. Hand the [back-channel integration contract](/docs/sso-backchannel-contract) to the team that owns the gateway |
 | `custom` | HS256-signed cookie envelope (dev/demo only) | local development, CI smoke, demo videos |
 
 Every provider is one row in `idp_providers`. The runtime
@@ -228,12 +230,15 @@ Validation at write time:
   true.
 * `group_membership`: the target group must exist and have
   `is_protected=false`.
-* Universal: `role_name='system:admin'` is refused (forbidden auto-role).
+* Universal: `super_admin` is refused (a forbidden auto-grant role), and so is
+  `system:admin` if it is sent as a role name. A platform admin role
+  (`org_admin`) can be mapped only for one specific provider whose assurance
+  is `verified` (§1.13).
 
 Reconciliation (`permission_service.reconcile_sso_targets`) runs on
 **every SSO login AND on every `/refresh`** for SSO sessions. Admin
-mapping changes propagate to active sessions within ~5 min (one
-refresh cycle).
+mapping changes propagate to active sessions within one access-token
+lifetime (one refresh cycle).
 
 ### 1.6 24-hour SSO re-authentication
 
@@ -359,8 +364,8 @@ Shared response shape (`UserSummary`): id, email, name, status,
 * Admin `GET /admin/idp-providers` redacts secret fields to
   `"********"`. Rotation happens by PATCH-ing the field with a new
   value (the merge logic preserves the rest of the settings dict).
-* JWT_SECRET_KEY fails fast at import if < 32 chars (Phase 0
-  hardening).
+* `JWT_SECRET_KEY` fails fast at startup if it is missing, shorter than
+  32 characters, or a placeholder published in the repository.
 
 ### 1.12 Audit
 
@@ -560,17 +565,23 @@ to restart uvicorn.
 K8s deployments via Helm do not need this step — the hook Job runs
 ahead of every `helm install/upgrade`.
 
+> **Note:** In the app, **Connect a provider** opens a wizard — **Provider**, **Connect**,
+> **Fields**, **Rehearse**, **Publish** — that asks which product you use (for example
+> **Microsoft Entra ID**) and sets the protocol from it. The JSON in these playbooks is what
+> it saves; a connection's **Advanced (JSON)** editor shows the same settings object. For a
+> click-by-click walkthrough, see [Single Sign-On](/guide/sso-setup).
+
 ### 2.1 Configure a new OIDC provider
 
-1. Admin → SSO → Providers → **Connect a provider**.
+1. Administration → SSO → Providers → **Connect a provider**.
 2. Fill in:
    * **Slug** — URL-safe identifier (e.g. `entra-staff`). Becomes
      `/api/v1/auth/entra-staff/login`.
    * **Display name** — shown on the login button (e.g. `Corporate
      Entra ID`).
-   * **Kind** — `oidc`.
-   * **Linking policy** — `strict` for most cases.
-   * **Settings (JSON)**:
+   * **Protocol** — `oidc`.
+   * **Account linking** — **Strict** (`strict`) for most cases.
+   * **Settings**, as JSON:
      ```json
      {
        "issuer": "https://login.microsoftonline.com/<tenant-id>/v2.0",
@@ -580,8 +591,8 @@ ahead of every `helm install/upgrade`.
        "scopes": "openid email profile"
      }
      ```
-   * **Claim mapping (JSON)** — empty `{}` to use defaults, or
-     override fields. Operators commonly add `extras`:
+   * **Claim mapping** — leave the defaults (`{}`), or override
+     fields. Operators commonly add `extras`:
      ```json
      {
        "groups": ["wids"],
@@ -591,19 +602,19 @@ ahead of every `helm install/upgrade`.
        }
      }
      ```
-3. Register the redirect URI at the IdP. Use the claim-mapping
-   editor's **Preview** button (POST `/admin/idp-providers/{id}/test`)
-   to paste a sample id_token claims blob and confirm the mapping
-   resolves to the expected `ProviderIdentity` (incl. `attributes`).
-   Preview needs a saved row, so create the provider first, then reopen
-   it with the row's edit (pencil) action.
+3. Register the redirect URI at the IdP. In **Claim mapping**, paste a
+   sample id_token claims blob: the live preview shows the
+   `ProviderIdentity` the mapping resolves to (incl. `attributes`). It
+   runs as you type, before the connection is saved; for a saved one it
+   uses `POST /admin/idp-providers/{id}/test`.
 4. Rehearse a sign-in, then **Publish**. A new connection is created as a
    draft and is invisible to every login surface until published; after
    that the login page picks it up within 60 s (registry TTL).
 
 ### 2.2 Configure a new SAML provider
 
-1. Same flow as OIDC, with kind `saml2`.
+1. Same flow as OIDC, with protocol `saml2` (the **AD FS** and **Other SAML 2.0
+   provider** products set it).
 2. Settings JSON:
    ```json
    {
@@ -620,8 +631,8 @@ ahead of every `helm install/upgrade`.
    ```
 3. Hand the SP metadata XML to the IdP team:
    `GET /api/v1/auth/okta-prod/metadata` returns it.
-4. Smoke test with `/admin/idp-providers/{id}/test` (paste a SAML
-   attribute statement as the `claims` blob).
+4. Check the mapping by pasting a SAML attribute statement as the sample
+   in **Claim mapping**; the live preview resolves it.
 
 ### 2.2.1 Configure a custom profile provider (cookie / storage / header)
 
@@ -639,9 +650,9 @@ mapping is configured in the admin UI rather than in code.
 > `trusted_proxy_acknowledged`) each require an explicit toggle in the
 > admin UI and emit their own audit event on every login.
 
-1. Admin → SSO → Providers → **Connect a provider**, kind
-   `Custom profile (cookie / browser storage / header)`.
-2. Pick the **source**:
+1. Administration → SSO → Providers → **Connect a provider**, and pick
+   **Corporate portal** (protocol `custom_profile`).
+2. Pick the **Source**:
 
    | Source | Read by | Login flow |
    |---|---|---|
@@ -652,7 +663,8 @@ mapping is configured in the admin UI rather than in code.
 
    One source per row. Multiple rows of this kind are fine — run a
    cookie provider and a storage provider side by side if you need to.
-3. Set **source key** — the cookie name, storage key, or header name.
+3. Set the key it is read from — **Cookie name**, **Storage key** or
+   **Header name**, depending on the source.
 4. Settings, for the signed (recommended) case:
    ```json
    {
@@ -674,17 +686,17 @@ mapping is configured in the admin UI rather than in code.
      JSON, since a raw JSON blob isn't a legal cookie value.
    * `signing_alg: "RS256"` swaps `shared_secret` for `public_key` (PEM).
    * `issuer` / `audience` are enforced only when set.
-5. Map the fields. The **Profile field mapping** editor lists our fields
+5. Map the fields. **Claim mapping** lists our fields
    against ordered candidate keys — first non-empty wins. Defaults
    already cover the common casings (`firstName` / `first_name` /
    `givenName`, `emailAddress` / `mail` / `upn`, `fullName` split into
    first + last), so most portals need no override. For a storage
    source, **Read from my browser** pulls the real object out of your own
-   browser so you can map against it; **Preview** resolves it through
-   the mapping server-side and shows the resulting profile.
+   browser so you can map against it, and the live preview resolves it
+   through the mapping server-side and shows the resulting profile.
 6. Anything else worth keeping (department, employee ID) goes under
    **Extra attributes** — those land in `users.metadata_.attributes` and
-   the indexed `user_external_attributes` table, so Admin → SSO →
+   the indexed `user_external_attributes` table, so Administration → SSO →
    Diagnostics can search on them.
 7. Rehearse a sign-in, then **Publish**. Until it is published the
    connection is a draft and no login page shows it; after publishing,
@@ -702,20 +714,23 @@ including an administrator, network isolation notwithstanding. Every such
 login is audited as `user.sso_unsigned_accepted`.
 
 **Proxy headers.** `source: "header"` requires
-`trusted_proxy_acknowledged: true`. Only tick it once you have confirmed
+`trusted_proxy_acknowledged: true` (**Trust proxy headers**). Only tick it once you have confirmed
 your proxy strips the header from inbound requests before setting its
 own — otherwise a request can name any user it likes. Audited as
 `user.sso_header_accepted`.
 
 ### 2.3 Set up IdP group → role mapping
 
-Admin → SSO → Access mapping → **Create mapping**.
+Administration → SSO → **Access mapping**: build the rule under **New rule**,
+then choose **Create rule**. The fields, as the API names them:
 
 * **Role-binding target** — "Everyone in the IdP group
-  `DataViz-Admins` gets `super_admin` globally":
+  `DataViz-Admins` who signs in through the `entra-staff` connection
+  gets `org_admin` globally":
+  * `providerId`: the `entra-staff` connection's id
   * `idpGroup`: `DataViz-Admins`
   * `targetType`: `role_binding`
-  * `roleName`: `super_admin`
+  * `roleName`: `org_admin`
   * `scopeType`: `global`
 * **Group-membership target** — "Everyone in the IdP group
   `engineering` joins the internal `Engineers` group":
@@ -724,43 +739,45 @@ Admin → SSO → Access mapping → **Create mapping**.
   * `targetGroupId`: `grp_xxxxxxxxxx`
 
 Mapping takes effect on the next SSO login OR the next `/refresh`
-(within ~5 min) for sessions already in flight.
+(within one access-token lifetime) for sessions already in flight.
 
-> **Warning:** An IdP-group mapping that grants a **global admin** role (`super_admin`
-> or `org_admin`) hands platform-wide power to whoever your IdP puts in that group.
-> Validation refuses `roleName: system:admin` outright (a forbidden auto-role — that is
-> a *permission*, not a bindable role), and `role_is_bindable_in_scope` must pass, but a
-> valid `super_admin` binding is exactly as powerful as it sounds. Prefer mapping to
-> `group_membership` and managing privileged membership internally. Role names come from
-> the [RBAC taxonomy](/docs/rbac).
+> **Warning:** An IdP-group mapping that grants a **global admin** role hands
+> platform-wide power to whoever your IdP puts in that group. `super_admin` can never be
+> granted this way: validation refuses it, as it refuses `system:admin` sent as a role
+> name. `org_admin` can be mapped only for one specific provider whose assurance is
+> `verified` (§1.13). Every mapping must also pass `role_is_bindable_in_scope`. A valid `org_admin`
+> mapping is exactly as powerful as it sounds: prefer mapping to `group_membership` and
+> managing privileged membership internally. Role names come from the
+> [RBAC taxonomy](/docs/rbac).
 
 ### 2.4 Disable local login (SSO-only mode)
 
 > **Caution:** This is a lockout-class change. The API refuses it (HTTP 409) if any
-> active admin lacks an SSO identity, and refuses `sso_enabled=false` +
+> active Super Admin who isn't a system account lacks an SSO identity, and refuses `sso_enabled=false` +
 > `allow_local_login=false` together (no way left to log in) — but you still want an
 > SSO login verified end-to-end **before** you flip it.
 
-Pre-flight: every admin must have at least one linked SSO identity.
-Check via `Admin → SSO → Diagnostics` and confirm each admin has a
-`Linked identities` row, OR have them go to `/me/identities` and
+Pre-flight: every Super Admin who isn't a system (break-glass) account
+must have at least one linked SSO identity. Look each one up in
+Administration → SSO → **Diagnostics** and confirm their **Ways in**
+lists an SSO identity, OR have them go to `/me/identities` and
 click **Link** for an IdP.
 
-Admin → SSO → Settings → toggle **Allow local login** OFF →
+Administration → SSO → Settings → turn **Passwords** off →
 confirm. If any admin lacks an SSO identity the API returns 409
 with the offending list and the toggle reverts; fix them first
 and retry.
 
 ### 2.5 Master kill-switch
 
-Admin → SSO → Settings → toggle **SSO enabled** OFF. The login page
+Administration → SSO → Settings → turn **Single sign-on** off. The login page
 will only show the password form; SSO routes 404. Per-provider
 `enabled` rows are unchanged; flipping the master toggle back on
 restores everything.
 
 ### 2.6 Block JIT provisioning
 
-Admin → SSO → Settings → toggle **Allow JIT provisioning** OFF. New
+Administration → SSO → Settings → turn **Create accounts automatically** off. New
 IdP subjects whose email doesn't match an existing user get
 `jit_disabled` (audited as `user.sso_jit_blocked`). Existing users
 keep working — admins must pre-create / invite new users before
@@ -768,13 +785,13 @@ they can SSO in.
 
 ### 2.7 Find a user
 
-Admin → SSO → Diagnostics. Three modes:
+Administration → SSO → Diagnostics → **Find a person**. Three searches:
 
-* **Free-text** — type any of email, name, external_id, or attribute
+* **Anything** — type any of email, name, external_id, or attribute
   value. Fan-out across all four; results show which dimension
   matched.
-* **Find by email** — exact match on `users.email`.
-* **Find by claim attribute** — type `staff_id` + the value;
+* **Email** — exact match on `users.email`.
+* **Claim attribute** — type `staff_id` + the value;
   uses the `(key, value)` composite index. Returns 409 if the value
   matches more than one user (operator narrows with a provider
   filter or uses fan-out instead).
@@ -806,7 +823,7 @@ row in the admin UI, set the env vars, restart.
 
 ### 2.10 Onboard a provider by discovery (instead of typing 15 fields)
 
-Admin → SSO → Providers → **Connect a provider** → paste one of:
+Administration → SSO → Providers → **Connect a provider** → paste one of:
 
 * an **OIDC issuer URL** — the `.well-known/openid-configuration` is
   fetched and `authorization_endpoint` / `token_endpoint` / `jwks_uri` /
@@ -829,7 +846,7 @@ actually breaks in production — redirect URI registered at the IdP,
 signature verifies, clock skew, certificate still valid — is what this
 covers.
 
-1. Admin → SSO → Providers → the flask icon on the provider row.
+1. Administration → SSO → Providers → the flask icon (**Rehearse sign-in**) on the provider row.
 2. A new tab opens the real IdP login. **Sign in with your own account.**
 3. The callback reports what *would* have happened: which branch fires
    (`provision_new` / `sign_in_existing` / `link_existing` / `rejected`),
@@ -859,7 +876,7 @@ Every SSO failure redirects to `/login?ref=<8 hex chars>&sso_error=1`. The
 reason is deliberately withheld from that page — it is admin-only by
 construction and lives in the audit log instead.
 
-Admin → SSO → **Diagnostics** → *Given a reference?* → **Look up**, which opens
+Administration → SSO → **Diagnostics** → *Given a reference?* → **Look up**, which opens
 the **Activity** tab with the ref searched (`GET /api/v1/admin/sso/activity`). The
 `user.sso_login_failed` event carries the provider, the precise reason
 (`state_mismatch`, `token_or_idtoken`, `saml_validate`,
@@ -869,28 +886,28 @@ to know (`email`, `user_id`, `external_id`) and where it came from
 (`client_ip`, `user_agent`, `path`). Open the row to read them.
 
 The same tab's **Sign-in problems** list groups these per person
-(`GET /api/v1/admin/sso/failures`); see *When a sign-in fails* in
-`docs/guide/SSO_OPERATIONS.md`.
+(`GET /api/v1/admin/sso/failures`); see [Running Single Sign-On](/guide/sso-operations).
 
-The tab needs `system:audit:read` in addition to `system:admin` — the two
-do not imply each other.
+The tab's data needs `system:audit:read`, and opening the SSO page at all
+needs `system:admin`; `super_admin` holds both, since `system:admin` passes
+every check.
 
 ### 2.13 Map claims against what the IdP actually sent
 
-In the claim-mapping editor, **Load last assertion** pulls the most recent
+In **Claim mapping**, **Use last real assertion** pulls the most recent
 claims blob this provider sent (§1.16) into the sample box, then the live
 preview shows exactly what the current mapping would produce from it. This
 beats pasting a sample from the IdP's documentation, which is where most
 mapping bugs come from.
 
-The button 404s with an explanation until one has been captured — it is
-recorded on the next successful sign-in through that provider.
+Until one has been captured, the button explains that there is nothing to
+load yet — one is recorded on the next successful sign-in through that provider.
 
 ### 2.14 Turn on email-first login
 
 1. Set each provider's **Email domains** (comma or space separated) in the
-   provider form. Do this **first**.
-2. Admin → SSO → Settings → **Email-first sign-in**.
+   connection's **Login page** section. Do this **first**.
+2. Administration → SSO → Settings → turn on **Ask for an email first**.
 
 An address that matches nothing falls back to the password form and the
 button row, so nobody is stranded by a domain you missed. To reverse it,
@@ -903,7 +920,7 @@ flip the switch off; the login page returns to exactly what it was.
 ### 3.1 Test suites (cheap, deterministic)
 
 ```bash
-# Auth/SSO suite — 96 tests
+# Auth/SSO suite
 JWT_SECRET_KEY=$(python3 -c "print('x'*48)") PYTHONPATH=. pytest \
   backend/tests/test_sso_phase2.py \
   backend/tests/test_sso_phase3.py \
@@ -921,7 +938,7 @@ JWT_SECRET_KEY=$(python3 -c "print('x'*48)") PYTHONPATH=. pytest \
   backend/tests/test_sso_dry_run.py
 ```
 
-Expected: 233 passing.
+Expected: every test passes.
 
 ```bash
 # Frontend: session cache, the claim mapper UI, and the silent
@@ -964,15 +981,15 @@ export JWT_SECRET_KEY=$(python3 -c "import secrets;print(secrets.token_urlsafe(4
 3. Visit `/me/identities` → see the linked identity from
    `default-custom`.
 4. Visit `/admin/sso` → Providers tab shows `default-custom`;
-   Settings tab shows all three toggles ON; Find user finds the
-   mock user.
-5. Toggle **Allow local login** OFF in Settings → confirm.
+   Settings tab shows **Single sign-on**, **Passwords** and **Create
+   accounts automatically** on; Diagnostics finds the mock user.
+5. Turn **Passwords** off in Settings → confirm.
 6. Log out → try password login → 403 `local_login_disabled`. Try
    Dev Login again → succeeds.
-7. Toggle **Allow JIT provisioning** OFF → log out → Dev Login with
+7. Turn **Create accounts automatically** off → log out → Dev Login with
    a brand-new external_id + email → `/login?sso_error=1`. Logs
    show `user.sso_jit_blocked`.
-8. Toggle everything back ON.
+8. Turn everything back on.
 
 ### 3.4 Review checklist
 
@@ -1015,8 +1032,8 @@ we go beyond the typical pattern:
   every IdP rename. Group-membership mapping decouples IdP-side
   and internal group management.
 * **Continuous reconciliation on /refresh** — many platforms only
-  reconcile on login. Admin mapping changes propagate within ~5 min
-  here.
+  reconcile on login. Admin mapping changes propagate within one
+  access-token lifetime here.
 * **Multi-identity per user with last-authenticator invariant** —
   most platforms lock you to one IdP per account. Ours stacks
   arbitrarily, with a server-side guarantee the unlink path can't
@@ -1091,9 +1108,10 @@ backend/app/db/
     idp_provider_repo.py     # Fernet-encrypted CRUD + redaction
     idp_group_mapping_repo.py# role_binding + group_membership targets + validation
     app_auth_config_repo.py  # singleton CRUD with optimistic version bump
-  services/
-    permission_service.py    # reconcile_sso_targets (both target types)
-    idp_health.py            # background probe loop -> app.state.idp_health_cache
+
+backend/app/services/
+  permission_service.py      # reconcile_sso_targets (both target types)
+  idp_health.py              # background probe loop -> app.state.idp_health_cache
 
 backend/app/api/v1/endpoints/
   admin_idp_providers.py   # CRUD + /test mapping preview + /discover + /status
@@ -1127,9 +1145,22 @@ frontend/src/
   pages/MyIdentitiesPage.tsx     # /me/identities
   pages/DevLogin.tsx             # /dev-login (custom IdP)
   pages/PortalLogin.tsx          # /portal-login (custom_profile web storage)
-  components/admin/AdminSso.tsx  # Providers / Mappings / Settings / Find user tabs
-  components/admin/ProviderForm.tsx      # create + edit, kind-aware settings
-  components/admin/ClaimMappingEditor.tsx # visual field mapper + live preview
+  components/admin/AdminSso.tsx  # Providers / Access mapping / Diagnostics / Activity / Settings tabs
+  components/admin/sso/IdpConnectionWizard/  # connect a provider (Provider -> Publish)
+  components/admin/sso/ProviderEditorDrawer/ # edit a connection, section by section
+  components/admin/sso/settings/             # kind-aware settings forms + Advanced (JSON)
+  components/admin/sso/ClaimMappingStudio/   # visual field mapper + live preview
   components/auth/LoginPage.tsx  # dynamic SSO buttons + collision modal
                                  # + one-shot silent custom_profile sign-in
 ```
+
+## Where to next
+
+* [Single Sign-On](/guide/sso-setup) — when you want the click-by-click setup of a
+  connection in the app.
+* [SSO Integration Guide](/docs/sso-integration) — when you need to extend, test or debug
+  the sign-in surface.
+* [Security Overview](/docs/security-overview) — when you want SSO in the context of
+  every other security control.
+* [Multi-Environment Sessions](/docs/multi-environment-sessions) — when more than one
+  environment can be open in the same browser.
