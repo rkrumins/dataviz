@@ -690,5 +690,5 @@ Admin visibility: `GET /admin/redis/config` (resolved config + per-field provena
 - [Data Architecture](/docs/data-architecture) — Redis topology and schema details behind ADR-017 through ADR-022
 - [Aggregation Pipeline](/docs/aggregation-pipeline) — the pipeline shaped by the provider-protection decisions
 - [Services Overview](/docs/services-overview) — the process-role topology referenced by ADR-017/019
-- [Technical Debt](/docs/technical-debt) — open risks, some of which these ADRs resolved
+- The technical-debt register, `docs/TECHNICAL_DEBT.md` in the repository — open risks, some of which these ADRs resolved
 - [Overview](/docs/overview) — platform vision and key terms

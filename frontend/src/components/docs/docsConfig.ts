@@ -226,13 +226,6 @@ export const docEntries: DocEntry[] = [
     description: 'How :AGGREGATED edges are materialized and rolled up',
     importFn: () => import('@docs/AGGREGATION_PIPELINE.md?raw'),
   },
-  {
-    slug: 'technical-debt',
-    section: 'architecture',
-    title: 'Technical Debt',
-    description: 'Known debt items and remediation plan',
-    importFn: () => import('@docs/TECHNICAL_DEBT.md?raw'),
-  },
 
   // Setup & Development
   {

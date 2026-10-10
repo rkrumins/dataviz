@@ -23,7 +23,6 @@ export const filenameMap: Record<string, string> = {
   'FRONTEND.md': 'frontend',
   'DATA_ARCHITECTURE.md': 'data-architecture',
   'API_FEATURES.md': 'api-features',
-  'TECHNICAL_DEBT.md': 'technical-debt',
   'SIGNUP_USER_SERVICE_PLAN.md': 'signup-service',
   'architecture-when-scaling.md': 'scaling-architecture',
   'AGGREGATION_PIPELINE.md': 'aggregation-pipeline',

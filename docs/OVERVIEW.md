@@ -56,7 +56,7 @@ The starting point for understanding {brand} — what it is, the problem it solv
 2. [BACKEND.md](BACKEND.md) -- full API reference
 3. [FRONTEND.md](FRONTEND.md) -- component architecture
 4. [DECISIONS.md](DECISIONS.md) -- architectural trade-offs
-5. [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) -- known risks
+5. `docs/TECHNICAL_DEBT.md` -- known risks
 
 **Deep Dive:**
 - [DATA_ARCHITECTURE.md](DATA_ARCHITECTURE.md) -- all schema details
@@ -408,13 +408,13 @@ For detailed architecture documentation, see:
 - [FRONTEND.md](FRONTEND.md) -- Component architecture, state management, UX patterns
 - [DATA_ARCHITECTURE.md](DATA_ARCHITECTURE.md) -- Data models, entity relationships, caching
 - [DECISIONS.md](DECISIONS.md) -- Architectural Decision Records (ADRs)
-- [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) -- Risk assessment and remediation plan
+- `docs/TECHNICAL_DEBT.md` -- Risk assessment and remediation plan
 
 ---
 
 ## Current State & Roadmap
 
-*As of 2026-10-09. `PLAN.md` at the repository root is the one-page version; the [technical-debt register](TECHNICAL_DEBT.md) is what is wrong today.*
+*As of 2026-10-09. `PLAN.md` at the repository root is the one-page version; the technical-debt register (`docs/TECHNICAL_DEBT.md`) is what is wrong today.*
 
 ### Current State: Shipped Platform
 
@@ -478,7 +478,7 @@ timeline
 
 | Area | Item | Status |
 |------|------|--------|
-| Hardening | The register's §1: production safeguards on in shipped configs, the connection-tester SSRF, FalkorDB persistence on Kubernetes, metrics scraped and alerted on, complete Kubernetes deploy paths, and a setup script that cannot overwrite live secrets | Next — see [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md), which sets the order |
+| Hardening | Production safeguards switched on in the shipped configs, FalkorDB persistence on Kubernetes, metrics scraped and alerted on, complete Kubernetes deploy paths, and a setup script that cannot overwrite live secrets | Next — the technical-debt register in the repository sets the order |
 | Views | Server-side membership, so `placementContractEnabled` can default on | Next — the placement contract ships as a preview behind that flag |
 | Versioning | Re-sync above 250,000 entities, version control beyond FalkorDB, retention and incremental Merkle for drafts | Planned — [Versioning: Scale, Limits & Roadmap](versioning/09-scale-limits-and-roadmap.md) |
 | Integrations | Additional provider adapters (Apache Atlas, dbt, Airflow) | Not started |
@@ -512,7 +512,7 @@ timeline
 - **Deployment parity:** The Helm chart lacks the versioning worker and other pieces the Kubernetes manifests have, and the zero-config quickstart does not boot
 - **Legacy code:** The pre-workspace connection path is unreachable dead code still waiting to be deleted
 
-Each of these is an entry, with evidence, in the [technical-debt register](TECHNICAL_DEBT.md).
+Each of these is an entry, with evidence, in the technical-debt register (`docs/TECHNICAL_DEBT.md`).
 
 ### Honest State
 
@@ -524,7 +524,7 @@ Each of these is an entry, with evidence, in the [technical-debt register](TECHN
 | Frontend UX | Strong | Canvas, persona, Lineage Lens, multi-entity trace, Layer Strip, Anchor Rail, guided onboarding |
 | Backend API | Solid | About 500 endpoints, clear REST patterns |
 | Identity | Strong | SSO, cookie sessions with CSRF protection, RBAC with custom roles and group bindings |
-| Security posture | Needs Work | Strong controls that shipped configs do not switch on; connection-tester SSRF open |
+| Security posture | Needs Work | Strong controls that the shipped configs do not switch on yet; open hardening items are tracked in the repository |
 | Operability | Needs Work | Metrics off by default and unalerted; Helm chart behind the Kubernetes manifests |
 | Scale-out | Deployed, unmeasured | Three tiers on Kubernetes with autoscaling; no recorded load test |
 
@@ -602,7 +602,7 @@ ADMIN_EMAIL=admin@your-org.com                                        # Recommen
 ADMIN_PASSWORD=<strong-random-password>                                # Recommended
 ```
 
-> **Warning:** Without `ENV=production`, the production-only checks — the 15-minute token cap, shared replay caches, credential encryption, the control-plane token, and readiness on shared revocation — only log a warning. None of the shipped deployment configs set it yet; see [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §1.1.
+> **Warning:** Without `ENV=production`, the production-only checks — the 15-minute token cap, shared replay caches, credential encryption, the control-plane token, and readiness on shared revocation — only log a warning. None of the shipped deployment configs set it yet; see `docs/TECHNICAL_DEBT.md` §1.1.
 
 ---
 
@@ -612,6 +612,6 @@ ADMIN_PASSWORD=<strong-random-password>                                # Recomme
 - [Data Architecture](/docs/data-architecture) — data models, entity relationships, caching, Redis topology
 - [Decisions](/docs/decisions) — the ADRs behind the four-entity model and beyond
 - [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
-- [Technical Debt](/docs/technical-debt) — known risks and the remediation plan
+- The technical-debt register, `docs/TECHNICAL_DEBT.md` in the repository — known risks and the remediation plan
 - [Architecture When Scaling](/docs/scaling-architecture) — the deployed three-tier split, and the end-state items still open
 - [Versioning: Scale, Limits & Roadmap](/docs/versioning-scale-and-roadmap) — the versioned store's limits and roadmap

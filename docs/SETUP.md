@@ -279,7 +279,7 @@ Before deploying to production, ensure these **mandatory** settings are configur
 | **Specific CORS origins** | The dev default only allows `http://localhost:5173`; a production deployment must allow-list its real frontend domain(s), not `*` | Set `CORS_ALLOWED_ORIGINS` to your actual frontend domain(s) |
 | **JWT secret key** | Changing `JWT_SECRET_KEY` invalidates every live session at once, and mid-rollout pods on the old and new key make auth flap request-to-request | Keep it stable and stored out-of-band. To rotate, move the current value to `JWT_SECRET_KEY_PREVIOUS` first, deploy, then drop it after `JWT_REFRESH_EXPIRY_DAYS` |
 
-> See [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) for a full security risk assessment.
+> See `docs/TECHNICAL_DEBT.md` for a full security risk assessment.
 
 ---
 

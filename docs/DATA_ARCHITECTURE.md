@@ -891,5 +891,5 @@ All tables use text UUIDs with semantic prefixes:
 - [Decisions](/docs/decisions) — ADRs behind the entity model, Redis roles, and outbox
 - [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are computed and written
 - [Services Overview](/docs/services-overview) — process-role topology over these data layers
-- [Technical Debt](/docs/technical-debt) — SQLite, migrations, and outbox-consumer risks
+- The technical-debt register, `docs/TECHNICAL_DEBT.md` in the repository — SQLite, migrations, and outbox-consumer risks
 - [Overview](/docs/overview) — platform vision and key terms

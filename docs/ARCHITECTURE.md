@@ -380,7 +380,7 @@ Authorization separates **global-tier roles** (organization-wide) from **workspa
 
 ### Scalability Considerations
 
-- **Per-process provider caches**: Each process keeps its own provider cache. A provider edit is broadcast over Redis, and the web, aggregation-worker and versioning-worker processes drop their copies; the stats service and the control plane do not listen yet ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §2.3).
+- **Per-process provider caches**: Each process keeps its own provider cache. A provider edit is broadcast over Redis, and the web, aggregation-worker and versioning-worker processes drop their copies; the stats service and the control plane do not listen yet (`docs/TECHNICAL_DEBT.md` §2.3).
 - **PostgreSQL only**: There is no SQLite branch. Any `MANAGEMENT_DB_URL` that is not a `postgresql+asyncpg://` URL is rejected at startup, in every environment.
 
 ---
@@ -830,5 +830,5 @@ kubectl -n synodic logs -l app=viz-service -f
 - [Decisions](/docs/decisions) — ADRs behind the entity model, services, and Redis design
 - [Services Overview](/docs/services-overview) — process-role topology (WEB, WORKER, CONTROLPLANE, DEV)
 - [Aggregation Pipeline](/docs/aggregation-pipeline) — how `:AGGREGATED` rollup edges are materialized
-- [Technical Debt](/docs/technical-debt) — security, scaling, and testing risks
+- The technical-debt register, `docs/TECHNICAL_DEBT.md` in the repository — security, scaling, and testing risks
 - [Architecture When Scaling](/docs/scaling-architecture) — the deferred horizontal-scale plan

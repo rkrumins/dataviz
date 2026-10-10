@@ -132,7 +132,7 @@ Two rules that are not optional:
 
 All three then run `verify-schema`, which fails when the ORM declares a table or column the
 database lacks, and warns on the known `server_default` differences catalogued in
-[TECHNICAL_DEBT.md §3.1](TECHNICAL_DEBT.md).
+`docs/TECHNICAL_DEBT.md` §3.1.
 
 `forward-migrate` is the one worth understanding. A green "upgrade head on an empty database"
 proves the chain does not crash — not that any migration in it does anything, because on a
