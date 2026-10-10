@@ -378,9 +378,9 @@ export const PAGE_INDEX: PageEntry[] = [
     {
         id: 'admin-audit',
         category: 'Setting',
-        title: 'Audit Log',
-        description: 'RBAC + user lifecycle history',
-        keywords: ['admin', 'audit', 'log', 'history', 'compliance'],
+        title: 'Activity',
+        description: 'Who did what, where and why — across the platform',
+        keywords: ['admin', 'audit', 'log', 'history', 'compliance', 'activity', 'who', 'triggered'],
         path: '/admin/audit',
         gate: { kind: 'admin', key: 'audit' },
     },

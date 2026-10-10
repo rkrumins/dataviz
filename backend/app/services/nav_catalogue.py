@@ -79,7 +79,12 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     # true here is that holding any of these three ALWAYS grants access,
     # whatever the flag says.
     "analytics":  ("Analytics",     NavSpecAnyPerm(perms=["system:analytics:read", "system:admin", "system:org-admin", "system:audit:read"])),
-    "admin":      ("Administration", NavSpecAnyPerm(perms=["system:admin", "system:groups:manage"])),
+    # Every permission that opens an admin SECTION must also open the parent
+    # route, or that section is unreachable: `/admin` is a nested route whose
+    # guard runs first. `system:audit:read` was missing, so the org_auditor role
+    # — built to read the activity log — was refused at `/admin` before its own
+    # section was ever consulted.
+    "admin":      ("Administration", NavSpecAnyPerm(perms=["system:admin", "system:groups:manage", "system:audit:read"])),
 }
 
 # Admin sub-nav. Keyed by the route segment (matches
@@ -102,7 +107,7 @@ _ADMIN_SECTIONS: dict[str, tuple[str, NavSpec]] = {
     "groups":        ("Groups",          NavSpecPerm(perm="system:groups:manage")),
     "permissions":   ("Permissions",     NavSpecPerm(perm="system:admin")),
     "sso":           ("SSO",             NavSpecPerm(perm="system:admin")),
-    "audit":         ("Audit Log",       NavSpecPerm(perm="system:audit:read")),
+    "audit":         ("Activity",        NavSpecPerm(perm="system:audit:read")),
 }
 
 

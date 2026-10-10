@@ -175,6 +175,22 @@ def test_sidebar_workspace_legs_are_enforced():
         )
 
 
+def test_every_admin_section_is_reachable_through_the_parent_gate():
+    """``/admin`` is a nested route: its sidebar spec is checked before any
+    section's. A section whose permission the parent does not accept is
+    therefore unreachable for anyone holding only that permission — which is
+    exactly how the org_auditor role (``system:audit:read``) was refused at
+    ``/admin`` while its own section said it was allowed in."""
+    catalogue = get_catalogue()
+    parent = catalogue.sidebar["admin"].spec
+    assert parent.kind == "anyPerm"
+    for key, section in catalogue.admin_sections.items():
+        assert section.spec.perm in parent.perms, (
+            f"/admin/{key} needs {section.spec.perm!r}, which the /admin parent "
+            f"gate {parent.perms} does not accept — the section is unreachable."
+        )
+
+
 def test_catalogue_covers_admin_route_segments():
     """Every admin section the catalogue gates has a backend anchor, and
     vice-versa — catches a section added to one side but not the other."""

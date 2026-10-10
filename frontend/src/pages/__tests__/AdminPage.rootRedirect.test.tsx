@@ -37,6 +37,8 @@ function renderAtAdminRoot() {
                 <Route path="/admin" element={<AdminPage />} />
                 <Route path="/admin/overview" element={<div>overview page</div>} />
                 <Route path="/admin/groups" element={<div>groups page</div>} />
+                <Route path="/admin/audit" element={<div>activity page</div>} />
+                <Route path="/admin/telemetry" element={<div>telemetry page</div>} />
             </Routes>
         </MemoryRouter>,
     )
@@ -73,5 +75,13 @@ describe('AdminPage root redirect', () => {
         renderAtAdminRoot()
 
         expect(screen.getByText('overview page')).toBeInTheDocument()
+    })
+
+    it('lands an auditor on Activity, the section built for them', () => {
+        setClaims('ready', ['system:audit:read'])
+        renderAtAdminRoot()
+
+        expect(screen.getByText('activity page')).toBeInTheDocument()
+        expect(screen.queryByText('telemetry page')).not.toBeInTheDocument()
     })
 })
