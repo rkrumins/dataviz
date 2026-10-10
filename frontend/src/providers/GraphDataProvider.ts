@@ -687,6 +687,10 @@ export interface LensClosureExtras {
      *  lane, 'fine' when a coarse request fell back to the walk (a
      *  provider without rollups), absent from servers that predate it. */
     grain?: 'fine' | 'coarse' | null
+    /** Lineage edges the server left out because the entity at their other
+     *  end has no URN — a quiet count, never partiality. Absent on older
+     *  servers. */
+    unresolvedEdges?: number
 }
 
 /**

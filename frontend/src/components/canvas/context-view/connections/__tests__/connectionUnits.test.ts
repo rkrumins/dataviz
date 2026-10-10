@@ -31,6 +31,8 @@ import {
   formatUnitCount,
   unitMeaning,
   unitNoun,
+  unresolvedFlowsLabel,
+  unresolvedFlowsNote,
   type ConnectionCountUnit,
 } from '../connectionUnits'
 
@@ -73,6 +75,15 @@ describe('the unit vocabulary', () => {
   it('formats the number with its unit, thousands separated', () => {
     expect(formatUnitCount(4300, 'flows')).toBe('4,300 underlying flows')
     expect(formatUnitCount(1, 'lines')).toBe('1 line')
+  })
+
+  it('says flows left out for a missing URN as "at least", agreeing with the number', () => {
+    expect(unresolvedFlowsNote(1)).toBe("At least 1 underlying flow isn't shown — the entity at its other end has no URN.")
+    expect(unresolvedFlowsNote(1200)).toBe(
+      "At least 1,200 underlying flows aren't shown — the entities at their other ends have no URN.",
+    )
+    expect(unresolvedFlowsLabel(1)).toBe('at least 1 underlying flow not shown')
+    expect(unresolvedFlowsLabel(3)).toBe('at least 3 underlying flows not shown')
   })
 
   it('every unit can say precisely what it counts', () => {

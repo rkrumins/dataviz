@@ -2389,6 +2389,7 @@ export function LineageLens({
               // (2026-08-23). Same switch as the header's Direction.
               direction={directionFilter}
               onDirection={setDirectionFilter}
+              unresolvedFlows={model?.unresolvedEdges ?? 0}
             />
           {/* LEAVING THE ROOM. A walk is work — hops fetched one click at
               a time, containers opened, a path followed — and it lives

@@ -1142,6 +1142,11 @@ async def trace_closure(
       * ``seedCursor`` is INCLUSIVE: ``s:<urn>`` names the first anchor the
         next page will walk. It is legal with ``seedUrns`` (a container
         card's descendants page by keyset too).
+      * ``unresolvedEdges`` counts lineage edges of the anchors this page
+        walked that were left out because the node at their far end has no
+        usable urn. It is never a truncation — ``truncated`` and
+        ``truncationReason`` are untouched — and two pages can count the
+        same edge, so a client merging pages takes the max.
 
     Same bulkheads and never-504 contract as ``/trace/v2``. Unlike the
     legacy trace routes, this endpoint IS enrolled in fair-share: a
@@ -2416,9 +2421,21 @@ class _SyncSummaries(BaseModel):
     last_job_status: Optional[str] = Field(None, alias="lastJobStatus")
     last_job_at: Optional[str] = Field(None, alias="lastJobAt")
     last_success_at: Optional[str] = Field(None, alias="lastSuccessAt")
+    # Lineage-bearing nodes the last completed run found with no usable urn — every read leaves
+    # their lineage out, which counts alone can never show. None = none found, or not reported.
+    identity_gaps: Optional[int] = Field(None, alias="identityGaps")
 
     class Config:
         populate_by_name = True
+
+
+def _identity_gaps_of(run_stats: Optional[str]) -> Optional[int]:
+    """The node count of a run's ``lineage_identity_gaps`` advisory, if it recorded one."""
+    try:
+        advisories = (json.loads(run_stats) if run_stats else {}).get("advisories") or []
+        return next((int(a["nodes"]) for a in advisories if a.get("kind") == "lineage_identity_gaps"), None)
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return None
 
 
 class _SyncCounts(BaseModel):
@@ -2511,10 +2528,11 @@ async def get_sync_status(
     newest = (await session.execute(
         _select(AggregationJobORM).where(AggregationJobORM.data_source_id == dataSourceId)
         .order_by(AggregationJobORM.created_at.desc()).limit(1))).scalar_one_or_none()
-    last_success = (await session.execute(
-        _select(AggregationJobORM.completed_at).where(
+    last_success_row = (await session.execute(
+        _select(AggregationJobORM.completed_at, AggregationJobORM.run_stats).where(
             AggregationJobORM.data_source_id == dataSourceId, AggregationJobORM.status == "completed")
-        .order_by(AggregationJobORM.completed_at.desc().nullslast()).limit(1))).scalar_one_or_none()
+        .order_by(AggregationJobORM.completed_at.desc().nullslast()).limit(1))).first()
+    last_success = last_success_row[0] if last_success_row else None
 
     summaries = None
     if row is not None:
@@ -2540,6 +2558,7 @@ async def get_sync_status(
             last_job_status=newest.status if newest else None,
             last_job_at=(newest.completed_at or newest.updated_at or newest.created_at) if newest else None,
             last_success_at=last_success,
+            identity_gaps=_identity_gaps_of(last_success_row[1]) if last_success_row else None,
         )
 
     svc = GraphVersioningService()

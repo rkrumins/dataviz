@@ -762,6 +762,73 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
       expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn).sort()).toEqual(['a', 'c1'])
       expect(result.current.walkFor('a')!.status).toBe('done')
     })
+
+    /** The fine first page answers only once released, and fails while
+     *  `failFine` holds — so the coarse leg always lands first. */
+    function fineFailsAfterCoarse(coarse: () => TraceV2Result & LensClosureExtras) {
+      const state = { failFine: true }
+      const gates: Array<() => void> = []
+      const { provider, traceClosure } = providerByUrn({
+        a: async (req) => {
+          if (req.grain === 'coarse') return coarse()
+          if (state.failFine) { await new Promise<void>(r => { gates.push(r) }); throw new Error('500 Internal Server Error') }
+          return closureResult({ focus: f('a'), nodes: [gn('a'), gn('c1')], downstreamUrns: new Set(['c1']) })
+        },
+      })
+      const coarseCalls = () => traceClosure.mock.calls.filter(c => (c[0] as Record<string, unknown>).grain === 'coarse').length
+      const failFirstPage = async () => { await waitFor(() => expect(gates).toHaveLength(1)); act(() => gates[0]!()) }
+      return { provider, traceClosure, state, coarseCalls, failFirstPage }
+    }
+
+    it('cells drawn, then the fine page fails: the cells stay, the first page is owed, retryWalk re-runs it — once', async () => {
+      const { provider, traceClosure, state, coarseCalls, failFirstPage } = fineFailsAfterCoarse(coarsePage)
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(result.current.walkFor('a')?.model.lineageEdges.map(e => e.id)).toEqual(['agg:a>P']))
+      await failFirstPage()
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('error'))
+      const entry = result.current.walkFor('a')!
+      expect(entry.status).toBe('done')                                          // not wiped
+      expect(entry.model.lineageEdges.map(e => e.id)).toEqual(['agg:a>P'])
+      expect(entry.extendStatus.get('fine:a')).toBe('error')
+      expect(result.current.walkProgressFor('a')!.pending).toBeGreaterThanOrEqual(1)
+
+      // Never auto-retried.
+      await new Promise(r => setTimeout(r, 20))
+      expectFineCalls(traceClosure, 1)
+      expect(coarseCalls()).toBe(1)
+
+      state.failFine = false
+      act(() => { result.current.retryWalk('a'); result.current.retryWalk('a') })
+      expectFineCalls(traceClosure, 2)                                           // a double click is ONE request
+      expect(result.current.walkProgressFor('a')?.phase).toBe('seeding')
+      expect(fineCalls(traceClosure)[1]![0]).toEqual({
+        urn: 'a', direction: 'both', upstreamDepth: 1, downstreamDepth: 1, maxNodes: WALK_FIRST_PAGE_NODES,
+      })
+      expect(coarseCalls()).toBe(1)                                              // the coarse leg is not re-fired
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+      const after = result.current.walkFor('a')!
+      expect(after.extendStatus.has('fine:a')).toBe(false)
+      expect(after.model.nodes.map(n => n.urn).sort()).toEqual(['P', 'a', 'c1'])
+      expect(after.model.lineageEdges.map(e => e.id)).toEqual(['agg:a>P'])
+      expectFineCalls(traceClosure, 2)
+    })
+
+    it('a coarse page with no cells changes nothing: the fine failure is an error entry, and retry re-fetches', async () => {
+      const { provider, traceClosure, state, failFirstPage } = fineFailsAfterCoarse(
+        () => closureResult({ focus: f('a'), nodes: [gn('a')], grain: 'coarse' } as never),
+      )
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('done'))  // the empty coarse page landed
+      await failFirstPage()
+      await waitFor(() => expect(result.current.walkFor('a')?.status).toBe('error'))
+      expect(result.current.walkFor('a')!.model.nodes).toEqual([])
+      expect(result.current.walkFor('a')!.error).toBe('500 Internal Server Error')
+
+      state.failFine = false
+      act(() => result.current.retry('a'))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+      expectFineCalls(traceClosure, 2)
+    })
   })
 
   it('holds at most FULL_WALK_CONCURRENCY requests in flight', async () => {

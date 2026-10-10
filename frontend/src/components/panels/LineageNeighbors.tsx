@@ -49,7 +49,7 @@ import { cn } from '@/lib/utils'
 import { withTimeout, TimeoutError } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
-import { formatUnitCount, unitMeaning, unitNoun } from '@/components/canvas/context-view/connections/connectionUnits'
+import { formatUnitCount, unitMeaning, unitNoun, unresolvedFlowsNote } from '@/components/canvas/context-view/connections/connectionUnits'
 import { resolveEntityName } from '@/lib/entityDisplayName'
 import { EmptyState, SortMenu, type SortMode } from './lineageListParts'
 import { PartnerTreeDetail } from './LineagePartnerTree'
@@ -148,7 +148,10 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
   const lensWalk = useLensWalk(fineOn ? nodeId : null, fineOn ? provider ?? null : null, 1, false, DRAWER_WALK_CHECKPOINT)
   const walkEntry = fineOn ? lensWalk.walkFor(nodeId) : null
   const walkProgress = fineOn ? lensWalk.walkProgressFor(nodeId) : null
-  const fineFailed = walkEntry?.status === 'error' || walkEntry?.status === 'unsupported'
+  /** The walk's first page failed — outright, or behind a coarse picture
+   *  the walk kept. Either way the drawer reads it as a failed walk. */
+  const firstPageFailed = walkEntry?.status === 'error' || walkEntry?.extendStatus.get(`fine:${nodeId}`) === 'error'
+  const fineFailed = firstPageFailed || walkEntry?.status === 'unsupported'
   // The tree answers whenever either grain can. Only when neither can does
   // the drawer fall back to what the canvas holds — and say so.
   const walkMode = walkCapable && !(fineFailed && !coarseHasCells)
@@ -338,6 +341,8 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
     if (walkEntry?.status === 'error') lensWalk.retry(nodeId)
     else lensWalk.retryWalk(nodeId)
   }
+  /** Flows the server left out for a missing URN — a quiet note, never a floor. */
+  const unresolvedFlows = fineModel?.unresolvedEdges ?? 0
 
   // The fallback counts CONNECTED ENTITIES, not records: a partner reached
   // by two kinds of flow is one connected entity either way.
@@ -509,13 +514,13 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
           </button>
         </div>
       )}
-      {fineOn && phase === 'error' && coarseHasCells === false && (
+      {fineOn && phase === 'error' && coarseHasCells === false && !firstPageFailed && (
         <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
           <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
           <span className="min-w-0">Part of this lineage didn&apos;t load, so these counts are floors.</span>
           <button
             type="button"
-            onClick={() => lensWalk.retryWalk(nodeId)}
+            onClick={retryDrill}
             className="ml-auto flex-shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md font-semibold bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 cursor-pointer transition-colors"
           >
             <LucideIcons.RotateCw className="w-3 h-3" />
@@ -523,13 +528,13 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
           </button>
         </div>
       )}
-      {walkEntry?.status === 'error' && !coarseHasCells && (
+      {firstPageFailed && !coarseHasCells && (
         <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-[10.5px] text-amber-700 dark:text-amber-400">
           <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
           <span className="min-w-0">Couldn&apos;t walk this entity&apos;s lineage in the data source — showing only what&apos;s loaded on the canvas.</span>
           <button
             type="button"
-            onClick={() => lensWalk.retry(nodeId)}
+            onClick={retryDrill}
             className="ml-auto flex-shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md font-semibold bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 cursor-pointer transition-colors"
           >
             <LucideIcons.RotateCw className="w-3 h-3" />
@@ -577,6 +582,12 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
         <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
           <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
           <span>Large neighborhood — showing the first {EDGE_FETCH_LIMIT} flows per direction from the data source.</span>
+        </div>
+      )}
+      {unresolvedFlows > 0 && (
+        <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
+          <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
+          <span>{unresolvedFlowsNote(unresolvedFlows)}</span>
         </div>
       )}
 

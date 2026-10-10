@@ -727,6 +727,26 @@ describe('LineageNeighbors — counts agree with the Focus Lens', () => {
     }
   })
 
+  it('flows left out for a missing URN are a quiet note — never a failure, never a floor', async () => {
+    seedCanvas([])
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async () => closure(['u1', 'u2', 'u3'], ['d1'], { unresolvedEdges: 2 }),
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(
+        screen.getByText("At least 2 underlying flows aren't shown — the entities at their other ends have no URN."),
+      ).toBeInTheDocument())
+      await waitFor(() => expect(countIn('Data Sources').getByText('3')).toBeInTheDocument())
+      expect(screen.getByText('4 connected entities')).toBeInTheDocument()   // not "at least 4"
+      expect(screen.queryByText(/didn.t load|Couldn.t walk/)).toBeNull()
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
   it('falls back to the locally-derived count when the provider cannot walk', async () => {
     seedCanvas([makeEdge('e1', UPSTREAM_A, FOCAL, 'FLOWS_TO')])
     // No traceClosure on this provider at all.
@@ -1065,6 +1085,69 @@ describe('LineageNeighbors — lineage loads a level at a time', () => {
       // The drawer asks no rollup page of its own for a leaf — the one
       // coarse request here is the walk's own first-paint leg.
       expect(calls.coarse).toBeLessThanOrEqual(1)
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A walk that fails says so ONCE, and its Retry retries the right thing
+// ---------------------------------------------------------------------------
+
+describe('LineageNeighbors — a failed walk is one banner', () => {
+  it('an initial walk failure shows ONE banner, and its Retry walks again', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    let fine = 0
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async (req: { grain?: string }) => {
+        if (req.grain === 'coarse') return closure([], [], { grain: 'coarse' })
+        fine++
+        throw new Error('500 Internal Server Error')
+      },
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(screen.getByText(/Couldn.t walk this entity/)).toBeInTheDocument())
+      expect(screen.queryByText(/Part of this lineage didn.t load/)).toBeNull()
+      expect(screen.getAllByRole('button', { name: /retry/i })).toHaveLength(1)
+      expect(fine).toBe(1)
+      await user.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(fine).toBe(2))
+    } finally {
+      mockProviderHolder.current = null
+    }
+  })
+
+  it('a first page that fails behind the walk\'s own cells: ONE banner, and Retry re-runs only that page', async () => {
+    const user = userEvent.setup()
+    seedCanvas([])
+    const calls = { coarse: 0, fine: 0 }
+    const cells = { edges: [{ id: 'agg1', sourceUrn: 'u1', targetUrn: FOCAL, edgeType: 'AGGREGATED', properties: { weight: 2 } }] }
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async (req: { grain?: string }) => {
+        // The drawer's own rollup read finds no cells (so it walks); the
+        // walk's coarse leg, a moment later, does.
+        if (req.grain === 'coarse') return closure(['u1'], [], { grain: 'coarse', ...(++calls.coarse > 1 ? cells : {}) })
+        calls.fine++
+        await new Promise((r) => setTimeout(r, 10))   // the cells land first
+        throw new Error('500 Internal Server Error')
+      },
+    }
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(screen.getByText(/Couldn.t walk this entity/)).toBeInTheDocument())
+      expect(screen.queryByText(/Part of this lineage didn.t load/)).toBeNull()
+      expect(screen.getAllByRole('button', { name: /retry/i })).toHaveLength(1)
+      expect(calls).toEqual({ coarse: 2, fine: 1 })
+      await user.click(screen.getByRole('button', { name: /retry/i }))
+      await waitFor(() => expect(calls.fine).toBe(2))
+      expect(calls.coarse).toBe(2)
     } finally {
       mockProviderHolder.current = null
     }
