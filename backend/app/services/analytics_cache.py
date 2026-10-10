@@ -124,6 +124,30 @@ async def _redis_set(key: str, value: Any, ttl: float | None = None) -> bool:
         return False
 
 
+async def claim(name: str, *, ttl: float) -> bool:
+    """Whether this caller should do ``name``'s work: one caller in Redis wins.
+
+    ``SET NX`` on the shared Redis, so of several control-plane replicas
+    exactly one warms a slot and the rest skip it. With Redis unreachable
+    there is nothing to coordinate through and nothing shared to fill, so
+    every caller proceeds as a lone replica would: its in-process tier is
+    the only copy it can warm.
+    """
+    global _redis_down_until
+    if time.monotonic() < _redis_down_until:
+        return True
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        return bool(await get_redis().set(
+            _PREFIX + "claim:" + name, "1", nx=True, ex=max(1, int(ttl)),
+        ))
+    except Exception as exc:  # noqa: BLE001 — a claim must never stop the work
+        _redis_down_until = time.monotonic() + _REDIS_RETRY_AFTER
+        logger.debug("Analytics claim fell back to a lone replica: %s", exc)
+        return True
+
+
 def _memory_put(key: str, value: Any) -> None:
     """Store one entry, first dropping whatever has aged out of reach."""
     now = time.monotonic()

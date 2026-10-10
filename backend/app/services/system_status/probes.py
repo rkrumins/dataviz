@@ -1571,12 +1571,18 @@ async def probe_reconciliation() -> Optional[dict]:
     }
 
 
+#: How long an event may wait, with the ledger recording nothing meanwhile,
+#: before the relay counts as stalled. Its idle poll is 5s, so this is two
+#: dozen missed ticks — never a relay that is merely between them.
+_RELAY_STALL_S = 120.0
+
+
 async def probe_outbox(app_state) -> Optional[dict]:
     """Transactional-outbox backlog — the event-delivery lag signal."""
     from sqlalchemy import func, select
 
     from backend.app.db.engine import PoolRole, get_session_factory
-    from backend.app.db.models import OutboxEventORM
+    from backend.app.db.models import AuthAuditLogORM, OutboxEventORM
 
     stmt = select(
         func.count().label("pending"),
@@ -1587,19 +1593,35 @@ async def probe_outbox(app_state) -> Optional[dict]:
             factory = get_session_factory(PoolRole.READONLY)
             async with factory() as session:
                 row = (await session.execute(stmt)).one()
+                last_recorded = (await session.execute(
+                    select(func.max(AuthAuditLogORM.recorded_at)))).scalar()
     except Exception as exc:
         logger.warning("outbox probe failed: %s", exc)
         return None
 
+    now = datetime.now(timezone.utc)
     oldest_age_s: Optional[float] = None
     oldest = _parse_iso(row.oldest)
     if oldest is not None:
-        oldest_age_s = max(0.0, (datetime.now(timezone.utc) - oldest).total_seconds())
+        oldest_age_s = max(0.0, (now - oldest).total_seconds())
 
-    # Relay ownership is role-based (controlplane/dev own it); when this
-    # process isn't the owner the task is absent → None, not a fault.
+    # The relay runs on the aggregation control plane, so the process
+    # answering this usually holds no task to look at — judge the relay by
+    # what it does instead. It is stalled when an event has waited past the
+    # threshold AND the ledger has recorded nothing for as long. A long
+    # backlog with recent writes is a relay working through history (newest
+    # first, so its oldest event is the last it reaches), not a dead one.
     task = getattr(app_state, "_outbox_relay_task", None)
-    relay_alive = (not task.done()) if task is not None else None
+    if task is not None:
+        relay_alive = not task.done()
+    elif oldest_age_s is None or oldest_age_s < _RELAY_STALL_S:
+        relay_alive = True
+    else:
+        recorded = _parse_iso(last_recorded)
+        relay_alive = (
+            recorded is not None
+            and (now - recorded).total_seconds() < _RELAY_STALL_S
+        )
 
     return {
         "pending": row.pending,

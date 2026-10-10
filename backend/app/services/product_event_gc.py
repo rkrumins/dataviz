@@ -14,9 +14,10 @@ Nothing reads past the analytics windows (365 days is the hard ceiling on both
 the ``days`` query param and a custom range), so rows older than the retention
 horizon cost storage and vacuum pressure and buy nothing back.
 
-Runs on the CONTROLPLANE/DEV role only — the same ``runs_scheduler`` gate the
-outbox relay and the refresh-token sweeper use. Three web replicas each
-sweeping the same table would only contend for the same rows.
+Runs on the aggregation control plane, and on a dev-role monolith through the
+``runs_scheduler`` gate the outbox relay and the refresh-token sweeper share.
+Each batch takes an advisory lock first, so control-plane replicas take turns
+rather than contending for the same rows.
 """
 from __future__ import annotations
 
@@ -28,8 +29,12 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.repositories.product_event_repo import purge_older_than
+from backend.app.db.singleton import try_xact_lock
 
 logger = logging.getLogger(__name__)
+
+#: One replica sweeps at a time (``db/singleton.py``).
+_LOCK_KEY = "gc:product-events"
 
 #: Rows per transaction, matching the refresh-token sweeper's discipline.
 _BATCH = 5_000
@@ -73,7 +78,10 @@ async def sweep_once(
     session: AsyncSession, *, days: int | None = None,
     now: datetime | None = None,
 ) -> int:
-    """Delete one batch of expired rows. Returns how many went."""
+    """Delete one batch of expired rows. Returns how many went — 0, too,
+    when another replica is sweeping."""
+    if not await try_xact_lock(session, _LOCK_KEY):
+        return 0
     return await purge_older_than(
         session, days=days if days is not None else retention_days(),
         batch=_BATCH, now=now,

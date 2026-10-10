@@ -242,8 +242,10 @@ services:
       # a large-graph scan: reusing the stats TTL (1200s) would leave a source
       # un-probeable for twenty minutes after a worker died mid-probe.
       STATS_PROBE_DEDUP_TTL_SECS: "${STATS_PROBE_DEDUP_TTL_SECS:-90}"
-      # Analytics warmer + product-event retention sweep. Both run here
-      # because both are gated on runs_scheduler(). The warm interval MUST
+      # Outbox relay (the activity ledger), analytics warmer and the
+      # product-event / refresh-token retention sweeps all run here: the
+      # control plane's lifespan starts them, single-flight across replicas.
+      # The warm interval MUST
       # match viz-service's copy of the same variable — it is also the grid
       # readers snap `now` to, and a warmer phase-locked to a different grid
       # writes cache entries no reader will ever look up. Same ${VAR} on both

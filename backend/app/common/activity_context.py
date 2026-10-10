@@ -52,6 +52,9 @@ _CORRELATION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 _WHITESPACE = re.compile(r"\s+")
 
+#: Unicode categories :func:`clean_text` replaces: control, format, surrogate.
+_UNPRINTABLE = frozenset({"Cc", "Cf", "Cs"})
+
 
 @dataclass(frozen=True)
 class ActivityContext:
@@ -87,23 +90,31 @@ def valid_correlation_id(value: Optional[str]) -> Optional[str]:
     return None
 
 
-def clean_reason(value: Any) -> Optional[str]:
-    """Normalise free text a person typed into one bounded, printable line.
+def clean_text(value: Any, limit: int) -> Optional[str]:
+    """Untrusted text as one bounded, printable line, or ``None``.
 
-    Control and format characters go (a bidi override in an audit record is a
-    way to make it read as something it does not say), runs of whitespace
-    collapse, and the result is capped. Empty after all that means no reason.
+    Control, format and lone-surrogate characters go: a bidi override in an
+    audit record is a way to make it read as something it does not say, and
+    a NUL or a lone surrogate (which a JSON ``\\ud800`` escape decodes to) is
+    a value Postgres refuses to store. Runs of whitespace collapse and the
+    result is capped. Empty after all that is ``None``.
     """
     if not isinstance(value, str):
         return None
-    text = "".join(
-        ch if unicodedata.category(ch) not in ("Cc", "Cf") else " "
-        for ch in value
-    )
-    text = _WHITESPACE.sub(" ", text).strip()
-    if not text:
-        return None
-    return text[:MAX_REASON_CHARS]
+    # Bound the work: collapsing whitespace can shrink a value, but not by
+    # more than this.
+    value = value[: limit * 8]
+    if not (value.isascii() and value.isprintable()):
+        value = "".join(
+            ch if unicodedata.category(ch) not in _UNPRINTABLE else " "
+            for ch in value
+        )
+    return _WHITESPACE.sub(" ", value).strip()[:limit] or None
+
+
+def clean_reason(value: Any) -> Optional[str]:
+    """Normalise free text a person typed into one bounded, printable line."""
+    return clean_text(value, MAX_REASON_CHARS)
 
 
 def parse_stated_reason(header_value: Optional[str]) -> Optional[str]:

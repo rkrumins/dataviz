@@ -27,10 +27,11 @@ and acted on in weeks, so this is invisible to a human reading a 90-day trend �
 and the document carries ``generatedAt``, which the UI shows, so the staleness
 is stated rather than hidden.
 
-Runs on the CONTROLPLANE/DEV role only — the same ``runs_scheduler`` gate the
-outbox relay, the refresh-token sweeper and the product-event GC use. Three web
-replicas each warming the same keys would be three times the work for one
-result.
+Runs on the aggregation control plane, and on a dev-role monolith through the
+``runs_scheduler`` gate the outbox relay, the refresh-token sweeper and the
+product-event GC share — never on the web tier, where every replica warming the
+same keys would be that many times the work for one result. Control-plane
+replicas claim each slot in Redis (``analytics_cache.claim``), so one warms it.
 """
 from __future__ import annotations
 
@@ -163,25 +164,31 @@ async def run_warmer(
     while not shutdown.is_set():
         started = time.monotonic()
         try:
-            async with session_factory() as session:
-                stored = await warm_once(session, ttl=ttl)
-            elapsed = time.monotonic() - started
-            if stored:
-                logger.info(
-                    "Analytics warm pass stored %d document(s) in %.1fs",
-                    stored, elapsed,
-                )
-            elif not warned_no_redis:
-                # Nothing reached Redis. The dashboard still works — readers
-                # fall back to read-through — but replicas no longer share a
-                # warm copy, and an operator should know that once.
-                warned_no_redis = True
-                logger.warning(
-                    "Analytics warm pass stored nothing; Redis is unreachable, "
-                    "so readers will rebuild documents on demand.",
-                )
-            if stored:
-                warned_no_redis = False
+            # Every control-plane replica runs this loop: the first to claim
+            # a slot warms it, and the rest leave it alone.
+            slot = int(analytics_cache.epoch_start().timestamp())
+            if await analytics_cache.claim(f"warm:e{slot}", ttl=interval):
+                async with session_factory() as session:
+                    stored = await warm_once(session, ttl=ttl)
+                elapsed = time.monotonic() - started
+                if stored:
+                    logger.info(
+                        "Analytics warm pass stored %d document(s) in %.1fs",
+                        stored, elapsed,
+                    )
+                elif not warned_no_redis:
+                    # Nothing reached Redis. The dashboard still works —
+                    # readers fall back to read-through — but replicas no
+                    # longer share a warm copy, and an operator should know
+                    # that once.
+                    warned_no_redis = True
+                    logger.warning(
+                        "Analytics warm pass stored nothing; Redis is "
+                        "unreachable, so readers will rebuild documents on "
+                        "demand.",
+                    )
+                if stored:
+                    warned_no_redis = False
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — loop must survive blips

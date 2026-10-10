@@ -213,6 +213,45 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Aggregation state-sync consumer started")
 
+    # 10. Platform housekeeping. It belongs to whichever process holds the
+    # scheduler role, and in the split topology that is this one — the web
+    # tier runs as SYNODIC_ROLE=web, so until these started here they ran
+    # only in a dev-role monolith: the activity ledger never filled, and
+    # product events and spent refresh tokens were never swept. Each is safe
+    # on every replica at once: the relay claims batches with SKIP LOCKED,
+    # the sweeps take an advisory lock per batch, and the warmer claims each
+    # slot in Redis.
+    from backend.app.db.engine import get_readonly_session
+    from backend.app.services.analytics_warmer import run_warmer
+    from backend.app.services.outbox_relay import run_relay
+    from backend.app.services.product_event_gc import (
+        run_sweeper as run_product_event_gc,
+    )
+    from backend.app.services.refresh_token_gc import (
+        run_sweeper as run_refresh_token_gc,
+    )
+    housekeeping_shutdown = asyncio.Event()
+    housekeeping_tasks = [
+        asyncio.create_task(
+            run_relay(get_jobs_session, housekeeping_shutdown),
+            name="outbox-relay",
+        ),
+        asyncio.create_task(
+            run_product_event_gc(get_jobs_session, housekeeping_shutdown),
+            name="product-event-gc",
+        ),
+        asyncio.create_task(
+            run_refresh_token_gc(get_jobs_session, housekeeping_shutdown),
+            name="refresh-token-gc",
+        ),
+        # Reads only, so it stays off the JOBS pool the job API runs on.
+        asyncio.create_task(
+            run_warmer(get_readonly_session, housekeeping_shutdown),
+            name="analytics-warmer",
+        ),
+    ]
+    logger.info("Outbox relay, retention sweeps and analytics warmer started")
+
     # Store in app state
     app.state.aggregation_service = svc
     app.state.session_factory = get_jobs_session
@@ -223,6 +262,14 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    # Housekeeping first: the warmer needs Redis and every loop needs the
+    # database, and both close below. A loop still mid-batch after the
+    # grace period is cancelled; its session scope rolls the batch back.
+    housekeeping_shutdown.set()
+    _, still_running = await asyncio.wait(housekeeping_tasks, timeout=2.0)
+    for task in still_running:
+        task.cancel()
+    await asyncio.gather(*still_running, return_exceptions=True)
     reconciler_shutdown.set()
     if not reconciler_task.done():
         try:

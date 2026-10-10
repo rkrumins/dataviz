@@ -155,3 +155,74 @@ def test_the_warmer_and_the_readers_share_one_grid(monkeypatch):
     monkeypatch.setenv("ANALYTICS_WARM_INTERVAL_SECONDS", "1")
     assert analytics_warmer.interval_seconds() == 30.0
 
+
+
+# ── One warmer per slot across control-plane replicas ────────────────
+#
+# The warmer runs on the aggregation control plane, which runs more than one
+# replica. Each pass is a dozen documents of grouped queries, so every replica
+# warming every slot would multiply the load the warmer exists to remove —
+# for documents only one of them needs to write.
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.keys: dict[str, str] = {}
+
+    async def set(self, key, value, *, nx=False, ex=None):
+        if nx and key in self.keys:
+            return None
+        self.keys[key] = value
+        return True
+
+
+def _with_redis(monkeypatch, client):
+    from backend.app.services.aggregation import redis_client
+
+    monkeypatch.setattr(redis_client, "get_redis", lambda: client)
+    monkeypatch.setattr(analytics_cache, "_redis_down_until", 0.0)
+
+
+async def test_one_replica_wins_each_slot(monkeypatch):
+    _with_redis(monkeypatch, _FakeRedis())
+    assert await analytics_cache.claim("warm:e100", ttl=300) is True
+    assert await analytics_cache.claim("warm:e100", ttl=300) is False
+    assert await analytics_cache.claim("warm:e400", ttl=300) is True
+
+
+async def test_without_redis_every_replica_warms_its_own_tier(monkeypatch):
+    class _Down:
+        async def set(self, *a, **k):
+            raise ConnectionError("redis is down")
+
+    _with_redis(monkeypatch, _Down())
+    assert await analytics_cache.claim("warm:e100", ttl=300) is True
+    # …and the outage is remembered, so the next claim pays no timeout.
+    assert analytics_cache._redis_down_until > 0
+    assert await analytics_cache.claim("warm:e100", ttl=300) is True
+
+
+async def test_a_replica_that_loses_the_claim_builds_nothing(monkeypatch):
+    passes = {"n": 0}
+
+    async def _warm(session, *, ttl=None):
+        passes["n"] += 1
+        return 12
+
+    async def _lost(name, *, ttl):
+        return False
+
+    monkeypatch.setattr(analytics_warmer, "warm_once", _warm)
+    monkeypatch.setattr(analytics_cache, "claim", _lost)
+
+    class _Factory:
+        def __call__(self):
+            raise AssertionError("a replica that lost the claim opened a session")
+
+    shutdown = asyncio.Event()
+    task = asyncio.create_task(
+        analytics_warmer.run_warmer(_Factory(), shutdown, interval=0.05))
+    await asyncio.sleep(0.2)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=2)
+    assert passes["n"] == 0

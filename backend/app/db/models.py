@@ -3235,27 +3235,75 @@ class OutboxEventORM(Base):
 # ------------------------------------------------------------------ #
 
 class AuthAuditLogORM(Base):
-    """Immutable record of every domain event the outbox relay drains.
+    """The platform activity ledger: every domain event the outbox relay drains.
 
-    Append-only: rows are inserted by the relay and never updated or
-    deleted. ``source_event_id`` is the originating outbox event id and
-    is UNIQUE so a relay re-run after a crash cannot double-record.
+    Despite the name (it began as the auth audit trail) this is the read model
+    behind Admin → Activity and each workspace's Activity tab.
+
+    Two kinds of column, and the difference is the contract:
+
+    * The RECORD — ``source_event_id``, ``event_type``, ``event_version``,
+      ``aggregate_*``, ``payload``, ``occurred_at``, ``recorded_at`` — is
+      written once by the relay and never updated or deleted. ``source_event_id`` is the
+      originating outbox event id and is UNIQUE, so a relay re-run after a
+      crash cannot double-record.
+    * The PROJECTION — everything from ``category`` down — is an index over
+      the record, derived by ``services.activity.catalogue.project``. It
+      exists so every activity read is a SQL predicate on an indexed column
+      instead of a scan of JSON payloads, and it may be RECOMPUTED: the relay
+      re-projects rows whose ``projection_version`` trails the catalogue's,
+      so a better classification reaches history without a data migration.
     """
     __tablename__ = "auth_audit_log"
 
     id = Column(Text, primary_key=True, default=lambda: f"aud_{uuid.uuid4().hex[:12]}")
     source_event_id = Column(Text, nullable=False)   # OutboxEventORM.id
     event_type = Column(Text, nullable=False)
+    # The payload's schema version, as emitted. NULL on rows recorded before
+    # it was copied across, all of which were version 1.
+    event_version = Column(Integer, nullable=True)
     aggregate_type = Column(Text, nullable=True)
     aggregate_id = Column(Text, nullable=True)
     payload = Column(Text, nullable=False, default="{}")  # JSON (verbatim)
     occurred_at = Column(Text, nullable=False)       # source event created_at
     recorded_at = Column(Text, nullable=False, default=_now)
 
+    # ── Projection (rebuildable; see the class docstring) ──────────────
+    category = Column(Text, nullable=True)        # operations|access|identity|data|content|platform
+    audience = Column(Text, nullable=True)        # platform|workspace — who may read it
+    severity = Column(Text, nullable=True)        # info|warning|critical
+    outcome = Column(Text, nullable=True)         # success|failure|denied
+    actor_id = Column(Text, nullable=True)
+    actor_kind = Column(Text, nullable=True)      # user|service|system|anonymous
+    subject_id = Column(Text, nullable=True)      # the person it happened TO
+    target_type = Column(Text, nullable=True)
+    target_id = Column(Text, nullable=True)
+    target_label = Column(Text, nullable=True)    # the name AT THE TIME
+    workspace_id = Column(Text, nullable=True)
+    data_source_id = Column(Text, nullable=True)
+    stated_reason = Column(Text, nullable=True)   # the "why" a person gave
+    correlation_id = Column(Text, nullable=True)  # the HTTP request it came from
+    projection_version = Column(Integer, nullable=False, default=0, server_default="0")
+
     __table_args__ = (
         UniqueConstraint("source_event_id", name="uq_auth_audit_source_event"),
-        Index("idx_auth_audit_event_type", "event_type"),
         Index("idx_auth_audit_recorded_at", "recorded_at"),
+        # Every activity read is "these rows, newest first": each predicate
+        # the explorer offers gets an index that LEADS with it and ends on
+        # the timeline, so a filter is a range scan that stops at the page.
+        # No more than that — every index is paid for on every event the
+        # relay records. (``audience`` has none: it is only ever read with a
+        # workspace, whose index finds the rows first.)
+        Index("idx_aal_occurred", "occurred_at", "id"),
+        Index("idx_aal_category_occurred", "category", "occurred_at"),
+        Index("idx_aal_actor_occurred", "actor_id", "occurred_at"),
+        Index("idx_aal_subject_occurred", "subject_id", "occurred_at"),
+        Index("idx_aal_workspace_occurred", "workspace_id", "occurred_at"),
+        Index("idx_aal_ds_occurred", "data_source_id", "occurred_at"),
+        Index("idx_aal_target_occurred", "target_type", "target_id", "occurred_at"),
+        Index("idx_aal_type_occurred", "event_type", "occurred_at"),
+        Index("idx_aal_correlation", "correlation_id"),
+        Index("idx_aal_projection_version", "projection_version"),
     )
 
     def __repr__(self) -> str:
