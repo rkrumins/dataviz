@@ -557,11 +557,6 @@ async def _backfilling(session: AsyncSession) -> bool:
         select(func.count()).select_from(inner))).scalar() or 0) >= _BACKFILL_PENDING
 
 
-#: A span that ended this recently may still be receiving its last events
-#: from the relay, so it is not reused yet.
-_SETTLE = timedelta(minutes=10)
-
-
 #: How a caller lets closed folds be reused: ``reuse(key, build)`` returns
 #: the document under ``key``, building it at most once.
 Reuse = Callable[[str, Callable[[], Awaitable[dict[str, Any]]]], Awaitable[dict[str, Any]]]
@@ -569,7 +564,7 @@ Reuse = Callable[[str, Callable[[], Awaitable[dict[str, Any]]]], Awaitable[dict[
 
 async def _closed_fold(
     session: AsyncSession, f: ActivityFilter, start: str, end: str, *,
-    full: bool, reuse: Optional[Reuse], now: datetime,
+    full: bool, reuse: Optional[Reuse],
 ) -> dict[str, Any]:
     """A fold over days that are over, reused until the window moves on."""
     if start >= end:
@@ -578,8 +573,7 @@ async def _closed_fold(
     async def _build() -> dict[str, Any]:
         return await _fold(session, f, start, end, full=full)
 
-    settled = datetime.fromisoformat(end) <= now - _SETTLE
-    if reuse is None or not settled:
+    if reuse is None:
         return await _build()
     return await reuse(f"{'full' if full else 'totals'}:{start}:{end}", _build)
 
@@ -597,8 +591,9 @@ async def summary(
 
     Cost: the closed days of the window, and the whole previous window, are
     folds a caller may ``reuse`` until midnight (``None`` reuses nothing).
-    What a request then reads itself is today: five grouped reads over one
-    day's rows, however long the window — not a pass over every row in it.
+    What a request then reads itself is yesterday and today: five grouped
+    reads over at most two days' rows, however long the window — not a pass
+    over every row in it.
     """
     now = now or datetime.now(timezone.utc)
     if reuse is not None and await _backfilling(session):
@@ -606,18 +601,21 @@ async def summary(
         # would be reused short.
         reuse = None
     day0 = _midnight(w.start)
-    today0 = min(_midnight(now.isoformat()), w.end)
+    # The closed days end where yesterday begins, and yesterday is read live
+    # with today: its last events may still be on their way from the relay
+    # after midnight. So the fold before it changes once a day, when the
+    # window moves on, and is reusable from the moment it is built. (Ending
+    # it at today's midnight meant a fold too fresh to reuse for the first
+    # minutes of every day — rebuilt by every reader of every view at once —
+    # and then built a second time.)
+    live0 = min(_midnight((now - timedelta(days=1)).isoformat()), w.end)
     previous0 = _midnight(w.previous_start)
 
-    closed = await _closed_fold(
-        session, f, day0, today0, full=True, reuse=reuse, now=now,
-    )
+    closed = await _closed_fold(session, f, day0, live0, full=True, reuse=reuse)
     live = (
-        await _fold(session, f, today0, w.end, full=True) if today0 < w.end else _empty_fold()
+        await _fold(session, f, live0, w.end, full=True) if live0 < w.end else _empty_fold()
     )
-    previous = await _closed_fold(
-        session, f, previous0, day0, full=False, reuse=reuse, now=now,
-    )
+    previous = await _closed_fold(session, f, previous0, day0, full=False, reuse=reuse)
     cur = _merge(closed, live)
 
     by_day_cat: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))

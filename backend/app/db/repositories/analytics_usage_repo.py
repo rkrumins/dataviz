@@ -73,6 +73,31 @@ def run_origin(trigger_source: Optional[str], by_person: bool) -> str:
     return "other"
 
 
+def pulse_statement(start: str, end: str):
+    """Every workspace's workspace-audience rows in ``[start, end)``, by
+    workspace, day, category and whether a person did it.
+
+    Answered from ``idx_aal_workspace_pulse`` alone: it leads with the time
+    and carries the rest. Through the workspace lens instead — workspace
+    first — a window across every workspace read that whole index and then
+    each row it found. Platform-audience events carry no workspace anyway.
+    """
+    by_user = (AuthAuditLogORM.actor_kind == "user").label("u")
+    return (
+        select(
+            AuthAuditLogORM.workspace_id,
+            func.substr(AuthAuditLogORM.occurred_at, 1, 10).label("d"),
+            AuthAuditLogORM.category, by_user, func.count(),
+        )
+        .where(
+            AuthAuditLogORM.audience == "workspace",
+            AuthAuditLogORM.workspace_id.is_not(None),
+            AuthAuditLogORM.occurred_at >= start, AuthAuditLogORM.occurred_at < end,
+        )
+        .group_by(AuthAuditLogORM.workspace_id, "d", AuthAuditLogORM.category, by_user)
+    )
+
+
 def _iso_days_before(now: datetime, days: int) -> str:
     return (now - timedelta(days=days)).isoformat()
 
@@ -236,23 +261,11 @@ async def platform_usage(
     # One pass over the workspace-audience ledger serves both the pulse and
     # the hands-on counts. Reading it through its partial index is what makes
     # this affordable: on a 10M-row ledger the same question asked with
-    # "workspace_id IS NOT NULL" took over a minute for 30 days, this way a
-    # third of a second. Platform-audience events carry no workspace anyway.
+    # "workspace_id IS NOT NULL" took over a minute for 30 days.
     pulse: dict[str, Counter] = defaultdict(Counter)
     hands_on: dict[str, Counter] = defaultdict(Counter)
-    by_user = (AuthAuditLogORM.actor_kind == "user").label("u")
     for ws, day, category, user_did_it, n in (await session.execute(
-        select(
-            AuthAuditLogORM.workspace_id,
-            func.substr(AuthAuditLogORM.occurred_at, 1, 10).label("d"),
-            AuthAuditLogORM.category, by_user, func.count(),
-        )
-        .where(
-            AuthAuditLogORM.audience == "workspace",
-            AuthAuditLogORM.workspace_id.is_not(None),
-            *in_window(AuthAuditLogORM.occurred_at),
-        )
-        .group_by(AuthAuditLogORM.workspace_id, "d", AuthAuditLogORM.category, by_user)
+        pulse_statement(w.start, w.end)
     )).all():
         pulse[ws][day] += int(n)
         if user_did_it and category in ("operations", "access"):

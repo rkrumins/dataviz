@@ -2092,6 +2092,29 @@ async def _provider_busy_handler(request, exc: _ProviderBusy):
     )
 
 
+# Every slot of a bulkhead stayed taken while the request waited for one (see
+# common/bulkhead.py): too many slow reads of one kind on this replica at once.
+# 429 + Retry-After, for the same reason as a busy provider — the client backs
+# off and asks again, instead of every request timing out on an empty pool.
+from backend.app.common.bulkhead import Busy as _Busy
+
+
+@app.exception_handler(_Busy)
+async def _busy_handler(request, exc: _Busy):
+    logger.info("Busy on %s: %s", request.url.path, exc.kind)
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "busy",
+                "message": str(exc),
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
 # ProviderLoading is a subclass of ProviderUnavailable but semantically a
 # transient "warming up" state (FalkorDB replaying its RDB on restart). Map
 # to 503 + Retry-After with a distinct PROVIDER_LOADING code so the frontend

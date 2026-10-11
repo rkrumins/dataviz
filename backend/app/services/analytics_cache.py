@@ -27,6 +27,7 @@ response carries ``generatedAt`` so the UI can say exactly how old it is.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
+from backend.app.common.bulkhead import Bulkhead, Busy
 from backend.app.common.single_flight import SingleFlight
 
 logger = logging.getLogger(__name__)
@@ -150,6 +152,49 @@ def _memory_get(key: str) -> Optional[Any]:
     return value
 
 
+#: Cold builds of long-window documents in this process at once. Each holds a
+#: READONLY connection for seconds on a large ledger, and that pool also
+#: answers the readiness probe; past this, a build waits for a slot. With the
+#: activity searches and exports, slow work may hold at most half the pool.
+DOCUMENT_BUILDS = Bulkhead("summaries being prepared", 3, wait_seconds=10.0)
+
+#: How long one replica's claim on a build stands. Longer than any request
+#: may run, so a claim outlives its build only when its process has died.
+_CLAIM_SECONDS = 60
+#: How long a replica waits for another's build before its reader is told to
+#: come back — inside the request timeout, so the answer is a 429, not a 504.
+_PEER_WAIT_SECONDS = 15.0
+_PEER_POLL_SECONDS = 0.25
+
+
+async def _claim(key: str) -> Optional[bool]:
+    """Claim the build of ``key`` for this replica: ``True`` when the claim is
+    its own, ``False`` when another replica holds it, ``None`` when Redis
+    cannot say — and then every replica builds for itself, as without Redis."""
+    global _redis_down_until
+    if time.monotonic() < _redis_down_until:
+        return None
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        return bool(await get_redis().set(
+            f"{_PREFIX}{key}:building", "1", nx=True, ex=_CLAIM_SECONDS,
+        ))
+    except Exception as exc:  # noqa: BLE001 — a claim must never fail a read
+        _redis_down_until = time.monotonic() + _REDIS_RETRY_AFTER
+        logger.debug("Analytics build claim skipped: %s", exc)
+        return None
+
+
+async def _unclaim(key: str) -> None:
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        await get_redis().delete(f"{_PREFIX}{key}:building")
+    except Exception as exc:  # noqa: BLE001 — it expires on its own
+        logger.debug("Analytics build claim left to expire: %s", exc)
+
+
 async def cached(
     key: str, build: Callable[[], Awaitable[Any]], *,
     ttl: float | None = None, memory: bool = True,
@@ -180,17 +225,44 @@ async def cached(
         again = _memory_get(key) if memory else None
         if again is not None:
             return again
-        value = await build()
-        # A ``None`` document means "no such workspace". Caching it would store
-        # an entry that ``cached`` can never serve (it tests ``is not None``),
-        # so a caller walking random ids would grow ``_memory`` without bound
-        # while getting no benefit. Negatives are cheap to recompute; don't
-        # store them.
-        if value is not None:
-            if memory:
+        # The flight above is per process. Across replicas, one claims the
+        # build and the rest wait for its result: otherwise every replica that
+        # misses a cold key builds it at once — after a deploy, and at
+        # midnight for every activity fold — and the cost of a cold document
+        # is multiplied by the size of the fleet.
+        deadline = time.monotonic() + _PEER_WAIT_SECONDS
+        while (claimed := await _claim(key)) is False:
+            if time.monotonic() >= deadline:
+                raise Busy(DOCUMENT_BUILDS.kind, DOCUMENT_BUILDS.retry_after_seconds)
+            await asyncio.sleep(_PEER_POLL_SECONDS)
+            built = await _redis_get(key)
+            if built is not None:
+                if memory:
+                    _memory_put(key, built, ttl)
+                return built
+        try:
+            # The claim may have come free because a build just finished.
+            built = await _redis_get(key)
+            if built is not None:
+                value = built
+            else:
+                async with DOCUMENT_BUILDS.slot():
+                    value = await build()
+                # A ``None`` document means "no such workspace". Caching it
+                # would store an entry that ``cached`` can never serve (it
+                # tests ``is not None``), so a caller walking random ids would
+                # grow ``_memory`` without bound while getting no benefit.
+                # Negatives are cheap to recompute; don't store them.
+                if value is not None:
+                    await _redis_set(key, value, ttl)
+            if value is not None and memory:
                 _memory_put(key, value, ttl)
-            await _redis_set(key, value, ttl)
-        return value
+            return value
+        finally:
+            # After the result is stored, so a replica that finds the claim
+            # gone finds the document.
+            if claimed:
+                await _unclaim(key)
 
     return await _flight.run(("analytics", key), _compute)
 

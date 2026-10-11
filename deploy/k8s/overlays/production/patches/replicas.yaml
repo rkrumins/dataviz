@@ -35,5 +35,5 @@ spec:
   # retry early, never late), crash-recovery (per-job exec-lock dedup plus
   # the shared auto-resume cap), outbox relay (FOR UPDATE SKIP LOCKED
   # batches), retention sweeps (advisory xact lock per batch), analytics
-  # warmer (one Redis claim per epoch).
+  # warmer (advisory xact lock per pass).
   replicas: 2

@@ -3310,6 +3310,15 @@ class AuthAuditLogORM(Base):
         Index("idx_aal_workspace_lens", "workspace_id", "occurred_at",
               postgresql_where=text("audience = 'workspace'"),
               sqlite_where=text("audience = 'workspace'")),
+        # The workspace pulse: every workspace's rows in a window, by day,
+        # category and who did it. The lens leads with the workspace, so a
+        # window across all of them read that whole index and then each row;
+        # this leads with the time and carries what the pulse groups on, so
+        # it is answered from the index alone.
+        Index("idx_aal_workspace_pulse", "occurred_at",
+              postgresql_include=["workspace_id", "category", "actor_kind"],
+              postgresql_where=text("audience = 'workspace'"),
+              sqlite_where=text("audience = 'workspace'")),
         Index("idx_aal_ds_occurred", "data_source_id", "occurred_at"),
         Index("idx_aal_target_occurred", "target_type", "target_id", "occurred_at"),
         Index("idx_aal_type_occurred", "event_type", "occurred_at"),

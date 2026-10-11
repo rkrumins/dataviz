@@ -202,19 +202,78 @@ async def test_a_redis_only_entry_never_lands_in_process(monkeypatch):
     assert builds["n"] == 2
 
 
-async def test_a_warm_pass_builds_the_activity_explorers_landing_view(
+async def test_a_warm_pass_builds_every_lens_the_explorer_opens_on(
     test_client, db_session, monkeypatch,
 ):
-    """The explorer opened with no filter is served what the warmer built —
-    proof that the warmer and the endpoint key the same document."""
+    """Each lens, over each leading range, is served what the warmer built —
+    proof that the warmer and the endpoint key the same documents, however
+    the categories in a request are ordered."""
     from backend.app.db.repositories import activity_repo
+    from backend.app.services.activity import summaries
 
     await analytics_warmer.warm_once(db_session, ttl=900)
 
     async def _must_not_build(*_a, **_kw):
-        raise AssertionError("the landing view was built again after a warm pass")
+        raise AssertionError("a lens was built again after a warm pass")
 
     monkeypatch.setattr(activity_repo, "summary", _must_not_build)
-    res = await test_client.get("/api/v1/admin/activity/summary?days=30")
-    assert res.status_code == 200, res.text
-    assert "totals" in res.json()
+    lenses = [
+        "".join((
+            f"&category={','.join(categories)}" if categories else "",
+            "&includeNoise=true" if noise else "",
+        ))
+        for categories, noise in summaries.LENSES
+    ]
+    assert "&category=identity,access&includeNoise=true" in lenses
+    for days in summaries.WARM_DAYS:
+        for lens in [*lenses, "&category=access,identity&includeNoise=true"]:
+            res = await test_client.get(f"/api/v1/admin/activity/summary?days={days}{lens}")
+            assert res.status_code == 200, (days, lens, res.text)
+            assert "totals" in res.json()
+
+
+def _poison(session) -> None:
+    """Fail the way a timed-out read does on Postgres: the session's
+    transaction is dead, and every statement after it fails too until it is
+    rolled back. (A refused flush does that on any database.)"""
+    from backend.app.db.models import AuthAuditLogORM
+    session.add(AuthAuditLogORM())
+
+
+async def test_a_view_that_breaks_the_session_costs_only_itself(db_session, monkeypatch):
+    from backend.app.db.repositories import activity_repo
+    from backend.app.services.activity import summaries
+
+    real = activity_repo.summary
+    failed = []
+
+    async def _one_times_out(session, f, w, **kw):
+        if f.categories == ("operations",) and w.days == 7:
+            failed.append(f)
+            _poison(session)
+            await session.flush()
+        return await real(session, f, w, **kw)
+
+    monkeypatch.setattr(activity_repo, "summary", _one_times_out)
+    built = await summaries.warm_platform(db_session)
+    assert len(failed) == 1
+    assert built == len(summaries.WARM_DAYS) * len(summaries.LENSES) - 1
+
+
+async def test_a_document_that_breaks_the_session_costs_only_itself(db_session, monkeypatch):
+    real = analytics_repo.platform_summary
+
+    async def _one_times_out(session, **kwargs):
+        if kwargs.get("days") == 7:
+            _poison(session)
+            await session.flush()
+        return await real(session, **kwargs)
+
+    monkeypatch.setattr(analytics_repo, "platform_summary", _one_times_out)
+    await analytics_warmer.warm_once(db_session, ttl=900)
+
+    assert analytics_cache._memory_get(
+        analytics_cache.document_key("summary", {"days": 7})) is None
+    for surface, days in (("workspaces", 7), ("usage", 7), ("summary", 14), ("data", 365)):
+        assert analytics_cache._memory_get(
+            analytics_cache.document_key(surface, {"days": days})) is not None, (surface, days)

@@ -25,7 +25,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.db.models import AuthAuditLogORM, OutboxEventORM
-from backend.app.db.repositories import activity_repo
+from backend.app.db.repositories import activity_repo, analytics_usage_repo
 from backend.app.db.repositories.activity_repo import ActivityFilter
 from backend.app.db.advisory import claim_this_pass
 from backend.app.services import outbox_relay
@@ -212,3 +212,35 @@ async def test_the_workspace_lens_reads_its_own_index(factory):
         await s.execute(text("SET LOCAL enable_seqscan = off"))
         plan = "\n".join((await s.execute(text("EXPLAIN " + sql))).scalars())
     assert "idx_aal_workspace_lens" in plan, plan
+
+
+async def test_the_workspace_pulse_reads_its_own_index(factory, run_id):
+    """The pulse asks for every workspace's rows in a window. The lens index
+    leads with the workspace, so through it that was the whole index and then
+    every row (1.6 s for 90 days on ten million, and past 30 s under load);
+    the pulse index leads with the time and carries the rest. Asked of a
+    ledger shaped like a real one — a year, many workspaces, a quarter of it
+    workspace-audience — since on an empty one any index is as cheap."""
+    async with factory() as s, s.begin():
+        await s.execute(text("""
+            INSERT INTO auth_audit_log (
+                id, source_event_id, event_type, payload, occurred_at, recorded_at,
+                category, audience, actor_kind, workspace_id, projection_version)
+            SELECT :p || g, :p || g, 'aggregation.job.triggered', '{}',
+                   to_char(timestamp '2025-10-01' + g * interval '26 minutes',
+                           'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'),
+                   '2026-10-01T00:00:00+00:00', 'operations',
+                   CASE WHEN g % 4 = 0 THEN 'workspace' ELSE 'platform' END,
+                   'user', 'ws_' || (g % 50), 1
+            FROM generate_series(1, 20000) AS g
+        """), {"p": run_id})
+    async with factory() as s, s.begin():
+        await s.execute(text("ANALYZE auth_audit_log"))
+    stmt = analytics_usage_repo.pulse_statement(
+        "2026-07-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00",
+    )
+    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    async with factory() as s, s.begin():
+        await s.execute(text("SET LOCAL enable_seqscan = off"))
+        plan = "\n".join((await s.execute(text("EXPLAIN " + sql))).scalars())
+    assert "idx_aal_workspace_pulse" in plan, plan

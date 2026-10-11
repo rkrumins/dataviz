@@ -21,6 +21,7 @@ the pool that serves the rest of the product.
 """
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
@@ -35,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
 from backend.app.common.activity_context import provenance_for
+from backend.app.common.bulkhead import Bulkhead, Busy
 from backend.app.db.engine import get_db_session, get_readonly_db_session
 from backend.app.db.repositories import activity_repo, analytics_repo, user_repo
 from backend.app.db.repositories.activity_repo import ActivityFilter
@@ -65,6 +67,12 @@ _EXPORT_CHUNK = 1_000
 #: test can turn reuse off.
 _SUMMARY_TTL_SECONDS = summaries.SUMMARY_TTL_SECONDS
 _MAX_EVENT_TYPES = 25
+#: Free-text searches in this process at once: each reads its whole window,
+#: for up to the search timeout, on a READONLY connection.
+_SEARCHES = Bulkhead("activity searches", 2, wait_seconds=5.0)
+#: Exports streaming at once: each holds a READONLY connection until its
+#: last row is sent.
+_EXPORTS = Bulkhead("activity exports", 2, wait_seconds=10.0, retry_after_seconds=30)
 
 
 # ── Scope ────────────────────────────────────────────────────────────
@@ -187,6 +195,10 @@ async def _people(session: AsyncSession, term: str) -> frozenset[str]:
     except Exception:  # noqa: BLE001
         logger.warning("activity: could not resolve the person filter %r", term, exc_info=True)
         matches = set()
+    # Hand the connection back: what follows may wait — for a search or build
+    # slot, or on another request's build of the same summary — and must not
+    # hold one from the pool while it does. A failed lookup is cleared too.
+    await summaries.rolled_back(session)
     return frozenset(matches | ({term} if term.startswith("usr_") else set()))
 
 
@@ -354,9 +366,10 @@ def _mount(r: APIRouter, scope_dependency) -> None:
         """A page of events, newest first. Pass ``nextCursor`` back for more."""
         f, _ = await _filter(session, p, scope)
         try:
-            rows, next_cursor = await activity_repo.list_events(
-                session, f, cursor=cursor, limit=limit,
-            )
+            async with _SEARCHES.slot() if f.text else contextlib.nullcontext():
+                rows, next_cursor = await activity_repo.list_events(
+                    session, f, cursor=cursor, limit=limit,
+                )
         except activity_repo.InvalidCursor:
             raise HTTPException(400, "Malformed cursor")
         except activity_repo.SearchTooBroad:
@@ -457,6 +470,10 @@ def _mount(r: APIRouter, scope_dependency) -> None:
         the request's read session — which stays open until the response
         has been sent.
         """
+        if _EXPORTS.full:
+            # Refused before it is recorded, and before a byte is sent: once
+            # the response has started, a 429 is no longer possible.
+            raise Busy(_EXPORTS.kind, _EXPORTS.retry_after_seconds)
         f, _ = await _filter(session, p, scope)
         filters = {k: v for k, v in p.__dict__.items() if v not in (None, (), False, "any")}
         await recorder.record_activity(
@@ -473,14 +490,17 @@ def _mount(r: APIRouter, scope_dependency) -> None:
             header = io.StringIO()
             csv.writer(header).writerow(_CSV_COLUMNS)
             yield header.getvalue()
-            async for chunk in activity_repo.iter_events(
-                session, f, chunk=_EXPORT_CHUNK, cap=_EXPORT_CAP,
-            ):
-                buf = io.StringIO()
-                writer = csv.writer(buf)
-                for event in await _events(session, chunk, full=False):
-                    writer.writerow(_csv_row(event))
-                yield buf.getvalue()
+            # Held while the rows stream, and released when the stream ends
+            # or the client goes away; never taken by one that never starts.
+            async with _EXPORTS.slot():
+                async for chunk in activity_repo.iter_events(
+                    session, f, chunk=_EXPORT_CHUNK, cap=_EXPORT_CAP,
+                ):
+                    buf = io.StringIO()
+                    writer = csv.writer(buf)
+                    for event in await _events(session, chunk, full=False):
+                        writer.writerow(_csv_row(event))
+                    yield buf.getvalue()
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
         where = scope.workspace_id or "platform"

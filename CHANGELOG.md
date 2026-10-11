@@ -86,6 +86,13 @@ by a person cannot be recorded as automation.
 
 The analytics document cache moves to schema version 3; documents rebuild on first read.
 
+**A busy replica answers "try again shortly" instead of timing out.** Free-text activity searches,
+exports and the first build of a summary each get a fixed share of a replica's read connections.
+Past it, a request waits briefly, then gets `429` with `Retry-After` (`"code": "busy"`) rather
+than taking the connections the readiness probe needs. Of several replicas missing the same
+summary, one builds it and the others wait for its result. The warmer prepares every lens of the
+activity explorer for the last 7, 30 and 90 days, not only the unfiltered view.
+
 ### Fixed
 
 - The audit page filtered people and targets after the page limit, so a filtered page could come
@@ -108,9 +115,10 @@ The analytics document cache moves to schema version 3; documents rebuild on fir
 
 ### Upgrading
 
-- **Two migrations:** `20261010_1000_activity_ledger` (DDL on `auth_audit_log`, inspector-guarded,
-  no data updates) and `20261010_1100_job_provenance` (`aggregation_jobs.triggered_by` and
-  `stated_reason`). Run the upgrade job before rolling out.
+- **Three migrations:** `20261010_1000_activity_ledger` (DDL on `auth_audit_log`, inspector-guarded,
+  no data updates), `20261010_1100_job_provenance` (`aggregation_jobs.triggered_by` and
+  `stated_reason`) and `20261011_1000_activity_pulse` (a partial index on `auth_audit_log` for the
+  workspace pulse). Run the upgrade job before rolling out.
 - **Copying the audit backlog** (see the entry below) also classifies each event for the activity
   log, newest first, at roughly 3,000–5,000 events a second — about ten minutes per two million
   events. Administration → Activity says *Importing earlier activity* until it finishes.

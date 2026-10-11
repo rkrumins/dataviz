@@ -46,6 +46,7 @@ tests/test_automation_holds_scope.py
 tests/test_background_tasks.py
 tests/test_branding_endpoint.py
 tests/test_branding_repo.py
+tests/test_bulkhead.py
 tests/test_cache_refresh_route.py
 tests/test_canvas_endpoints.py
 tests/test_changeset_materialize.py

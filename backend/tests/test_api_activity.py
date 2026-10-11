@@ -19,6 +19,7 @@ Pinned here:
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -28,9 +29,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 
 from backend.app.auth.dependencies import get_permission_claims
+from backend.app.common.bulkhead import Bulkhead
 from backend.app.db.models import AuthAuditLogORM, OutboxEventORM, UserORM, WorkspaceORM
 from backend.app.services import analytics_cache
 from backend.app.services.outbox_relay import drain_once
@@ -415,10 +417,8 @@ async def test_the_summary_describes_the_window_in_a_fixed_number_of_reads(
     from backend.app.db.repositories import activity_repo
 
     # Every request builds its document; only the folds of closed days carry
-    # over, which is the reuse under test. (And a span is reusable the moment
-    # it closes, so the test does not depend on the time of day.)
+    # over, which is the reuse under test.
     monkeypatch.setattr(activity, "_SUMMARY_TTL_SECONDS", 0.000001)
-    monkeypatch.setattr(activity_repo, "_SETTLE", timedelta(0))
     _redis_in_memory(monkeypatch)
     await _seed_mixed(db_session)
     for i in range(4):
@@ -479,7 +479,6 @@ async def test_closed_days_are_not_reused_while_history_is_still_arriving(
     from backend.app.db.repositories import activity_repo
 
     monkeypatch.setattr(activity, "_SUMMARY_TTL_SECONDS", 0.000001)
-    monkeypatch.setattr(activity_repo, "_SETTLE", timedelta(0))
     monkeypatch.setattr(activity_repo, "_BACKFILL_PENDING", 1)
     _redis_in_memory(monkeypatch)
     await _emit(db_session, "user.logged_in", {"user_id": "usr_1"}, minutes_ago=60 * 24 * 2)
@@ -493,6 +492,54 @@ async def test_closed_days_are_not_reused_while_history_is_still_arriving(
     await _relay(db_session)
     second = (await test_client.get(f"{API}/summary?days=30")).json()
     assert second["totals"]["events"]["current"] == 2
+
+
+async def test_the_closed_days_are_folded_once_a_day(db_session):
+    """Yesterday is read live with today, because its last events may still
+    be on their way from the relay after midnight. The days before it are a
+    fold that is reusable from the moment it is built and stays the same all
+    day — it used to end at today's midnight, too fresh to reuse for the
+    first minutes of every day, when every reader of every view rebuilt it."""
+    from backend.app.db.repositories import activity_repo, analytics_repo
+    from backend.app.db.repositories.activity_repo import ActivityFilter
+
+    t0 = NOW.replace(hour=0, minute=5, second=0, microsecond=0)
+
+    def ago(ts: datetime) -> float:
+        return (NOW - ts).total_seconds() / 60
+
+    await _emit(db_session, "user.logged_in", {"user_id": "usr_1"}, minutes_ago=ago(t0 - timedelta(days=3)))
+    await _emit(db_session, "user.logged_in", {"user_id": "usr_2"}, minutes_ago=ago(t0 - timedelta(minutes=7)))
+    await _relay(db_session)
+
+    folds: dict[str, dict] = {}
+    builds = 0
+
+    async def reuse(key, build):
+        nonlocal builds
+        if key not in folds:
+            builds += 1
+            folds[key] = await build()
+        return folds[key]
+
+    w = analytics_repo.build_window(7, now=t0)
+    f = ActivityFilter(since=w.start, until=w.end)
+    first = await activity_repo.summary(db_session, f, w, reuse=reuse, now=t0)
+    # One of yesterday's events reaches the ledger late.
+    await _emit(db_session, "user.logged_in", {"user_id": "usr_3"}, minutes_ago=ago(t0 - timedelta(minutes=6)))
+    await _relay(db_session)
+    later = await activity_repo.summary(
+        db_session, f, w, reuse=reuse, now=t0 + timedelta(hours=12),
+    )
+
+    yesterday = (t0 - timedelta(days=1)).date().isoformat()
+    assert list(folds) == [
+        f"full:{activity_repo._midnight(w.start)}:{yesterday}T00:00:00+00:00",
+        f"totals:{activity_repo._midnight(w.previous_start)}:{activity_repo._midnight(w.start)}",
+    ]
+    assert builds == 2
+    assert first["totals"]["events"]["current"] == 2
+    assert later["totals"]["events"]["current"] == 3
 
 
 async def test_a_workspace_summary_counts_only_that_workspace(
@@ -534,6 +581,93 @@ async def test_an_export_is_capped_safe_to_open_and_recorded(
     payload = json.loads(recorded.payload)
     assert payload["actor_id"] == "usr_test000000"
     assert payload["details"]["format"] == "csv"
+
+
+# ── Under load ──────────────────────────────────────────────────────
+
+
+async def _hold_every_slot(bulkhead: Bulkhead) -> tuple[list, asyncio.Event]:
+    """Every slot of ``bulkhead`` taken by other requests. Each holder is a
+    task of its own: a slot held in this one would count as the request's."""
+    release = asyncio.Event()
+
+    async def hold():
+        async with bulkhead.slot():
+            await release.wait()
+
+    holders = [asyncio.create_task(hold()) for _ in range(bulkhead.limit)]
+    await asyncio.sleep(0)
+    assert bulkhead.full
+    return holders, release
+
+
+async def test_searches_past_their_share_are_told_to_come_back(
+    test_client: AsyncClient, db_session, monkeypatch,
+):
+    """A free-text search reads its whole window. Past a few at once, more
+    would take the connections the readiness probe needs too: they are
+    turned away with a retry hint, and every other read carries on."""
+    from backend.app.api.v1.endpoints import activity
+
+    monkeypatch.setattr(activity, "_SEARCHES", Bulkhead("activity searches", 1, wait_seconds=0.01))
+    holders, release = await _hold_every_slot(activity._SEARCHES)
+    try:
+        res = await test_client.get(f"{API}/events?q=rebuild")
+        assert res.status_code == 429, res.text
+        assert res.headers["retry-after"] == "5"
+        assert res.json()["detail"]["code"] == "busy"
+        assert "try again" in res.json()["detail"]["message"]
+        assert (await test_client.get(f"{API}/events")).status_code == 200
+    finally:
+        release.set()
+        await asyncio.gather(*holders)
+    assert (await test_client.get(f"{API}/events?q=rebuild")).status_code == 200
+
+
+async def test_an_export_past_its_share_is_turned_away_before_it_is_recorded(
+    test_client: AsyncClient, db_session, monkeypatch,
+):
+    """Once a stream has started, a refusal can no longer be a 429 — so an
+    export is turned away at the door, and is not recorded as taken."""
+    from backend.app.api.v1.endpoints import activity
+
+    monkeypatch.setattr(activity, "_EXPORTS", Bulkhead(
+        "activity exports", 1, wait_seconds=0.01, retry_after_seconds=30,
+    ))
+    holders, release = await _hold_every_slot(activity._EXPORTS)
+    try:
+        res = await test_client.get(f"{API}/export.csv")
+    finally:
+        release.set()
+        await asyncio.gather(*holders)
+    assert res.status_code == 429, res.text
+    assert res.headers["retry-after"] == "30"
+    exported = (await db_session.execute(
+        select(func.count()).select_from(OutboxEventORM)
+        .where(OutboxEventORM.event_type == "platform.activity.exported")
+    )).scalar()
+    assert exported == 0
+    assert (await test_client.get(f"{API}/export.csv")).status_code == 200
+
+
+async def test_only_a_cold_summary_needs_a_build_slot(
+    test_client: AsyncClient, db_session, monkeypatch,
+):
+    """Builds of long-window documents are what hold a connection for
+    seconds. A built one is served whatever the builds are doing."""
+    monkeypatch.setattr(analytics_cache, "DOCUMENT_BUILDS", Bulkhead(
+        "document builds", 1, wait_seconds=0.01,
+    ))
+    assert (await test_client.get(f"{API}/summary?days=7")).status_code == 200
+    holders, release = await _hold_every_slot(analytics_cache.DOCUMENT_BUILDS)
+    try:
+        assert (await test_client.get(f"{API}/summary?days=7")).status_code == 200
+        cold = await test_client.get(f"{API}/summary?days=30")
+        assert cold.status_code == 429, cold.text
+    finally:
+        release.set()
+        await asyncio.gather(*holders)
+    assert (await test_client.get(f"{API}/summary?days=30")).status_code == 200
 
 
 # ── Directory: names for ids, for everyone ──────────────────────────

@@ -71,7 +71,7 @@ _SURFACES = {
 }
 
 #: How often to recompute. Long enough that the aggregation cost is negligible
-#: (24 documents and the activity explorer's 3 landing views per pass, on one
+#: (24 documents and the activity explorer's 24 lens views per pass, on one
 #: replica), short enough that "as of 4 minutes ago" is not a number anyone
 #: argues with.
 #:
@@ -129,14 +129,15 @@ async def warm_once(session: AsyncSession, *, ttl: float | None = None) -> int:
                     "Analytics warm failed for %s/%dd: %s", surface, days, exc,
                     exc_info=True,
                 )
+                await summaries.rolled_back(session)
                 continue
             if await analytics_cache.put(
                 analytics_cache.document_key(surface, args, epoch=epoch),
                 doc, ttl=ttl,
             ):
                 stored += 1
-    # The Activity explorer's landing view: its cold cost is folding closed
-    # days, the same for everyone who opens it unfiltered, so it is paid here.
+    # The Activity explorer's lenses: their cold cost is folding closed days,
+    # the same for everyone who opens them, so it is paid here.
     stored += await summaries.warm_platform(session)
     return stored
 
