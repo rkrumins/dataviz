@@ -22,7 +22,6 @@ the pool that serves the rest of the product.
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import json
 import logging
@@ -39,8 +38,7 @@ from backend.app.common.activity_context import provenance_for
 from backend.app.db.engine import get_db_session, get_readonly_db_session
 from backend.app.db.repositories import activity_repo, analytics_repo, user_repo
 from backend.app.db.repositories.activity_repo import ActivityFilter
-from backend.app.services import analytics_cache
-from backend.app.services.activity import catalogue, names, recorder
+from backend.app.services.activity import catalogue, names, recorder, summaries
 from backend.auth_service.interface import User
 from backend.common.models.activity import (
     ActivityCatalogue,
@@ -63,12 +61,9 @@ _SEARCH_MAX_DAYS = 92
 #: Rows an export may carry. Past this, narrow the filters.
 _EXPORT_CAP = 50_000
 _EXPORT_CHUNK = 1_000
-#: How long a summary is reused. Activity is read for what just happened, so
-#: this is far shorter than the analytics documents' epoch.
-_SUMMARY_TTL_SECONDS = 60.0
-#: How long a fold of closed days is kept: the span is day-aligned, so it is
-#: asked for until the next UTC midnight moves every window on.
-_FOLD_TTL_SECONDS = 26 * 3600.0
+#: How long a summary is reused (see ``summaries``); a module attribute so a
+#: test can turn reuse off.
+_SUMMARY_TTL_SECONDS = summaries.SUMMARY_TTL_SECONDS
 _MAX_EVENT_TYPES = 25
 
 
@@ -126,12 +121,6 @@ class _Params:
     has_reason: Optional[bool]
     include_noise: bool
     q: Optional[str]
-
-    def key(self) -> str:
-        """A stable digest of every filter, for cache keys."""
-        return hashlib.sha1(
-            json.dumps(self.__dict__, sort_keys=True, default=str).encode()
-        ).hexdigest()[:20]
 
 
 def _csv(raw: Optional[str]) -> tuple[str, ...]:
@@ -316,29 +305,6 @@ async def _events(
     return out
 
 
-async def _name_summary(session: AsyncSession, doc: dict[str, Any]) -> dict[str, Any]:
-    """Name the leaderboards: one batched lookup per kind, like a page."""
-    page = await names.name_page(
-        session,
-        people={r["id"] for r in doc["topPeople"]},
-        workspaces={r["workspaceId"] for r in doc["handsOnSources"] if r.get("workspaceId")},
-        references={r["dataSourceId"] for r in doc["handsOnSources"]}
-        | {r["id"] for r in doc["topTargets"] if r.get("id") and not r.get("label")},
-    )
-    for row in doc["topPeople"]:
-        who = page.people.get(row["id"]) or {}
-        row.update(name=who.get("name") or None, email=who.get("email"),
-                   deleted=bool(who.get("deleted")))
-    for row in doc["topTargets"]:
-        row["label"] = row.get("label") or page.names.get(row.get("id") or "")
-    for row in doc["handsOnSources"]:
-        row["name"] = page.names.get(row["dataSourceId"])
-        row["workspaceName"] = page.workspaces.get(row.get("workspaceId") or "")
-    for row in doc["topActions"]:
-        row.update(label=catalogue.label_of(row["type"]), category=catalogue.category_of(row["type"]))
-    return doc
-
-
 # ── CSV ──────────────────────────────────────────────────────────────
 
 _CSV_COLUMNS = (
@@ -459,26 +425,9 @@ def _mount(r: APIRouter, scope_dependency) -> None:
         """
         p = replace(p, q=None)
         f, window = await _filter(session, p, scope, default_days=30)
-        # The window's own bounds stay out of the key: a fold covers whole
-        # days, and two windows over the same days share their folds.
-        selection = replace(p, days=None, date_from=None, date_to=None).key()
-        key = f"activity:v1:{scope.workspace_id or 'all'}:{p.key()}"
-
-        async def _reuse(span: str, build):
-            # Redis only: a fold holds every person and target in its span,
-            # too large to keep a copy of in every worker.
-            return await analytics_cache.cached(
-                f"activity:fold:v1:p{catalogue.PROJECTION_VERSION}:"
-                f"{scope.workspace_id or 'all'}:{selection}:{span}",
-                build, ttl=_FOLD_TTL_SECONDS, memory=False,
-            )
-
-        async def _build() -> dict[str, Any]:
-            doc = await activity_repo.summary(session, f, window, reuse=_reuse)
-            doc["generatedAt"] = datetime.now(timezone.utc).isoformat()
-            return await _name_summary(session, doc)
-
-        return await analytics_cache.cached(key, _build, ttl=_SUMMARY_TTL_SECONDS)
+        return await summaries.summary(
+            session, f, window, workspace_id=scope.workspace_id, ttl=_SUMMARY_TTL_SECONDS,
+        )
 
     @r.get("/catalogue", response_model=ActivityCatalogue, response_model_by_alias=True)
     async def activity_catalogue(

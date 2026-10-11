@@ -41,8 +41,13 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.repositories import analytics_repo
+from backend.app.db.repositories import (
+    analytics_data_repo,
+    analytics_repo,
+    analytics_usage_repo,
+)
 from backend.app.services import analytics_cache
+from backend.app.services.activity import summaries
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +56,20 @@ logger = logging.getLogger(__name__)
 #: list is allowed to be a plain constant rather than a shared contract.
 WARM_WINDOWS: tuple[int, ...] = (7, 14, 30, 90, 180, 365)
 
-#: The two reader-independent surfaces. The per-workspace drill-in is
-#: deliberately absent: it is one document per workspace per window, which is
-#: unbounded in the dimension that matters, and it is opened by one person at a
-#: time rather than by everyone at once.
-_SURFACES = ("summary", "workspaces")
+#: The reader-independent surfaces, each with the builder that computes it —
+#: named rather than bound, so a test that patches a builder patches what runs.
+#: The per-workspace drill-in is deliberately absent: it is one document per
+#: workspace per window, which is unbounded in the dimension that matters, and
+#: it is opened by one person at a time rather than by everyone at once.
+_SURFACES = {
+    "summary": (analytics_repo, "platform_summary"),
+    "workspaces": (analytics_repo, "workspace_rows"),
+    "data": (analytics_data_repo, "platform_data"),
+    "usage": (analytics_usage_repo, "platform_usage"),
+}
 
 #: How often to recompute. Long enough that the aggregation cost is negligible
-#: (12 documents per pass on one replica), short enough that "as of 4 minutes
+#: (24 documents per pass on one replica), short enough that "as of 4 minutes
 #: ago" is not a number anyone argues with.
 #:
 #: Aliased rather than restated: the warm cadence and the epoch grid must be
@@ -106,14 +117,10 @@ async def warm_once(session: AsyncSession, *, ttl: float | None = None) -> int:
     epoch = analytics_cache.epoch_start()
     for days in WARM_WINDOWS:
         args = {"days": days}
-        for surface in _SURFACES:
+        for surface, (module, builder) in _SURFACES.items():
             try:
-                if surface == "summary":
-                    doc = await analytics_repo.platform_summary(
-                        session, scope=None, now=epoch, **args)
-                else:
-                    doc = await analytics_repo.workspace_rows(
-                        session, scope=None, now=epoch, **args)
+                doc = await getattr(module, builder)(
+                    session, scope=None, now=epoch, **args)
             except Exception as exc:  # noqa: BLE001 — one window, not the pass
                 logger.warning(
                     "Analytics warm failed for %s/%dd: %s", surface, days, exc,
@@ -125,6 +132,9 @@ async def warm_once(session: AsyncSession, *, ttl: float | None = None) -> int:
                 doc, ttl=ttl,
             ):
                 stored += 1
+    # The Activity explorer's landing view: its cold cost is folding closed
+    # days, the same for everyone who opens it unfiltered, so it is paid here.
+    stored += await summaries.warm_platform(session)
     return stored
 
 

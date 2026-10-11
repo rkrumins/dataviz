@@ -293,8 +293,9 @@ def epoch_start(at: Optional[datetime] = None) -> datetime:
 #: Redis for a TTL measured in minutes, so a deploy that adds a field will keep
 #: serving the old shape to freshly-deployed clients until every entry expires.
 #: Versioning the key makes a shape change a cache miss instead of a puzzle.
-#: (v2 added ``series.previous.buckets``.)
-SCHEMA_VERSION = 2
+#: (v2 added ``series.previous.buckets``; v3 the drill-in's data-growth
+#: series and operations mix.)
+SCHEMA_VERSION = 3
 
 
 def document_key(

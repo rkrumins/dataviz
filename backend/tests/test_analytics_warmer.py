@@ -39,7 +39,8 @@ async def test_a_warm_pass_fills_the_keys_readers_look_up(db_session, monkeypatc
     await analytics_warmer.warm_once(db_session, ttl=900)
 
     for days in analytics_warmer.WARM_WINDOWS:
-        for surface in ("summary", "workspaces"):
+        # Every surface the warmer knows — the Data and Usage tabs included.
+        for surface in ("summary", "workspaces", "data", "usage"):
             key = analytics_cache.document_key(surface, {"days": days})
             assert analytics_cache._memory_get(key) is not None, (
                 f"{surface}/{days}d was not warmed into the key readers use"
@@ -271,3 +272,21 @@ async def test_a_redis_only_entry_never_lands_in_process(monkeypatch):
     # Without Redis there is nothing to reuse it from, so it is rebuilt.
     await analytics_cache.cached("k:fold", _build, memory=False)
     assert builds["n"] == 2
+
+
+async def test_a_warm_pass_builds_the_activity_explorers_landing_view(
+    test_client, db_session, monkeypatch,
+):
+    """The explorer opened with no filter is served what the warmer built —
+    proof that the warmer and the endpoint key the same document."""
+    from backend.app.db.repositories import activity_repo
+
+    await analytics_warmer.warm_once(db_session, ttl=900)
+
+    async def _must_not_build(*_a, **_kw):
+        raise AssertionError("the landing view was built again after a warm pass")
+
+    monkeypatch.setattr(activity_repo, "summary", _must_not_build)
+    res = await test_client.get("/api/v1/admin/activity/summary?days=30")
+    assert res.status_code == 200, res.text
+    assert "totals" in res.json()
