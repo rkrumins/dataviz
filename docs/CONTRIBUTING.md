@@ -202,7 +202,7 @@ The full contract, with the reasons, is in [Feature switch lifecycle](/docs/feat
 1. Guide images live in `frontend/public/docs-assets/guide/`, and a page shows one with an ordinary Markdown image whose path is `/docs-assets/guide/<name>.png`. The integrity test fails if the file is missing.
 2. Shots are captured with `frontend/scripts/guide-shots.mjs`, which signs in and photographs the running app. Before you run it:
    - The stack is up, with the API on 8000 and Vite on `http://localhost:5173`, and the demo data onboarded ([Developer Setup](/docs/setup#load-demo-data)).
-   - `ADMIN_PASSWORD` in `.env.dev` holds the password you chose at the first sign-in. The script signs in with `ADMIN_EMAIL` and `ADMIN_PASSWORD`, and the published default can't get past the password change.
+   - `ADMIN_PASSWORD` in `.env.dev` holds the password you chose at the first sign-in. The script signs in with `ADMIN_EMAIL` and `ADMIN_PASSWORD`, and a starting password can't get past the password change.
    - Chrome or Chromium is available. The script uses one listening on remote-debugging port 9222, or starts a headless one if it finds Chrome installed.
 3. Take the shots:
 

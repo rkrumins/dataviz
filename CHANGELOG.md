@@ -53,11 +53,41 @@ the ADRs record what superseded what.
   you had entered. They open a new tab.
 - Four deep links into the docs pointed at headings that don't exist.
 - Guide reading times were typed by hand and had drifted; they are computed from each page.
+- Identity-provider health — reachability and certificate expiry — on the SSO admin pages was
+  empty in every container deployment. Every API process checks it now.
 
 Guards keep this from drifting again: every link the app shows into the guide or docs must open a
 page, every guide page must end by pointing the reader on, every seeded switch, permission and role
 must be documented, every signed-in page must offer help, and the configuration reference must
 match the code.
+
+### Security
+
+- **A password someone else chose has to be replaced.** The first administrator chooses its own
+  password at its first sign-in, whatever `ADMIN_PASSWORD` it was created with; before, only three
+  published values asked for that. The same holds for a password an administrator sets for someone
+  else, when creating the account or with **Reset password**. While the change is pending, the
+  server refuses every request except the change itself, on every route.
+- **Sign-in events reach the audit table in every deployment.** The relay that copies them into
+  the append-only `auth_audit_log` — with the refresh-token and product-event retention sweeps and
+  the analytics warmer — never ran in Docker Compose, Kubernetes or Helm. The control plane runs
+  them now, one copy at a time. The Audit Log also shows changes to the SSO back-channel host
+  list, and **Recent activity** on Account settings shows password resets, reset links, role
+  changes and suspensions done to your account.
+
+### Upgrading
+
+- **The first administrator may be asked for a new password.** At the first start after upgrading,
+  a system account still signing in with its starting password (`ADMIN_PASSWORD`), or with one
+  published in this repository, must choose a new one at its next sign-in. Scripts that sign in
+  as it need the new password afterwards.
+- **The product-event retention sweep runs for the first time.** It deletes product events —
+  views opened, traces and searches, which Analytics counts — older than
+  `PRODUCT_EVENT_RETENTION_DAYS`, 400 days unless you set it. Raise it before upgrading if you
+  want to keep more.
+- **The control plane copies the audit backlog.** On an install where the relay never ran, its
+  first pass copies every event since installation into `auth_audit_log`, continuously until it
+  has caught up.
 
 ### Known limitations
 

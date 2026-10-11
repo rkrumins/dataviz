@@ -74,6 +74,9 @@ synodic-frontend-1       | start worker process
 | Email    | `admin@nexuslineage.local`  |
 | Password | `admin123`                  |
 
+The first sign-in asks you to choose a new password: the account can't do anything else until
+it has one of its own.
+
 ### 5. What's included
 
 The quickstart ships with pre-populated data baked into the Docker images:

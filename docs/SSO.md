@@ -470,8 +470,9 @@ ahead. Warned at 30 days. It must be computed server-side —
 never parse it itself. OIDC has no cert dates; there "health" means
 discovery/JWKS reachability.
 
-The loop is gated on `runs_scheduler()` so replicas do not duplicate it,
-and shuts down instantly via `wait_for(shutdown.wait(), timeout=...)`
+The loop runs in every process that serves the API, because the endpoint
+reads that process's own cache, and shuts down instantly via
+`wait_for(shutdown.wait(), timeout=...)`
 rather than sleeping through a deploy. Note this is deliberately **not** a
 frontend sweep: the mount-time fan-out pattern was removed from
 `useProviderHealthSweep` as a P0.4 regression, and repeating it for IdPs

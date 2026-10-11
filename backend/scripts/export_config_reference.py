@@ -118,10 +118,10 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "A random shared secret, the same value for every service.",
     ),
     "ADMIN_PASSWORD": (
-        "Password for the first administrator account. If it is one of the example passwords "
-        "published in this repository, the account must change it at first sign-in.",
-        "Your own password for the first administrator account, which is created only when the "
-        "database has no users.",
+        "Starting password for the first administrator account, which must replace it at its "
+        "first sign-in. Unset or empty means `changeme`.",
+        "Your own starting password for the first administrator account, which is created only "
+        "when the database has no users and must replace it at its first sign-in.",
     ),
     "AUTH_ENVIRONMENT_ID": (
         "Short name for this deployment, such as `uat`: 1 to 32 letters, digits, `_` or `-`, "

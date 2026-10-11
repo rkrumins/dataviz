@@ -46,6 +46,14 @@ PUBLISHED_PASSWORDS = frozenset({
 })
 
 
+def admin_email() -> str:
+    """``ADMIN_EMAIL``, or the default when it is unset or empty."""
+    email = os.getenv("ADMIN_EMAIL")
+    if not email:
+        return DEFAULT_ADMIN_EMAIL
+    return email
+
+
 def starting_password() -> str:
     """``ADMIN_PASSWORD``, or the default when it is unset or empty.
 
@@ -53,7 +61,10 @@ def starting_password() -> str:
     refuses an empty password, so an administrator seeded with one could
     never sign in at all.
     """
-    return os.getenv("ADMIN_PASSWORD") or DEFAULT_ADMIN_PASSWORD
+    password = os.getenv("ADMIN_PASSWORD")
+    if not password:
+        return DEFAULT_ADMIN_PASSWORD
+    return password
 
 
 async def seed_system_admin(session: AsyncSession) -> Optional[str]:
@@ -65,7 +76,7 @@ async def seed_system_admin(session: AsyncSession) -> Optional[str]:
     """
     if await user_repo.count_users(session) != 0:
         return None
-    email = os.getenv("ADMIN_EMAIL") or DEFAULT_ADMIN_EMAIL
+    email = admin_email()
     user = await user_repo.create_user(
         session,
         email=email,
