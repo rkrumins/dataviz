@@ -48,9 +48,15 @@ export interface AuthUser {
     updatedAt: string
     /** Chosen avatar illustration, or null for the initials fallback. */
     avatarId?: string | null
-    /** True while the account must rotate its password before it can do
-     *  anything else. The API refuses everything but the change screen. */
+    /** The account's flag: its password was chosen by somebody else and
+     *  must be replaced at the next password sign-in. */
     mustChangePassword?: boolean
+    /** Whether THIS session must change the password before it can do
+     *  anything else — the API refuses everything but the change screen.
+     *  False for a session signed in through an identity provider, even
+     *  while the account's own password is pending a change. Set from
+     *  the session response by ``adoptSession``. */
+    passwordChangeRequired?: boolean
     /** IdP-mapped extras (department, employee_id, …). Phase 3. */
     attributes?: Record<string, unknown>
 }
@@ -553,6 +559,8 @@ export interface SessionResponse {
      *  the backend sets no ``AUTH_ENVIRONMENT_ID``, which is also when
      *  those names are unscoped. */
     environment_id?: string | null
+    /** Whether this session must change the password first. */
+    passwordChangeRequired?: boolean
 }
 
 /**
@@ -581,8 +589,15 @@ export interface PermissionClaims {
  * are read by an environment-scoped name, and this is the only place the
  * page learns the name: an in-page sign-in never makes the bootstrap call.
  */
-function adoptSession<T extends { environment_id?: string | null }>(resp: T): T {
+function adoptSession(resp: SessionResponse): SessionResponse {
     adoptEnvironmentId(resp?.environment_id)
+    // The session's own requirement rides on the user the store keeps. A
+    // server that predates the field is answered as before, by the
+    // account's flag.
+    if (resp?.user) {
+        resp.user.passwordChangeRequired =
+            resp.passwordChangeRequired ?? resp.user.mustChangePassword ?? false
+    }
     return resp
 }
 

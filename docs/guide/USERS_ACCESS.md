@@ -156,7 +156,7 @@ first. It works whether or not invite links are switched on.
    | Choose | When | What happens |
    | --- | --- | --- |
    | **Send them a setup link** | Most of the time | The account has no password until they choose one; nobody else ever knows it. |
-   | **Set a password yourself** | One person, and you'll pass it on | At least 12 characters. Nothing sends it for you, and they choose their own the first time they sign in. Not offered for a list. |
+   | **Set a password yourself** | One person, and you'll pass it on | At least 12 characters. Nothing sends it for you, and they choose their own the first time they sign in with it. Not offered for a list. |
    | **Single sign-on only** | They sign in through your identity provider | No password at all. |
 
    **Active straight away** is ticked; untick it to park the accounts in the
@@ -394,7 +394,11 @@ A fresh deployment creates one administrator from its `ADMIN_EMAIL` and
 new one at its first sign-in — the API refuses everything else until it does.
 The administrator changes it again whenever they like on **Account settings**.
 **User Management** shows a **MUST CHANGE PASSWORD** badge against any account
-that still has to choose its own password.
+that still has to choose its own password. The requirement is about the
+password: someone who also signs in through single sign-on keeps doing so
+without being asked, and only signing in with that password takes them to
+**Choose a new password**. An account that signs in only through single
+sign-on has no password, so it is never asked.
 
 ### System accounts (break-glass)
 

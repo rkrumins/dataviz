@@ -132,6 +132,71 @@ async def test_an_account_already_held_is_not_checked_again(db_session, monkeypa
     assert await bootstrap.hold_unchanged_system_accounts(db_session) == []
 
 
+# ── Upgrades where the password was already changed ──────────────────
+#
+# Operators often set ADMIN_PASSWORD to the password the administrator
+# chose, so scripts can sign in with it. That must not read as "still on
+# the starting password" — at the first start after the upgrade or any
+# later one. The audit trail says who chose the password.
+
+async def _event(session, event_type: str, payload: dict, *, aggregate: bool = True):
+    await user_repo.create_outbox_event(
+        session, event_type=event_type, payload=payload,
+        **({"aggregate_type": "user", "aggregate_id": payload["user_id"]} if aggregate else {}),
+    )
+
+
+@pytest.mark.parametrize("event_type,payload,aggregate", [
+    ("user.password_changed", {"via": "self_service"}, True),
+    ("user.password_reset_completed", {}, True),
+    # Before the account link was added to this event, it rode in the payload only.
+    ("user.password_reset_completed", {}, False),
+    ("user.password_reset_by_admin", {"reset_by": "break_glass_cli", "via": "cli"}, True),
+])
+async def test_an_admin_who_chose_the_value_now_in_admin_password_is_left_alone(
+    db_session, monkeypatch, event_type, payload, aggregate,
+):
+    monkeypatch.setenv("ADMIN_PASSWORD", _OPERATOR_CHOSEN)
+    uid = await _system_account(
+        db_session, "admin@example.com", hash_password(_OPERATOR_CHOSEN))
+    await _event(db_session, event_type, {"user_id": uid, **payload}, aggregate=aggregate)
+
+    assert await bootstrap.hold_unchanged_system_accounts(db_session) == []
+    assert await _flag(db_session, uid) is False
+
+
+async def test_an_admin_setting_their_own_from_admin_users_chose_it(db_session, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", _OPERATOR_CHOSEN)
+    uid = await _system_account(
+        db_session, "admin@example.com", hash_password(_OPERATOR_CHOSEN))
+    await _event(db_session, "user.password_reset_by_admin", {"user_id": uid, "reset_by": uid})
+
+    assert await bootstrap.hold_unchanged_system_accounts(db_session) == []
+
+
+async def test_another_persons_events_prove_nothing(db_session, monkeypatch):
+    """Someone else's change, and another administrator setting this
+    account's password, are not this account choosing its own."""
+    monkeypatch.setenv("ADMIN_PASSWORD", _OPERATOR_CHOSEN)
+    uid = await _system_account(
+        db_session, "admin@example.com", hash_password(_OPERATOR_CHOSEN))
+    await _event(db_session, "user.password_changed", {"user_id": "usr_someoneelse"})
+    await _event(db_session, "user.password_reset_by_admin",
+                 {"user_id": uid, "reset_by": "usr_anotheradmin"})
+
+    assert await bootstrap.hold_unchanged_system_accounts(db_session) == [uid]
+
+
+async def test_a_published_password_is_held_whoever_chose_it(db_session, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", _OPERATOR_CHOSEN)
+    uid = await _system_account(
+        db_session, "admin@example.com", hash_password("admin123"))
+    await _event(db_session, "user.password_reset_by_admin",
+                 {"user_id": uid, "reset_by": "break_glass_cli", "via": "cli"})
+
+    assert await bootstrap.hold_unchanged_system_accounts(db_session) == [uid]
+
+
 # ── The published list keeps up with the examples ────────────────────
 
 _REPO = Path(__file__).resolve().parents[2]

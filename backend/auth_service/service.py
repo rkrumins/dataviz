@@ -42,6 +42,9 @@ from .activity import RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS
 from .activity import ActivityGate
 from .core.password import disabled_password_hash
 from .core.tokens import (
+    SIGNIN_CLAIM,
+    SIGNIN_PASSWORD,
+    SIGNIN_SSO,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -453,6 +456,7 @@ class LocalIdentityService:
         tokens = self._issue_tokens(
             user,
             family_id=None,
+            signin=SIGNIN_PASSWORD,
             claims_extra=claims_extra,
             refresh_token=refresh_token,
         )
@@ -987,6 +991,11 @@ class LocalIdentityService:
         tokens = self._issue_tokens(
             user,
             family_id=claims.family_id,
+            # The way this session was signed in to, as recorded at sign-in:
+            # an SSO session carries its provider (and the IdP's auth
+            # instant) on every successor; a password session carries
+            # neither.
+            signin=SIGNIN_SSO if (session_provider_id or auth_time) else SIGNIN_PASSWORD,
             claims_extra=claims_extra,
             auth_time=auth_time,
             refresh_token=successor_token,
@@ -1496,6 +1505,7 @@ class LocalIdentityService:
         tokens = self._issue_tokens(
             user,
             family_id=None,
+            signin=SIGNIN_SSO,
             claims_extra=claims_extra,
             auth_time=auth_time,
             refresh_token=refresh_token,
@@ -2174,11 +2184,17 @@ class LocalIdentityService:
         user: User,
         *,
         family_id: Optional[str],
+        signin: str,
         claims_extra: Optional[dict] = None,
         auth_time: Optional[int] = None,
         refresh_token: Optional[str] = None,
     ) -> SessionTokens:
         """Mint a fresh (access, refresh, csrf) triple.
+
+        ``signin`` is how the session was signed in to — ``SIGNIN_PASSWORD``
+        or ``SIGNIN_SSO`` — carried on the access token from sign-in
+        through every rotation. A pending password change holds password
+        sessions only; see ``password_change_pending``.
 
         ``auth_time`` (epoch seconds) is the IdP-issued authentication
         instant for SSO sessions; it is embedded in the refresh JWT
@@ -2193,11 +2209,14 @@ class LocalIdentityService:
         rather than letting a second one be generated here.
         """
         extra = dict(claims_extra or {})
-        if user.must_change_password:
+        extra[SIGNIN_CLAIM] = signin
+        if user.must_change_password and signin == SIGNIN_PASSWORD:
             # Carried as a claim rather than looked up per request:
             # ``get_current_user`` already decodes this token to read
             # ``sid``, so enforcing the rotation costs one more dict
             # lookup instead of a database round-trip on every call.
+            # Password sessions only: an SSO sign-in never used the
+            # password somebody else chose.
             extra["mcp"] = True
         # No size decision here. The claims resolver does not put
         # per-workspace grants in the token at all — see ``_resolve_claims``

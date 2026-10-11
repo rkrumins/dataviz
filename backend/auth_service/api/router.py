@@ -102,6 +102,7 @@ from ..core.tokens import (
     decode_refresh_token,
     decode_saml_state_token,
     decode_token,
+    password_change_pending,
 )
 from ..interface import (
     IdentityService,
@@ -284,6 +285,28 @@ class SessionResponse(BaseModel):
     #: case where the names are unscoped — so the client's fallback and
     #: this field agree without either having to special-case it.
     environment_id: Optional[str] = None
+    #: Whether THIS session must change the account's password before it
+    #: can do anything else — true for a session signed in with a password
+    #: somebody else chose, false for one signed in through an identity
+    #: provider even when the account's own password is pending a change.
+    #: ``user.mustChangePassword`` is the account's flag; this is what the
+    #: SPA redirects on.
+    password_change_required: bool = Field(False, alias="passwordChangeRequired")
+
+
+def _session_response(user: User, access_token: Optional[str]) -> SessionResponse:
+    """The answer to a request that established, rotated or read a session."""
+    try:
+        payload = decode_token(access_token or "")
+    except Exception:  # noqa: BLE001 — no readable token, so nothing it could hold
+        payload = {}
+    return SessionResponse(
+        user=user,
+        environment_id=AUTH_ENVIRONMENT_ID or None,
+        password_change_required=password_change_pending(
+            payload, bool(user.must_change_password),
+        ),
+    )
 
 
 class _Ack(BaseModel):
@@ -1265,7 +1288,7 @@ async def login(
     await accounts.reset("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT)
     set_session_cookies(response, tokens)
     logger.info("Login succeeded for user=%s", user.id)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)
 
 
 # ── POST /auth/logout ─────────────────────────────────────────────────
@@ -1358,7 +1381,7 @@ async def refresh(request: Request, response: Response):
         return _refresh_refused(request, "Refresh token invalid or expired")
 
     set_session_cookies(response, tokens)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)
 
 
 # ── GET /auth/me ──────────────────────────────────────────────────────
@@ -1427,7 +1450,7 @@ async def me(request: Request, response: Response):
     # The bootstrap GET is where a lost CSRF cookie gets healed — the
     # one moment we know the session is valid before any write happens.
     _heal_csrf_cookie(request, response)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, read_access_cookie(request))
 
 
 # ── GET /auth/csrf ────────────────────────────────────────────────────
@@ -2577,7 +2600,7 @@ async def backchannel_handle_login(
     if read_link_intent_cookie(request) is not None:
         clear_link_intent_cookie(response)
     logger.info("Back-channel login succeeded (slug=%s, user=%s)", slug, user.id)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)
 
 
 @router.post("/{slug}/browser-profile", response_model=SessionResponse,
@@ -2668,4 +2691,4 @@ async def custom_profile_browser_login(
         clear_link_intent_cookie(response)
     logger.info("Custom profile login succeeded (slug=%s, user=%s, source=%s)",
                 slug, user.id, provider.settings.source)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return _session_response(user, tokens.access_token)

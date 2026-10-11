@@ -87,7 +87,10 @@ match the code.
   password at its first sign-in, whatever `ADMIN_PASSWORD` it was created with; before, only three
   published values asked for that. The same holds for a password an administrator sets for someone
   else, when creating the account or with **Reset password**. While the change is pending, the
-  server refuses every request except the change itself, on every route.
+  server refuses every request except the change itself, on every route, from a session signed in
+  with that password. Signing in through SSO is unaffected: someone who signs in through the
+  identity provider and also has a local password keeps working, and can replace the password on
+  **Account settings**.
 - **Sign-in events reach the audit table in every deployment.** The relay that copies them into
   the append-only `auth_audit_log` — with the refresh-token and product-event retention sweeps and
   the analytics warmer — never ran in Docker Compose, Kubernetes or Helm. The control plane runs
@@ -100,7 +103,10 @@ match the code.
 - **The first administrator may be asked for a new password.** At the first start after upgrading,
   a system account still signing in with its starting password (`ADMIN_PASSWORD`), or with one
   published in this repository, must choose a new one at its next sign-in. Scripts that sign in
-  as it need the new password afterwards.
+  as it need the new password afterwards. An administrator who already chose its own password —
+  on **Account settings**, with a reset link, **Reset password** on its own row, or the host's
+  reset script — isn't asked again, even if `ADMIN_PASSWORD` has since been set to it, unless it
+  is one of the published ones.
 - **The product-event retention sweep runs for the first time.** It deletes product events —
   views opened, traces and searches, which Analytics counts — older than
   `PRODUCT_EVENT_RETENTION_DAYS`, 400 days unless you set it. Raise it before upgrading if you

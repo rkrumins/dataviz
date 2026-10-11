@@ -33,7 +33,9 @@ from backend.auth_service.cookies import (
     raise_if_foreign_session,
     read_access_cookie,
 )
-from backend.auth_service.core.tokens import decode_token, is_foreign_token_error
+from backend.auth_service.core.tokens import (
+    decode_token, is_foreign_token_error, password_change_pending,
+)
 from backend.auth_service.interface import IdentityService, User
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
@@ -184,10 +186,12 @@ def _hold_for_password_change(
     The token claim is minted from the account at sign-in and at every
     refresh; the user record, where a resolver has one, is read on every
     request, so a requirement set after sign-in holds from the next
-    request rather than the next refresh.
+    request rather than the next refresh. Only a session signed in with
+    the password is held: one signed in through an identity provider
+    carries on (``password_change_pending``).
     """
-    pending = bool(payload.get("mcp")) or bool(
-        user is not None and getattr(user, "must_change_password", False)
+    pending = password_change_pending(
+        payload, bool(user is not None and getattr(user, "must_change_password", False)),
     )
     if pending and not _password_change_exempt(request):
         raise HTTPException(

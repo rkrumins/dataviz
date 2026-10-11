@@ -78,10 +78,13 @@ one. The forms show a matching strength meter as you type.
 A new installation creates one administrator from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Whatever
 that password is, someone other than the administrator chose it, so the account must choose its
 own before it can work: the app takes it to **Choose a new password**, and the server — not
-just the page — refuses every other request with the error `password_change_required`,
-whichever way the request signs in. The same applies to a password an administrator sets for
-someone else, when creating the account or with **Reset password**, and, at every start, to a
-system account still using its starting password or one published in this repository.
+just the page — refuses every other request from that session, on every route, with the error
+`password_change_required`. The same applies to a password an administrator sets for someone
+else, when creating the account or with **Reset password**, and, at every start, to a system
+account still using its starting password or one published in this repository — unless the
+account has already chosen its own. Only a session signed in with the password is held: the
+same account signing in through single sign-on carries on, because the requirement concerns the
+password, not the person.
 
 **How to configure it.**
 

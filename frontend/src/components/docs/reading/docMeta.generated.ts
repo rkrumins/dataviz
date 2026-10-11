@@ -63,7 +63,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/API_GUIDE.md"
   },
   "backend": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/BACKEND.md"
   },
   "frontend": {
