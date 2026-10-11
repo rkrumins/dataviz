@@ -69,8 +69,9 @@ _SURFACES = {
 }
 
 #: How often to recompute. Long enough that the aggregation cost is negligible
-#: (24 documents per pass on one replica), short enough that "as of 4 minutes
-#: ago" is not a number anyone argues with.
+#: (24 documents and the activity explorer's 3 landing views per pass, on one
+#: replica), short enough that "as of 4 minutes ago" is not a number anyone
+#: argues with.
 #:
 #: Aliased rather than restated: the warm cadence and the epoch grid must be
 #: the same number, and a second literal here is how they drift apart again.
