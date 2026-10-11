@@ -137,7 +137,7 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
         navigate(hit.path)
         break
       case 'Doc':
-        navigate(`/${hit.area}/${hit.slug}`)
+        navigate(hit.href)
         break
       case 'Workspace':
         wsSetActive(hit.workspace.id)

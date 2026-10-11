@@ -70,6 +70,7 @@ function fixture(overrides: { catalogItemId?: string } = {}): GlobalSearchResult
       Doc: [{
         id: 'doc-guide-reading', category: 'Doc', score: 1,
         name: 'Reading a lineage graph', area: 'guide', slug: 'reading-a-lineage-graph',
+        href: '/guide/reading-a-lineage-graph#colours',
       }],
     },
     totalByCategory: {
@@ -91,8 +92,8 @@ function emptyFixture(): GlobalSearchResult {
 }
 
 function LocationProbe() {
-  const { pathname, search } = useLocation()
-  return <div data-testid="location">{`${pathname}${search}`}</div>
+  const { pathname, search, hash } = useLocation()
+  return <div data-testid="location">{`${pathname}${search}${hash}`}</div>
 }
 
 function renderPalette(open: boolean, route = '/dashboard') {
@@ -219,11 +220,11 @@ describe('CommandPalette — where a hit takes you', () => {
     expect(locationNow()).toBe('/me/account')
   })
 
-  it('opens a doc in its own area', () => {
+  it('opens a doc at the section that matched', () => {
     renderPalette(true)
     type()
     clickRow('Reading a lineage graph')
-    expect(locationNow()).toBe('/guide/reading-a-lineage-graph')
+    expect(locationNow()).toBe('/guide/reading-a-lineage-graph#colours')
   })
 
   it('opens a catalogued data source on its own page', () => {
