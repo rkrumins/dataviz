@@ -129,6 +129,33 @@ async def test_a_requirement_set_after_sign_in_holds_at_once(monkeypatch):
         assert exc.value.detail["error"] == "password_change_required"
 
 
+async def test_an_sso_session_carries_on(monkeypatch):
+    """Someone who signs in through SSO nearly every day must not be
+    stopped for a local password somebody else set: the requirement is
+    about the password, so it holds sessions signed in WITH it."""
+    _install_fake_session(
+        monkeypatch, must_change=False, flagged_record=True, signin="sso",
+    )
+    assert (await deps.get_current_user(_request_for("/api/v1/admin/users"))).id == "usr_flagged"
+    assert (await deps.get_optional_user(_request_for("/api/v1/views", "POST"))).id == "usr_flagged"
+    assert await deps.get_permission_claims(_request_for("/api/v1/views", "POST"))
+
+
+async def test_a_token_from_before_the_sign_in_kind_is_held_by_its_claim(monkeypatch):
+    """Access tokens minted before ``signin`` existed live a few minutes
+    more. Their own ``mcp`` still holds them; the account flag alone
+    can't, because it can't tell a password session from an SSO one."""
+    _install_fake_session(
+        monkeypatch, must_change=False, flagged_record=True, signin=None,
+    )
+    assert (await deps.get_current_user(_request_for("/api/v1/admin/users"))).id == "usr_flagged"
+
+    _install_fake_session(monkeypatch, must_change=True, signin=None)
+    with pytest.raises(HTTPException) as exc:
+        await deps.get_current_user(_request_for("/api/v1/admin/users"))
+    assert exc.value.detail["error"] == "password_change_required"
+
+
 async def test_a_revoked_session_is_signed_out_not_held(monkeypatch):
     """Changing the password revokes every session. Another tab still
     holding the old, flagged token must be sent to sign in, not to a
@@ -160,13 +187,16 @@ def _request_for(path: str, method: str = "GET"):
 
 def _install_fake_session(
     monkeypatch, *, must_change: bool, flagged_record: bool = False,
+    signin: str | None = "password",
 ):
     """Stub out the token decode and the session validation.
 
-    We are testing the gate, not JWT plumbing — ``mcp`` is the only
-    claim that matters here, plus an inline ``ws`` so the claims
+    We are testing the gate, not JWT plumbing — ``mcp`` and ``signin``
+    are the claims that matter here, plus an inline ``ws`` so the claims
     resolver has no store to consult. ``flagged_record`` sets the flag on
-    the user record without putting it in the token.
+    the user record without putting it in the token; ``signin`` is how
+    the session was signed in to (``None`` for a token minted before the
+    claim existed).
     """
     from backend.auth_service.interface import User
 
@@ -187,5 +217,6 @@ def _install_fake_session(
         lambda _tok: {
             "sid": "sess_test", "sub": "usr_flagged", "ws": {},
             **({"mcp": True} if must_change else {}),
+            **({"signin": signin} if signin else {}),
         },
     )

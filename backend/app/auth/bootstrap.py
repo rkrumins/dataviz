@@ -9,20 +9,27 @@ replace it at its first sign-in.
 Accounts created before that rule are caught at startup: a system account
 still signing in with the configured starting password, or with any
 password this repository publishes, is made to change it at its next
-sign-in.
+sign-in. An account that has already chosen its own password is left alone
+even when ``ADMIN_PASSWORD`` has since been set to that password — operators
+often do, so scripts can sign in — unless it is a published one.
+
+The requirement holds password sign-ins only: an account that also signs in
+through an identity provider keeps doing so (see
+``auth_service.core.tokens.password_change_pending``).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.password import hash_password, verify_password
-from backend.app.db.models import UserORM
+from backend.app.db.models import OutboxEventORM, UserORM
 from backend.app.db.repositories import user_repo
 from backend.auth_service.core.password import is_password_set
 
@@ -103,15 +110,58 @@ async def seed_system_admin(session: AsyncSession) -> Optional[str]:
     return email
 
 
+#: Events that mean an account's password was chosen by the account itself
+#: — a change from Account settings or a reset link — or set from the host by
+#: the operator recovering it, or set by an administrator on their own
+#: account. (An administrator setting somebody else's password marks the
+#: account to change it, so that case never reaches the check below.)
+_OWN_PASSWORD_EVENTS = (
+    "user.password_changed",
+    "user.password_reset_completed",
+    "user.password_reset_by_admin",
+)
+
+
+async def _has_chosen_own_password(session: AsyncSession, user_id: str) -> bool:
+    """Whether the audit trail shows this account choosing its password.
+
+    Read from ``outbox_events``, which keeps every event; older events
+    carry the account only in their payload, so both are matched.
+    """
+    rows = (await session.execute(
+        select(OutboxEventORM.event_type, OutboxEventORM.payload).where(
+            OutboxEventORM.event_type.in_(_OWN_PASSWORD_EVENTS),
+            or_(
+                OutboxEventORM.aggregate_id == user_id,
+                OutboxEventORM.payload.contains(user_id, autoescape=True),
+            ),
+        )
+    )).all()
+    for event_type, raw in rows:
+        try:
+            payload = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        if payload.get("user_id") != user_id:
+            continue
+        if event_type != "user.password_reset_by_admin":
+            return True
+        if payload.get("via") == "cli" or payload.get("reset_by") == user_id:
+            return True
+    return False
+
+
 async def hold_unchanged_system_accounts(session: AsyncSession) -> list[str]:
     """Make each system account still on a password it didn't choose change it.
 
     Checks every system account that has a password and isn't already
-    held against the configured starting password and every published
-    one. Returns the ids it held. A few Argon2 verifications per system
-    account, run off the event loop; there is normally one such account.
+    held against every published password, and — unless the account has
+    chosen its own password before — against the configured starting
+    password. Returns the ids it held. A few Argon2 verifications per
+    system account, run off the event loop; there is normally one such
+    account.
     """
-    candidates = [starting_password(), *sorted(PUBLISHED_PASSWORDS)]
+    published = sorted(PUBLISHED_PASSWORDS)
     accounts = (await session.execute(
         select(UserORM.id, UserORM.password_hash).where(
             UserORM.is_system_account.is_(True),
@@ -123,6 +173,12 @@ async def hold_unchanged_system_accounts(session: AsyncSession) -> list[str]:
     for user_id, password_hash in accounts:
         if not is_password_set(password_hash):
             continue
+        # ``ADMIN_PASSWORD`` matching is only evidence of an unchanged
+        # starting password while the account has never chosen one.
+        candidates = (
+            published if await _has_chosen_own_password(session, user_id)
+            else [starting_password(), *published]
+        )
         for candidate in candidates:
             if await asyncio.to_thread(verify_password, candidate, password_hash):
                 await user_repo.set_must_change_password(session, user_id, True)

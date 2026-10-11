@@ -40,7 +40,7 @@ export { useViewEditorModal }
 export function AppLayout() {
   const status = useAuthStore((s) => s.status)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
-  const mustChangePassword = useAuthStore((s) => s.user?.mustChangePassword ?? false)
+  const passwordChangeRequired = useAuthStore((s) => s.user?.passwordChangeRequired ?? false)
   const location = useLocation()
   // Selector subscriptions (not whole-store) so this always-mounted shell
   // only re-renders when these specific fields change, not on every
@@ -83,7 +83,7 @@ export function AppLayout() {
     // Not while a password change is pending: the API refuses the read,
     // and the refusal would reload the page on its way to the change
     // screen this layout is already redirecting to.
-    if (!isAuthenticated || mustChangePassword) return
+    if (!isAuthenticated || passwordChangeRequired) return
 
     const loadViews = async () => {
       try {
@@ -96,7 +96,7 @@ export function AppLayout() {
       }
     }
     loadViews()
-  }, [isAuthenticated, mustChangePassword])
+  }, [isAuthenticated, passwordChangeRequired])
 
   // Applies the theme preference to <html class="dark">. See
   // useAppliedTheme for the anti-jank details — routes outside this layout
@@ -155,7 +155,7 @@ export function AppLayout() {
   // has to be replaced before anything else. The API holds every other
   // request regardless; going straight to the change screen spares the
   // person a page that loads only to be refused.
-  if (mustChangePassword) {
+  if (passwordChangeRequired) {
     return <Navigate to="/password-change-required" replace />
   }
 

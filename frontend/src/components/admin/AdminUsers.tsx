@@ -1056,7 +1056,7 @@ export function AdminUsers() {
                                                             opening the row. */}
                                                         {user.mustChangePassword && (
                                                             <span
-                                                                title="This account's password was chosen by someone else. It must choose its own at its next sign-in."
+                                                                title="This account's password was chosen by someone else. It must choose its own the next time it signs in with that password; signing in through SSO is unaffected."
                                                                 className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
                                                                 MUST CHANGE PASSWORD
                                                             </span>

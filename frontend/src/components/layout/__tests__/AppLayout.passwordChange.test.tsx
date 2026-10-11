@@ -1,7 +1,8 @@
 /**
- * A signed-in account that must change its password goes straight to the
- * change screen, and the shell doesn't start loading data the API would
- * refuse on the way there.
+ * A session that must change its password goes straight to the change
+ * screen, and the shell doesn't start loading data the API would refuse on
+ * the way there. A session signed in through SSO doesn't, even while the
+ * account's own password is pending a change.
  *
  * Everything the shell renders around the outlet is stubbed: this is
  * about the guard, not the chrome.
@@ -34,14 +35,14 @@ vi.mock('@/services/viewApiService', () => ({
 import { AppLayout } from '../AppLayout'
 import { useAuthStore } from '@/store/auth'
 
-function signIn(mustChangePassword: boolean) {
+function signIn(passwordChangeRequired: boolean, mustChangePassword = passwordChangeRequired) {
     useAuthStore.setState({
         status: 'authenticated',
         isAuthenticated: true,
         user: {
             id: 'usr_1', email: 'a@b.c', firstName: 'A', lastName: 'B',
             role: 'super_admin', status: 'active', authProvider: 'local',
-            createdAt: '', updatedAt: '', mustChangePassword,
+            createdAt: '', updatedAt: '', mustChangePassword, passwordChangeRequired,
         },
     } as never)
 }
@@ -72,6 +73,13 @@ describe('AppLayout and a pending password change', () => {
 
     it('lets everyone else through', async () => {
         signIn(false)
+        renderAt('/dashboard')
+        expect(await screen.findByText('Dashboard')).toBeInTheDocument()
+        expect(listViews).toHaveBeenCalledTimes(1)
+    })
+
+    it('lets an SSO session through while the account password is pending', async () => {
+        signIn(false, true)
         renderAt('/dashboard')
         expect(await screen.findByText('Dashboard')).toBeInTheDocument()
         expect(listViews).toHaveBeenCalledTimes(1)

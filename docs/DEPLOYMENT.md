@@ -273,7 +273,8 @@ provider that has a password; the Kubernetes manifests already give it to them.
   sign-in when single sign-on is enforced, and forced sign-out sweeps skip it. The value sits
   in your `.env`, so the account must choose its own password at its first sign-in before it
   can do anything else; an existing installation whose administrator still uses that value,
-  or a password published in this repository, is made to change it at its next sign-in. The
+  or a password published in this repository, is made to change it at its next sign-in. An
+  administrator who chose that `ADMIN_PASSWORD` value itself isn't asked again. The
   value is read only while no user exists, so changing it in `.env` later does nothing:
   change the password on **Account settings** (`/me/account`), or follow
   [Reset an administrator's password](/docs/runbooks#reset-an-administrators-password).
