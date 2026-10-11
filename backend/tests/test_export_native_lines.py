@@ -5,14 +5,18 @@ Pins: ``stream.native_pages`` writes each entity's stored payload text verbatim 
 qualified names; ``rowmodel.normalize`` reads such a line into the same row the flat (format-1)
 record of that entity gives, with nested properties as they were stored; ``TypeStats`` counts by
 type in the provider-stats shape; a view's export reads only its own entities' payloads; and a
-starter template reads one page of each kind, never the whole graph. The snapshot is faked at its
-page boundary; integration/test_export_stream.py reads real ones.
+starter template reads one page of each kind, never the whole graph. An export reads each page
+while it writes the one before, and an early close ends the read under way. The snapshot is faked at
+its page boundary; integration/test_export_stream.py reads real ones.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from typing import Dict, List
+
+import pytest
 
 from backend.app.services.versioning.import_export import stream
 from backend.app.services.versioning.import_export.rowmodel import normalize
@@ -34,7 +38,7 @@ class _Snap:
             return w
         return replace(w, payload=None)
 
-    async def iter_live(self, kind, payload=False):
+    async def iter_live(self, kind, payload=False, limit=None):
         rows = sorted(self._by[kind].values(), key=lambda w: w.entity_id)
         for i in range(0, len(rows), self.page_size):
             self.pages_read[kind] += 1
@@ -147,3 +151,55 @@ async def test_a_starter_template_reads_one_page_of_each_kind():
     assert snap.pages_read == {"node": 1, "edge": 1}
     assert records[3]["sourceUrn"] == "urn:0" and records[3]["targetUrn"] == "urn:1"
     assert await stream.first_records(_Snap([], []), 3) == []
+
+
+async def _source(n: int, log: List[str], *, gate: asyncio.Event = None, fail_at: int = None):
+    """Pages 0..n-1, each logged as it is read; page 1 waits for ``gate``, page ``fail_at`` fails."""
+    try:
+        for i in range(n):
+            if i == 1 and gate is not None:
+                await gate.wait()
+            if i == fail_at:
+                raise RuntimeError("the database went away")
+            await asyncio.sleep(0)
+            log.append(f"read {i}")
+            yield i
+    finally:
+        log.append("closed")
+
+
+async def test_the_next_page_is_read_while_this_one_is_written():
+    log: List[str] = []
+    async for page in stream._read_ahead(_source(3, log)):
+        await asyncio.sleep(0.01)                 # records, encoding, compression
+        log.append(f"wrote {page}")
+    assert [e for e in log if e.startswith("wrote")] == ["wrote 0", "wrote 1", "wrote 2"]
+    assert log.index("read 1") < log.index("wrote 0"), log
+    assert log.count("closed") == 1, "read to its end, while the last page was written"
+
+
+async def test_closed_mid_read_the_read_is_cancelled_and_the_source_ends():
+    log: List[str] = []
+    pages = stream._read_ahead(_source(3, log, gate=asyncio.Event()))
+    assert await anext(pages) == 0
+    await asyncio.sleep(0.01)                     # page 1's read is under way, and waits
+    await pages.aclose()
+    await asyncio.sleep(0.01)
+    assert log == ["read 0", "closed"]
+
+
+async def test_closed_with_the_next_page_read_the_source_is_closed():
+    log: List[str] = []
+    pages = stream._read_ahead(_source(3, log))
+    assert await anext(pages) == 0
+    await asyncio.sleep(0.01)                     # page 1 is read and waits to be taken
+    await pages.aclose()
+    assert log == ["read 0", "read 1", "closed"]
+
+
+async def test_a_failed_read_reaches_the_caller():
+    log: List[str] = []
+    with pytest.raises(RuntimeError, match="went away"):
+        async for page in stream._read_ahead(_source(3, log, fail_at=2)):
+            log.append(f"wrote {page}")
+    assert log == ["read 0", "wrote 0", "read 1", "wrote 1", "closed"]

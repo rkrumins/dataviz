@@ -16,10 +16,12 @@ exactly as ``_composed_state``/``_state_as_of`` compose it. Streaming a layer, e
 entities a higher layer decides, found with one indexed point lookup per higher layer, so every
 live entity comes out once, from its deciding layer, with no global sort or in-memory map.
 
-Pages are keyset-paged on ``entity_id`` in the database's own collation (the cursor compares in the
-same one), each in a short session: a commit landing mid-export can't shift a page, and pinning
-``main`` to a commit seq makes the whole export one consistent snapshot. A draft read as it stands
-now has no seq to pin to; :func:`pinned_reads` gives such a reader one transaction instead.
+A layer pinned to a commit seq never changes (version rows are only ever added), so it is read by ONE
+query, streamed a page at a time (:func:`_stream`); pinning ``main`` to a commit seq makes the whole
+export one consistent snapshot. A draft's current state is keyset-paged on ``entity_id`` in the
+database's own collation, each page in a short session that sees the draft as it is then. A draft
+read as it stands now has no seq to pin to; :func:`pinned_reads` gives such a reader one
+transaction instead.
 """
 from __future__ import annotations
 
@@ -29,7 +31,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Dict, Iterable, List, Optional, Sequence, Set, Union
 
-from sqlalchemy import Text, cast, func, select, text
+from sqlalchemy import Text, any_, bindparam, cast, func, select, text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import db
@@ -37,8 +40,11 @@ from ..models import BranchORM, EdgeVersionORM, EntityHeadORM, GraphORM, NodeVer
 
 #: Rows per page. Big enough that per-page overhead is noise, small enough to hold comfortably.
 PAGE_SIZE = int(os.getenv("GRAPH_EXPORT_PAGE_SIZE", "2000"))
-#: Ids per point lookup (an IN list).
+#: Ids per point lookup.
 _LOOKUP_CHUNK = 5000
+#: A point lookup's ids, as one array (``= ANY``): an IN list of thousands is compiled one bind at a
+#: time, and each length is a statement of its own to prepare and plan.
+_ANY_ID = any_(bindparam("ids", type_=ARRAY(Text)))
 
 #: The session every read here goes through while :func:`pinned_reads` is open.
 _PINNED: ContextVar[Optional[AsyncSession]] = ContextVar("snapshot_pinned_reads", default=None)
@@ -122,6 +128,26 @@ def _chunks(items: Sequence[str], n: int) -> Iterable[Sequence[str]]:
         yield items[i:i + n]
 
 
+async def _stream(stmt, size: int) -> AsyncIterator[Sequence]:
+    """``stmt``'s rows, ``size`` at a time, from ONE execution read through a server-side cursor.
+
+    Not keyset pages (``… WHERE entity_id > :after … LIMIT :size``): each of those is planned on its
+    own, and Postgres estimates how many rows a layer's ``DISTINCT ON`` yields from the partitioned
+    table's own statistics, which autovacuum never collects. Without them it expects 200, so a page
+    of 2,000 looks like the whole result, and each page sorted every version row after it: about
+    500 entities a second on 2M nodes, hours for a large graph. Read once, the rows are sorted (or
+    walked in index order) once, whatever the plan. The cursor's transaction stays open while the
+    rows are read: the pinned one inside :func:`pinned_reads`, else a pooled session's, held for
+    the read."""
+    async with _session() as s:
+        result = await s.stream(stmt.execution_options(yield_per=size))
+        try:
+            async for rows in result.partitions():
+                yield rows
+        finally:
+            await result.close()
+
+
 @dataclass(frozen=True)
 class VersionLayer:
     """A branch's version rows at ``commit_seq <= seq`` — the winner per entity is its newest."""
@@ -138,21 +164,21 @@ class VersionLayer:
                 .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
                 .distinct(model.entity_id))
 
-    async def page(self, kind: str, after: Optional[str], limit: int, payload: bool = False) -> List[Winner]:
-        model = _model(kind)
+    async def scan(self, kind: str, size: int, payload: bool = False,
+                   limit: Optional[int] = None) -> AsyncIterator[List[Winner]]:
+        """Every winner of ``kind`` (the first ``limit``), in id order, ``size`` at a time, from one
+        query (:func:`_stream`): rows at or below the seq never change, so one read is the layer."""
         stmt = self._winners(kind, payload)
-        if after is not None:
-            stmt = stmt.where(model.entity_id > after)
-        async with _session() as s:
-            rows = (await s.execute(stmt.limit(limit))).all()
-        return [_winner(kind, self.graph_id, r) for r in rows]
+        async for rows in _stream(stmt if limit is None else stmt.limit(limit), size):
+            yield [_winner(kind, self.graph_id, r) for r in rows]
 
     async def lookup(self, kind: str, entity_ids: Sequence[str], payload: bool = False) -> Dict[str, Winner]:
         model = _model(kind)
+        stmt = self._winners(kind, payload).where(model.entity_id == _ANY_ID)
         out: Dict[str, Winner] = {}
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
             async with _session() as s:
-                rows = (await s.execute(self._winners(kind, payload).where(model.entity_id.in_(chunk)))).all()
+                rows = (await s.execute(stmt, {"ids": list(chunk)})).all()
             for r in rows:
                 out[r[0]] = _winner(kind, self.graph_id, r)
         return out
@@ -187,12 +213,27 @@ class HeadsLayer:
             rows = (await s.execute(stmt.limit(limit))).all()
         return [self._winner(kind, r) for r in rows]
 
+    async def scan(self, kind: str, size: int, payload: bool = False,
+                   limit: Optional[int] = None) -> AsyncIterator[List[Winner]]:
+        """Every head of ``kind`` (the first ``limit``), in id order, ``size`` at a time: a query a
+        page, each seeing the draft as it is then (a replace import deletes as it reads)."""
+        after: Optional[str] = None
+        while limit is None or limit > 0:
+            want = size if limit is None else min(size, limit)
+            page = await self.page(kind, after, want, payload)
+            if page:
+                yield page
+            if len(page) < want:
+                return
+            after = page[-1].entity_id
+            limit = None if limit is None else limit - want
+
     async def lookup(self, kind: str, entity_ids: Sequence[str], payload: bool = False) -> Dict[str, Winner]:
+        stmt = self._heads(kind, payload).where(EntityHeadORM.entity_id == _ANY_ID)
         out: Dict[str, Winner] = {}
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
             async with _session() as s:
-                rows = (await s.execute(
-                    self._heads(kind, payload).where(EntityHeadORM.entity_id.in_(chunk)))).all()
+                rows = (await s.execute(stmt, {"ids": list(chunk)})).all()
             for r in rows:
                 out[r[0]] = self._winner(kind, r)
         return out
@@ -218,26 +259,22 @@ class Snapshot:
     def is_draft(self) -> bool:
         return self.branch_id != self.main_branch_id
 
-    async def iter_live(self, kind: str, payload: bool = False) -> AsyncIterator[List[Winner]]:
+    async def iter_live(self, kind: str, payload: bool = False,
+                        limit: Optional[int] = None) -> AsyncIterator[List[Winner]]:
         """Every live entity of ``kind``, once each, a page at a time (order: by layer, then id),
-        with each version's payload when ``payload``."""
+        with each version's payload when ``payload``. ``limit`` reads only each layer's first
+        ``limit`` entities, for a caller that wants a few (a starter template's rows)."""
         for i, layer in enumerate(self.layers):
             above = self.layers[i + 1:]
-            after: Optional[str] = None
-            while True:
-                page = await layer.page(kind, after, self.page_size, payload)
-                if not page:
-                    break
-                after = page[-1].entity_id
-                decided: Set[str] = set()
-                ids = [w.entity_id for w in page]
-                for upper in above:
-                    decided |= (await upper.lookup(kind, ids)).keys()
-                live = [w for w in page if w.live and w.entity_id not in decided]
-                if live:
-                    yield live
-                if len(page) < self.page_size:
-                    break
+            async with contextlib.aclosing(layer.scan(kind, self.page_size, payload, limit)) as pages:
+                async for page in pages:
+                    decided: Set[str] = set()
+                    ids = [w.entity_id for w in page]
+                    for upper in above:
+                        decided |= (await upper.lookup(kind, ids)).keys()
+                    live = [w for w in page if w.live and w.entity_id not in decided]
+                    if live:
+                        yield live
 
     async def lookup_live(self, kind: str, entity_ids: Iterable[str], payload: bool = False) -> Dict[str, Winner]:
         """The live entities among ``entity_ids`` (deciding layer first, top down), with each

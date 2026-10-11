@@ -7,14 +7,15 @@ and deletes), a draft as of one of its commits, and a copy-on-write fork — wit
 enough that every read spans many pages. Then that the view scope, a selection, and every format
 written from it agree with the materializing path, and that an empty export is still a valid file.
 A view package's format-2 lines (``stream.native_pages``) carry the same entities' payloads whole.
-A draft read as it stands now, inside ``pinned_reads``, reads one state while it is edited.
+A draft read as it stands now, inside ``pinned_reads``, reads one state while it is edited. And a
+layer pinned to a commit is read by one query, however many pages it spans.
 """
 import asyncio
 import json
 import os
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.import_export import stream
@@ -250,6 +251,27 @@ async def _run() -> None:
     assert await head.head_counts() is not None
     assert await (await open_snapshot(graph_id=gid, as_of_seq=seq1)).head_counts() is None
     assert await (await open_snapshot(graph_id=fid)).head_counts() is None
+
+    # A layer pinned to a commit is ONE query, streamed a page at a time: planned once a page, its
+    # DISTINCT ON could sort every version row after the page, for every page. A starter template
+    # reads only the first few.
+    winners = []
+
+    def _seen(_conn, _cursor, statement, *_args):
+        if "DISTINCT ON" in statement and "node_versions" in statement:
+            winners.append(statement)
+
+    engine = db.get_engine().sync_engine
+    event.listen(engine, "before_cursor_execute", _seen)
+    try:
+        snap = await open_snapshot(graph_id=gid, page_size=PAGE)
+        pages = [page async for page in snap.iter_live("node")]
+        first = [w.entity_id async for page in snap.iter_live("node", limit=3) for w in page]
+    finally:
+        event.remove(engine, "before_cursor_execute", _seen)
+    assert len(pages) >= 4 and len(winners) == 2, (len(pages), winners)
+    assert "LIMIT" not in winners[0] and "LIMIT" in winners[1]
+    assert first == [w.entity_id for w in pages[0][:3]]
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres")

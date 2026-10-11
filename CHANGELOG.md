@@ -52,6 +52,14 @@ empty source 85 s, publish of the 200k changes about 28 s (it was 23 minutes at 
 package export 15 s, a new source from the package 49 s, and enable version control with 1,000
 duplicates pauses within 3 s and finishes 42 s after the decision.
 
+**Exporting millions of entities takes minutes, not hours.** An export read the version store a
+page at a time, and Postgres planned each page on its own. Without statistics for the partitioned
+table it expected a few hundred entities, so for every page of 2,000 it sorted every version row
+left: about 500 entities a second on a 2M-node graph, around seven hours for 7M items. Each part of
+the graph is now read by one query, streamed, and the next page is read while the last is written.
+On 2M nodes and 2M edges the whole package takes about three minutes, at full speed from the start.
+An export's plan counts and a replace import's read of the graph stream the same way.
+
 **Version-control jobs run only on the versioning worker, and resume.** Imports, exports, publishes,
 package checks, enabling version control and purges never run in a web server any more. The worker
 runs them on three lanes, `projection`, `transfer` and `bootstrap` (`GRAPHVER_WORKER_LANES`), which

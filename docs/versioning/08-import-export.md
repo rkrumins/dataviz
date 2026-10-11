@@ -381,13 +381,18 @@ property is typing under a new `prop.<name>` header — nothing shifts.
 
 An export reads a **snapshot** (`import_export/snapshot.py`): the branch's state as a stack of
 layers — `main` at a commit (a fork's `main` sits on its parent's at the fork point), then a draft
-at a commit or as it stands now (its `entity_heads`). Each layer is keyset-paged on `entity_id`,
-and each page drops the entities a higher layer decides, found with one indexed point lookup per
-layer — so every live entity comes out once, a page at a time, with no global sort and no map of
-the whole state in memory. `main` is pinned to its head commit when the export starts, so a long
-export is one consistent snapshot. `import_export/stream.py` turns each page into records (off the
-event loop) and hands them to the format's `write_pages`; spreadsheets take a first pass that keeps
-only the records' keys, for their columns. Postgres integration test:
+at a commit or as it stands now (its `entity_heads`). A layer at a commit never changes, so it is
+read by one query, streamed a page at a time. Paged by keyset instead, each page was planned on its
+own: without statistics for the partitioned table, Postgres expected 200 winners and sorted every
+remaining version row for every page, about 500 entities a second on a 2M-node graph. A draft's
+current state is keyset-paged on `entity_id`. Each page drops the entities a higher layer decides,
+found with one indexed point lookup per layer, so every live entity comes out once, a page at a
+time, with no map of the whole state in memory. `main` is pinned to its head commit when the export
+starts, so a long export is one consistent snapshot. `import_export/stream.py` turns each page into
+records (off the event loop), reading the next page and its edges' ends meanwhile, and hands them
+to the format's `write_pages`; spreadsheets take a first pass that keeps only the records' keys, for
+their columns. A package of 2M nodes and 2M edges exports in about three minutes. Postgres
+integration test:
 `tests/integration/test_export_stream.py` (identical records to `materialize_state` for main,
 as-of, draft, draft as-of and fork, many pages each).
 
