@@ -676,7 +676,9 @@ other events from the same request and on the same target), `summary`,
 `catalogue` and `export.csv` (streamed, at most 50,000 rows, with
 spreadsheet formulas neutralised; the export is itself recorded as
 `platform.activity.exported`). Free-text search (`q`) needs a window of 92
-days or less.
+days or less. A replica already running its share of searches, exports or
+summary builds answers `429` with `Retry-After` and `"code": "busy"`: ask
+again after that many seconds.
 
 **Why.** Any mutating request may carry an optional `X-Activity-Reason`
 header: percent-encoded UTF-8, at most 500 characters once decoded, with
