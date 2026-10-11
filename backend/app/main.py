@@ -1553,9 +1553,12 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Versioning projection worker not started: %s", exc)
 
-    # Phase 0 — outbox relay → append-only auth_audit_log. Runs only on
-    # the documented owner role (CONTROLPLANE / DEV via runs_scheduler)
-    # so multiple WEB replicas don't all drain the same outbox.
+    # Phase 0 — outbox relay → append-only auth_audit_log. In a split
+    # deployment the aggregation control plane runs it, with the retention
+    # sweeps and the analytics warmer below (see
+    # ``services/aggregation/controlplane.py``); this process starts them
+    # only as a dev monolith, so web replicas don't each run them. Every
+    # pass claims an advisory lock either way.
     _app.state._outbox_relay_shutdown = asyncio.Event()
     _app.state._outbox_relay_task = None
     if runs_scheduler():
@@ -1568,9 +1571,9 @@ async def lifespan(_app: FastAPI):
             name="outbox-relay",
         )
 
-    # Refresh-token revocation sweep. Same owner role as the relay: the
-    # table is shared, so three web replicas sweeping it would only
-    # contend for the same rows.
+    # Refresh-token revocation sweep. Same owner as the relay: the table
+    # is shared, so three web replicas sweeping it would only contend for
+    # the same rows.
     _app.state._refresh_gc_shutdown = asyncio.Event()
     _app.state._refresh_gc_task = None
     if runs_scheduler():
@@ -1615,23 +1618,23 @@ async def lifespan(_app: FastAPI):
         )
 
     # IdP health sweep → app.state.idp_health_cache, read by the cache-only
-    # GET /admin/idp-providers/status. Same runs_scheduler() gating as the
-    # relay so replicas don't each probe every IdP. The cache is initialised
-    # unconditionally: a WEB replica serves an empty status rather than
-    # AttributeError-ing on a missing attribute.
+    # GET /admin/idp-providers/status. Runs in every process that serves the
+    # API, because the cache lives in this process: gated on the scheduler
+    # role, as it was, web replicas — every container deployment — always
+    # answered with an empty status. One discovery or metadata fetch per
+    # provider every fifteen minutes; back-channel providers are not
+    # contacted at all (see ``services/idp_health.py``).
     _app.state.idp_health_cache = {}
     _app.state._idp_health_shutdown = asyncio.Event()
-    _app.state._idp_health_task = None
-    if runs_scheduler():
-        from .services.idp_health import run_idp_health_loop
-        _app.state._idp_health_task = asyncio.create_task(
-            run_idp_health_loop(
-                get_jobs_session,
-                _app.state._idp_health_shutdown,
-                _app.state.idp_health_cache,
-            ),
-            name="idp-health",
-        )
+    from .services.idp_health import run_idp_health_loop
+    _app.state._idp_health_task = asyncio.create_task(
+        run_idp_health_loop(
+            get_jobs_session,
+            _app.state._idp_health_shutdown,
+            _app.state.idp_health_cache,
+        ),
+        name="idp-health",
+    )
 
     # Everything startup built lives as long as the process: take it out of
     # the garbage collector's reach. A full collection otherwise walks this
