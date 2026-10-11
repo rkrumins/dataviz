@@ -502,6 +502,13 @@ _ACCOUNT_ACTIVITY_TYPES = (
 )
 
 
+#: The payload key each of those events names its actor under.
+_ACTIVITY_ACTOR_KEYS = (
+    "updated_by", "reset_by", "changed_by", "generated_by",
+    "suspended_by", "reactivated_by",
+)
+
+
 @router.get("/me/activity", response_model=list[AccountActivityItem])
 async def my_account_activity(
     limit: int = Query(20, ge=1, le=50),
@@ -538,7 +545,7 @@ async def my_account_activity(
             payload = json.loads(row.payload or "{}")
         except ValueError:
             payload = {}
-        actor = payload.get("updated_by") or payload.get("reset_by") or payload.get("changed_by")
+        actor = next((payload[k] for k in _ACTIVITY_ACTOR_KEYS if payload.get(k)), None)
         out.append(AccountActivityItem(
             id=row.id,
             eventType=row.event_type,
@@ -782,6 +789,8 @@ async def update_user_identity(
             "updated_fields": list(updates.keys()),
             "updated_by": admin.id,
         },
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("User %s identity updated by %s: %s", user_id, admin.id, list(updates.keys()))
@@ -839,6 +848,8 @@ async def change_user_role(
             "changed_by": admin.id,
             "sessions_revoked": revoked,
         },
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info(
@@ -883,6 +894,8 @@ async def suspend_user(
         session,
         event_type="user.suspended",
         payload={"user_id": user_id, "suspended_by": admin.id},
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("User %s suspended by %s", user_id, admin.id)
@@ -1029,6 +1042,8 @@ async def reactivate_user(
         session,
         event_type="user.reactivated",
         payload={"user_id": user_id, "reactivated_by": admin.id},
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("User %s reactivated by %s", user_id, admin.id)
@@ -1106,6 +1121,8 @@ async def admin_reset_password(
         session,
         event_type="user.password_reset_by_admin",
         payload={"user_id": user_id, "reset_by": admin.id},
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("Password reset for user %s by admin %s", user_id, admin.id)
@@ -1139,6 +1156,8 @@ async def generate_reset_token(
         session,
         event_type="user.reset_token_generated",
         payload={"user_id": user_id, "generated_by": admin.id},
+        aggregate_type="user",
+        aggregate_id=user_id,
     )
 
     logger.info("Reset token generated for user %s by admin %s", user_id, admin.id)
