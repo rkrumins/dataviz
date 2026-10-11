@@ -4,9 +4,9 @@
 chosen FalkorDB provider and queues the job that seeds its first version from the upload in place
 (``origin: 'package'``): 202, moving no data. It is safe to send again — the same ``requestId``, or
 the same target, answers 200 with what the first request made, and finishes what it left undone
-(a request that died after making the data source queues its job). One upload makes one source per
-workspace, and the package's read says which it made (``newSources``), where the caller may read
-them. A request that fails to make the version store removes the data source IT made, never
+(a request that died after making the data source queues its job). Once an upload made a source in
+a workspace, another target there is refused unless it asks for ``another`` copy on purpose; the
+package's read says which it made (``newSources``), where the caller may read them. A request that fails to make the version store removes the data source IT made, never
 one it found. Later: giving up removes the source; a purge never drops a key anything else reads
 (and keeps it when it cannot ask); the reaper tombstones a source that never got its graph.
 
@@ -43,6 +43,7 @@ pytestmark = pytest.mark.usefixtures("view_portability_enabled")
 _TRANSFER = "/api/v1/views/transfer"
 _RID = "nsr_" + "0" * 32
 _OTHER_RID = "nsr_" + "1" * 32
+_THIRD_RID = "nsr_" + "2" * 32
 
 
 class _Seeds:
@@ -221,6 +222,38 @@ async def test_asking_again_answers_with_what_the_first_made(
         "workspaceId": uat, "dataSourceId": first.json()["dataSourceId"], "label": "Finance copy",
         "graphName": "finance_copy", "providerId": prov, "ontologyId": None}
     assert len(await _sources(db_session, uat)) == 1 and len(seeds.jobs) == 1
+
+
+async def test_another_copy_is_made_only_when_asked_for(
+        test_client, db_session, graph, services, small_parts, seeds):
+    """Someone who wants a copy of their own asks for it: never a retry, a Back or a reload."""
+    _versioning, jobs = services
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    prov = await _provider(db_session)
+    upload = await _ready_upload(test_client, jobs, dev)
+    url = f"{_TRANSFER}/packages/{upload}/new-source"
+    first = (await test_client.post(url, json=_ask(uat, prov))).json()
+
+    ask_second = _ask(uat, prov, requestId=_OTHER_RID, graphName="finance_copy_2")
+    assert (await test_client.post(url, json=ask_second)).status_code == 409, "not asked for"
+    second = await test_client.post(url, json={**ask_second, "another": True})
+    assert second.status_code == 202, second.text
+    assert second.json()["dataSourceId"] != first["dataSourceId"]
+    assert second.json()["graphName"] == "finance_copy_2"
+    # Asked again, each request is still what it made: the second by its id, the first by its own.
+    again = await test_client.post(url, json={**ask_second, "another": True})
+    assert again.status_code == 200 and again.json() == second.json()
+    assert (await test_client.post(url, json=_ask(uat, prov))).json() == first
+    # A third target, not asked for as another copy: refused, naming the newest copy to follow.
+    third = await test_client.post(url, json=_ask(uat, prov, requestId=_THIRD_RID,
+                                                 graphName="finance_copy_3"))
+    assert third.status_code == 409
+    assert third.json()["detail"]["source"]["dataSourceId"] == second.json()["dataSourceId"]
+
+    made = (await test_client.get(f"{_TRANSFER}/packages/{upload}")).json()["newSources"]
+    assert [m["dataSourceId"] for m in made] == [first["dataSourceId"],
+                                                 second.json()["dataSourceId"]], "oldest first"
+    assert len(await _sources(db_session, uat)) == 2 and len(seeds.jobs) == 2
 
 
 async def test_the_package_says_which_data_sources_it_made(

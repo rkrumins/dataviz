@@ -401,9 +401,9 @@ def origin_of(extra_config: Optional[str]) -> Optional[Dict[str, Any]]:
 async def find_origin_data_sources(session: AsyncSession, upload_id: str,
                                    ws_id: Optional[str] = None) -> List[Any]:
     """The live data sources the package upload ``upload_id`` created (``extra_config.origin =
-    {kind: 'viewPackage', uploadId}``), oldest first — one per workspace at most, and only in
-    ``ws_id`` when given. ``extra_config`` is JSON in a text column: narrowed by the id in SQL,
-    confirmed by parsing."""
+    {kind: 'viewPackage', uploadId}``), oldest first, and only in ``ws_id`` when given — so a
+    retry of "new source from this package" reuses what it made instead of making a second.
+    ``extra_config`` is JSON in a text column: narrowed by the id in SQL, confirmed by parsing."""
     from backend.app.db.models import WorkspaceDataSourceORM
 
     ds = WorkspaceDataSourceORM
@@ -418,12 +418,6 @@ async def find_origin_data_sources(session: AsyncSession, upload_id: str,
             found.append(row)
     return found
 
-
-async def find_origin_data_source(session: AsyncSession, ws_id: str, upload_id: str):
-    """The live data source in ``ws_id`` that the package upload ``upload_id`` created, if one was
-    — so a retry of "new source from this package" reuses it instead of making a second."""
-    found = await find_origin_data_sources(session, upload_id, ws_id=ws_id)
-    return found[0] if found else None
 
 
 def ontology_coverage(types: Optional[Dict[str, Any]], ontology) -> Dict[str, Any]:

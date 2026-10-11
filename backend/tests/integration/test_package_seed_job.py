@@ -423,11 +423,12 @@ async def test_items_sharing_a_type_and_urn_are_collapsed_and_reported(falkor, t
         edge("e7", "ent_x", "ent_y"), edge("e8", "ent_x", "ent_y"),       # the package's own parallels
         edge("e5", "ent_old", "ent_old"),                     # a genuine self-loop, moved
         edge("e6", "ent_col", "ent_y"),
+        edge("agg1", "ent_x", "ent_y", "AGGREGATED"),         # the platform's rollup: rebuilt
     ]
     data = b"".join(json.dumps(x).encode() + b"\n" for x in lines)
-    record = await _package(store, ie, data, 5, 8)
+    record = await _package(store, ie, data, 5, 9)
     key = falkor().name
-    ds, gid, job_id = await _seed(record, key, nodes=5, edges=8)
+    ds, gid, job_id = await _seed(record, key, nodes=5, edges=9)
     runner, _ = _runner(falkor, store)
     assert (await runner.run_job(await _take(job_id)))["status"] == "completed", \
         await bootstrap_status(data_source_id=ds)
@@ -441,6 +442,10 @@ async def test_items_sharing_a_type_and_urn_are_collapsed_and_reported(falkor, t
     assert status["collapsed"] == {"nodes": 1, "byLabel": {"Table": 1}, "selfLoops": 1}, \
         "told as a graph bootstrap tells it"
     assert (report["package"]["nodes"], report["package"]["edges"]) == (4, 6)
+    # The rollup is not copied, and the report says so rather than leaving 9 read, 6 stored.
+    assert report["package"]["derivedSkipped"] == 1
+    assert checks["derived_rebuilt"]["ok"] and not checks["derived_rebuilt"]["blocking"]
+    assert checks["derived_rebuilt"]["detail"].startswith("1 rollup connection(s) aren't copied")
     collapse = report["package"]["collapse"]
     assert (collapse["identifiers"], collapse["nodes"], collapse["selfLoops"], collapse["parallel"]) \
         == (1, 1, 1, 1)

@@ -19,9 +19,12 @@ and the name is checked as you type. The semantic layer is matched for you: the 
 when it exists in this environment (a changed one is shown as drift), otherwise the best match by
 entity and relationship types, the same scoring the Add data source wizard uses. You can also pick
 another, *Create from this package* or *No semantic layer*. The package's data is written as the new
-source's first version, keeping its entity ids, with no draft and nothing to publish. Every view in
-the package is imported afterwards. Needs `viewImportEnabled`, `versioningEnabled` and permission to
-manage data sources (`POST /views/transfer/packages/{uploadId}/new-source`).
+source's first version, keeping its entity ids, with no draft and nothing to publish. The
+platform's rollup connections, when the package carries them, are rebuilt rather than copied, and
+the check report says how many. Every view in the package is imported afterwards. Opening the same
+package again follows the copy it made; *Make another copy* makes a further, independent one.
+Needs `viewImportEnabled`, `versioningEnabled` and permission to manage data sources
+(`POST /views/transfer/packages/{uploadId}/new-source`).
 
 **Duplicate identifiers no longer fail "Enable version control".** Before copying anything, the job
 now lists every urn that more than one node in the graph carries, and it pauses until a manager

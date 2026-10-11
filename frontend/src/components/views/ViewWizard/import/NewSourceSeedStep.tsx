@@ -29,13 +29,16 @@ import { useImportSession, type NewDataTarget } from './importSession'
 type Into = { workspaceId: string; dataSourceId: string }
 
 export function NewSourceSeedStep({
-  steps, target, made, providerName, attached, onBack, onClose, onSeeded, onChooseFileAgain, onUseGraphName,
+  steps, target, made, another = false, providerName, attached, onBack, onClose, onSeeded, onChooseFileAgain,
+  onUseGraphName,
 }: {
   steps: WizardStepDef[]
   /** The new data source the Target step described; null when opened on one made already. */
   target: NewDataTarget | null
   /** The data source this package already made in the chosen workspace: followed, not made again. */
   made: PackageNewSource | null
+  /** The target is a further copy, asked for on purpose beside the one this package made here. */
+  another?: boolean
   providerName?: string | null
   /** "Finish importing views": the data source this package was already copied into. */
   attached?: Into | null
@@ -78,7 +81,9 @@ export function NewSourceSeedStep({
     keep({ requestId: request.requestId, request, sending: true })
     try {
       const started = await createNewSourceFromPackage(session.pkg.uploadId, request)
-      keep({ requestId: request.requestId, request })
+      // Answered: the session holds what it made, and a later copy is a request of its own.
+      rememberNewSource(fileKey, null)
+      setRecord(null)
       noteNewSource({
         workspaceId: request.workspaceId, dataSourceId: started.dataSourceId, label: started.label,
         graphName: started.graphName, providerId: request.providerId, ontologyId: started.ontologyId,
@@ -112,13 +117,17 @@ export function NewSourceSeedStep({
 
   const create = () => {
     if (!target) return
+    // The same request again (after a refusal, or an answer never heard) keeps its id; another
+    // copy is a request of its own, whatever this file asked for before.
+    const again = record && !!record.request?.another === another ? record.requestId : null
     void send({
-      requestId: record?.requestId ?? newSourceRequestId(),
+      requestId: again ?? newSourceRequestId(),
       workspaceId: target.workspaceId,
       providerId: target.providerId,
       label: target.label,
       graphName: target.graphName,
       ontologyId: target.ontologyId,
+      ...(another ? { another: true } : {}),
     })
   }
 
@@ -238,7 +247,8 @@ export function NewSourceSeedStep({
                     providerId: source.providerId, label: source.label, graphName: source.graphName,
                     ontologyId: source.ontologyId,
                   })
-                }} />
+                }}
+                onAnother={record?.request ? () => void send({ ...record.request!, another: true }) : undefined} />
             ) : !target ? (
               <Notice tone="amber" title="There is no data source to copy into">
                 <p>It was given up and removed. Describe a new one on the Target step to copy the package into it.</p>
@@ -273,14 +283,16 @@ export function NewSourceSeedStep({
 }
 
 /** Why the data source wasn't created, and what can be done about it. */
-function Refusal({ error, onRetry, onBack, onChooseFileAgain, onUseGraphName, onContinue }: {
+function Refusal({ error, onRetry, onBack, onChooseFileAgain, onUseGraphName, onContinue, onAnother }: {
   error: unknown
   onRetry: () => void
   onBack: () => void
   onChooseFileAgain: () => void
   onUseGraphName: (name: string) => void
-  /** `upload_consumed`: follow the data source this package already made here instead. */
+  /** `upload_consumed`: follow the data source this package already made here instead, */
   onContinue: (source: PackageNewSource) => void
+  /** or make the one asked for anyway, as another copy. */
+  onAnother?: () => void
 }) {
   const refusal = error instanceof ViewTransferError ? error : null
   const message = error instanceof Error ? error.message : 'The data source couldn’t be created.'
@@ -311,14 +323,22 @@ function Refusal({ error, onRetry, onBack, onChooseFileAgain, onUseGraphName, on
     return (
       <Notice tone="amber" title="This package already made a data source">
         <p>
-          {consumed ? `It went into “${consumed.label}”.` : message} One package makes one new data source; its views can go
-          into that one.
+          {consumed ? `It went into “${consumed.label}”.` : message} Continue with that one, or make this one as
+          another copy of your own.
         </p>
-        {consumed && (
-          <Action icon={<ArrowRight className="w-4 h-4" />} onClick={() => onContinue(consumed)}>
-            Continue with it
-          </Action>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {consumed && (
+            <Action icon={<ArrowRight className="w-4 h-4" />} onClick={() => onContinue(consumed)}>
+              Continue with it
+            </Action>
+          )}
+          {onAnother && (
+            <button type="button" onClick={onAnother}
+              className="px-3 py-2 rounded-xl text-sm font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5">
+              Make another copy
+            </button>
+          )}
+        </div>
       </Notice>
     )
   }

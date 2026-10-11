@@ -85,6 +85,8 @@ interface PackageReport {
   nodes?: number
   edges?: number
   sourceEnvironment?: string | null
+  /** The platform's rollup connections the package carried: rebuilt, never copied. */
+  derivedSkipped?: number
 }
 
 const num = (n: unknown) => (typeof n === 'number' ? n.toLocaleString() : '—')
@@ -483,9 +485,11 @@ export function BootstrapProgress({
             </p>
           ) : (
             <p className="mt-3 text-[12px] font-medium text-emerald-700 dark:text-emerald-400">
-              {fromPackage
-                ? 'Zero data loss — every item and connection in the package is in the new data source.'
-                : 'Zero data loss — every item and connection in the source is in your history.'}
+              {!fromPackage
+                ? 'Zero data loss — every item and connection in the source is in your history.'
+                : (packageReport?.derivedSkipped ?? 0) > 0
+                  ? `Zero data loss — every item and connection in the package is in the new data source, but for its ${num(packageReport?.derivedSkipped)} rollup connections: they are rebuilt from the others, not copied.`
+                  : 'Zero data loss — every item and connection in the package is in the new data source.'}
             </p>
           )}
           {packageReport && (packageReport.nodes != null || packageReport.edges != null) && (

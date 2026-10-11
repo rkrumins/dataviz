@@ -146,9 +146,10 @@ export interface ImportSession {
    *  (asking again for one answers with its job), until the upload expires. (A new data source is
    *  created and followed by the Data step itself: NewSourceSeedStep.) */
   startData: (target: ExistingDataTarget) => Promise<void>
-  /** The data sources this package made, one per workspace at most: what the server said when the
-   *  package was read, kept up to date as this session makes one or gives one up. Every step reads
-   *  them from here, so an answer heard after its step was left is never lost. */
+  /** The data sources this package made, oldest first (a workspace has more than one only when
+   *  another copy was asked for): what the server said when the package was read, kept up to date
+   *  as this session makes one or gives one up. Every step reads them from here, so an answer heard
+   *  after its step was left is never lost. */
   newSources: PackageNewSource[]
   noteNewSource: (made: PackageNewSource) => void
   dropNewSource: (dataSourceId: string) => void
@@ -333,7 +334,7 @@ export function useImportSessionState(opts: {
   }, [])
 
   const noteNewSource = useCallback((made: PackageNewSource) => {
-    setNewSources(prev => [...prev.filter(s => s.workspaceId !== made.workspaceId), made])
+    setNewSources(prev => [...prev.filter(s => s.dataSourceId !== made.dataSourceId), made])
   }, [])
 
   const dropNewSource = useCallback((dataSourceId: string) => {

@@ -37,7 +37,8 @@
  *     rendered as the app renders it (StrictMode), the copy is followed once the data source is made;
  *     the data source the package made (the server's word, or this session's, even if heard after
  *     Back) is what the Target step shows and the Data step follows: never another described,
- *     whose name would read as taken by it.
+ *     whose name would read as taken by it — unless another copy is asked for on purpose, under a
+ *     request of its own, from there or from a refusal; the newest copy is then the one followed.
  */
 import { StrictMode } from 'react'
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
@@ -217,7 +218,7 @@ vi.mock('../steps/ScopeStep', async (importOriginal) => {
   }
 })
 
-import { ViewTransferError } from '@/services/viewTransferApiService'
+import { ViewTransferError, rememberNewSource } from '@/services/viewTransferApiService'
 import { PullRequestExistsError, type BootstrapJob } from '@/services/versioningApiService'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -1218,12 +1219,14 @@ describe('ViewWizard — a package’s data in a new data source', () => {
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
 
     // Closed while it copies, and opened again on the same file: the package now says what it made,
-    // so back to following the copy, with no second data source asked for.
+    // so the target shows it, and on, back to following the copy, with no second one asked for.
     first.unmount()
     inspectPackageMock.mockResolvedValue(packageWithStats({ newSources: [MADE] }))
     renderNewSource()
     await screen.findByText('Import a view with its data')
-    await next()
+    await next()                                          // → Target: the copy it made
+    expect(await screen.findByText('This package already made “Lineage” here')).toBeInTheDocument()
+    await next()                                          // → Data, following it
     expect(await screen.findByText('Copying the package')).toBeInTheDocument()
     expect(newSourceMock).toHaveBeenCalledTimes(1)
 
@@ -1318,10 +1321,63 @@ describe('ViewWizard — a package’s data in a new data source', () => {
     inspectPackageMock.mockResolvedValue(packageWithStats({ newSources: [MADE] }))
     renderNewSource()
     await screen.findByText('Import a view with its data')
+    await next()                                          // → Target: the copy it made
+    expect(await screen.findByText('This package already made “Lineage” here')).toBeInTheDocument()
     await next()                                          // → Data, following its copy
     expect(await screen.findByText('Copying the package')).toBeInTheDocument()
     expect(bootstrapStatusMock).toHaveBeenCalledWith('ws1', 'ds_new')
     expect(newSourceMock).not.toHaveBeenCalled()
+  })
+
+  it('makes another copy on purpose, under a request of its own, then follows that one', async () => {
+    inspectPackageMock.mockResolvedValue(packageWithStats({ newSources: [MADE] }))
+    // What this browser asked for before: the request that made the first copy.
+    rememberNewSource('finance.v7.view-package.zip:2:1700000000000', {
+      requestId: 'nsr_' + 'a'.repeat(32),
+      request: { requestId: 'nsr_' + 'a'.repeat(32), workspaceId: 'ws1', providerId: 'p1', label: 'Lineage', graphName: 'lineage_copy', ontologyId: 'onto_fin' },
+    })
+    // The first copy holds the derived name: the next free one is taken for the second.
+    nameCheckMock.mockImplementation(async (_ws: string, _p: string, name: string) => (name === 'lineage_copy'
+      ? { available: false, normalized: name, reason: 'Another data source on this connection already uses this name.', suggestion: 'lineage_copy_2' }
+      : { available: true, normalized: name }))
+    newSourceMock.mockImplementation(async (_upload: string, request: { graphName: string }) => (
+      { ...STARTED, dataSourceId: 'ds_two', graphName: request.graphName }))
+    renderNewSource()
+    await screen.findByText('Import a view with its data')
+    await next()                                          // → Target: the copy it made
+    fireEvent.click(await screen.findByRole('button', { name: /Make another copy/ }))
+    expect(await screen.findByText(/Another copy, beside “Lineage”/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Falkor prod' }))
+    await waitFor(() => expect(screen.getByLabelText('Graph name of the new data source')).toHaveValue('lineage_copy_2'))
+    await next()                                          // → Data
+    fireEvent.click(await screen.findByRole('button', { name: CREATE }))
+    expect(await screen.findByText('Copying the package')).toBeInTheDocument()
+
+    expect(newSourceMock).toHaveBeenCalledTimes(1)
+    const [[, asked]] = newSourceMock.mock.calls
+    expect(asked).toMatchObject({ graphName: 'lineage_copy_2', another: true })
+    expect(asked.requestId).toMatch(/^nsr_[0-9a-f]{32}$/)
+    expect(asked.requestId).not.toBe('nsr_' + 'a'.repeat(32))   // not the first copy's request
+    expect(bootstrapStatusMock).toHaveBeenLastCalledWith('ws1', 'ds_two')
+    // Back on the target: the newest copy is the one followed.
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    expect(await screen.findByText('lineage_copy_2')).toBeInTheDocument()
+  })
+
+  it('makes the copy it was refused as another one, when asked, under the same request', async () => {
+    newSourceMock.mockImplementation(async (_upload: string, request: { graphName: string }) => (
+      { ...STARTED, dataSourceId: 'ds_two', graphName: request.graphName }))
+    newSourceMock.mockRejectedValueOnce(new ViewTransferError('This package already made a data source here.', 409,
+      'upload_consumed', undefined, { type: 'upload_consumed', dataSourceId: 'ds_new', source: MADE }))
+    renderNewSource()
+    await toNewSourceTarget()
+    await next()                                          // → Data
+    fireEvent.click(await screen.findByRole('button', { name: CREATE }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Make another copy' }))
+    expect(await screen.findByText('Copying the package')).toBeInTheDocument()
+    const [[, refused], [, again]] = newSourceMock.mock.calls
+    expect(again).toEqual({ ...refused, another: true })
+    expect(bootstrapStatusMock).toHaveBeenLastCalledWith('ws1', 'ds_two')
   })
 
   it('binds the package’s own semantic layer when it comes from this environment', async () => {

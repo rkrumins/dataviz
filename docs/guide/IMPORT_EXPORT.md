@@ -265,10 +265,10 @@ semantic layer: {brand} picks the package's own or the best match, or choose
 package into it as its first version, with no draft to publish, and every View
 in the package is imported into it. You need permission to manage the
 workspace's data sources. If you close the wizard meanwhile, the copy carries
-on, and the data source's panel offers **Finish importing views**. A package
-makes one data source in a workspace: going back to **Target**, or choosing the
-same file again, even in another browser, shows the one it made, and **Next**
-follows its copy.
+on, and the data source's panel offers **Finish importing views**. Going back
+to **Target**, or choosing the same file again, even in another browser, shows
+the data source the package made: **Next** follows its copy, and **Make another
+copy** makes a further one of your own, independent of it.
 
 To bring in just the View — for example where the data is already there —
 choose **View only** on the File step. Into a data source here, a package of

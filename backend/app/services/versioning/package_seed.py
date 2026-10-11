@@ -597,6 +597,11 @@ async def phase_validate(run: BootstrapRunner, lease: Lease, graph_id: str) -> b
           written["edges"] == parsed["edges"] - dupes["edges"] - seed["dangling"]
           and stored_edges == written["edges"] - collapse["selfLoops"] - collapse["parallel"],
           f"{stored_edges:,} connections stored")
+    # The rollups a package carried are the platform's own, rebuilt from the connections above.
+    if seed["derived"]:
+        check("derived_rebuilt", True,
+              f"{seed['derived']:,} rollup connection(s) aren't copied: they're rebuilt from the "
+              "connections stored", blocking=False)
     # 3. No connection points at an item that isn't there.
     check("referentially_whole", int(dangling) == 0,
           f"{dangling} connection(s) referencing a missing item")

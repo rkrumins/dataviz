@@ -7,8 +7,9 @@
  * marked as its copy (`lineage_copy`, derived by the wizard), checked live on the connection chosen
  * below it (useGraphNameCheck, as a blank model's is): a derived name that's taken moves to a free
  * one on its own, a typed one gets the free one offered. The copy is independent: nothing ties it to
- * where it was exported from. Where the package already made its data source (one per workspace),
- * there is nothing to describe: MadeSourceCard shows that one, and the copy is followed.
+ * where it was exported from. Where the package already made a data source in the workspace,
+ * MadeSourceCard shows it: its copy is followed, unless another is asked for on purpose — then this
+ * describes that one, beside the first (`alongside`).
  */
 import { useMemo } from 'react'
 import { AlertCircle, AlertTriangle, Check, Database, DatabaseZap, Loader2, PlusCircle, Sparkles } from 'lucide-react'
@@ -52,7 +53,9 @@ export function DataTargetToggle({ mode, onChange }: {
   )
 }
 
-export function NewSourceTargetPanel({ value, onChange, workspaceId, providerId, providerName, defaults, allowed }: {
+export function NewSourceTargetPanel({
+  value, onChange, workspaceId, providerId, providerName, defaults, allowed, alongside, onFollowMade,
+}: {
   value: NewSourceDraft
   /** Merged into the draft (several can land at once: keep the merge functional). */
   onChange: (patch: Partial<NewSourceDraft>) => void
@@ -63,6 +66,9 @@ export function NewSourceTargetPanel({ value, onChange, workspaceId, providerId,
   defaults: { label: string; graphName: string }
   /** The person may create data sources in this workspace (`workspace:datasource:manage`). */
   allowed: boolean
+  /** Another copy is being described: the one this package already made here, beside it. */
+  alongside?: PackageNewSource | null
+  onFollowMade?: () => void
 }) {
   const scope = useMemo(
     () => (workspaceId && providerId ? { workspaceId, providerId } : null),
@@ -79,6 +85,17 @@ export function NewSourceTargetPanel({ value, onChange, workspaceId, providerId,
         <p className="text-xs font-bold text-ink">A new data source, with a full copy of the package’s data</p>
         <p className="text-[11px] text-ink-muted">Independent: nothing ties it to where it was exported from</p>
       </div>
+      {alongside && (
+        <p className="text-[11px] text-ink-secondary">
+          Another copy, beside “{alongside.label}” (<span className="font-mono">{alongside.graphName}</span>), which this
+          package already made here.{' '}
+          {onFollowMade && (
+            <button type="button" onClick={onFollowMade} className="font-medium text-blue-500 hover:underline">
+              Follow that one instead
+            </button>
+          )}
+        </p>
+      )}
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="block">
           <span className="block text-xs font-semibold text-ink-secondary mb-1">Label</span>
@@ -150,7 +167,12 @@ export function NewSourceTargetPanel({ value, onChange, workspaceId, providerId,
 }
 
 /** The data source this package already made in the chosen workspace, in place of the pickers. */
-export function MadeSourceCard({ made, providerName }: { made: PackageNewSource; providerName?: string | null }) {
+export function MadeSourceCard({ made, providerName, onAnother }: {
+  made: PackageNewSource
+  providerName?: string | null
+  /** Describe a further copy, independent of this one. */
+  onAnother: () => void
+}) {
   return (
     <div className="flex-1 flex items-center justify-center p-6">
       <div role="status" className="w-full max-w-md rounded-2xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/40 dark:bg-emerald-950/15 px-5 py-4 space-y-1.5">
@@ -162,8 +184,12 @@ export function MadeSourceCard({ made, providerName }: { made: PackageNewSource;
           <span className="font-mono">{made.graphName}</span>{providerName ? ` on ${providerName}` : ''}
         </p>
         <p className="text-[11px] text-ink-muted leading-relaxed">
-          One package makes one data source in a workspace. Next follows its copy; to make another, give this one up from its progress first.
+          Next follows its copy. For a copy of your own as well, make another: it is independent of this one.
         </p>
+        <button type="button" onClick={onAnother}
+          className="mt-1 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10">
+          <PlusCircle className="w-3.5 h-3.5" /> Make another copy
+        </button>
       </div>
     </div>
   )

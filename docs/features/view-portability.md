@@ -315,9 +315,11 @@ download is named for the package.
    asking again for the same target returns its job, or, when that job failed, queues it again to
    resume into the same draft. 409 until the package is checked; 410 `upload_expired` once the
    upload is gone. Instead, `POST …/packages/{uploadId}/new-source` makes a new data source of
-   the data, as its first version with no draft, and the views are then imported into it. A
-   package makes one per workspace: asking again answers with that one, and another target there
-   is 409 `upload_consumed`, with that one as `source`, to follow instead.
+   the data, as its first version with no draft, and the views are then imported into it. Asking
+   again answers with what that request made. Once a package made one in a workspace, another
+   target there is 409 `upload_consumed` (the newest as `source`, to follow instead), unless the
+   request asks for `another` copy on purpose. The copy skips the platform's rollup connections
+   (`AGGREGATED`), which are rebuilt from the others, and its report counts them.
 3. The view is reconciled against **that draft** (`target.branchId`), so the entities the data
    brought count as found, then imported into it with `stage` set. A new view claims the draft as
    its own. The view and its data are reviewed and published together.

@@ -756,6 +756,9 @@ export interface NewSourceRequest {
   label: string
   graphName: string
   ontologyId: string | null
+  /** A further copy, asked for on purpose although this package already made one in the
+   *  workspace. Without it, another target there is refused (`upload_consumed`). */
+  another?: boolean
 }
 
 /** The new data source, and the job copying the package's data into it. The copy is followed on
@@ -785,7 +788,8 @@ export function newSourceRequestId(): string {
  * the chosen connection under the chosen graph name. Answers 202 at once (the copy runs as a job);
  * the same `requestId` sent again, or the same target asked again, answers 200 with what the first
  * request created. Refusals are `ViewTransferError`s by type: `upload_consumed` (this upload
- * already made another data source: `detail.dataSourceId`), `ds_has_other_job`, `upload_expired`
+ * already made a data source there: `detail.source`, unless `another` asks for one more),
+ * `ds_has_other_job`, `upload_expired`
  * (410), `not_inspected`, `graph_name_unavailable` (`detail.suggestion`), `provider_unsupported`,
  * `provider_unreachable`, `ontology_unknown`, `provisioning_failed` (502).
  */

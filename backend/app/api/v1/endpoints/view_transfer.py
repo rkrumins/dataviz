@@ -722,6 +722,8 @@ class NewSourceRequest(BaseModel):
     graphName: str = Field(..., min_length=1, max_length=64)
     #: The semantic layer to bind — a draft one too (made from the package's types) — or none.
     ontologyId: Optional[str] = Field(None, max_length=128)
+    #: A further copy, asked for on purpose although this upload already made one in the workspace.
+    another: bool = False
 
 
 #: Where an upload notes the data source it created (``new-source.json`` beside its record): the
@@ -834,8 +836,9 @@ async def create_source_from_package(
     The request moves no data: it provisions the source, queues the job and answers 202. Asking
     again with the same ``requestId`` — or for the same target, once this upload has made one —
     answers 200 with what the first request made, finishing anything it left undone (a request
-    that died after making the data source queues its job). One upload makes one source per
-    workspace: another target is 409 ``upload_consumed``, with that ``source`` to follow instead.
+    that died after making the data source queues its job). Another target, once this upload has
+    made a source in the workspace, is 409 ``upload_consumed`` (with the newest as ``source``, to
+    follow instead), unless it asks for ``another`` copy on purpose: then it makes one more.
     409 ``not_inspected`` until the package is checked; 410 ``upload_expired`` when the upload is
     gone or about to expire; 422 for a provider that isn't usable, a semantic layer that isn't
     there, or a graph name that is taken (with a free ``suggestion``); 502 ``provisioning_failed``
@@ -859,18 +862,23 @@ async def create_source_from_package(
         raise HTTPException(status_code=403, detail=f"Missing permission: {_NEW_SOURCE_PERMISSION}")
 
     async with _per_upload(upload_id):
-        ds = await managed_sources.find_origin_data_source(session, body.workspaceId, upload_id)
+        made = await managed_sources.find_origin_data_sources(session, upload_id,
+                                                              ws_id=body.workspaceId)
+        # This request again (its id), or its target asked for afresh: what that made.
+        wanted = body.graphName.strip().lower()
+        ds = (next((d for d in made if (managed_sources.origin_of(d.extra_config) or {})
+                    .get("requestId") == body.requestId), None)
+              or next((d for d in made if d.provider_id == body.providerId
+                       and d.graph_name == wanted), None))
         created, ont = ds is None, None
         if ds is not None:
             origin = managed_sources.origin_of(ds.extra_config) or {}
-            same = (origin.get("requestId") == body.requestId
-                    or (ds.provider_id == body.providerId
-                        and ds.graph_name == body.graphName.strip().lower()))
-            if not same:
-                raise HTTPException(status_code=409, detail={
-                    "type": "upload_consumed", "dataSourceId": ds.id, "source": _made_source(ds),
-                    "message": "This package already made a data source here. Open it, or give it "
-                               "up to make another."})
+        elif made and not body.another:
+            raise HTTPException(status_code=409, detail={
+                "type": "upload_consumed", "dataSourceId": made[-1].id,
+                "source": _made_source(made[-1]),
+                "message": "This package already made a data source here. Open it, or ask for "
+                           "another copy on purpose."})
         else:
             if datetime.now(timezone.utc) >= uploads.expires_at(record) - _EXPIRY_MARGIN:
                 raise HTTPException(status_code=410, detail={

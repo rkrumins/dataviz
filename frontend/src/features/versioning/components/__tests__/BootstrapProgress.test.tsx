@@ -429,6 +429,17 @@ describe('copying a view package into a new data source', () => {
     expect(screen.getByText('Copied from the package, exported from dev: 118 items and 80 connections.')).toBeInTheDocument()
   })
 
+  it('says the rollups a package carried are rebuilt, not copied', () => {
+    const report = seedReport([read, {
+      key: 'derived_rebuilt', ok: true, blocking: false,
+      detail: "40 rollup connection(s) aren't copied: they're rebuilt from the connections stored",
+    }]) as unknown as { package: Record<string, unknown> }
+    report.package.derivedSkipped = 40
+    render_({ ...seed, status: 'completed', phase: null, percent: 100, report: report as unknown as BootstrapJob['report'] })
+    expect(screen.getByText(/40 rollup connection\(s\) aren't copied/)).toBeInTheDocument()
+    expect(screen.getByText(/but for its 40 rollup connections: they are rebuilt from the others, not copied/)).toBeInTheDocument()
+  })
+
   it('shows the identifiers it shared, folded into one, as a warning — and claims no zero loss', () => {
     render_({
       ...seed, status: 'completed', phase: null, percent: 100,

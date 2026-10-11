@@ -79,7 +79,7 @@ import {
 } from '@/services/viewApiService'
 import {
     importView, newRequestId, ViewTransferError,
-    type ImportViewRequest, type ImportViewResult, type PackageInspectResult,
+    type ImportViewRequest, type ImportViewResult, type PackageInspectResult, type PackageNewSource,
 } from '@/services/viewTransferApiService'
 import { recordEvent } from '@/services/telemetryService'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -484,6 +484,12 @@ function ViewWizardEditResolver(props: ViewWizardProps) {
     )
 }
 
+/** The newest data source a package made in `wsId` (`newSources` is oldest first). */
+function newestIn(sources: PackageNewSource[], wsId: string | null): PackageNewSource | null {
+    for (let i = sources.length - 1; i >= 0; i--) if (sources[i].workspaceId === wsId) return sources[i]
+    return null
+}
+
 /** Create mode resolver — two-phase: ScopeStep (or the Import journey's File and Target steps)
  *  then SchemaScope + Body. */
 function ViewWizardCreateResolver(props: ViewWizardProps & {
@@ -537,6 +543,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     const [dataTargetMode, setDataTargetMode] = useState<'existing' | 'new'>('existing')
     const toNewSource = newSourceOffered && dataTargetMode === 'new'
     const [newSource, setNewSource] = useState<NewSourceDraft>({})
+    /** "Make another copy": the copy this package had made in the workspace when it was asked for. */
+    const [anotherAfter, setAnotherAfter] = useState<string | null>(null)
     const updateNewSource = useCallback(
         (patch: Partial<NewSourceDraft>) => setNewSource(prev => ({ ...prev, ...patch })), [])
     const chooseNewSourceOntology = useCallback(
@@ -588,6 +596,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
             setScopeConfirmed(false)
             setDataTargetMode('existing')
             setNewSource({})
+            setAnotherAfter(null)
             setSeeded(null)
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -658,16 +667,14 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 if (top && (top.sampleHitRate ?? 0) >= 0.5) selectScope(top.workspaceId, top.dataSourceId)
             }
             // This package already made a new data source (the wizard was closed, the page reloaded,
-            // or another browser made it): back to following that copy, in the workspace the wizard
-            // opened on if it made one there.
+            // or another browser made it): the Target step shows it, in the workspace the wizard
+            // opened on if it made one there, to follow its copy or make another on purpose.
             const made = newSourceOffered
-                ? importSession.newSources.find(s => s.workspaceId === selectedWsId) ?? importSession.newSources[0]
+                ? newestIn(importSession.newSources, selectedWsId) ?? importSession.newSources.at(-1)
                 : undefined
             if (made) {
                 setSelectedWsId(made.workspaceId)
                 setDataTargetMode('new')
-                setImportStep('seed')
-                return
             }
             setImportStep('target')
             return
@@ -697,13 +704,15 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
             ontologyId: newSource.ontologyId ?? null,
         }
     }, [newSource, newSourceDefaults, selectedWsId, selectedProviderId])
-    // The data source this package already made in the chosen workspace (the server's word when the
-    // package was read, or this session's): one per workspace, so it is followed rather than another
-    // described, whose name would read as taken, by it.
-    const madeHere = useMemo(
-        () => (newSourceOffered ? importSession.newSources.find(s => s.workspaceId === selectedWsId) ?? null : null),
+    // The data source this package already made in the chosen workspace, the newest (the server's
+    // word when the package was read, or this session's): followed, rather than another described
+    // whose name would read as taken by it — unless another copy was asked for since it was made.
+    const latestHere = useMemo(
+        () => (newSourceOffered ? newestIn(importSession.newSources, selectedWsId) : null),
         [newSourceOffered, importSession.newSources, selectedWsId],
     )
+    const describingAnother = !!latestHere && anotherAfter === latestHere.dataSourceId
+    const madeHere = describingAnother ? null : latestHere
     // No data source id yet: what's needed is a complete description, a free name, and the right.
     const newSourceReady = !!madeHere || (!!newSourceTarget && mayCreateSource && newSource.graphNameAvailable !== false
         && !newSourceOntologyPending)
@@ -797,6 +806,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                         steps={allSteps}
                         target={attachTo ? null : newSourceTarget}
                         made={madeHere}
+                        another={describingAnother}
                         providerName={chosenProvider?.name}
                         attached={attachTo}
                         onBack={() => setImportStep(attachTo ? 'file' : 'target')}
@@ -874,6 +884,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                                             providerName={chosenProvider?.name}
                                             defaults={newSourceDefaults}
                                             allowed={mayCreateSource}
+                                            alongside={describingAnother ? latestHere : null}
+                                            onFollowMade={() => setAnotherAfter(null)}
                                         />
                                     )}
                                 </>
@@ -911,7 +923,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                             onSelectOntology={setSelectedOntologyId}
                             blankBody={toNewSource && madeHere ? (
                                 <MadeSourceCard made={madeHere}
-                                    providerName={blankOptions.providers.find(o => o.provider.id === madeHere.providerId)?.provider.name} />
+                                    providerName={blankOptions.providers.find(o => o.provider.id === madeHere.providerId)?.provider.name}
+                                    onAnother={() => setAnotherAfter(madeHere.dataSourceId)} />
                             ) : undefined}
                             blankOntologySlot={toNewSource ? (
                                 <PackageOntologyPicker
