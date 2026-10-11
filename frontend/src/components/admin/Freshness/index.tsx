@@ -14,11 +14,13 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { RefreshCw, Zap } from 'lucide-react'
+import { RefreshCw, StopCircle, Zap } from 'lucide-react'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { usePermission, checkPermission, usePermissionClaims } from '@/store/auth'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
+import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import { workspaceService } from '@/services/workspaceService'
 import { aggregationService } from '@/services/aggregationService'
 import type { FreshnessRow as FreshnessRowData, ProviderFreshnessSummary, RefreshScope } from '@/services/freshnessService'
@@ -163,6 +165,8 @@ export function Freshness() {
     const fleet = useFleetFreshness()
     const activeJobs = useActiveJobs()
     const refreshSource = useRefreshSource()
+    const rebuildReason = useReasonDraft('refresh')
+    const [reasonPrompt, askReason] = useReasonPrompt()
 
     // The panel already disappears once its job leaves the feed (canExpand
     // goes false), but `expandedRow` itself would stay set — re-opening the
@@ -175,15 +179,27 @@ export function Freshness() {
 
     const qc = useQueryClient()
     const onCancelJob = useCallback(async (dsId: string, jobId: string) => {
+        const answer = await askReason({
+            title: 'Stop this rebuild?',
+            message: 'Cancels the lineage rebuild running for this source.',
+            confirmLabel: 'Stop rebuild',
+            confirmIcon: StopCircle,
+            context: 'cancel',
+            audience: 'workspace',
+            tone: 'danger',
+        })
+        if (!answer) return
         try {
-            await aggregationService.cancelJob(dsId, jobId)
+            await (answer.reason
+                ? aggregationService.cancelJob(dsId, jobId, { reason: answer.reason })
+                : aggregationService.cancelJob(dsId, jobId))
             notify('success', 'Rebuild cancelled. If automation requested it, it may retry a few more times, then it waits for a person.')
         } catch (e) {
             notify('error', (e as Error).message || 'Could not cancel the rebuild.')
         }
         void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
         void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
-    }, [qc, notify])
+    }, [qc, notify, askReason])
 
     const workspacesQ = useQuery({
         queryKey: ['freshness', 'workspaces'],
@@ -293,9 +309,9 @@ export function Freshness() {
     }, [fprov, fws, fstatus, ffail, fq])
 
     // ── Refresh actions ───────────────────────────────────────────────
-    const doRefresh = (dsId: string, scope: RefreshScope, firstBuild?: boolean) => {
+    const doRefresh = (dsId: string, scope: RefreshScope, firstBuild?: boolean, reason?: string) => {
         const name = rows.find(r => r.dataSourceId === dsId)?.name || 'source'
-        refreshSource.mutate({ dsId, scope }, {
+        refreshSource.mutate({ dsId, scope, reason }, {
             onSuccess: () => {
                 const msg = scope === 'read-caches'
                     ? `Caches refreshed for ${name}.`
@@ -314,7 +330,10 @@ export function Freshness() {
     // rebuilds confirm first.
     const onRefresh = (dsId: string, scope: RefreshScope, opts?: { firstBuild?: boolean }) => {
         if (scope === 'read-caches' || scope === 'clear') doRefresh(dsId, scope)
-        else setConfirm({ dsId, scope, firstBuild: opts?.firstBuild })
+        else {
+            rebuildReason.reset()
+            setConfirm({ dsId, scope, firstBuild: opts?.firstBuild })
+        }
     }
 
     const busyDsId = refreshSource.isPending ? refreshSource.variables?.dsId : undefined
@@ -559,12 +578,15 @@ export function Freshness() {
                 confirmLabel={buildMode ? 'Build lineage' : (confirm ? SCOPE_LABEL[confirm.scope] : '')}
                 confirmColor="bg-indigo-600 hover:bg-indigo-700 shadow-md"
                 confirmIcon={Zap}
+                reason={rebuildReason}
                 onConfirm={() => {
-                    if (confirm) doRefresh(confirm.dsId, confirm.scope, confirm.firstBuild)
+                    if (confirm) doRefresh(confirm.dsId, confirm.scope, confirm.firstBuild, rebuildReason.take())
                     setConfirm(null)
                 }}
                 onCancel={() => setConfirm(null)}
             />
+
+            {reasonPrompt}
 
             <ProviderRefreshDialog
                 key={providerDialog?.id ?? 'closed'}

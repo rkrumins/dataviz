@@ -173,6 +173,7 @@ export function filtersToParams(f: JobHistoryFilters): URLSearchParams {
     if (f.dataSourceId?.length) f.dataSourceId.forEach(id => p.append('dataSourceId', id))
     if (f.projectionMode) p.set('projectionMode', f.projectionMode)
     if (f.triggerSource) p.set('triggerSource', f.triggerSource)
+    if (f.triggeredBy) p.set('triggeredBy', f.triggeredBy)
     if (f.dateFrom) p.set('dateFrom', f.dateFrom)
     if (f.dateTo) p.set('dateTo', f.dateTo)
     if (f.search) p.set('search', f.search)
@@ -189,6 +190,7 @@ export function paramsToFilters(p: URLSearchParams): JobHistoryFilters {
         dataSourceId: dsIds.length > 0 ? dsIds : undefined,
         projectionMode: p.get('projectionMode') ?? undefined,
         triggerSource: p.get('triggerSource') ?? undefined,
+        triggeredBy: p.get('triggeredBy') ?? undefined,
         dateFrom: p.get('dateFrom') ?? undefined,
         dateTo: p.get('dateTo') ?? undefined,
         search: p.get('search') ?? undefined,
@@ -215,6 +217,7 @@ export function SearchableDropdown({
     onSelect,
     activeColor = 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400',
     multi = false,
+    onQueryChange,
 }: {
     icon: typeof Search
     label: string
@@ -223,12 +226,18 @@ export function SearchableDropdown({
     onSelect: (ids: string[]) => void
     activeColor?: string
     multi?: boolean
+    /** For options searched server-side: told every time the query changes. */
+    onQueryChange?: (query: string) => void
 }) {
     const [open, setOpen] = useState(false)
-    const [query, setQuery] = useState('')
+    const [query, setQueryState] = useState('')
+    const setQuery = useCallback((value: string) => {
+        setQueryState(value)
+        onQueryChange?.(value)
+    }, [onQueryChange])
     const ref = useRef<HTMLDivElement>(null)
     const inputRef = useRef<HTMLInputElement>(null)
-    useClickOutside(ref, useCallback(() => { setOpen(false); setQuery('') }, []))
+    useClickOutside(ref, useCallback(() => { setOpen(false); setQuery('') }, [setQuery]))
 
     const filtered = useMemo(() => {
         if (!query) return options
@@ -761,6 +770,8 @@ export function jobHistoryPath(opts: {
     dataSourceId?: string
     status?: string[]
     triggerSource?: string
+    /** Runs this person started by hand. */
+    triggeredBy?: string
     search?: string
     dateFrom?: string
 } = {}): string {
@@ -772,6 +783,7 @@ export function jobHistoryPath(opts: {
     // exactly the filter state the user could have set by hand — same key
     // names, no second vocabulary to keep in sync.
     if (opts.triggerSource) p.set('triggerSource', opts.triggerSource)
+    if (opts.triggeredBy) p.set('triggeredBy', opts.triggeredBy)
     if (opts.search) p.set('search', opts.search)
     if (opts.dateFrom) p.set('dateFrom', opts.dateFrom)
     return `/ingestion?${p.toString()}`

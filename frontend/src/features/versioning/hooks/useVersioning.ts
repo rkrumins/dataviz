@@ -431,8 +431,9 @@ export function useSquashedCommits(
 export function useBootstrapGraph(wsId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (dataSourceId: string) => api.bootstrapGraph(wsId, dataSourceId),
-    onSuccess: (_res, dataSourceId) => {
+    mutationFn: ({ dataSourceId, reason }: { dataSourceId: string; reason?: string }) =>
+      api.bootstrapGraph(wsId, dataSourceId, { reason }),
+    onSuccess: (_res, { dataSourceId }) => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
@@ -466,8 +467,8 @@ export function useBootstrapStatus(
 export function useRetryBootstrap(wsId: string, dataSourceId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (mode: 'resume' | 'restart' = 'resume') =>
-      api.retryBootstrap(wsId, dataSourceId, mode),
+    mutationFn: ({ mode = 'resume', reason }: { mode?: 'resume' | 'restart'; reason?: string } = {}) =>
+      api.retryBootstrap(wsId, dataSourceId, mode, { reason }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
     },
@@ -477,7 +478,7 @@ export function useRetryBootstrap(wsId: string, dataSourceId: string) {
 export function useAbandonBootstrap(wsId: string, dataSourceId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => api.abandonBootstrap(wsId, dataSourceId),
+    mutationFn: (vars?: { reason?: string }) => api.abandonBootstrap(wsId, dataSourceId, { reason: vars?.reason }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.bootstrap(wsId, dataSourceId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all })

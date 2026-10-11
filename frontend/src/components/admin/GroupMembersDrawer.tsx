@@ -18,6 +18,10 @@
  * admin got a 403 inside the `Promise.all` and BOTH panes sat spinning
  * forever. `listMembers` now carries the names itself, and the picker uses
  * the same signed-in-user directory the share dialog does.
+ *
+ * Membership is access, so each change asks why — optionally. The add panel
+ * holds one reason for everyone added while it is open; a removal asks in the
+ * confirmation it never had. Each row says who added that person.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -39,6 +43,10 @@ import { UserAvatar } from '@/components/ui/UserAvatar'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
+import { PersonName } from '@/components/activity/PersonName'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
+import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 
 
 export function GroupMembersDrawer({
@@ -64,7 +72,12 @@ export function GroupMembersDrawer({
     const [results, setResults] = useState<DirectoryUser[] | null>(null)
     const { notify } = useAppNotifications()
 
-    const dialogRef = useModalA11y(!!group, onClose)
+    const addReason = useReasonDraft('member-add')
+    const { reset: resetAddReason } = addReason
+    const [reasonPrompt, askReason] = useReasonPrompt()
+    // Stands aside while the removal prompt is up, so Escape and Tab belong
+    // to the prompt rather than closing or trapping the drawer beneath it.
+    const dialogRef = useModalA11y(!!group && !reasonPrompt, onClose)
     const isScim = group?.source === 'scim'
     const canEdit = canManage && !isScim
 
@@ -93,8 +106,9 @@ export function GroupMembersDrawer({
         setAdding(false)
         setQuery('')
         setResults(null)
+        resetAddReason()
         void load()
-    }, [groupId, load])
+    }, [groupId, load, resetAddReason])
 
     // The picker searches the directory server-side — the same source the
     // share dialog uses, and open to any signed-in user.
@@ -128,9 +142,21 @@ export function GroupMembersDrawer({
     async function remove(m: GroupMemberResponse) {
         if (!group) return
         const name = m.displayName ?? m.userId
+        const answer = await askReason({
+            title: `Remove ${name} from "${group.name}"?`,
+            message: m.source === 'sso'
+                ? 'The identity provider added them, so this lasts only until their next sign-in — remove the mapping or the directory group to make it stick.'
+                : 'They lose every role this group gives them, in every workspace.',
+            confirmLabel: 'Remove',
+            confirmIcon: UserMinus,
+            context: 'member-remove',
+            audience: 'platform',
+            tone: 'danger',
+        })
+        if (!answer) return
         setBusy(m.userId)
         try {
-            await groupsService.removeMember(group.id, m.userId)
+            await groupsService.removeMember(group.id, m.userId, { reason: answer.reason })
             await load()
             onChanged()
             notify('success', `Removed ${name} from "${group.name}".`)
@@ -147,7 +173,7 @@ export function GroupMembersDrawer({
         if (!group) return
         setBusy(u.id)
         try {
-            await groupsService.addMember(group.id, u.id)
+            await groupsService.addMember(group.id, u.id, { reason: addReason.take() })
             await load()
             onChanged()
             notify('success', `Added ${u.displayName} to "${group.name}".`)
@@ -290,6 +316,12 @@ export function GroupMembersDrawer({
                                                 </button>
                                             ))}
                                         </div>
+                                        <ReasonField
+                                            draft={addReason}
+                                            audience="platform"
+                                            label="Why are they joining?"
+                                            className="mt-3"
+                                        />
                                     </div>
                                 </motion.div>
                             )}
@@ -382,6 +414,7 @@ export function GroupMembersDrawer({
                     </motion.div>
                 )}
             </AnimatePresence>
+            {reasonPrompt}
         </>
     )
 }
@@ -461,8 +494,13 @@ function MemberRow({
                     <p className="mt-0.5 font-mono text-[10px] text-ink-muted truncate">{m.userId}</p>
                 )}
             </div>
-            <span className="hidden sm:block text-[11px] text-ink-muted shrink-0">
+            <span className="hidden sm:block text-right text-[11px] text-ink-muted shrink-0">
                 {timeAgo(m.addedAt)}
+                {m.addedBy && (
+                    <span className="block max-w-[9rem] truncate text-[10px]">
+                        by <PersonName id={m.addedBy} />
+                    </span>
+                )}
             </span>
             {canEdit && (
                 <button

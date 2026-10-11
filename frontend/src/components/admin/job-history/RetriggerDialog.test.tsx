@@ -216,6 +216,34 @@ describe('RetriggerDialog — what "from scratch" means, and the purge option', 
     await user.click(purgeBtn)
     expect(onConfirm).toHaveBeenLastCalledWith(baseValue, { purgeFirst: true })
   })
+
+  it('asks why, optionally, and hands the reason to whichever path runs', async () => {
+    const onRetrigger = vi.fn(async () => {})
+    const onResume = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(
+      <RetriggerDialog
+        isOpen
+        onClose={() => {}}
+        initialValue={baseValue}
+        title="Re-trigger aggregation"
+        originatingJob={{ id: 'job-1', lastCursor: 'c1', status: 'failed' }}
+        onConfirmRetrigger={onRetrigger}
+        onConfirmResume={onResume}
+      />,
+    )
+
+    // A chip fills the field in one click; typing replaces it.
+    await user.click(screen.getByRole('button', { name: 'Previous run failed' }))
+    await user.click(screen.getByRole('button', { name: /resume from cursor/i }))
+    expect(onResume).toHaveBeenLastCalledWith(baseValue, { reason: 'Previous run failed' })
+
+    const why = screen.getByRole('textbox', { name: /why\?/i })
+    await user.clear(why)
+    await user.type(why, 'Upstream ETL re-ran')
+    await user.click(screen.getByRole('button', { name: /re-trigger from scratch/i }))
+    expect(onRetrigger).toHaveBeenLastCalledWith(baseValue, { purgeFirst: false, reason: 'Upstream ETL re-ran' })
+  })
 })
 
 describe('RetriggerDialog — putting the last run\u2019s settings back', () => {

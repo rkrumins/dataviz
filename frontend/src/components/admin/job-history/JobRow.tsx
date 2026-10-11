@@ -27,6 +27,9 @@ import { ReconcileWhy } from '../Freshness/reconcileEvidence'
 import { FAILURE_CATEGORY_LABEL, asFailureCategory } from '../Freshness/failureGuidance'
 import { remainingSecsFromLedger, stoppedStage, STEP_LABELS } from './runSteps'
 import { runRecordText } from './runRecord'
+import { PersonName } from '@/components/activity/PersonName'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 
 /**
  * History-informed ETA: uses the PREVIOUS completed run's durations
@@ -128,6 +131,52 @@ export function KpiCard({ icon: Icon, label, value, accent, iconBg }: {
     )
 }
 
+/**
+ * The purge confirmation, with the optional reason. Its own component so the
+ * reason's state (and its recent-reasons read) exists only while a purge is
+ * being confirmed, not once per row.
+ */
+function PurgeConfirm({ loading, onConfirm, onCancel }: {
+    loading: boolean
+    onConfirm: (reason?: string) => void
+    onCancel: () => void
+}) {
+    const reason = useReasonDraft('purge')
+    const confirm = () => onConfirm(reason.take())
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="space-y-3 p-3 rounded-xl bg-red-500/[0.04] border border-red-500/15"
+        >
+            <div className="flex items-center gap-3">
+                <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                <span className="text-[11px] text-red-400 flex-1">
+                    Remove all materialized edges? A re-aggregation job starts automatically when the purge completes (use the Assets tab purge for a stay-empty option).
+                </span>
+                <button
+                    onClick={confirm}
+                    disabled={loading}
+                    className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-red-500 text-white hover:bg-red-600 transition-all shadow-sm shadow-red-500/20 disabled:opacity-40"
+                >
+                    {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Confirm Purge'}
+                </button>
+                <button onClick={onCancel} className="text-[11px] text-ink-muted hover:text-ink transition-colors">
+                    Cancel
+                </button>
+            </div>
+            <ReasonField
+                draft={reason}
+                audience="workspace"
+                note="It also shows on the purge in Job History."
+                disabled={loading}
+                onSubmit={() => { if (!loading) confirm() }}
+                onEscape={onCancel}
+            />
+        </motion.div>
+    )
+}
+
 // ── Job Row ──────────────────────────────────────────────────────────
 
 export interface JobRowProps {
@@ -141,7 +190,8 @@ export interface JobRowProps {
     onResume: (job: AggregationJobResponse) => void
     onRetrigger: (job: AggregationJobResponse) => void
     onDelete: (job: AggregationJobResponse) => void
-    onPurge: (job: AggregationJobResponse) => void
+    /** ``reason`` is the person's reason, when they gave one. */
+    onPurge: (job: AggregationJobResponse, reason?: string) => void
     purgeConfirm: string | null
     setPurgeConfirm: (id: string | null) => void
     actionLoading: boolean
@@ -473,6 +523,21 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                         </span>
                     ) : (
                         <span className="text-[11px] text-ink-muted">{triggerLabel(job.triggerSource)}</span>
+                    )}
+                    {/* Who started it by hand, and why — on the row, so the
+                        list answers "who keeps rebuilding this?" unopened. */}
+                    {job.triggeredBy && (
+                        <span className="block max-w-[12rem] truncate text-[10px] text-ink-muted">
+                            by <PersonName id={job.triggeredBy} />
+                        </span>
+                    )}
+                    {job.triggeredBy && job.statedReason && !compact && (
+                        <span
+                            className="block max-w-[12rem] truncate text-[10px] italic text-ink-secondary"
+                            title={job.statedReason}
+                        >
+                            “{job.statedReason}”
+                        </span>
                     )}
                 </td>
 
@@ -831,6 +896,23 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                             />
                                         )}
 
+                                        {/* The same question for a run a person
+                                            started: who, and the reason they gave. */}
+                                        {job.triggeredBy && (
+                                            <div
+                                                data-testid="run-started-by"
+                                                className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] px-4 py-3"
+                                            >
+                                                <p className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">Started by</p>
+                                                <p className="mt-1 text-sm text-ink break-words">
+                                                    <PersonName id={job.triggeredBy} className="font-semibold" />
+                                                    {job.statedReason
+                                                        ? <span className="text-ink-secondary"> — “{job.statedReason}”</span>
+                                                        : <span className="text-ink-muted"> · No reason given</span>}
+                                                </p>
+                                            </div>
+                                        )}
+
                                         {/* Stat grid */}
                                         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                                             <StatCell
@@ -1157,26 +1239,11 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         Purge {job.createdEdges.toLocaleString()} aggregated edges from graph
                                                     </button>
                                                 ) : (
-                                                    <motion.div
-                                                        initial={{ opacity: 0, y: -4 }}
-                                                        animate={{ opacity: 1, y: 0 }}
-                                                        className="flex items-center gap-3 p-3 rounded-xl bg-red-500/[0.04] border border-red-500/15"
-                                                    >
-                                                        <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
-                                                        <span className="text-[11px] text-red-400 flex-1">
-                                                            Remove all materialized edges? A re-aggregation job starts automatically when the purge completes (use the Assets tab purge for a stay-empty option).
-                                                        </span>
-                                                        <button
-                                                            onClick={() => onPurge(job)}
-                                                            disabled={actionLoading}
-                                                            className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-red-500 text-white hover:bg-red-600 transition-all shadow-sm shadow-red-500/20 disabled:opacity-40"
-                                                        >
-                                                            {actionLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Confirm Purge'}
-                                                        </button>
-                                                        <button onClick={() => setPurgeConfirm(null)} className="text-[11px] text-ink-muted hover:text-ink transition-colors">
-                                                            Cancel
-                                                        </button>
-                                                    </motion.div>
+                                                    <PurgeConfirm
+                                                        loading={actionLoading}
+                                                        onConfirm={reason => onPurge(job, reason)}
+                                                        onCancel={() => setPurgeConfirm(null)}
+                                                    />
                                                 )}
                                             </div>
                                         )}

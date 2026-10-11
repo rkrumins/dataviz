@@ -17,6 +17,8 @@ import { cn } from '@/lib/utils'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ProgressBar } from '@/components/ui/ProgressBar'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 import type { RefreshScope } from '@/services/freshnessService'
 import { FRESHNESS_KEYS, useRefreshBatch, useRefreshFleet } from './useFreshness'
 import { BatchResultsList } from './BatchResultsList'
@@ -37,6 +39,7 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
     const [showAdvanced, setShowAdvanced] = useState(false)
     const [confirming, setConfirming] = useState(false)
     const [batchId, setBatchId] = useState<string | null>(null)
+    const refreshReason = useReasonDraft('refresh')
 
     const refreshFleet = useRefreshFleet()
     const { data: batch } = useRefreshBatch(batchId, isOpen)
@@ -57,10 +60,12 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
     const total = batch?.total ?? 0
     const completed = batch?.done ?? 0
     const pct = total > 0 ? (completed / total) * 100 : 0
+    // Clearing the cache is the safe reset; the other scopes can start rebuilds.
+    const asksWhy = scope !== 'clear'
 
     const start = () => {
         refreshFleet.mutate(
-            { scope },
+            { scope, reason: asksWhy ? refreshReason.take() : undefined },
             { onSuccess: (res) => setBatchId(res.batchId) },
         )
     }
@@ -129,6 +134,15 @@ export function FleetRefreshDialog({ fleetTotal, isOpen, onClose }: {
                                     {/* Fleet-wide, not provider-scoped — RefreshImpact's default
                                         fallback text ("this provider") has no antecedent here. */}
                                     <RefreshImpact scope={scope} force={false} emptyLabel="every live source in the fleet" />
+
+                                    {asksWhy && (
+                                        <ReasonField
+                                            draft={refreshReason}
+                                            audience="platform"
+                                            disabled={refreshFleet.isPending}
+                                            className="mb-4"
+                                        />
+                                    )}
 
                                     {refreshFleet.isError && (
                                         <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-xs text-red-700 dark:text-red-300">

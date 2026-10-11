@@ -69,7 +69,7 @@ interface JobHistoryGroupedViewProps {
     onResume: (job: AggregationJobResponse) => void
     onRetrigger: (job: AggregationJobResponse) => void
     onDelete: (job: AggregationJobResponse) => void
-    onPurge: (job: AggregationJobResponse) => void
+    onPurge: (job: AggregationJobResponse, reason?: string) => void
     onTriggerAggregation: (dataSourceId: string) => void
     onPurgeDataSource: (dataSourceId: string) => void
     onShowAllJobs: (dataSourceId: string) => void

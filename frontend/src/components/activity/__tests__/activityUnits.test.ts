@@ -92,13 +92,21 @@ describe('when a missing reason is worth saying', () => {
 describe('where an event links to', () => {
     it('sends a run to Job History, its source to Freshness and its workspace home', () => {
         const links = activityLinks(ev({ details: { jobId: 'agg_9' } }))
-        expect(links.map((l) => l.key)).toEqual(['job', 'freshness', 'workspace'])
+        expect(links.map((l) => l.key)).toEqual(['job', 'their-runs', 'freshness', 'workspace'])
         expect(links[0].href).toBe('/ingestion?tab=jobs&dataSourceId=ds_1&search=agg_9')
-        expect(links[1].href).toBe('/ingestion?tab=freshness&fds=ds_1')
+        // Every other run the same person started — how often they do this.
+        expect(links[1].href).toBe('/ingestion?tab=jobs&triggeredBy=usr_ana')
+        expect(links[2].href).toBe('/ingestion?tab=freshness&fds=ds_1')
+    })
+
+    it('offers a person\'s runs only for a run a person started', () => {
+        const automated = activityLinks(ev({ actorKind: 'system', actor: null }))
+        expect(automated.map((l) => l.key)).not.toContain('their-runs')
     })
 
     it('opens a group by its id', () => {
         const links = activityLinks(ev({
+            eventType: 'rbac.group.member_added', category: 'access',
             target: { type: 'group', id: 'grp_1' }, workspaceId: null, dataSourceId: null,
         }))
         expect(links).toEqual([{ key: 'group', label: 'Open the group', href: '/admin/groups?group=grp_1' }])

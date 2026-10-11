@@ -12,6 +12,7 @@
  * Redis-sourced field is optional and degrades to null when the cache is cold.
  */
 import { authFetch } from './apiClient'
+import { withReason, type ActivityOpts } from './activityReason'
 
 export type RefreshScope = 'auto' | 'read-caches' | 'rollups' | 'full' | 'clear'
 
@@ -541,11 +542,12 @@ export const freshnessService = {
     refreshSource(
         dsId: string,
         body: { scope: RefreshScope; force?: boolean; reason?: string },
+        opts?: ActivityOpts,
     ): Promise<RefreshResponse> {
-        return authFetch<RefreshResponse>(`${BASE}/data-sources/${dsId}/refresh`, {
+        return authFetch<RefreshResponse>(`${BASE}/data-sources/${dsId}/refresh`, withReason({
             method: 'POST',
             body: JSON.stringify(body),
-        })
+        }, opts?.reason))
     },
 
     /** Guarded batch across every live source under a provider. 409 when a
@@ -553,22 +555,23 @@ export const freshnessService = {
     refreshProvider(
         providerId: string,
         body: { scope: RefreshScope; force?: boolean },
+        opts?: ActivityOpts,
     ): Promise<BatchStatus> {
-        return authFetch<BatchStatus>(`${BASE}/providers/${providerId}/refresh`, {
+        return authFetch<BatchStatus>(`${BASE}/providers/${providerId}/refresh`, withReason({
             method: 'POST',
             body: JSON.stringify(body),
-        })
+        }, opts?.reason))
     },
 
     /** Guarded batch across every live source in the whole fleet (every
      *  provider/workspace). 409 when a fleet batch is already running.
      *  system:admin only. The returned batch's ``providerId`` is the
      *  ``__fleet__`` sentinel. */
-    refreshAll(body: { scope: RefreshScope; force?: boolean }): Promise<BatchStatus> {
-        return authFetch<BatchStatus>(`${BASE}/freshness/refresh-all`, {
+    refreshAll(body: { scope: RefreshScope; force?: boolean }, opts?: ActivityOpts): Promise<BatchStatus> {
+        return authFetch<BatchStatus>(`${BASE}/freshness/refresh-all`, withReason({
             method: 'POST',
             body: JSON.stringify(body),
-        })
+        }, opts?.reason))
     },
 
     getBatch(batchId: string): Promise<BatchStatus> {
@@ -610,30 +613,31 @@ export const freshnessService = {
     /** Update the global policy. Partial: only the keys sent are written.
      *  The fleet hold (``pausedUntil`` / ``stopped``) rides the same PUT.
      *  Platform-admin only. */
-    putReconciliation(body: ReconcilePolicyPatch): Promise<ReconcilePolicy> {
-        return authFetch<ReconcilePolicy>(`${BASE}/freshness/reconciliation`, {
+    putReconciliation(body: ReconcilePolicyPatch, opts?: ActivityOpts): Promise<ReconcilePolicy> {
+        return authFetch<ReconcilePolicy>(`${BASE}/freshness/reconciliation`, withReason({
             method: 'PUT',
             body: JSON.stringify(body),
-        })
+        }, opts?.reason))
     },
 
     /** Pause, stop or resume automatic rebuilds for every source under a
      *  provider. Partial, like the per-source PATCH. Platform-admin only. */
-    setProviderHold(providerId: string, body: ScopeHoldPatch): Promise<ScopeHold> {
-        return authFetch<ScopeHold>(`${BASE}/freshness/holds/provider/${providerId}`, {
+    setProviderHold(providerId: string, body: ScopeHoldPatch, opts?: ActivityOpts): Promise<ScopeHold> {
+        return authFetch<ScopeHold>(`${BASE}/freshness/holds/provider/${providerId}`, withReason({
             method: 'PUT',
             body: JSON.stringify(body),
-        })
+        }, opts?.reason))
     },
 
     /** Run a sweep now. ``dryRun`` evaluates and reports without queueing
      *  anything — the blast-radius preview. Platform-admin only. */
     reconcileNow(
         body: { dryRun?: boolean; dataSourceIds?: string[] } = {},
+        opts?: ActivityOpts,
     ): Promise<ReconcileRunResult> {
-        return authFetch<ReconcileRunResult>(`${BASE}/freshness/reconcile-now`, {
+        return authFetch<ReconcileRunResult>(`${BASE}/freshness/reconcile-now`, withReason({
             method: 'POST',
             body: JSON.stringify(body),
-        })
+        }, opts?.reason))
     },
 }

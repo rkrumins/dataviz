@@ -23,6 +23,8 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import type { BootstrapJob, BootstrapPhase } from '@/services/versioningApiService'
 import { useAbandonBootstrap, useRetryBootstrap } from '../hooks/useVersioning'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 
 /** The job's eight phases, told as the four things a person actually cares about. */
 const STEPS: Array<{ id: string; label: string; phases: BootstrapPhase[] }> = [
@@ -83,7 +85,13 @@ export function BootstrapProgress({
   const abandon = useAbandonBootstrap(wsId, dataSourceId)
   const openPanel = useVersioningPanelStore((s) => s.openPanel)
   const [showDetails, setShowDetails] = useState(false)
-  const [confirming, setConfirming] = useState<null | 'restart' | 'abandon'>(null)
+  const [confirming, setConfirmingState] = useState<null | 'restart' | 'abandon'>(null)
+  const reason = useReasonDraft('versioning')
+  // Each confirmation starts with an empty reason.
+  const setConfirming = (next: null | 'restart' | 'abandon') => {
+    reason.reset()
+    setConfirmingState(next)
+  }
 
   const running = job.status === 'pending' || job.status === 'running'
   const failed = job.status === 'failed'
@@ -101,14 +109,14 @@ export function BootstrapProgress({
     URL.revokeObjectURL(url)
   }
 
-  const runRetry = (mode: 'resume' | 'restart') =>
-    retry.mutate(mode, {
+  const runRetry = (mode: 'resume' | 'restart', why?: string) =>
+    retry.mutate({ mode, reason: why }, {
       onSuccess: () => notify('success', mode === 'resume' ? 'Picking up where it left off…' : 'Starting over…'),
       onError: (e) => notify('error', e instanceof Error ? e.message : 'Could not retry.'),
     })
 
-  const runAbandon = () =>
-    abandon.mutate(undefined, {
+  const runAbandon = (why?: string) =>
+    abandon.mutate({ reason: why }, {
       onSuccess: () => notify('success', 'Cancelled — this data source is exactly as it was.'),
       onError: (e) => notify('error', e instanceof Error ? e.message : 'Could not cancel.'),
     })
@@ -256,13 +264,15 @@ export function BootstrapProgress({
                   </>
                 )}
               </p>
+              <ReasonField draft={reason} audience="workspace" className="mt-2.5" />
               <div className="mt-2.5 flex items-center gap-2">
                 <button
                   onClick={() => {
                     const what = confirming
+                    const why = reason.take()
                     setConfirming(null)
-                    if (what === 'restart') runRetry('restart')
-                    else runAbandon()
+                    if (what === 'restart') runRetry('restart', why)
+                    else runAbandon(why)
                   }}
                   className={cn(
                     'px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white shadow-sm transition-colors',

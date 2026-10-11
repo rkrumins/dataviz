@@ -1,11 +1,14 @@
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Backdrop } from '@/components/ui/Backdrop';
+import { ReasonField } from '@/components/activity/ReasonField';
+import { useReasonDraft } from '@/components/activity/useReasonDraft';
 
 interface SkipAggregationDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: () => void;
+  /** ``reason`` is the person's reason for skipping, when they gave one. */
+  onConfirm: (reason?: string) => void;
   isSubmitting: boolean;
 }
 
@@ -15,6 +18,7 @@ export function SkipAggregationDialog({
   onConfirm,
   isSubmitting
 }: SkipAggregationDialogProps) {
+  const reason = useReasonDraft('skip');
   if (!isOpen) return null;
 
   return (
@@ -43,7 +47,9 @@ export function SkipAggregationDialog({
                 However, <strong>performance on deep graph algorithms may be significantly degraded</strong> until the structural hierarchy edges are fully computed.
               </p>
             </div>
-            
+
+            <ReasonField draft={reason} audience="workspace" disabled={isSubmitting} className="mt-5" />
+
             <div className="mt-8 flex items-center justify-end gap-3">
               <button
                 onClick={onClose}
@@ -53,7 +59,7 @@ export function SkipAggregationDialog({
                 Continue Aggregating
               </button>
               <button
-                onClick={onConfirm}
+                onClick={() => onConfirm(reason.take())}
                 disabled={isSubmitting}
                 className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-colors shadow-md"
               >

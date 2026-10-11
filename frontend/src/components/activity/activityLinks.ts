@@ -33,6 +33,15 @@ export function activityLinks(event: ActivityEvent): ActivityLink[] {
             href: jobHistoryPath({ dataSourceId: event.dataSourceId ?? undefined, search: jobId }),
         })
     }
+    // An aggregation run someone started: the rest of the runs they started,
+    // which answers "how often does this person do this?" in one click.
+    if (event.eventType.startsWith('aggregation.') && event.actorKind === 'user' && event.actor?.id) {
+        links.push({
+            key: 'their-runs',
+            label: 'Runs this person started',
+            href: jobHistoryPath({ triggeredBy: event.actor.id }),
+        })
+    }
     if (event.dataSourceId) {
         links.push({
             key: 'freshness',

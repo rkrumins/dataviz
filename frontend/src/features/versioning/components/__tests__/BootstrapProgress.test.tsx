@@ -137,7 +137,7 @@ describe('when the copy fails', () => {
   it('resumes on one click — the safe action costs nothing', () => {
     render_(failed)
     fireEvent.click(screen.getByRole('button', { name: /Resume/ }))
-    expect(retryMutate).toHaveBeenCalledWith('resume', expect.anything())
+    expect(retryMutate).toHaveBeenCalledWith(expect.objectContaining({ mode: 'resume' }), expect.anything())
   })
 
   // ── the two destructive actions sit right next to Resume. A single stray click on
@@ -154,7 +154,15 @@ describe('when the copy fails', () => {
     expect(screen.getByText(/Resuming keeps them/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Yes, start over/ }))
-    expect(retryMutate).toHaveBeenCalledWith('restart', expect.anything())
+    expect(retryMutate).toHaveBeenCalledWith(expect.objectContaining({ mode: 'restart' }), expect.anything())
+  })
+
+  it('carries the reason given for giving up', () => {
+    render_(failed)
+    fireEvent.click(screen.getByRole('button', { name: /Give up/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Turned on by mistake' }))
+    fireEvent.click(screen.getByRole('button', { name: /Yes, remove it/ }))
+    expect(abandonMutate).toHaveBeenCalledWith({ reason: 'Turned on by mistake' }, expect.anything())
   })
 
   it('will not give up on one click, and promises the data source is untouched', () => {

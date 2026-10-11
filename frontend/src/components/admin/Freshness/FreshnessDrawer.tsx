@@ -23,6 +23,9 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DurationField, formatDuration } from '@/components/ui/DurationField'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
+import { PersonName } from '@/components/activity/PersonName'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
+import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import { jobHistoryPath } from '../job-history/shared'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import {
@@ -362,12 +365,37 @@ function ProjectionWedge({ doc }: { doc: FreshnessDoc }) {
  * Everything shown here is read off the state row: the sweep stamps it, this
  * section never recomputes it, and the freshness read path makes no graph call.
  */
-function CheckSection({ doc }: { doc: FreshnessDoc }) {
+function CheckSection({ doc, askReason }: {
+    doc: FreshnessDoc
+    /** The drawer's own prompt, so the drawer knows to step aside while it is up. */
+    askReason: ReturnType<typeof useReasonPrompt>[1]
+}) {
     const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const isAdmin = usePermission('system:admin')
     const setSettings = useSetFreshnessSettings()
     const reconcileNow = useReconcileNow()
+
+    // A real check, not a preview: it can queue a rebuild, so it asks why.
+    const checkNow = async () => {
+        const answer = await askReason({
+            title: 'Check this source now?',
+            message: 'If it has drifted, a rebuild can be queued for it, just as on a scheduled check.',
+            confirmLabel: 'Check now',
+            confirmIcon: RefreshCw,
+            context: 'reconcile',
+            audience: 'platform',
+        })
+        if (!answer) return
+        reconcileNow.mutate(
+            { dataSourceIds: [doc.dataSourceId], reason: answer.reason },
+            {
+                onSuccess: (res) => notify('success', checkNowMessage(res)),
+                onError: (e) => notify('error',
+                    e.message || 'Could not run reconciliation.'),
+            },
+        )
+    }
 
     // A versioned graph is mastered in Postgres with FalkorDB as a rebuildable
     // read cache, so version control maintains its rollups on every publish and
@@ -539,14 +567,7 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
                     {isAdmin && (
                         <button
                             type="button"
-                            onClick={() => reconcileNow.mutate(
-                                { dataSourceIds: [doc.dataSourceId] },
-                                {
-                                    onSuccess: (res) => notify('success', checkNowMessage(res)),
-                                    onError: (e) => notify('error',
-                                        e.message || 'Could not run reconciliation.'),
-                                },
-                            )}
+                            onClick={checkNow}
                             disabled={reconcileNow.isPending}
                             className={cn(QUIET_BTN, 'my-2')}
                         >
@@ -848,9 +869,7 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
                     )}
                     {showMode && (
                     <span
-                        title={automatic
-                            ? 'Started by automatic reconciliation'
-                            : `Started by ${event.actor && event.actor !== 'internal' ? event.actor : 'a person'}`}
+                        title={automatic ? 'Started by automatic reconciliation' : 'Started by a person'}
                         className={cn(
                             'shrink-0 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold',
                             automatic
@@ -860,6 +879,13 @@ function ActivityRow({ event }: { event: RefreshEventSummary }) {
                     >
                         {automatic ? 'Auto' : 'Manual'}
                     </span>
+                    )}
+                    {/* Who, by name: the id is what the event holds, not what
+                        a reader recognises. Mounted only when there is one. */}
+                    {event.mode === 'manual' && event.actor && event.actor !== 'internal' && (
+                        <span className="min-w-0 truncate text-[10px] text-ink-muted">
+                            by <PersonName id={event.actor} />
+                        </span>
                     )}
                 </span>
                 <TimeStamp at={event.ts} icon={null} colorByAge={false} />
@@ -1205,6 +1231,9 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     const refresh = useRefreshSource()
     const reconcileNow = useReconcileNow()
     const name = doc?.name || dsId || 'this source'
+    const retryReason = useReasonDraft('refresh')
+    const [reasonPrompt, askReason] = useReasonPrompt()
+    const docHold = doc ? rowHold(doc) : null
 
     // Clear cache is the safe reset — no confirm; Retry rebuilds (may fail
     // again for OOM) so it confirms first. Both invalidate fleet + doc via the
@@ -1218,30 +1247,49 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     }
     const doRetry = () => {
         if (!dsId) return
-        refresh.mutate({ dsId, scope: 'rollups' }, {
+        refresh.mutate({ dsId, scope: 'rollups', reason: retryReason.take() }, {
             onSuccess: () => notify('success', `Lineage rebuild queued for ${name}.`),
             onError: (e) => notify('error', e.message || 'Could not start the rebuild.'),
         })
         setRetryOpen(false)
     }
-    const doRebuildLineage = () => {
+    // These two had no confirm; the prompt that asks why is now theirs.
+    const doRebuildLineage = async () => {
         if (!dsId) return
-        refresh.mutate({ dsId, scope: 'rollups' }, {
+        const answer = await askReason({
+            title: 'Rebuild lineage',
+            message: 'This rebuilds aggregated lineage for this source. It can take a while.'
+                + (docHold ? ` ${overrideWarning(docHold)}` : ''),
+            confirmLabel: 'Rebuild lineage',
+            confirmIcon: RotateCcw,
+            context: 'refresh',
+            audience: 'workspace',
+        })
+        if (!answer) return
+        refresh.mutate({ dsId, scope: 'rollups', reason: answer.reason }, {
             onSuccess: () => notify('success', `Lineage rebuild queued for ${name}.`),
             onError: (e) => notify('error', e.message || 'Could not start the rebuild.'),
         })
     }
-    const doReconcileThisSource = () => {
+    const doReconcileThisSource = async () => {
         if (!dsId) return
+        const answer = await askReason({
+            title: 'Reconcile this source?',
+            message: 'If it has drifted, a rebuild can be queued for it, just as on a scheduled check.',
+            confirmLabel: 'Reconcile this source',
+            confirmIcon: RefreshCw,
+            context: 'reconcile',
+            audience: 'platform',
+        })
+        if (!answer) return
         reconcileNow.mutate(
-            { dataSourceIds: [dsId] },
+            { dataSourceIds: [dsId], reason: answer.reason },
             {
                 onSuccess: (res) => notify('success', checkNowMessage(res)),
                 onError: (e) => notify('error', e.message || 'Could not run reconciliation.'),
             },
         )
     }
-    const docHold = doc ? rowHold(doc) : null
     // One word for the same act, on the button, the confirm and its title:
     // after a node went away this is a Resume, not a fresh attempt.
     const retryLabel =
@@ -1260,10 +1308,10 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
 
     const mastered = doc ? isPlatformMastered(doc) : false
 
-    // Suspended while the retry ConfirmDialog is up, so Escape dismisses the
-    // confirm rather than closing the drawer underneath it. This drawer
-    // PATCHes fleet automation, so it owes the full keyboard contract.
-    const dialogRef = useModalA11y(isOpen && !!dsId && !retryOpen, onClose)
+    // Suspended while the retry ConfirmDialog or a reason prompt is up, so
+    // Escape dismisses that rather than closing the drawer underneath it. This
+    // drawer PATCHes fleet automation, so it owes the full keyboard contract.
+    const dialogRef = useModalA11y(isOpen && !!dsId && !retryOpen && !reasonPrompt, onClose)
 
     return createPortal(
         <>
@@ -1333,7 +1381,10 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                             canManage={canManage}
                                             busy={refresh.isPending}
                                             onClear={doClear}
-                                            onRetry={() => setRetryOpen(true)}
+                                            onRetry={() => {
+                                                retryReason.reset()
+                                                setRetryOpen(true)
+                                            }}
                                         />
                                     )}
 
@@ -1364,7 +1415,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                             it can see.
                                         </p>
                                         <DetectSection doc={doc} />
-                                        <CheckSection doc={doc} />
+                                        <CheckSection doc={doc} askReason={askReason} />
                                         <ActSection doc={doc} />
                                     </div>
 
@@ -1514,9 +1565,12 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                 confirmColor="bg-indigo-600 hover:bg-indigo-700 shadow-md"
                 confirmIcon={RotateCcw}
                 loading={refresh.isPending}
+                reason={retryReason}
                 onConfirm={doRetry}
                 onCancel={() => setRetryOpen(false)}
             />
+
+            {reasonPrompt}
         </>,
         document.body,
     )

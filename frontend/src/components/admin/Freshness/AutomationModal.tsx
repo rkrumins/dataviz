@@ -51,6 +51,8 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
+import { ReasonField } from '@/components/activity/ReasonField'
+import { useReasonDraft } from '@/components/activity/useReasonDraft'
 import { aggregationService, type AggregationCadence, type AggregationTuning } from '@/services/aggregationService'
 import type { FreshnessSummary } from '@/services/freshnessService'
 import {
@@ -325,6 +327,10 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
      *  a local, reversible act that would not survive being asked about
      *  twice. */
     const [pendingStop, setPendingStop] = useState<{ run: () => void } | null>(null)
+    /** Why the fleet hold is changing — taken by the pause, stop or resume
+     *  it goes with, never by Save. */
+    const holdReason = useReasonDraft('hold')
+    const { reset: resetHoldReason } = holdReason
 
     const remoteSig = JSON.stringify([
         policy?.enabled, policy?.checkIntervalSecs, policy?.maxActionsPerRun,
@@ -396,7 +402,8 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
         setShowCloseConfirm(false)
         setCheckAdvanced(false)
         setActAdvanced(false)
-    }, [open])
+        resetHoldReason()
+    }, [open, resetHoldReason])
 
     useEffect(() => {
         if (!open || dirty || !policy) return
@@ -1012,26 +1019,42 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                                                 clicked. Most restrictive wins, so no source or
                                                 provider control can release it; it is also the
                                                 one thing the Overlay integrity header banners. */}
-                                            <SnoozeRow
-                                                scope="fleet"
-                                                idPrefix="automation-fleet-hold"
-                                                pausedUntil={policy?.pausedUntil}
-                                                stoppedAt={policy?.stoppedAt}
-                                                allowStop
-                                                disabled={!isAdmin}
-                                                pending={saveRecon.isPending}
-                                                onPatch={(patch, ok) => {
-                                                    const write = () => saveRecon.mutate(patch, {
-                                                        onSuccess: () => notify('success', `Fleet-wide: ${ok}`),
-                                                        onError: (e: Error) =>
-                                                            notify('error', e.message || 'Could not update the fleet-wide hold.'),
-                                                    })
-                                                    // The indefinite stop, and only it: a timed pause
-                                                    // says when it ends, and resuming asks nothing.
-                                                    if (patch.stopped === true) setPendingStop({ run: write })
-                                                    else write()
-                                                }}
-                                            />
+                                            <div>
+                                                {/* Why, above the row: the row writes the moment
+                                                    a choice is made. */}
+                                                {isAdmin && (
+                                                    <ReasonField
+                                                        draft={holdReason}
+                                                        audience="platform"
+                                                        disabled={saveRecon.isPending}
+                                                        className="pt-2.5"
+                                                    />
+                                                )}
+                                                <SnoozeRow
+                                                    scope="fleet"
+                                                    idPrefix="automation-fleet-hold"
+                                                    pausedUntil={policy?.pausedUntil}
+                                                    stoppedAt={policy?.stoppedAt}
+                                                    allowStop
+                                                    disabled={!isAdmin}
+                                                    pending={saveRecon.isPending}
+                                                    onPatch={(patch, ok) => {
+                                                        const write = () => saveRecon.mutate({ ...patch, reason: holdReason.take() }, {
+                                                            onSuccess: () => {
+                                                                // The next change is a new decision.
+                                                                resetHoldReason()
+                                                                notify('success', `Fleet-wide: ${ok}`)
+                                                            },
+                                                            onError: (e: Error) =>
+                                                                notify('error', e.message || 'Could not update the fleet-wide hold.'),
+                                                        })
+                                                        // The indefinite stop, and only it: a timed pause
+                                                        // says when it ends, and resuming asks nothing.
+                                                        if (patch.stopped === true) setPendingStop({ run: write })
+                                                        else write()
+                                                    }}
+                                                />
+                                            </div>
 
                                             {/* The breaker's limit is deploy-owned and the API does
                                                 not report it, so this states the rule and the live

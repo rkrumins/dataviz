@@ -18,6 +18,7 @@ vi.mock('./useFreshness', async () => {
     return { ...actual, useRefreshProvider, useRefreshBatch }
 })
 
+import { freshnessService } from '@/services/freshnessService'
 import { ProviderRefreshDialog } from './ProviderRefreshDialog'
 import { RefreshImpact, scopeRebuilds } from './RefreshImpact'
 
@@ -57,6 +58,37 @@ describe('ProviderRefreshDialog', () => {
         expect(close).toBeEnabled()
         await user.click(close)
         await waitFor(() => expect(onClose).toHaveBeenCalled())
+    })
+
+    it('sends the reason with the batch, beside its body', async () => {
+        const user = userEvent.setup()
+        // The real hook this time, so the assertion is on the request itself.
+        const actual = await vi.importActual<typeof import('./useFreshness')>('./useFreshness')
+        useRefreshProvider.mockImplementation(actual.useRefreshProvider)
+        useRefreshBatch.mockReturnValue({ data: undefined })
+        const refreshProvider = vi.spyOn(freshnessService, 'refreshProvider').mockResolvedValue({
+            batchId: 'b1', providerId: 'p1', total: 3, done: 0, results: [], state: 'running',
+        })
+
+        renderDialog()
+        await user.click(screen.getByRole('button', { name: 'Verifying a fix' }))
+        await user.click(screen.getByRole('button', { name: /start refresh/i }))
+
+        await waitFor(() => expect(refreshProvider).toHaveBeenCalledWith(
+            'p1', { scope: 'auto', force: false }, { reason: 'Verifying a fix' },
+        ))
+        refreshProvider.mockRestore()
+    })
+
+    it('asks no reason for a cache-only scope, which starts no work', async () => {
+        const user = userEvent.setup()
+        useRefreshProvider.mockReturnValue({ mutate: vi.fn(), isPending: false, isError: false, error: null })
+        useRefreshBatch.mockReturnValue({ data: undefined })
+
+        renderDialog()
+        expect(screen.getByLabelText(/why\?/i)).toBeInTheDocument()
+        await user.click(screen.getByRole('radio', { name: /clear cache/i }))
+        expect(screen.queryByLabelText(/why\?/i)).not.toBeInTheDocument()
     })
 })
 
