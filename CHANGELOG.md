@@ -93,8 +93,9 @@ The analytics document cache moves to schema version 3; documents rebuild on fir
 
 ### Fixed
 
-- Audit log filters for actor and target were applied after the page limit, so filtered pages came
-  back short or empty. Every filter is now part of the query.
+- The audit page filtered people and targets after the page limit, so a filtered page could come
+  back short or empty. Admin → Activity filters in the query. `GET /api/v1/admin/audit`, kept as it
+  was for API clients, still filters that way.
 - Data sources added through the API recorded no creator; `created_by` is now set.
 - In proxy mode — every deployed topology — manual aggregation runs recorded nobody.
 
