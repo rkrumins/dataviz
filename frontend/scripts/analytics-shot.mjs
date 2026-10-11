@@ -26,6 +26,8 @@ const OUT = '.harness'
 const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'privileged:overview', 'privileged:engagement', 'privileged:health',
   'privileged:workspaces', 'privileged:growth', 'privileged:content',
+  'privileged:data',
+  'strict:data',        // movers and bands in workspaces the reader cannot see
   'strict:overview',    // withheld people panel + locked leaderboards
   'strict:health',      // both operator sections withheld
   'strict:workspaces',  // locked rows with request-access
@@ -37,6 +39,7 @@ const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'firstRun:overview:admin',
   'privileged:overview:dark',
   'strict:overview:dark',
+  'privileged:data:dark',
   'activity:platform',
   'activity:workspace:dark',
 ]
