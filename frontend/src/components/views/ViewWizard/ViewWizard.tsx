@@ -813,6 +813,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                         isSubmitting={false}
                         onSubmit={() => {}}
                         wide
+                        helpSlug="import-export"
                     >
                         <ImportStep
                             modeToggle={props.importIntoViewId
@@ -836,6 +837,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                         isSubmitting={false}
                         onSubmit={() => {}}
                         wide
+                        helpSlug="import-export"
                     >
                         <ScopeStep
                             scopeMode={toNewSource ? 'blank' : 'existing'}
@@ -931,6 +933,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 isSubmitting={false}
                 onSubmit={() => {}}
                 wide
+                helpSlug="creating-views"
             >
                 <ScopeStep
                     scopeMode={scopeMode}
@@ -1938,6 +1941,7 @@ function ViewWizardBody({
         <WizardShell
             title={shellTitle.title}
             submitLabel={shellTitle.submitLabel}
+            helpSlug={isImport ? 'import-export' : 'creating-views'}
             wide={currentStep === 'scope' || currentStep === 'assignment' || currentStep === 'reconcile'}
             currentStep={currentStep}
             activeSteps={activeSteps}

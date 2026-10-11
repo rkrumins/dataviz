@@ -1797,4 +1797,4 @@ is wiped, and the re-run converges to a zero-write diff.
 - [Decisions](/docs/decisions) — ADR-020/021/022 (FalkorDB client, Redis roles) that underpin provider protection
 - [Architecture](/docs/architecture) — where the aggregation control plane and worker fleet sit in the topology
 - [Services Overview](/docs/services-overview) — the WORKER and CONTROLPLANE roles that run this pipeline
-- [Technical Debt](/docs/technical-debt) — related scaling and observability gaps
+- The technical-debt register, `docs/TECHNICAL_DEBT.md` in the repository — related scaling and observability gaps

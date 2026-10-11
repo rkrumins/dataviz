@@ -24,6 +24,7 @@ import { ContentSkeleton } from '@/components/docs/reading/ContentSkeleton'
 import { UpdatedChip } from '@/components/docs/reading/UpdatedChip'
 import { PageFeedback } from '@/components/docs/reading/PageFeedback'
 import { guideMeta } from '@/components/docs/reading/docMeta.generated'
+import { readingTime } from '@/components/docs/reading/readingTime'
 
 export function GuideContent() {
   const brand = useBrand()
@@ -38,6 +39,7 @@ export function GuideContent() {
   useDocumentTitle(entry?.title ? `${entry.title} · Guide` : 'User Guide')
 
   const headings = useMemo(() => (content ? extractHeadings(content) : []), [content])
+  const minutes = useMemo(() => (content ? readingTime(content) : ''), [content])
   const { prev, next } = entry ? getPagerNeighbors(entry.slug) : { prev: undefined, next: undefined }
 
   if (error || !entry) {
@@ -92,10 +94,12 @@ export function GuideContent() {
                 {persona.label}
               </span>
             )}
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-ink-muted bg-black/[0.04] dark:bg-white/[0.06]">
-              <Clock className="w-3.5 h-3.5" />
-              {entry.readingTime} read
-            </span>
+            {minutes && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-ink-muted bg-black/[0.04] dark:bg-white/[0.06]">
+                <Clock className="w-3.5 h-3.5" />
+                {minutes} read
+              </span>
+            )}
             <UpdatedChip date={guideMeta[entry.slug]?.updated} />
           </div>
 

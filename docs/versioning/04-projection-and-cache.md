@@ -430,7 +430,7 @@ keyset-paginated PG `entity_heads` under `COLLATE "C"` vs a FalkorDB scan — `_
 The projector runs in one of two runtimes (never blocking boot):
 
 - **In-process** (`main.py:1530`) — gated by `GRAPHVER_PROJECTION_INPROCESS` (`config.py:157`; no
-  compose file sets it). Builds a `ProjectionWorker` with the full hook set:
+  compose file sets it), and honoured only with `SYNODIC_ROLE=dev`. Builds a `ProjectionWorker` with the full hook set:
   `make_registry_graph_factory()`, `target_resolver=repair_projection_target`,
   **`on_rollups_stale=make_rollup_rebuild_hook(...)`**, `on_projected`, and
   `evict_budget=make_registry_budget_resolver()` (`main.py:903-913`).
@@ -466,7 +466,7 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
 | `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |
 | `GRAPHVER_PROJECTION_VERIFY` | on | Post-apply count reconcile + heal (`config.py:124`). |
-| `GRAPHVER_PROJECTION_INPROCESS` | off | Run the worker in the web process (`config.py:126`). |
+| `GRAPHVER_PROJECTION_INPROCESS` | off | Run the worker lanes in the web process, only with `SYNODIC_ROLE=dev` (`config.py:158`). |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | 900 | Operator-rebuild budget (`config.py:130`). |
 | `GRAPHVER_REBUILD_LOCK_TTL` / `GRAPHVER_LEASE_TTL` | 120 / 60 | Single-flight rebuild lock / read-lease TTLs (`config.py:139-140`). |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `_BUDGETS` | 0 / {} | Per-provider eviction budget (off by default, `config.py:151`). |

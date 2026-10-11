@@ -146,6 +146,7 @@ export function NewSourceSeedStep({
       isSubmitting={false}
       onSubmit={() => {}}
       wide
+      helpSlug="import-export"
     >
       <div className="space-y-5">
         <div>

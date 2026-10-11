@@ -8,6 +8,16 @@ If you are still connecting your first provider, start with
 [Single Sign-On](/guide/sso-setup) instead — this page assumes you have one
 working.
 
+## Most common tasks
+
+- [Find out why someone can't sign in](#when-a-sign-in-fails)
+- [Give people roles from their directory groups](#access-mapping)
+- [Offboard somebody who is leaving](#somebody-is-leaving)
+- [End someone's sessions now](#ending-sessions)
+- [Make single sign-on the only way in](#enforcing-single-sign-on)
+- [Add a second identity provider](#adding-a-second-identity-provider)
+- [Turn a connection off](#turning-a-connection-off)
+
 ---
 
 ## How access is decided
@@ -590,3 +600,16 @@ creates no session, so there is no reason not to use it after editing a
 connection. Its verdict also tells the avatar story — whether the mapped
 picture would arrive (type and size), or which rule refused it and, when the
 host is the problem, which host to add to the avatar image hosts list.
+
+---
+
+## Where to next
+
+- [Single Sign-On](/guide/sso-setup) — when you need to connect another
+  identity provider or change how a connection is set up.
+- [Users & Access](/guide/users-access) — when you want to manage roles,
+  groups and accounts by hand.
+- [The Admin Console](/guide/governance-ops#audit-log) — when you want the
+  wider audit trail of role, group and account changes.
+- [Troubleshooting](/guide/troubleshooting#someone-has-too-much--too-little-access)
+  — when someone has too much or too little access.

@@ -10,13 +10,6 @@ import {
   Sparkles,
   ChevronDown,
   FileText,
-  Network,
-  Eye,
-  Share2,
-  Users,
-  History,
-  PlugZap,
-  type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import ReactMarkdown from 'react-markdown'
@@ -31,6 +24,7 @@ import {
   quickStartSteps,
   glossaryChips,
   guideFaqs,
+  topJobs,
 } from './guideConfig'
 import { guideMarkdownComponents } from './guideMarkdown'
 import { interpolateBrand } from '@/lib/brandText'
@@ -45,17 +39,6 @@ const fade = {
     transition: { duration: 0.4, delay: i * 0.05, ease: 'easeOut' },
   }),
 }
-
-// Jobs-first entry: the hub leads with what people are trying to DO, phrased as
-// goals, each routing straight to the article that gets them there.
-const topJobs: { title: string; outcome: string; slug: string; icon: LucideIcon }[] = [
-  { title: 'See what a change will break', outcome: 'Trace a dataset upstream and downstream to find its blast radius', slug: 'reading-lineage', icon: Network },
-  { title: 'Find and open the right view', outcome: 'Browse curated explorations and pin the ones you use most', slug: 'browsing-views', icon: Eye },
-  { title: 'Save & share a view with my team', outcome: 'Turn an exploration into a durable, shareable asset', slug: 'creating-views', icon: Share2 },
-  { title: 'Give someone the right access', outcome: 'Approve people and grant exactly the access they need', slug: 'users-access', icon: Users },
-  { title: 'Undo or roll back a change', outcome: 'Reverse one edit, or reset the graph to a known-good point', slug: 'versioning-change-control', icon: History },
-  { title: 'Connect a new data source', outcome: 'Provider → catalog → workspace → data source, end to end', slug: 'admin-setup', icon: PlugZap },
-]
 
 export function GuideHome() {
   const brand = useBrand()
@@ -210,7 +193,7 @@ export function GuideHome() {
 
             {/* ── Persona cards ───────────────────────────── */}
             <Section title="Choose your path" subtitle="Most people are mainly one of these — start where you fit.">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5">
                 {guidePersonas.map((p, i) => {
                   const entries = getEntriesForSection(p.id)
                   return (
@@ -293,7 +276,6 @@ export function GuideHome() {
                           >
                             <j.icon className="w-5 h-5" />
                           </div>
-                          <span className="text-[10px] text-ink-muted">{j.time}</span>
                         </div>
                         <h3 className="mt-3 text-sm font-bold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
                           {j.title}
@@ -314,7 +296,7 @@ export function GuideHome() {
             </Section>
 
             {/* ── Quick start strip ───────────────────────── */}
-            <Section title="Your first 10 minutes" subtitle="Five steps from sign-in to your first saved View.">
+            <Section title="Your first 10 minutes" subtitle="Five steps from signing in to tracing your first lineage.">
               <Link
                 to="/guide/quick-start"
                 className="group block rounded-2xl border border-glass-border bg-gradient-to-br from-indigo-500/[0.06] to-violet-500/[0.04] p-6 hover:border-indigo-500/30 transition-colors"
@@ -370,8 +352,8 @@ export function GuideHome() {
               </div>
             </Section>
 
-            {/* ── Acronyms at a glance ────────────────────── */}
-            <Section title="Acronyms at a glance" subtitle="The vocabulary you’ll meet most.">
+            {/* ── Key terms at a glance ───────────────────── */}
+            <Section title="Key terms at a glance" subtitle="The vocabulary you’ll meet most.">
               <div className="flex flex-wrap gap-2">
                 {glossaryChips.map((c) => (
                   <Link

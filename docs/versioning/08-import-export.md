@@ -203,7 +203,7 @@ CSV"* message — a very common mistake that would otherwise parse into garbage 
 
 ### 3b. Resolve, a window at a time
 
-`_resolve_and_build` works through the staged rows in windows of `IMPORT_COMMIT_WINDOW` (50,000):
+`_resolve_and_build` works through the staged rows in windows of `IMPORT_COMMIT_WINDOW` (10,000):
 **every node window first, then every edge window**, so an edge finds a node any row of the file
 creates, even a later one. A window looks up **only what its own rows name** in the draft's composed
 state (`snapshot.py`, the export's reader): nodes by `entity_id`, `urn` and `qualifiedName`, the

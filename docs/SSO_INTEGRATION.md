@@ -1,5 +1,7 @@
 # SSO Integration Guide
 
+*For developers building on the sign-in surface, the support engineers who debug it, and the security reviewers who audit it.*
+
 > **Team-facing developer + operator guide.** Read this end-to-end on
 > day one; keep it open as you build on top of, debug, or audit the
 > auth surface. **Pairs with** the [SSO operator reference](/docs/sso).
@@ -62,7 +64,7 @@
 | "How do I configure an Entra IdP as an operator?" | `SSO.md §2.1` |
 | "How does `complete_sso_login` decide whether to JIT or link?" | this doc, §4.3 + §5.2–5.4 |
 | "What test suites cover this branch?" | `SSO.md §3.1` |
-| "Where is the source of truth for the `users` ORM?" | this doc, §11.5 + `app/db/models.py:858` |
+| "Where is the source of truth for the `users` ORM?" | this doc, §11.5 + `backend/app/db/models.py` (`UserORM`) |
 | "What's the planned follow-up (SCIM, KMS, …)?" | `SSO.md §4` |
 | "How do I run pytest against the new tables?" | this doc, §8 + §2.5 |
 | "I just got a 401 with sso_reauth_required — what now?" | this doc, §7.4 + §5.9 |
@@ -88,7 +90,7 @@ see `SSO.md §2.0`) needs:
 JWT_SECRET_KEY=<48+ chars; generate via python -c 'import secrets; print(secrets.token_urlsafe(48))'>
 ENV=dev
 MANAGEMENT_DB_URL=postgresql+asyncpg://synodic:synodic@localhost:5432/synodic
-REDIS_URL=redis://localhost:6379/0
+REDIS_URL=redis://localhost:6380/0  # ./dev.sh infra publishes Redis on 6380
 AUTH_CUSTOM_PROVIDER_ENABLED=true     # enables the dev IdP
 VITE_AUTH_CUSTOM_PROVIDER_ENABLED=true # exposes the /dev-login route
 CREDENTIAL_ENCRYPTION_KEY=<base64 Fernet key; for encrypting IdP settings>
@@ -104,7 +106,7 @@ python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 ```bash
 # 1. Clone + install
-git clone <repo> && cd synodic
+git clone <repo-url> && cd <repo-directory>
 python3.13 -m venv .venv && source .venv/bin/activate
 pip install -r backend/requirements.txt
 (cd frontend && npm install)
@@ -112,10 +114,10 @@ pip install -r backend/requirements.txt
 # 2. Drop the dev env file
 cp .env.example .env.dev      # then edit JWT_SECRET_KEY + CREDENTIAL_ENCRYPTION_KEY
 
-# 3. Start infra (Postgres + Redis) — assumes docker-compose.dev.yml
-./dev.sh up infra              # or docker-compose -f docker-compose.dev.yml up postgres redis
+# 3. Start infra (Postgres, Redis and FalkorDB in Docker)
+./dev.sh infra
 
-# 4. Apply migrations (Phase 0-4 chain, ends at 20260530_1200_display_rules)
+# 4. Apply migrations (brings the schema to head)
 python -m backend.scripts.upgrade upgrade
 python -m backend.scripts.upgrade check      # must exit 0
 
@@ -166,14 +168,14 @@ JWT_SECRET_KEY=… pytest backend/tests/test_auth_service_isolation.py
 cd frontend && npx vitest run src/store/
 ```
 
-Expected: A → 96 passed · B → 18 passed · C → 19 passed.
+Expected: all three finish with no failures.
 
 ### 2.5 IDE setup
 
 | Concern | Recipe |
 |---------|--------|
 | Pytest discovery | Point at `backend/tests`; set `PYTHONPATH=.` in the run config. JWT_SECRET_KEY must be set per invocation. |
-| Type checking (frontend) | `npx tsc --noEmit -p tsconfig.json` — the pre-existing TS errors in canvas/property code are tracked in `TECHNICAL_DEBT.md`; don't fix them here. |
+| Type checking (frontend) | `npx tsc --noEmit -p tsconfig.json` — the pre-existing TypeScript errors are tracked in the technical-debt register in the repository; don't fix them here. |
 | Type checking (backend) | None enforced; comments are the contract. |
 | Pytest watch | `ptw backend/tests/test_sso_*.py` (install `pytest-watch`). |
 | Linting | None enforced in CI for this branch; prefer functional changes over style changes. |
@@ -348,9 +350,10 @@ Two trust boundaries:
 
 Bootstrapping order (the `app.main.lifespan` entry point):
 
-1. Import-time: `auth_service/core/config.py` runs — `.env.dev`
-   gated auto-load, then `_resolve_secret()` reads
-   `JWT_SECRET_KEY`. Process refuses to start if missing.
+1. Import-time: `auth_service/core/config.py` runs the gated `.env.dev`
+   auto-load. The signing key is resolved on first use, and startup
+   calls `assert_signing_secret()`, so the process refuses to start if
+   `JWT_SECRET_KEY` is missing, too short, or a published placeholder.
 2. App startup:
    1. DB engines + session factory wired (`app/db/engine.py`).
    2. `register_provider("local", LocalIdentityProvider())`.
@@ -974,8 +977,9 @@ attribute repo flattens to CSV (`a, b, c`).
 3. Write a test in `test_oidc_login_flow.py` exercising the new
    policy.
 4. Update the §11.6 table in this doc + `SSO.md §1.7`.
-5. Update the admin UI's `linking_policy` `<select>` in
-   `AdminSso.tsx` (`CreateProviderForm`).
+5. Add the option to the admin UI's **Account linking** choices in
+   `frontend/src/components/admin/sso/ProviderEditorDrawer/sections/IdentitySection.tsx`
+   (`LINKING`).
 
 Open a migration (Alembic) only to update the CHECK constraint.
 
@@ -1024,8 +1028,8 @@ async def test_login_path():
 
 The `test_client` fixture in `backend/tests/conftest.py` overrides
 `get_current_user` etc. so endpoints get the `_FAKE_USER` DTO
-without needing a real login flow. See `conftest.py:204` for the
-overrides.
+without needing a real login flow. See the `test_client` fixture in
+`backend/tests/conftest.py` for the overrides.
 
 ### 6.6 Adding a new IdP kind (e.g. OAuth2-only, no OIDC)
 
@@ -1046,8 +1050,11 @@ overrides.
    pre-fill it.
 7. Add any new secret field names to `idp_provider_repo._SECRET_FIELDS`
    so they're redacted on the way back to the UI.
-8. Add the kind to `IdpKind` in `frontend/src/services/ssoAdminService.ts`
-   and to the `<select>` in `components/admin/ProviderForm.tsx`.
+8. Add the kind to `IdpKind` in `frontend/src/services/ssoAdminService.ts`,
+   give it a settings form in `frontend/src/components/admin/sso/settings/`
+   (wired up in `SettingsEditor.tsx`), and add a preset to
+   `frontend/src/components/admin/sso/vendorPresets.ts` so the connection
+   wizard can offer it.
 9. Add tests + a recipe to `SSO.md`.
 
 `custom_profile` (`providers/custom_profile.py`) is the most recent
@@ -1059,7 +1066,7 @@ kind-specific settings form rather than the JSON textarea.
 kind: add it to `VALID_SOURCES` (and to `BROWSER_STORAGE_SOURCES` if
 only JS can read it), teach `_custom_profile_login_flow` how to pull the
 raw string out of the request, and add the label to `SOURCE_LABELS` in
-`ProviderForm.tsx`. Everything downstream — verification, mapping,
+`frontend/src/components/admin/sso/settings/CustomProfileSettingsForm.tsx`. Everything downstream — verification, mapping,
 linking, reconciliation, auditing — is source-agnostic.
 
 ### 6.7 Touching `auth_service` — the isolation contract
@@ -1091,7 +1098,8 @@ If you need a DB access pattern the service doesn't have yet:
 7. Migration: extend the `app_auth_config` row with the new column
    + seed value.
 8. Add a test in `test_sso_phase4.py`.
-9. Surface in `AdminSso.tsx`'s Settings tab.
+9. Surface it in the Settings tab
+   (`frontend/src/components/admin/sso/tabs/SettingsTab.tsx`, `GROUPS`).
 
 ---
 
@@ -1173,7 +1181,7 @@ redirect. New services should NEVER call `fetch()` directly.
 
 ### 7.5 Reacting to `auth:session-lost`
 
-`main.tsx` listens for the event and calls
+`frontend/src/App.tsx` listens for the event and calls
 `useAuthStore.getState().handleSessionLost()` which clears the
 sessionStorage cache + transitions to `unauthenticated`. Route
 guards then push to `/login`. If you want to take an extra action
@@ -1397,18 +1405,6 @@ have it. The `delete_provider` endpoint is gated by it.
 The auth surface defends against these threats. Out-of-scope
 attacks at the bottom of the section.
 
-Several rows below are marked with what was **previously** wrong. Two of
-them once asserted controls this code did not actually implement — SAML
-assertion replay and `system:admin` via group mapping. What was found,
-what changed, and which test pins each one is written up in
-`docs/security/REMEDIATION_REPORT.md` in the repository.
-
-Deliberately a path and not a link: this page is served in-app, and the
-security write-ups under `docs/security/` are repository-only — they
-enumerate exploitable defects with reproduction detail, which does not
-belong on a surface every signed-in user can open. A markdown link here
-would also 404 in-app, since those files are not registered docs routes.
-
 ### 10.1 In scope
 
 | Threat | Defense | Location |
@@ -1446,7 +1442,7 @@ would also 404 in-app, since those files are not registered docs routes.
 | Unpublished provider used to sign in | registry refuses a non-`live` row next to where it refuses a disabled one; the dry-run opts in via its admin-minted cookie | `providers/registry.py:_assert_usable` |
 | SSRF via admin-supplied IdP metadata URLs | scheme + resolved-address allowlist, redirects off, body capped | `providers/outbound.py` |
 | SSO-only account converted to a local one | reset refuses; the admin override is explicit and audited | `endpoints/auth.py:reset_password` |
-| Signing-key absence/weakness | fail-fast at import (≥32 chars, published placeholders denylisted) | `core/config._resolve_secret` |
+| Signing-key absence/weakness | fail-fast at startup via `assert_signing_secret` (≥32 chars, published placeholders denylisted) | `core/config._resolve_secret` |
 | Algorithm downgrade | `JWT_ALGORITHM` allowlisted to the HMAC family at startup — `none` used to clear the boot check | `core/config.assert_signing_secret` |
 | Reserved claims overridden at mint | `extra` cannot set `sub`/`aud`/`iss`/`exp` — `aud` is what keeps a refresh token from being replayed as an access token | `core/tokens._safe_extra` |
 | Audit completeness | every state change emits an outbox event | grep `create_outbox_event` |
@@ -1484,10 +1480,10 @@ would also 404 in-app, since those files are not registered docs routes.
   explicit `allowSsoOnlyOverride` for an org genuinely retiring SSO, and
   using it emits `user.local_login_enabled`.
 
-  The residual is real and worth stating: where `allow_local_login` is
-  on, an account that has a password can use it, and nothing in this
-  application asks for a second factor. See `SSO.md §4` for the deferred
-  in-app pattern.
+  To require the IdP's second factor for everyone, turn off password
+  sign-in (`allow_local_login`, the **Passwords** switch in
+  Administration → SSO → Settings); only break-glass system accounts
+  keep a password then.
 * **SCIM provisioning** — same; manual `admin_user_identities`
   endpoints cover the small-scale need.
 * **HSM / KMS for signing keys** — HS256 with a fail-fast env
@@ -1499,18 +1495,6 @@ would also 404 in-app, since those files are not registered docs routes.
   per-session revoke; what it lacks is an IP/user-agent column captured
   at mint.
 
-* **IdP-initiated SLO propagation** — `/{slug}/sls` ends the presenting
-  browser's session and nothing else. The `NameID`/`SessionIndex` are
-  never resolved to a user, so a logout at the IdP does not reach that
-  user's other devices. The message signature IS now required; what is
-  missing is the fan-out.
-
-* **Per-provider email-domain binding** — `idp_providers.email_domains`
-  drives home-realm-discovery routing only. Nothing checks that an
-  asserted address belongs to the asserting provider's domains, so a
-  contractor IdP can assert a staff address; `linking_policy` and
-  `email_verified` decide whether that reaches an existing account, and
-  JIT provisioning creates one if it does not exist.
 * **Sandboxing the custom IdP** — gated by env + ENV
   ≠ `prod`/`production`; we rely on operators not flipping the
   flag in prod (the config module refuses to start if they do).
@@ -1584,23 +1568,12 @@ the whole ring so a key rotation does not 403 every write in flight.
 
 #### Public auth surface
 
-| Method | Path | Body | Auth | Response |
-|--------|------|------|------|----------|
-| GET | `/api/v1/auth/providers` | — | none | `ProviderSummary[]` |
-| POST | `/api/v1/auth/login` | `{email, password}` | none | `SessionResponse` + cookies |
-| POST | `/api/v1/auth/logout` | — | cookie | `{ok: true}` + clear cookies |
-| POST | `/api/v1/auth/refresh` | — | cookie | `SessionResponse` or 401 `sso_reauth_required` |
-| GET | `/api/v1/auth/me` | — | cookie | `SessionResponse` |
-| GET | `/api/v1/auth/csrf` | — | cookie | `{ok: true}` + re-mints `nx_csrf` in place (no rotation); 401 when no live session |
-| GET | `/api/v1/auth/{slug}/login` | next, force | none | 302 to IdP |
-| GET | `/api/v1/auth/{slug}/callback` | code, state | nx_oidc | 302 |
-| POST | `/api/v1/auth/{slug}/acs` | SAMLResponse, RelayState (form) | nx_saml | 302 |
-| GET | `/api/v1/auth/{slug}/metadata` | — | none | `application/samlmetadata+xml` |
-| GET\|POST | `/api/v1/auth/{slug}/sls` | SAML* | cookie | 302 |
-| POST | `/api/v1/auth/{slug}/mock` | mock identity | dev-only env gate | `{ok}` + cookie |
-| POST | `/api/v1/auth/{slug}/browser-profile` | `{payload}` from web storage | signature/freshness server-side; 404 unless the row's source is browser storage | `{user}` + session cookies |
-| POST | `/api/v1/auth/resolve` | `{email}` | none — pre-session, CSRF-exempt, rate limited 20/min | `{provider}` or `{provider: null}`; every miss identical |
-| GET | `/api/v1/auth/login-context` | — | none — pre-session | `{allowLocalLogin, emailFirstLogin, providers[]}`. What the login page renders from; fails open to the permissive posture |
+The pre-session routes — password sign-in, session renewal and sign-out,
+the email-first lookup, and each provider's sign-in legs — are defined in
+`backend/auth_service/api/router.py`, with sign-up, password reset and
+invitations in `backend/app/api/v1/endpoints/auth.py`. Read the route list
+there. They are covered by the Origin check and rate limits in §10, and the
+IdP callbacks by their own signature checks.
 
 #### Self-service identities
 
@@ -1631,7 +1604,10 @@ the whole ring so a key rotation does not 403 every write in flight.
 | GET | `/api/v1/admin/sso/config` | posture switches |
 | PATCH | `/api/v1/admin/sso/config` | with `expectedVersion` for optimistic concurrency |
 
-Every admin endpoint is gated by `requires("system:admin")`.
+Every admin endpoint above is gated by `requires("system:admin")`. Two
+admin surfaces use their own permission: the back-channel host allowlist
+(`system:sso:hosts:manage`) and the SSO activity and failure reports
+(`system:audit:read`).
 
 ### 11.3 Outbox events
 
@@ -1687,7 +1663,7 @@ by `source_event_id` UNIQUE.
 | `RATELIMIT_STORAGE_URI` | (none → resolver) | Override for rate-limit counter storage. Unset, counters resolve through the central Redis resolver on the STREAMS role — the same path revocation takes — so they follow whatever each environment configures, including production's Memorystore coordinates. A defaulted (unconfigured) endpoint means in-process memory |
 | `AUTH_ENVIRONMENT_ID` | (none) | Scopes session cookie names (`nx_access_uat`) and binds the JWT issuer. Set it when two deployments can be open in one browser: cookie jars key on domain, not cluster, so identically-named cookies overwrite each other and the receiving side can only report an opaque signature failure |
 | `JWT_SECRET_KEY_PREVIOUS` | (none) | Comma-separated retired keys, most-recent first, accepted for **verification only**. Set before rotating `JWT_SECRET_KEY`. Same ≥32-char floor as the active key, since a retired key is still trusted |
-| `RATELIMIT_LOGIN_PER_IP` | `1000/minute` | Per-address cap on `/login`, `/resolve` and portal login. A coarse flood guard only — behind a NAT every user shares one address, so a tight cap stops the office and not the attacker. Sized so a ~2000-seat tenant never reaches it |
+| `RATELIMIT_LOGIN_PER_IP` | `1000/minute` | Per-address cap on password sign-in, the email-first lookup and SSO sign-ins. A coarse flood guard only — behind a NAT every user shares one address, so a tight cap stops the office and not the attacker. Sized so a ~2000-seat tenant never reaches it |
 | `RATELIMIT_SENSITIVE_PER_IP` | `200/minute` | Same, for signup, invite redemption, and password forgot/reset |
 | `RATELIMIT_REFRESH_PER_SESSION` | `30/minute` | Per rotation family, i.e. per browser session. Already per-user, so it needs no headroom for tenant size — a session needs ~4 rotations an hour |
 | `RATELIMIT_LOGIN_PER_ACCOUNT` | `10 per 15 minutes` | **The brute-force control.** Keys on the account under attack, so it holds however many addresses the attempts come from. Counts failures only and is cleared by a successful sign-in, so a legitimate user is never throttled |
@@ -1765,3 +1741,13 @@ table here in the same commit. The 11-table reference section is the
 one consumers grep first — stale entries waste support engineers'
 time. PR reviewers should reject auth-surface changes that don't
 update this doc.*
+
+## Where to next
+
+* [SSO operator reference](/docs/sso) — when you need what exists and how to run it, rather
+  than how to build on it.
+* [Security Overview](/docs/security-overview) — when you want every security control in
+  one place, with where each is configured.
+* [RBAC](/docs/rbac) — when you need the roles and permissions IdP groups map onto.
+* [Back-channel integration contract](/docs/sso-backchannel-contract) — when you're working
+  with the team that owns an enterprise sign-in gateway.

@@ -10,8 +10,8 @@
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
 case**. Interactive edits and publishes are `O(change)`, not `O(graph)`. The remaining sharp edges are
 deliberately-deferred scale items — a full-graph Merkle rebuild on *draft* checkpoints, pulls and
-forks; a full re-projection that still holds the graph's ids in memory; import and export jobs that
-start over when interrupted; no retention inside a live graph; and a partitioning key that doesn't
+forks; a full re-projection that still holds the graph's ids in memory; export jobs that start over
+when interrupted (imports resume); no retention inside a live graph; and a partitioning key that doesn't
 help a single hot collaborative graph. Re-sync, separately, runs a bounded merge that has not been
 proven on a graph the bootstrap worker wrote ([11](11-resync-at-any-scale.md)). Read this chapter
 before betting a large production workload on it.
@@ -121,7 +121,7 @@ either wiring; incremental rollups now carry level and depth stamps (`sourceLeve
 `sourceDepth`, `targetDepth`, `levelDigest`); and a provider edit is broadcast to the web process
 and the aggregation and versioning workers, so credential rotation no longer needs a restart there
 unless the broadcast is missed. (The stats service and the control plane do not listen yet —
-[TECHNICAL_DEBT.md](../TECHNICAL_DEBT.md) §2.3.)
+`docs/TECHNICAL_DEBT.md` §2.3.)
 
 ## 7. Security / authorization — closed
 
@@ -176,7 +176,7 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | ⚠ `GRAPHVER_PARTITIONS` | `64` | HASH partition count for append-only tables |
 | ⚠ `GRAPHVER_MERKLE_DEPTH` | `4` | Merkle trie depth (16^depth buckets) |
 | ⚠ `GRAPHVER_HASH_ALGO` / `_DIGEST_SIZE` | `blake2b` / `32` | content + Merkle hash |
-| `GRAPHVER_PROJECTION_INPROCESS` | off | run the projector inside viz-service; Compose and Kubernetes run the standalone versioning worker instead |
+| `GRAPHVER_PROJECTION_INPROCESS` | off | run the worker lanes inside viz-service, honoured only with `SYNODIC_ROLE=dev`; Compose, Kubernetes and Helm run the versioning worker lanes instead |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | `8` | graphs projected per poll pass |
 | `GRAPHVER_READ_MAX_LAG` | `0` | staleness a read tolerates before Postgres fallback |
 | `GRAPHVER_PROJECTION_VERIFY` | on | post-projection count reconcile + bounded heal |
@@ -206,8 +206,8 @@ Status as of 2026-10-09 in brackets.
    §8). *(Export done: it streams in flat memory. Re-projection reconciles in place but still holds
    `O(N + E)` ids.)*
 4. **Durable async import/export** — *(Largely done: jobs queue in Postgres, claimed with
-   `SKIP LOCKED` by the versioning worker. Still open: resuming an interrupted job instead of starting
-   over.)*
+   `SKIP LOCKED` on the versioning worker's transfer lane; an interrupted import resumes from its
+   last committed window. Still open: resuming an interrupted export instead of starting over.)*
 5. **Retention** — compaction/TTL for superseded versions, committed `working_changes`, Merkle
    buckets (§6). *(Open for live graphs; deleted data sources are purged.)*
 6. **Partitioning decision** — settle the `graph_id`-only key before production data lands (§6).

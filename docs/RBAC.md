@@ -1,82 +1,142 @@
 # RBAC
 
-> **At a glance.** The authorization reference for {brand} — for operators granting
-> access and engineers writing permission checks. It covers the **eight built-in roles**,
-> the namespaced **permission catalogue**, the central **resolver** that folds role
-> bindings into per-request claims, the typed **403 contract**, and the surrounding
-> machinery: custom roles, invites, time-bound bindings, session revocation, and the
-> audit log.
+*For administrators granting access, and engineers writing permission checks.*
 
-The authorization model: eight built-in roles, a namespaced permission
-catalogue, and a central resolver that folds a user's role bindings into
-per-request permission claims. A failed check returns a typed 403 body.
-Custom roles extend the built-in set within the same rules.
+The authorization reference for {brand}: the seven built-in roles and the default `user`
+tier, every permission the platform seeds, how a permission check is decided, the typed 403
+body, and the machinery around them — custom roles, invitations, time-bound bindings, session
+revocation and the audit log.
+
+**How to read it.** To choose a role, start at [Built-in roles](#built-in-roles). To answer
+"who holds this permission?", use the [Permission catalogue](#permission-catalogue). To
+understand why a check passed or failed, read [Resolver behaviour](#resolver-behaviour). The
+role and permission tables match `backend/app/config/rbac_seed.py` exactly; for the wider
+security picture, see the [Security Overview](/docs/security-overview).
 
 > **Caution:** `super_admin` carries `system:admin`, which short-circuits **every**
-> permission check platform-wide. Bind it sparingly (platform owner / SRE break-glass)
-> and prefer `org_admin` for cross-workspace operators who shouldn't own users or SSO.
+> permission check platform-wide. Bind it sparingly (platform owner, SRE break-glass) and
+> prefer `org_admin` for cross-workspace operators who shouldn't manage users or SSO.
 
 ## TL;DR
 
-* Eight built-in roles. Four global-tier (including the default `user`
-  tier for anyone without an explicit global role), four
-  workspace-scoped.
-* Permissions are namespaced by category — `system:*` or `workspace:*`.
-  The resolver only emits perms whose category matches the binding's
-  scope; cross-category leaves are silently dropped.
-* `workspace:admin` auto-implies every other `workspace:*` permission
-  in the same workspace. Operators don't enumerate.
-* `system:org-admin` is a global shortcut for any workspace-scoped
-  check — the `org_admin` tier acts in every workspace without
-  per-workspace bindings.
+* Seven built-in roles: three platform roles (`super_admin`, `org_admin`, `org_auditor`)
+  and four workspace roles. Any account without a platform role is in the default `user`
+  tier, which stores nothing and grants nothing.
+* Permissions are namespaced by category — `system:*` or `workspace:*`. The resolver only
+  emits permissions whose category matches the binding's scope; cross-category ones are
+  silently dropped.
+* `workspace:admin` auto-implies every other `workspace:*` permission in the same workspace.
+  Operators don't enumerate.
+* Three global shortcuts: `system:admin` passes every check; `system:org-admin` passes every
+  workspace-scoped check in every workspace; `system:org-viewer` passes every workspace-scoped
+  `:read` check in every workspace.
 
-## The eight roles
+## Built-in roles
 
-| Role               | Scope     | Carries (after resolve)                                  | When to bind                                                    |
-|--------------------|-----------|----------------------------------------------------------|-----------------------------------------------------------------|
-| `super_admin`      | global    | `system:admin` (implies everything)                      | Platform owner / SRE break-glass. Bind sparingly.               |
-| `org_admin`        | global    | `system:org-admin`, `system:workspaces:create`, `system:groups:manage`, `workspace:*` (via shortcut) | Org-wide operator who curates workspaces but doesn't own users / SSO. |
-| `org_auditor`      | global    | `system:org-viewer`, `system:audit:read`, `system:bindings:read` (read-only cross-workspace via the org-viewer shortcut) | Compliance / audit reviewer — sees every workspace, all bindings, and the audit log; mutates nothing. |
-| `user`             | global    | *(nothing — the implicit default tier; no bindings, no workspace access)* | Not bound directly. The default tier for any account without an explicit global role. |
-| `workspace_admin`  | workspace | `workspace:admin` (auto-implies all `workspace:*`)       | Workspace owner who manages members + settings.                 |
-| `workspace_data_engineer` | workspace | `workspace:datasource:*`, `workspace:view:*`, `workspace:ontology:*`, `workspace:catalog:*`, `workspace:provider:read` | Owns data products in a workspace (sources, views, ontology, catalog) without managing members or settings. |
-| `workspace_member` | workspace | `workspace:view:*`, `workspace:datasource:*`             | Standard contributor — edit views + manage data sources.         |
-| `workspace_viewer` | workspace | `workspace:view:read`, `workspace:datasource:read`       | Read-only auditor / executive who shouldn't be able to edit.    |
+| Role (on screen) | Internal name | Bound at | When to bind |
+|---|---|---|---|
+| Super Admin | `super_admin` | Platform | Platform owner or SRE break-glass. Bind sparingly. |
+| Org Admin | `org_admin` | Platform | Org-wide operator who curates workspaces, but doesn't manage users or SSO. |
+| Org Auditor | `org_auditor` | Platform | Compliance or audit reviewer: sees every workspace, every binding and the audit log, and changes nothing. |
+| Workspace Admin | `workspace_admin` | A workspace | Workspace owner who manages its members and settings. |
+| Data Engineer | `workspace_data_engineer` | A workspace | Owns the data products in a workspace — data sources, views, semantic layers, catalog — without managing members or settings, or publishing views to everyone. |
+| Member | `workspace_member` | A workspace | Standard contributor: edits views and manages data sources. |
+| Viewer | `workspace_viewer` | A workspace | Read-only, for someone who shouldn't be able to edit. |
 
-The **global** roles `super_admin`, `org_admin`, and `org_auditor`
-live at `scope_type='global'`, `scope_id=NULL`; `user` is the implicit
-default tier for any account without a global binding (nothing is
-stored for it). The four **workspace** roles are stored at global
-scope too (they're templates that bind to any workspace), but binding
-them only emits workspace-category perms thanks to the resolver's
-filter.
+**User** (`user`) is not a stored role. It's the default tier of any account without a
+platform role: no platform permissions, and no workspace access until a workspace binding
+grants it.
+
+All seven roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The three
+platform roles are bound at global scope. The four workspace roles are templates you bind to a
+specific workspace (`scope_type='workspace'`, `scope_id=<workspace id>`); bound at global
+scope they grant nothing, because the resolver's category filter drops every `workspace:*`
+permission from a global binding.
+
+### Role grants
+
+Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each role:
+
+| Role | Count | Permissions granted |
+|---|---|---|
+| `super_admin` | 23 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_admin` | 17 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
+| `workspace_admin` | 1 | `workspace:admin` |
+| `workspace_data_engineer` | 11 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_member` | 9 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_viewer` | 5 | `workspace:catalog:read`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
+
+What a role can actually do differs from its stored grants in four places, all covered in
+[Resolver behaviour](#resolver-behaviour):
+
+* `super_admin` and `org_admin` are bound at global scope, so only their `system:*` grants
+  reach a session. Their workspace powers come from the shortcuts: `system:admin` passes every
+  check, and `system:org-admin` passes every workspace-scoped check in every workspace.
+* `org_auditor` reads every workspace through `system:org-viewer`, which passes any
+  workspace-scoped `:read` check.
+* `workspace_admin` stores only `workspace:admin`, which the resolver expands to every
+  `workspace:*` permission in that workspace.
+* `workspace_data_engineer` has neither `workspace:admin` nor `workspace:view:publish`, so it
+  can't manage members or publish views to everyone.
 
 ## Permission catalogue
 
-| ID                              | Category  | Carried by (built-in roles)        |
-|---------------------------------|-----------|------------------------------------|
-| `system:admin`                  | system    | `super_admin`                      |
-| `system:org-admin`              | system    | `super_admin`, `org_admin`         |
-| `system:users:manage`           | system    | `super_admin`                      |
-| `system:groups:manage`          | system    | `super_admin`, `org_admin`         |
-| `system:workspaces:create`      | system    | `super_admin`, `org_admin`         |
-| `system:org-viewer`             | system    | `super_admin`, `org_auditor`       |
-| `system:audit:read`             | system    | `super_admin`, `org_auditor`       |
-| `system:bindings:read`          | system    | `super_admin`, `org_auditor`       |
-| `workspace:admin`               | workspace | `super_admin`, `org_admin`, `workspace_admin` |
-| `workspace:datasource:manage`   | workspace | `super_admin`, `org_admin`, `workspace_admin`*, `workspace_member` |
-| `workspace:datasource:read`     | workspace | + `workspace_viewer`               |
-| `workspace:view:create`         | workspace | `super_admin`, `org_admin`, `workspace_admin`*, `workspace_member` |
-| `workspace:view:edit`           | workspace | (same)                             |
-| `workspace:view:delete`         | workspace | (same)                             |
-| `workspace:view:publish`        | workspace | `super_admin`, `org_admin`, `workspace_admin`* |
-| `workspace:view:read`           | workspace | + `workspace_viewer`               |
+Every permission `PERMISSIONS` in `backend/app/config/rbac_seed.py` defines. **Granted to**
+lists stored grants only (the [Role grants](#role-grants) table, read the other way): the
+shortcuts and `workspace:admin` reach further, as described above.
 
-\* `workspace_admin` only stores `workspace:admin` in
-`role_permissions`. The other `workspace:*` perms come from the
-resolver's auto-implication rule — see *Auto-implication* below.
+| Permission | Category | What it allows | Granted to (built-in roles) |
+|---|---|---|---|
+| `system:admin` | system | Full system control; implies every other permission. | `super_admin` |
+| `system:analytics:read` | system | Read platform analytics — growth, engagement and adoption. | `super_admin`, `org_admin`, `org_auditor` |
+| `system:sso:hosts:manage` | system | Manage which internal hosts SSO may call back to. | `super_admin` |
+| `system:audit:read` | system | Read the platform audit log (logins, RBAC mutations, sessions). | `super_admin`, `org_auditor` |
+| `system:bindings:read` | system | List role bindings and per-user effective access cross-workspace. | `super_admin`, `org_auditor` |
+| `system:groups:manage` | system | Create, edit, delete groups and manage their members. | `super_admin`, `org_admin` |
+| `system:org-admin` | system | Cross-workspace operator; implies every workspace permission. | `super_admin`, `org_admin` |
+| `system:org-viewer` | system | Read-only operator across every workspace in the tenancy. | `super_admin`, `org_auditor` |
+| `system:users:manage` | system | Create, approve, suspend, and change roles for users. | `super_admin` |
+| `system:workspaces:create` | system | Create new workspaces. | `super_admin`, `org_admin` |
+| `workspace:admin` | workspace | Manage workspace settings, members, and deletion. | `super_admin`, `org_admin`, `workspace_admin` |
+| `workspace:catalog:manage` | workspace | Promote / edit / delete catalog items the workspace owns. | `super_admin`, `org_admin`, `workspace_data_engineer` |
+| `workspace:catalog:read` | workspace | Read catalog items (curated data assets) available to the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
+| `workspace:datasource:manage` | workspace | Connect, edit, and delete data sources in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member` |
+| `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
+| `workspace:ontology:manage` | workspace | Create, edit, version, publish, and delete ontologies in the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer` |
+| `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
+| `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
+| `workspace:view:create` | workspace | Create new views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member` |
+| `workspace:view:delete` | workspace | Soft-delete any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member` |
+| `workspace:view:edit` | workspace | Edit any view in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member` |
+| `workspace:view:publish` | workspace | Publish views to everyone in the organization (enterprise visibility). | `super_admin`, `org_admin` |
+| `workspace:view:read` | workspace | List and open views in a workspace. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_viewer` |
 
-### View visibility and sharing (2026-07-31 rework)
+Two of these are deliberately separate from `system:admin`'s everyday reach:
+`system:analytics:read` (business metrics are not the audit log), and
+`system:sso:hosts:manage` (an entry lets the service make requests to an internal address,
+which is a network decision, so only `super_admin` holds it by default).
+
+### Which permissions open which screens
+
+`backend/app/services/nav_catalogue.py` maps each screen to the permission its backend routes
+enforce, and the app shows or hides it to match:
+
+| Screen | Shown to holders of |
+|---|---|
+| **Dashboard**, **Explore**, **Workspaces** | Everyone signed in |
+| **Ingestion** | Any of `system:admin`, `system:org-admin`, `workspace:provider:read`, `workspace:datasource:manage` (the workspace permissions in any one workspace) |
+| **Semantic Layers** | Any of `system:admin`, `system:org-admin`, `workspace:ontology:read` |
+| **Analytics** | Any of `system:analytics:read`, `system:admin`, `system:org-admin`, `system:audit:read`. When **Analytics for everyone** is on, everyone else gets a redacted version. |
+| **Administration** (entering it at all) | `system:admin` or `system:groups:manage` |
+| Administration → **Audit Log** and **Telemetry** | `system:audit:read` |
+| Administration → **Groups** | `system:groups:manage` |
+| Every other Administration page | `system:admin` |
+
+Entering **Administration** and opening one of its pages are separate checks: a page inside
+it needs its own permission as well as one of the two that open Administration.
+
+### View visibility and sharing
 
 Views carry a visibility tier plus optional explicit grants
 (`resource_grants`, user or group subjects, `viewer`/`editor` roles).
@@ -90,7 +150,10 @@ like `workspace` for every member:
 | `workspace`  | the above + `workspace:view:read` holders in the view's workspace    |
 | `enterprise` | any signed-in user on the platform                                   |
 
-Reading a view now implies **read-only** access to its data plane: the
+On screen these tiers are **Private**, **Workspace** and **Enterprise**; for the people who
+share views, see [Who can see a View](/guide/managing-views#who-can-see-a-view).
+
+Reading a view implies **read-only** access to its data plane: the
 graph/canvas routers accept a `?viewId=` capability context
 (`backend/app/api/v1/capability_gate.py`) pinned to the view's
 resolved data source. Mutations always require
@@ -121,16 +184,16 @@ who may touch a view's visibility (that stays creator / ws-admin).
 ### The publish ladder
 
 Four controls decide it, and they nest. `resolve_publish_gate`
-(`services/view_access.py`) is the only place that walks them, and
+(`backend/app/services/view_access.py`) is the only place that walks them, and
 `resolvePublishGate` (`frontend/src/lib/publishGate.ts`) is its exact
 twin — a UI that resolves this differently tells people the wrong thing
 about the button in front of them.
 
 | # | Control | Where it is set | Binds |
 |---|---------|-----------------|-------|
-| 1 | `enterpriseViewPolicy` — `workspaces` \| `request` \| `off` | Admin → Features | Everyone, **including permission holders** |
-| 2 | `workspaces.publish_policy` — `open` \| `request` | Workspace → Views tab | Everyone without the permission |
-| 3 | `workspace_data_sources.is_restricted` | Workspace → Views tab | Everyone without the permission |
+| 1 | `enterpriseViewPolicy` — `workspaces` \| `request` \| `off` | **Administration → Features → Publishing views to everyone** (**Workspaces decide**, **Always require approval**, **Not available**) | Everyone, **including permission holders** |
+| 2 | `workspaces.publish_policy` — `open` \| `request` | The workspace's **Views** tab | Everyone without the permission |
+| 3 | `workspace_data_sources.is_restricted` | The workspace's **Views** tab | Everyone without the permission |
 | 4 | `workspace:view:publish` | Role binding | Satisfies 2 and 3 outright |
 
 The platform ceiling is checked first and the permission does **not**
@@ -191,26 +254,22 @@ over a private view someone else created writes an `admin_viewed`
 entry to that view's activity log (deduped hourly per admin). The
 reach is unchanged; it is simply no longer invisible to the owner.
 
-Caveat for rollouts: sessions minted before this permission shipped may
-still carry a collapsed `workspace:view:*` wildcard in their cached
-claims and would pass a publish check until the session refreshes
-(bounded by the access-token TTL). Force re-login via the revocation
-service if that window matters.
-
 ## Resolver behaviour
 
-A permission check resolves through a fixed short-circuit ladder — the two global
+A permission check resolves through a fixed short-circuit ladder — the three global
 shortcuts win before any per-workspace bucket is consulted:
 
 ```mermaid
-flowchart TD
-    Q["has_permission(claims, perm, workspace_id?)"] --> A{"system:admin ∈<br/>global_perms?"}
-    A -->|"yes"| ALLOW["✅ allow (unconditional)"]
-    A -->|"no"| B{"perm is workspace-scoped<br/>AND system:org-admin ∈ global_perms?"}
+flowchart TB
+    Q["has_permission(claims, perm, workspace_id)"] --> A{"system:admin in<br/>global permissions?"}
+    A -->|"yes"| ALLOW["Allow"]
+    A -->|"no"| B{"Workspace-scoped check and<br/>system:org-admin held?"}
     B -->|"yes"| ALLOW
-    B -->|"no"| C{"perm in the matching<br/>bucket?<br/>(global_perms or ws_perms[ws])"}
+    B -->|"no"| C{"Workspace-scoped read check<br/>and system:org-viewer held?"}
     C -->|"yes"| ALLOW
-    C -->|"no"| DENY["⛔ typed 403<br/>missing_permission"]
+    C -->|"no"| D{"perm in the matching bucket?<br/>(global, or the workspace's)"}
+    D -->|"yes"| ALLOW
+    D -->|"no"| DENY["Typed 403<br/>missing_permission"]
 ```
 
 The buckets themselves are built by the resolver from a user's bindings, applying the
@@ -254,6 +313,19 @@ bindings or large `ws_perms` claims.
 
 `has_permission` returns `True` unconditionally when `system:admin` ∈
 `claims.global_perms`. The `super_admin` tier holds it.
+
+### 5. `system:org-viewer` read shortcut
+
+`has_permission(claims, perm, workspace_id=ws)` also short-circuits to `True` when all three
+hold:
+
+* `perm` is workspace-scoped (`workspace_id is not None`)
+* `perm` ends in `:read`
+* `system:org-viewer` ∈ `claims.global_perms`
+
+It never passes a manage or write permission. `has_permission_any_workspace` — the check
+behind catalogue-style lists that have no workspace in the URL — honours the same shortcut.
+This is how `org_auditor` reads every workspace without a single workspace binding.
 
 ## How claims reach a request
 
@@ -334,8 +406,9 @@ When a check fails, the endpoint raises a structured 403:
 The `message` field preserves the legacy text so existing scrapers
 keep working. New consumers should read `permission` and `scope`.
 
-The FE access-denied modal extracts the scope id to render
-"Access denied in *Finance*" rather than the opaque slug.
+The app's access-denied dialog turns `permission` into a plain-language sentence (for
+example "You don't have access to this workspace's data.") and, for a refusal inside a
+workspace, offers to request access from that workspace's admins.
 
 ## Operator recipes
 
@@ -350,6 +423,15 @@ and nothing in any other workspace.
 Bind `org_admin` at global scope. The user gets the cross-workspace
 shortcut + workspace creation + group management, but not user
 administration or SSO config.
+
+### "I want X to audit everything but change nothing"
+
+Bind `org_auditor` at global scope. The user reads every workspace through
+`system:org-viewer`, and holds `system:audit:read` and `system:bindings:read` for the audit
+log and the role-binding inventory. To use the **Audit Log** page in the app, they also need
+one of the permissions that open **Administration** (see
+[Which permissions open which screens](#which-permissions-open-which-screens)); the audit API
+needs only `system:audit:read`.
 
 ### "I want X to be platform owner"
 
@@ -411,16 +493,18 @@ bundle a cross-category permission the resolver would drop.
 `user_roles` and `role_bindings` in one transaction, so a promoted
 user's display role and resolved claims always agree. `PUT
 /admin/users/{user_id}/role` and the bootstrap admin path in
-`main.py` both go through it.
+`backend/app/main.py` both go through it.
 
 `ChangeRoleRequest` restricts `role` to the **globally assignable**
-set — `super_admin` and `org_admin`. Workspace-tier roles
-(`workspace_admin` / `workspace_member` / `workspace_viewer`) are
-bound via the workspace-members endpoint, which supplies the
-workspace context they need; binding them globally would be dropped
-by the resolver's category filter anyway. The AdminUsers UI dropdown
-enforces the same restriction and hides `super_admin` when the caller
-lacks `system:admin`.
+set — `user`, `org_auditor`, `org_admin` and `super_admin`
+(`GLOBAL_ASSIGNABLE_ROLES` in `backend/common/roles.py`). Assigning `user`
+clears the account's platform role and leaves its workspace bindings alone.
+Workspace roles (`workspace_admin`, `workspace_data_engineer`,
+`workspace_member`, `workspace_viewer`) are bound through the workspace-members
+endpoint, which supplies the workspace context they need; binding them globally
+would be dropped by the resolver's category filter anyway. The role picker in
+**Administration → User Management** offers the same four tiers and hides
+`super_admin` when the caller lacks `system:admin`.
 
 ### View-grants gating
 
@@ -440,7 +524,8 @@ pure helper `_ensure_can_manage_grants` keeps the rule in one place.
 
 Every mutation that narrows access wires
 `revocation_service.revoke_all_user_sessions` so a stale JWT can't
-outlive the change (the JWT TTL, default 5 min, is the fallback):
+outlive the change (the access-token lifetime — 5 minutes when `JWT_EXPIRY_MINUTES` is
+unset, 15 in the shipped Compose configuration — is the fallback):
 
 * `DELETE /admin/workspaces/{ws}/members/{binding}` — a user binding
   revokes that user's sessions; a group binding revokes every group
@@ -497,9 +582,13 @@ lists the removed bindings + roles.
 
 ## Invites
 
-An admin can mint an invite for **any** role — global tiers, workspace
-tiers, or custom roles — with the workspace bound on signup. Two link
-classes, split by privilege:
+A platform administrator (`system:admin`) can mint an invite for **any**
+role — global tiers, workspace tiers, or custom roles — with the
+workspace bound on signup. A workspace administrator can invite people into
+a workspace they administer, under one rule: you cannot grant what you do not
+hold. They can't invite into a privileged role, attach groups, or create an
+organisation-wide invite (`_enforce_invite_ceiling` in
+`backend/app/api/v1/endpoints/users.py`). Two link classes, split by privilege:
 
 * **Shareable link** (no email pin, reusable until expiry) — for
   **non-privileged** roles: `workspace_member`, `workspace_viewer`,
@@ -514,7 +603,8 @@ classes, split by privilege:
 **Privileged** is computed from `role_permissions` (includes
 `workspace:admin` or any `system:*`), so custom roles classify
 automatically. The invite token (`create_invite_token`) carries
-optional `workspace_id` and `email`; signup (`auth.py`) honours every
+optional `workspace_id` and `email`; signup
+(`backend/app/api/v1/endpoints/auth.py`) honours every
 role — global tiers via `set_global_role`, everything else via a
 `role_binding` at the right scope, re-validated for bindability at
 signup time. Email-bound invites reject a mismatched signup email.
@@ -533,9 +623,11 @@ emit `user.invite_created_shareable_with_groups` (vs the standard
 `user.invite_created`) with `shareable_groups_override: true` for
 auditing.
 
-The invite modal classifies roles by `isSystem` (built-in → "Standard
-Roles", operator-created → "Custom Roles") and a live summary narrates
-the invite in plain English as the form changes.
+Invites are created from **Administration → User Management → Invite by Link**,
+a wizard with four steps (**Who it's for**, **What they get**, **Safety**,
+**Review**); **Manage links** lists and revokes the ones already out. Turning off
+the **Invite links** feature switch stops new links and refuses the ones already
+sent.
 
 > **The access model invites respect.** A user has no access to any
 > workspace unless explicitly granted a binding in that workspace.
@@ -544,25 +636,26 @@ the invite in plain English as the form changes.
 > binding whose workspace perms the resolver drops → still no workspace
 > access. Only an explicit **workspace** binding grants access to that
 > one workspace; only `super_admin` and `org_admin` cross workspaces,
-> via the resolver short-circuits.
+> via the resolver short-circuits (and `org_auditor`, read-only).
 
 ## Audit log
 
 Every state-changing RBAC/auth mutation emits an outbox event; the
 relay lands it in `auth_audit_log`. Operators read it through:
 
-* `GET /api/v1/admin/audit` (gated `system:admin`) — filter by event
+* `GET /api/v1/admin/audit` (gated `system:audit:read`) — filter by event
   type prefix (`rbac.role.*`), actor, target user / role, workspace,
   and timestamp window. Cursor pagination (50/page default, 500 max).
   Every row carries a `severity` (`info` / `warning` / `critical`) and
   a one-line human `summary` computed from the event-type catalogue;
   unknown events fall back to `info` + the raw type.
-* `GET /api/v1/admin/audit/event-types` — distinct event types for the
-  filter dropdown.
-* `/admin/audit` — the admin page: a three-mode scope filter
-  (**Security** default / **Activity** / **Everything**), time-range
-  chips, a KPI strip by category, click-to-expand JSON payloads, and
-  clickable actor / target / workspace links.
+* `GET /api/v1/admin/audit/event-types` (same permission) — distinct event
+  types for the filter dropdown.
+* **Administration → Identity & Access → Audit Log** — the admin page: a
+  three-mode scope filter (**Security** default / **Activity** / **Everything**),
+  time-range chips, a KPI strip by category, click-to-expand JSON payloads, and
+  clickable actor / target / workspace links. Like every Administration page, it
+  also needs one of the permissions that open Administration.
 
 Every `requires()` 403 also emits a `user.access_denied` event,
 sampled hourly per `(user, permission, scope)` so a hostile scan
@@ -573,30 +666,27 @@ Compliance recipe: "Who promoted Alice last week?" → filter
 `targetUserId=alice`, `eventType=user.role_changed`,
 `fromTs=<7-days-ago>`.
 
-## Where to look in the code
+## Where in the code
 
 | Concern                                | File                                                          |
 |----------------------------------------|---------------------------------------------------------------|
-| Resolver (DB → claims)                 | `backend/app/services/permission_service.py:resolve`          |
-| Claim-time checks                      | `backend/app/services/permission_service.py:has_permission`   |
+| Seeded permissions, roles and grants   | `backend/app/config/rbac_seed.py` (`PERMISSIONS`, `SYSTEM_ROLES`, `ROLE_GRANTS`) |
+| Resolver (DB → claims)                 | `backend/app/services/permission_service.py` (`resolve`)      |
+| Claim-time checks                      | `backend/app/services/permission_service.py` (`has_permission`, `has_permission_any_workspace`) |
 | FastAPI `requires(...)` factory         | `backend/app/auth/dependencies.py`                            |
+| Which permission opens which screen    | `backend/app/services/nav_catalogue.py`                       |
+| Role names and assignable tiers        | `backend/common/roles.py`                                     |
 | Role bindability                       | `backend/app/db/repositories/role_repo.py`                    |
 | Permission catalogue / categories      | `backend/app/db/repositories/permission_repo.py`              |
+| View visibility and publishing         | `backend/app/services/view_access.py`                         |
 | Frontend `checkPermission`             | `frontend/src/store/auth.ts`                                  |
 | Workspace-aware role badge             | `frontend/src/components/layout/TopBar.tsx`                   |
 | Migration                              | `backend/alembic/versions/20260603_1100_rbac_uplift.py`       |
 | Regression tests                       | `backend/tests/test_rbac_phase5.py`                           |
 
-## Related docs
-
-* [SSO Integration Guide](/docs/sso-integration) — IdP → role-binding
-  reconciliation pulls roles from this taxonomy.
-* [SSO operator reference](/docs/sso) — operator-facing SSO posture; cross-references
-  the role names here.
-
 ## History
 
-The current eight-role taxonomy was introduced by the
+The current taxonomy was introduced by the
 `20260603_1100_rbac_uplift` migration, which renamed the earlier
 three-role set (`admin`/`user`/`viewer`) and added the `org_admin`
 role plus the `system:org-admin` permission:
@@ -615,5 +705,22 @@ The migration is reversible; its `downgrade()` renames everything back
 and drops the added permission + role. Legacy malformed
 `(role='user', scope='global')` rows from an earlier backfill are
 dropped on upgrade (with a per-row WARNING) and stay dropped on
-downgrade — `user` is a workspace-scoped tier, so those rows were never
-valid.
+downgrade — in the old taxonomy `user` was the workspace member tier (now
+`workspace_member`), so those rows were never valid.
+
+`20260606_0100_role_expansion` then added `workspace_data_engineer` and
+`org_auditor`, with the `system:org-viewer`, `system:audit:read` and
+`system:bindings:read` permissions; later migrations added the rest of the
+current catalogue. A fresh install is seeded from `rbac_seed.py` instead of
+replaying the chain, and CI holds the two paths to the same result.
+
+## See also
+
+* [Security Overview](/docs/security-overview) — every security control, with how to
+  configure it and where it lives in the code.
+* [SSO Integration Guide](/docs/sso-integration) — how identity-provider groups reconcile
+  into role bindings drawn from this taxonomy.
+* [SSO operator reference](/docs/sso) — the operator-facing SSO posture; it uses the role
+  names on this page.
+* [Users & Access](/guide/users-access) — the administrator's walkthrough for assigning
+  roles and inviting people.
