@@ -1050,15 +1050,15 @@ export function AdminUsers() {
                                                                 RESET
                                                             </span>
                                                         )}
-                                                        {/* An account still on the password it
-                                                            shipped with — which is printed in the
-                                                            setup docs, so it is public knowledge.
-                                                            Worth seeing without opening the row. */}
+                                                        {/* An account still on a password somebody
+                                                            else chose — its starting password, or one
+                                                            an administrator set. Worth seeing without
+                                                            opening the row. */}
                                                         {user.mustChangePassword && (
                                                             <span
-                                                                title="This account is still using its default password. It must choose a new one at next sign-in."
+                                                                title="This account's password was chosen by someone else. It must choose its own the next time it signs in with that password; signing in through SSO is unaffected."
                                                                 className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
-                                                                DEFAULT PASSWORD
+                                                                MUST CHANGE PASSWORD
                                                             </span>
                                                         )}
                                                     </div>
@@ -1543,7 +1543,7 @@ export function AdminUsers() {
                                                             className="input pl-10 h-11 w-full text-sm" autoFocus minLength={8} />
                                                     </div>
                                                     <p className="text-[11px] text-ink-muted mt-1.5">
-                                                        Set the password directly. The user will need to be informed of the new password.
+                                                        Set the password directly, then tell the user what it is. They'll be asked to choose their own the next time they sign in.
                                                     </p>
                                                 </div>
                                             )}

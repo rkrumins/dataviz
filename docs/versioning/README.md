@@ -139,7 +139,7 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
   (`python -m backend.app.services.versioning`), which hosts projection, "Enable version control"
   jobs, the data-source purge and reaper, and import/export jobs. `GRAPHVER_PROJECTION_INPROCESS=1`
   runs the same loops inside viz-service, for a single-node install. The Helm chart has neither, so
-  those loops do not run there ([TECHNICAL_DEBT.md](../TECHNICAL_DEBT.md) §1.5). The browser never
+  those loops do not run there (`docs/TECHNICAL_DEBT.md` §1.5). The browser never
   touches Postgres directly — everything is API-only.
 - **External sources.** Today graphs are predominantly **managed** (FalkorDB-backed, human-authored).
   **DataHub / OpenMetadata federation is designed-in** — the provider-capability seam, `source_mode`,

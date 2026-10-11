@@ -33,7 +33,9 @@ from backend.auth_service.cookies import (
     raise_if_foreign_session,
     read_access_cookie,
 )
-from backend.auth_service.core.tokens import decode_token, is_foreign_token_error
+from backend.auth_service.core.tokens import (
+    decode_token, is_foreign_token_error, password_change_pending,
+)
 from backend.auth_service.interface import IdentityService, User
 from backend.app.common import activity_context
 from backend.app.db.engine import get_db_session
@@ -149,23 +151,75 @@ def _identity_service(request: Request) -> IdentityService:
     return svc
 
 
-#: The only routes reachable while a forced password change is pending.
+#: The only requests reachable while a forced password change is pending.
 #: Kept to what the change screen itself needs — read who you are, set
 #: the new password, or give up and sign out. Anything else would let
 #: the account keep working around the rotation it is being held for.
-_PASSWORD_CHANGE_ALLOWED_PATHS = frozenset({
-    "/api/v1/users/me",
-    "/api/v1/users/me/password",
-    "/api/v1/auth/me",
-    "/api/v1/auth/logout",
-    "/api/v1/auth/refresh",
-    "/api/v1/me/identities",
+#: Matched on method as well as path: reading your profile is part of the
+#: change screen, editing it is not.
+_PASSWORD_CHANGE_ALLOWED = frozenset({
+    ("GET", "/api/v1/users/me"),
+    ("POST", "/api/v1/users/me/password"),
+    ("GET", "/api/v1/auth/me"),
+    ("POST", "/api/v1/auth/logout"),
+    ("POST", "/api/v1/auth/refresh"),
+    ("GET", "/api/v1/me/identities"),
 })
 
 
 def _password_change_exempt(request: Request) -> bool:
     """True if this request is part of getting the password changed."""
-    return request.url.path.rstrip("/") in _PASSWORD_CHANGE_ALLOWED_PATHS
+    return (
+        request.method.upper(), request.url.path.rstrip("/"),
+    ) in _PASSWORD_CHANGE_ALLOWED
+
+
+def _hold_for_password_change(
+    request: Request, payload: dict, user: User | None = None,
+) -> None:
+    """Refuse the request while the account must change its password.
+
+    Every resolver that authenticates a request calls this — the user
+    resolvers and the claims resolver alike — because a route may sign in
+    through any of them. Enforced in the API rather than in the SPA
+    because a client-side redirect is a suggestion, not a control.
+
+    The token claim is minted from the account at sign-in and at every
+    refresh; the user record, where a resolver has one, is read on every
+    request, so a requirement set after sign-in holds from the next
+    request rather than the next refresh. Only a session signed in with
+    the password is held: one signed in through an identity provider
+    carries on (``password_change_pending``).
+    """
+    pending = password_change_pending(
+        payload, bool(user is not None and getattr(user, "must_change_password", False)),
+    )
+    if pending and not _password_change_exempt(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "password_change_required",
+                "message": (
+                    "This account is using a default or "
+                    "administrator-set password. Choose a new one "
+                    "before continuing."
+                ),
+            },
+        )
+
+
+def _payload(token: str | None) -> dict:
+    """The access token's claims, or ``{}`` if there is no usable token.
+
+    Only called after ``validate_session`` has accepted the same token, so
+    the failure branch is defensive.
+    """
+    if not token:
+        return {}
+    try:
+        return decode_token(token)
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return {}
 
 
 async def get_current_user(request: Request) -> User:
@@ -183,7 +237,8 @@ async def get_current_user(request: Request) -> User:
     closed only applies on routes that explicitly opt-in via
     ``requires(...)`` against a sensitive permission.
     """
-    user = await _identity_service(request).validate_session(read_access_cookie(request))
+    token = read_access_cookie(request)
+    user = await _identity_service(request).validate_session(token)
     if user is None:
         raise_if_foreign_session(request)
         raise HTTPException(
@@ -196,38 +251,17 @@ async def get_current_user(request: Request) -> User:
     # also takes get_permission_claims). A missing sid means the
     # token predates the revocation feature — treat as not-revoked
     # and let the JWT TTL handle it.
-    token = read_access_cookie(request)
-    sid = ""
-    if token:
-        try:
-            payload = decode_token(token)
-            sid = payload.get("sid", "") or ""
-            # Phase 19: an account holding a password it must rotate can
-            # reach the handful of routes needed to rotate it, and
-            # nothing else. Enforced here rather than in the SPA because
-            # a client-side redirect is a suggestion, not a control —
-            # the API has to be the thing that refuses.
-            if payload.get("mcp") and not _password_change_exempt(request):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "error": "password_change_required",
-                        "message": (
-                            "This account is using a default or "
-                            "administrator-set password. Choose a new one "
-                            "before continuing."
-                        ),
-                    },
-                )
-        except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
-            # validate_session already rejected this above — defensive.
-            sid = ""
-
+    payload = _payload(token)
+    sid = payload.get("sid", "") or ""
     if sid and await _tombstoned(sid, user.id, where="get_current_user"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session revoked",
         )
+    # Phase 19: an account holding a password it must rotate can reach
+    # the handful of routes needed to rotate it, and nothing else. After
+    # the tombstone check: a revoked session is signed out, not held.
+    _hold_for_password_change(request, payload, user)
     # Whatever this request goes on to change is attributed to this person
     # (``activity_context.current_provenance``), here and across the hop to
     # the aggregation control plane.
@@ -260,17 +294,23 @@ async def get_optional_user(request: Request) -> User | None:
     else: signing out, a password reset or a role change has to take
     effect on these routes on the next request too, not when the access
     token happens to expire.
+
+    Optional means "may be anonymous", not "may skip the password-change
+    hold": a session that must change its password is refused here as it
+    is everywhere else.
     """
     token = read_access_cookie(request)
     user = await _identity_service(request).validate_session(token)
     if user is None or not token:
         return user
     try:
-        sid = decode_token(token).get("sid", "") or ""
+        payload = decode_token(token)
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
         return None
+    sid = payload.get("sid", "") or ""
     if sid and await _tombstoned(sid, user.id, where="get_optional_user"):
         return None
+    _hold_for_password_change(request, payload, user)
     return user
 
 
@@ -408,12 +448,16 @@ async def get_permission_claims(request: Request) -> PermissionClaims:
             detail="Not authenticated",
         )
     claims = PermissionClaims.from_jwt_dict(payload)
-    if PermissionClaims.token_carries_ws(payload):
-        return claims
-    grants = await _workspace_grants_from_store(
-        claims.sid, str(payload.get("sub") or ""),
-    )
-    return claims.with_ws(grants)
+    if not PermissionClaims.token_carries_ws(payload):
+        grants = await _workspace_grants_from_store(
+            claims.sid, str(payload.get("sub") or ""),
+        )
+        claims = claims.with_ws(grants)
+    # A route can authorise on claims alone, so the password-change hold
+    # applies here too. After the store read, which refuses a revoked
+    # session: signed out beats held.
+    _hold_for_password_change(request, payload)
+    return claims
 
 
 async def _workspace_grants_from_store(

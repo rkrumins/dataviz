@@ -19,8 +19,8 @@ had already expired.
 
 This runs on the aggregation control plane, and on a dev-role monolith
 through the ``runs_scheduler`` gate the outbox relay uses. Each batch takes
-an advisory lock first, so control-plane replicas take turns rather than
-contending for the same rows.
+an advisory lock first (``db/advisory.py``), so control-plane replicas take
+turns rather than contending for the same rows.
 """
 from __future__ import annotations
 
@@ -29,13 +29,10 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.advisory import claim_this_pass
 from backend.app.db.repositories.refresh_token_repo import purge_expired
-from backend.app.db.singleton import try_xact_lock
 
 logger = logging.getLogger(__name__)
-
-#: One replica sweeps at a time (``db/singleton.py``).
-_LOCK_KEY = "gc:refresh-tokens"
 
 # Rows per transaction. Bounded so one sweep never holds a long
 # transaction on the jobs pool, matching the outbox relay's discipline.
@@ -48,10 +45,7 @@ _DEFAULT_INTERVAL_SECONDS = 3600.0
 
 
 async def sweep_once(session: AsyncSession) -> int:
-    """Delete one batch of expired rows. Returns how many went — 0, too,
-    when another replica is sweeping."""
-    if not await try_xact_lock(session, _LOCK_KEY):
-        return 0
+    """Delete one batch of expired rows. Returns how many went."""
     return await purge_expired(session, batch=_BATCH)
 
 
@@ -77,6 +71,8 @@ async def run_sweeper(
         try:
             while not shutdown.is_set():
                 async with session_factory() as session:
+                    if not await claim_this_pass(session, "auth:refresh-token-gc"):
+                        break  # another process is sweeping
                     deleted = await sweep_once(session)
                 if deleted:
                     logger.info(

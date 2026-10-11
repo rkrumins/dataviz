@@ -587,8 +587,11 @@ async def lifespan(_app: FastAPI):
         logger.warning("System default ontology seed warning: %s", exc)
 
     # 2c. Bootstrap system admin (idempotent — skips if any user exists)
-    # Always ensures at least one admin account is present.
-    # Customizable via ADMIN_EMAIL / ADMIN_PASSWORD env vars; defaults provided.
+    # Always ensures at least one admin account is present, from
+    # ADMIN_EMAIL / ADMIN_PASSWORD. Whatever its starting password is,
+    # somebody else chose it, so the account must replace it at its first
+    # sign-in; an existing system account still on its starting password,
+    # or on one this repository publishes, is held the same way.
     #
     # N-worker safety: the (count==0 → create) check is not atomic. With
     # multiple workers/replicas booting against a fresh DB, several can pass
@@ -596,69 +599,31 @@ async def lifespan(_app: FastAPI):
     # users.email funnels them to a single winner; the rest hit
     # IntegrityError, which we treat as "another worker won the race".
     try:
-        import os
         from sqlalchemy.exc import IntegrityError
-        from .db.repositories import user_repo
-        from .auth.password import hash_password
-        admin_email = os.getenv("ADMIN_EMAIL", "admin@nexuslineage.local")
-        admin_password = os.getenv("ADMIN_PASSWORD", "changeme")
-        # Passwords that ship in this repo — in .env.example, the
-        # quickstart compose file, the README, and every setup doc. An
-        # account holding one of these is holding a credential that is
-        # public knowledge, so it is made to rotate on first sign-in.
-        # An operator who supplied their own is not nagged.
-        must_rotate = admin_password in {"changeme", "admin123", "REPLACE_ME"}
+        from .auth.bootstrap import (
+            hold_unchanged_system_accounts,
+            seed_system_admin,
+        )
         async with get_async_session() as session:
-            user_count = await user_repo.count_users(session)
-            if user_count == 0:
-                try:
-                    user = await user_repo.create_user(
-                        session,
-                        email=admin_email,
-                        password_hash=hash_password(admin_password),
-                        first_name="System",
-                        last_name="Admin",
-                        status="active",
-                    )
-                    if must_rotate:
-                        await user_repo.set_must_change_password(
-                            session, user.id, True,
-                        )
-                    # The seeded admin is the deployment's break-glass
-                    # account: it keeps password sign-in even when the
-                    # platform enforces SSO, and forced sign-out sweeps
-                    # skip it. Marked here because this is the one
-                    # account that exists before any operator can mark
-                    # anything.
-                    await user_repo.set_system_account(
-                        session, user.id, True,
-                    )
-                    # Phase 6: ``set_global_role`` writes both
-                    # ``user_roles`` (legacy display) and
-                    # ``role_bindings`` (canonical claims) so the
-                    # bootstrap admin actually has system:admin in
-                    # their JWT, not just on the User DTO.
-                    await user_repo.set_global_role(
-                        session, user.id, "super_admin",
-                        granted_by="system",
-                    )
-                    await user_repo.create_approval(
-                        session, user.id, status="approved", approved_by="system",
-                    )
+            try:
+                created = await seed_system_admin(session)
+                if created:
                     logger.info(
-                        "System admin created: %s%s",
-                        admin_email,
-                        (
-                            " (default password — a change is required at "
-                            "first sign-in)"
-                            if must_rotate else ""
-                        ),
+                        "System admin created: %s (it must choose a new "
+                        "password at first sign-in)", created,
                     )
-                except IntegrityError:
-                    await session.rollback()
-                    logger.info(
-                        "Admin bootstrap: another worker won the race (expected at N>1)"
-                    )
+            except IntegrityError:
+                await session.rollback()
+                logger.info(
+                    "Admin bootstrap: another worker won the race (expected at N>1)"
+                )
+        async with get_async_session() as session:
+            for user_id in await hold_unchanged_system_accounts(session):
+                logger.warning(
+                    "System account %s still signs in with its starting "
+                    "password or a published one; it must choose a new "
+                    "password at its next sign-in.", user_id,
+                )
     except Exception as exc:
         logger.warning("Admin bootstrap warning: %s", exc)
 
@@ -1588,9 +1553,12 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Versioning projection worker not started: %s", exc)
 
-    # Phase 0 — outbox relay → append-only auth_audit_log. Runs only on
-    # the documented owner role (CONTROLPLANE / DEV via runs_scheduler)
-    # so multiple WEB replicas don't all drain the same outbox.
+    # Phase 0 — outbox relay → append-only auth_audit_log. In a split
+    # deployment the aggregation control plane runs it, with the retention
+    # sweeps and the analytics warmer below (see
+    # ``services/aggregation/controlplane.py``); this process starts them
+    # only as a dev monolith, so web replicas don't each run them. Every
+    # pass claims an advisory lock either way.
     _app.state._outbox_relay_shutdown = asyncio.Event()
     _app.state._outbox_relay_task = None
     if runs_scheduler():
@@ -1603,9 +1571,9 @@ async def lifespan(_app: FastAPI):
             name="outbox-relay",
         )
 
-    # Refresh-token revocation sweep. Same owner role as the relay: the
-    # table is shared, so three web replicas sweeping it would only
-    # contend for the same rows.
+    # Refresh-token revocation sweep. Same owner as the relay: the table
+    # is shared, so three web replicas sweeping it would only contend for
+    # the same rows.
     _app.state._refresh_gc_shutdown = asyncio.Event()
     _app.state._refresh_gc_task = None
     if runs_scheduler():
@@ -1650,23 +1618,23 @@ async def lifespan(_app: FastAPI):
         )
 
     # IdP health sweep → app.state.idp_health_cache, read by the cache-only
-    # GET /admin/idp-providers/status. Same runs_scheduler() gating as the
-    # relay so replicas don't each probe every IdP. The cache is initialised
-    # unconditionally: a WEB replica serves an empty status rather than
-    # AttributeError-ing on a missing attribute.
+    # GET /admin/idp-providers/status. Runs in every process that serves the
+    # API, because the cache lives in this process: gated on the scheduler
+    # role, as it was, web replicas — every container deployment — always
+    # answered with an empty status. One discovery or metadata fetch per
+    # provider every fifteen minutes; back-channel providers are not
+    # contacted at all (see ``services/idp_health.py``).
     _app.state.idp_health_cache = {}
     _app.state._idp_health_shutdown = asyncio.Event()
-    _app.state._idp_health_task = None
-    if runs_scheduler():
-        from .services.idp_health import run_idp_health_loop
-        _app.state._idp_health_task = asyncio.create_task(
-            run_idp_health_loop(
-                get_jobs_session,
-                _app.state._idp_health_shutdown,
-                _app.state.idp_health_cache,
-            ),
-            name="idp-health",
-        )
+    from .services.idp_health import run_idp_health_loop
+    _app.state._idp_health_task = asyncio.create_task(
+        run_idp_health_loop(
+            get_jobs_session,
+            _app.state._idp_health_shutdown,
+            _app.state.idp_health_cache,
+        ),
+        name="idp-health",
+    )
 
     # Everything startup built lives as long as the process: take it out of
     # the garbage collector's reach. A full collection otherwise walks this

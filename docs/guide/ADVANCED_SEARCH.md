@@ -4,7 +4,8 @@
 matches what you describe — a name, a tag, a property value, a place in the
 lineage — however large the View is. It lights the matches up on the canvas,
 counts them in every container, and keeps the searches you use again, for you
-or for everyone who opens the View.
+or for everyone who opens the View. This page shows you how to search a View,
+narrow the results, act on the matches, and save the searches you reuse.
 
 > **Note:** *The one-sentence model* — A search is a set of **filters** (joined
 > with AND, OR and NOT) run over **one View**. The same filters power the quick
@@ -380,6 +381,11 @@ Within N hops of…**, then set the URN, hops and direction in the JSON it adds:
 
 ## Where to next
 
-- Colour the canvas by a rule you write → [Display Rules](/guide/display-rules)
-- Moving a library between Views, and Views between environments → [Import & Export](/guide/import-export)
-- The query language, every endpoint and scripting → [Search & Display Rules Reference](/docs/feature-search-and-rules-reference)
+- [Display Rules](/guide/display-rules) — when you want to colour the canvas by
+  a rule you write.
+- [Tracing Lineage on the Canvas](/guide/exploring-graph) — when you've found an
+  entity and want to follow its lineage.
+- [Import & Export](/guide/import-export) — when you're moving a library between
+  Views, or Views between environments.
+- [Search & Display Rules Reference](/docs/feature-search-and-rules-reference) — when
+  you need the query language, every endpoint and scripting.

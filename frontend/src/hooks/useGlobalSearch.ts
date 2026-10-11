@@ -90,6 +90,8 @@ export interface DocHit extends BaseHit {
     category: 'Doc'
     area: DocsSearchArea
     slug: string
+    /** The page, at the section or FAQ answer that matched. */
+    href: string
 }
 
 export type SearchHit =
@@ -218,8 +220,9 @@ export function useGlobalSearch(
     // module cache would survive anyway, this stops a second in-flight
     // build and any refetch.
     const docsQuery = useQuery({
-        queryKey: ['globalSearch', 'docsIndex'],
-        queryFn: getIndex,
+        // The index carries the brand's name, so a rebrand is a new index.
+        queryKey: ['globalSearch', 'docsIndex', brand.appName, brand.shortName],
+        queryFn: () => getIndex(brand),
         enabled: appWide && debouncedQuery.length > 0,
         staleTime: Infinity,
         gcTime: Infinity,
@@ -312,15 +315,20 @@ export function useGlobalSearch(
         // The markdown carries `{brand}` tokens literally, in titles as
         // well as prose, so nothing reaches a reader un-interpolated.
         const docResults = appWide && docsQuery.data ? runSearch(docsQuery.data, debouncedQuery) : []
-        const docHits: DocHit[] = docResults.map(r => ({
-            id: `doc-${r.area}-${r.slug}`,
-            category: 'Doc',
-            name: interpolateBrand(r.title, brand),
-            description: interpolateBrand(r.snippet.map(seg => seg.text).join(''), brand),
-            score: r.score,
-            area: r.area,
-            slug: r.slug,
-        }))
+        const docHits: DocHit[] = docResults.map(r => {
+            const snippet = r.snippet.map(seg => seg.text).join('')
+            const section = r.kind === 'section' && r.heading ? `${r.heading} — ` : ''
+            return {
+                id: `doc-${r.href}`,
+                category: 'Doc',
+                name: interpolateBrand(r.kind === 'faq' ? r.heading ?? r.title : r.title, brand),
+                description: interpolateBrand(`${section}${snippet}`, brand),
+                score: r.score,
+                area: r.area,
+                slug: r.slug,
+                href: r.href,
+            }
+        })
 
         const totalByCategory: Record<SearchCategory, number> = {
             Page: destinationHits.length,

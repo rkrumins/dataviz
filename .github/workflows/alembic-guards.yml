@@ -13,7 +13,12 @@ name: Guards
 #
 # 2. FEATURE WIRING. The Admin → Features page must not lie about which switches do something.
 #
-# Both jobs run on EVERY pull request. They used to be filtered to `backend/alembic/**`, which
+# 3. CONFIGURATION REFERENCE. docs/CONFIGURATION.md is generated from every environment variable
+#    the backend reads, by `backend/scripts/export_config_reference.py`. A new setting, a changed
+#    default or a moved read changes the page, and the job fails until it is regenerated, so the
+#    reference operators configure deployments from cannot drift from the code.
+#
+# All three jobs run on EVERY pull request. They used to be filtered to `backend/alembic/**`, which
 # reads as thrift and behaves as a hole: these guards exist precisely to catch the change made
 # somewhere else that quietly breaks them.
 
@@ -86,3 +91,18 @@ jobs:
       # exactly what a CI job has and the dev container does not (it mounts backend only).
       - name: Declared gates and UI surfaces exist
         run: python -m pytest backend/tests/test_feature_wiring.py -q --noconftest
+
+  config-reference:
+    name: Configuration reference matches the code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14'
+
+      # Stdlib only (`ast`, `re`), importing nothing from the backend, so there is no install
+      # step. On drift it prints the diff and the command that regenerates the page.
+      - name: docs/CONFIGURATION.md matches the backend's env reads
+        run: python backend/scripts/export_config_reference.py --check

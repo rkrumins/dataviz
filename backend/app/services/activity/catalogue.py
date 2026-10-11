@@ -133,6 +133,15 @@ def _summary_idp_provider(verb: str):
     return _build
 
 
+def _summary_backchannel_host(verb: str):
+    def _build(p: dict) -> str:
+        where = p.get("host") or "?"
+        if p.get("port"):
+            where = f"{where}:{p['port']}"
+        return f"Back-channel SSO host {where} {verb}"
+    return _build
+
+
 def _mapping_target(t: dict) -> str:
     """One clause naming what a mapping grants. Ids are fine here — the
     reference-name pass below swaps every ``grp_``/``ws_`` token for the
@@ -269,6 +278,7 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.group.member_removed": ("warning", _summary_group_membership("removed from")),
     "rbac.sso_mapping.deleted": ("warning", _summary_sso_mapping("deleted")),
     "idp.provider.deleted": ("warning", _summary_idp_provider("deleted")),
+    "sso.backchannel_host_withdrawn": ("warning", _summary_backchannel_host("withdrawn")),
     "rbac.access_request.denied": ("warning", _summary_access_request("denied")),
     "user.login_failed": ("warning", _summary_login_failed),
     "user.logged_out": ("warning", lambda p: f"User {p.get('user_id') or '?'} signed out"),
@@ -287,6 +297,7 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.sso_mapping.updated": ("info", _summary_sso_mapping_updated),
     "idp.provider.created": ("info", _summary_idp_provider("created")),
     "idp.provider.updated": ("info", _summary_idp_provider("updated")),
+    "sso.backchannel_host_allowed": ("info", _summary_backchannel_host("allowed")),
     "branding.updated": ("info", lambda p: "Branding settings updated"),
     "user.approved": ("info", _summary_user_status("approved")),
     "user.reactivated": ("info", _summary_user_status("reactivated")),

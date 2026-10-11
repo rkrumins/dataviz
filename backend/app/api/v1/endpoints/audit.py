@@ -62,6 +62,7 @@ _AUDIT_PREFIXES = (
     "user.",             # role_changed / approved / etc.
     "auth.",             # config.updated
     "idp.",              # provider.created / updated / deleted
+    "sso.",              # backchannel_host_allowed / backchannel_host_withdrawn
 )
 
 
@@ -132,6 +133,7 @@ _HIDE_BY_CATEGORY: dict[str, frozenset[str]] = {
 _SSO_PREFIXES = (
     "idp.",                  # provider.created / updated / deleted
     "auth.",                 # config.updated
+    "sso.",                  # back-channel host allowlist changes
     "rbac.sso_mapping.",     # created / deleted
     "user.sso_",             # provisioned / linked / link_denied / jit_blocked
                              # / session_expired / unsigned_accepted

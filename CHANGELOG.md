@@ -13,8 +13,8 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
-**Admin → Activity: one log of what people do across the platform.** The RBAC-only audit page at
-`/admin/audit` is replaced by an explorer of every recorded change: sign-ins and access, aggregation
+**Administration → Activity: one log of what people do across the platform.** The RBAC-only Audit
+Log page at `/admin/audit` is replaced by an explorer of every recorded change: sign-ins and access, aggregation
 and freshness operations, data sources and providers, version control, group membership and
 platform settings. Lenses (Operations, Access, Identity, Data, Content, Platform, Security), a date
 range, and filters for a person — as the one who acted or the one it happened to — action, outcome,
@@ -74,17 +74,12 @@ names up to 100 people for any signed-in reader. Mutating requests may carry an 
 
 ### Changed
 
-**The background loops that were documented as running now run.** The outbox relay that fills
-`auth_audit_log`, the product-event and refresh-token retention sweeps and the analytics warmer
-never started in the shipped topologies. They now run on the aggregation control plane, each
-single-flight, so its two production replicas take turns.
-
 **`auth_audit_log` is the activity ledger.** Each record stays immutable; beside it sits a
 rebuildable projection in indexed columns (category, audience, severity, outcome, actor, subject,
 target, workspace, data source, stated reason, correlation id), so every filter runs in SQL.
 
-**Admin's "Audit Log" is now "Activity"**, first in the System group, and holders of
-`system:audit:read` (Org Auditors) can reach Admin.
+**Administration's "Audit Log" is now "Activity"**, second in the System group, and holders of
+`system:audit:read` (Org Auditors) can open Administration, landing on it.
 
 **The public trigger endpoint accepts only `manual`, `onboarding` and `api`**, so a rebuild started
 by a person cannot be recorded as automation.
@@ -94,8 +89,8 @@ The analytics document cache moves to schema version 3; documents rebuild on fir
 ### Fixed
 
 - The audit page filtered people and targets after the page limit, so a filtered page could come
-  back short or empty. Admin → Activity filters in the query. `GET /api/v1/admin/audit`, kept as it
-  was for API clients, still filters that way.
+  back short or empty. Administration → Activity filters in the query. `GET /api/v1/admin/audit`,
+  kept as it was for API clients, still filters that way.
 - Data sources added through the API recorded no creator; `created_by` is now set.
 - In proxy mode — every deployed topology — manual aggregation runs recorded nobody.
 
@@ -116,11 +111,9 @@ The analytics document cache moves to schema version 3; documents rebuild on fir
 - **Two migrations:** `20261010_1000_activity_ledger` (DDL on `auth_audit_log`, inspector-guarded,
   no data updates) and `20261010_1100_job_provenance` (`aggregation_jobs.triggered_by` and
   `stated_reason`). Run the upgrade job before rolling out.
-- **The first control-plane start imports the outbox history into the ledger**, newest first, at
-  roughly 3,000–5,000 events a second per replica — about ten minutes per two million events.
-  Admin → Activity says *Importing earlier activity* until it finishes.
-- **The retention sweeps run for the first time:** product events older than 400 days
-  (`PRODUCT_EVENT_RETENTION_DAYS`) and expired refresh-token records are deleted.
+- **Copying the audit backlog** (see the entry below) also classifies each event for the activity
+  log, newest first, at roughly 3,000–5,000 events a second — about ten minutes per two million
+  events. Administration → Activity says *Importing earlier activity* until it finishes.
 - **Event storage roughly doubles** while the outbox is not pruned: events are kept both in
   `outbox_events` and in the ledger.
 - Browser clients may send `X-Activity-Reason`; it is in the CORS allow-list.
@@ -141,6 +134,122 @@ The analytics document cache moves to schema version 3; documents rebuild on fir
   and cache refresh.
 - A stated reason is free text and may contain personal data. Auditors can read it, and so can the
   workspace's admins for a workspace change; the field says so.
+
+---
+
+## [Unreleased] — A guide and docs for every reader, checked against the product
+
+### Added
+
+**Six new User Guide pages.** *Requesting Access* explains each "you can't do that" message and
+which way of asking works; *Editing in a Draft* and *The Review Center* cover changing data and
+publishing it; *Feature Switches* describes all 28 switches by the names Administration → Features
+shows; *Data Freshness & Ingestion* covers keeping lineage current; *Analytics* explains who sees
+what. Administration → Features' **Learn more** opens the new page — it used to open one that
+didn't exist.
+
+**Help shows the guide pages for the screen you're on.** The Help panel opens with **For this
+page** on every signed-in screen, above the quick start.
+
+**Three new ways into the docs.** The docs hub has cards for Integrators (a new *API Guide*),
+Security Reviewers (a new *Security Overview*) and Data Engineers (a new *Onboarding a Data
+Source*), alongside New Engineers, Architects and Operators. New pages: *Contributing*, *Testing &
+CI*, *Kubernetes*, *Observability*, *Runbooks* and a *Configuration Reference* generated from every
+environment variable the backend reads. Pages that existed but weren't in the reader now are:
+*Property Storage*, *Database Domain Ownership*, *Feature Switch Lifecycle*, *Top-Level Nodes
+Performance*, the *Back-channel SSO Contract*, the *Production Cluster Overlay* and the
+2026-09-10 upgrade note.
+
+**Reading paths that keep your place.** Each persona's pages — in the docs and in the guide — are
+a path you can follow: the page shows the step you're on, its end offers the next page, the sidebar
+ticks off what you've read, and the hub picks up where you left off. Progress stays in your
+browser.
+
+**The docs and the guide work on a phone.** The table of contents opens as a drawer, search fills
+the screen, and "On this page" folds into the top of the article.
+
+### Changed
+
+**Search finds the part of a page that answers.** *Search everything* (⌘K / Ctrl+K, or "/")
+searches every section of every page and every FAQ answer, matches a word in any form, forgives a
+typo and ignores filler words. Results are grouped by page with the sections that matched, the best
+page first whichever reader it is in, and choosing one opens the page at that section. *Filter
+pages* in the sidebar uses the same index, and both hubs' search boxes open *Search everything*.
+
+**The User Guide teaches the product as it ships.** The pages people start with described an
+Explorer that was an open canvas, a "Save as View" button, renamed visibility tiers, a five-step
+wizard and favourites in the sidebar. Every page was checked against the code and rewritten where
+it had drifted; each task page now says what to have ready, what you should see after each step,
+what to do if you don't, and where to go next. The guide's "Before you start", "If …" and
+"Admins" notes render as callouts.
+
+**The engineering entry points match the code.** *Developer Setup* follows the real `dev.sh`, a
+seed command that works and the first sign-in's password change; *Backend* is a router map;
+*Architecture*, *Frontend* and *Data Architecture* drop the mock provider, the Web-Worker layout
+and the session in local storage; *RBAC* and *Feature Flags API* list every permission and switch;
+the ADRs record what superseded what.
+
+### Fixed
+
+- A link to a section of a page opened the top of the page, and a new page opened as far down as
+  the previous one had been scrolled.
+- *Filter pages* matched only titles and descriptions — and only the exact phrase — so most
+  searches found nothing; on the hubs, "share a view" found nothing at all.
+- "On this page" links for headings that contain the product name went nowhere.
+- Code blocks' **Copy** buttons were invisible on touch screens.
+- Wizard help links opened the guide in the same tab, unmounting the wizard and throwing away what
+  you had entered. They open a new tab.
+- Four deep links into the docs pointed at headings that don't exist.
+- Guide reading times were typed by hand and had drifted; they are computed from each page.
+- Identity-provider health — reachability and certificate expiry — on the SSO admin pages was
+  empty in every container deployment. Every API process checks it now.
+
+Guards keep this from drifting again: every link the app shows into the guide or docs must open a
+page, every guide page must end by pointing the reader on, every seeded switch, permission and role
+must be documented, every signed-in page must offer help, and the configuration reference must
+match the code.
+
+### Security
+
+- **A password someone else chose has to be replaced.** The first administrator chooses its own
+  password at its first sign-in, whatever `ADMIN_PASSWORD` it was created with; before, only three
+  published values asked for that. The same holds for a password an administrator sets for someone
+  else, when creating the account or with **Reset password**. While the change is pending, the
+  server refuses every request except the change itself, on every route, from a session signed in
+  with that password. Signing in through SSO is unaffected: someone who signs in through the
+  identity provider and also has a local password keeps working, and can replace the password on
+  **Account settings**.
+- **Sign-in events reach the audit table in every deployment.** The relay that copies them into
+  the append-only `auth_audit_log` — with the refresh-token and product-event retention sweeps and
+  the analytics warmer — never ran in Docker Compose, Kubernetes or Helm. The control plane runs
+  them now, one copy at a time. The activity log also shows changes to the SSO back-channel host
+  list, and **Recent activity** on Account settings shows password resets, reset links, role
+  changes and suspensions done to your account.
+
+### Upgrading
+
+- **The first administrator may be asked for a new password.** At the first start after upgrading,
+  a system account still signing in with its starting password (`ADMIN_PASSWORD`), or with one
+  published in this repository, must choose a new one at its next sign-in. Scripts that sign in
+  as it need the new password afterwards. An administrator who already chose its own password —
+  on **Account settings**, with a reset link, **Reset password** on its own row, or the host's
+  reset script — isn't asked again, even if `ADMIN_PASSWORD` has since been set to it, unless it
+  is one of the published ones.
+- **The product-event retention sweep runs for the first time.** It deletes product events —
+  views opened, traces and searches, which Analytics counts — older than
+  `PRODUCT_EVENT_RETENTION_DAYS`, 400 days unless you set it. Raise it before upgrading if you
+  want to keep more.
+- **The control plane copies the audit backlog.** On an install where the relay never ran, its
+  first pass copies every event since installation into `auth_audit_log`, continuously until it
+  has caught up.
+
+### Known limitations
+
+- **Request access** on the Access denied card can't load its list of roles for most accounts, so
+  the request isn't sent; and **Add member** on a workspace's Members tab works fully only for
+  Super Admins. *Requesting Access* and *Workspace Admin* describe the routes that work today.
+- Two screens still have a placeholder rather than a screenshot: a semantic layer's **Health** tab, and
+  Administration → **Infrastructure** on the Observability page.
 
 ---
 

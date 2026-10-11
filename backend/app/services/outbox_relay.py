@@ -10,13 +10,15 @@ audience, actor, target, workspace, stated reason; see
 in the **same transaction**, so the record and the flag commit or roll
 back together.
 
-It runs on the aggregation control plane (and a dev-role monolith — see
-``runtime/role.py``), and is built to run on several replicas at once and
-to outlast anything a single event can do:
+It runs in the aggregation control plane
+(``services/aggregation/controlplane.py``) and in a dev monolith
+(``main.py``), and is built to outlast anything a single event can do:
 
-* **Single-flight without coordination.** A batch is claimed with
-  ``FOR UPDATE SKIP LOCKED``: two replicas never take the same event, and
-  neither waits for the other.
+* **One relay at a time.** Each batch claims an advisory lock first
+  (``db/advisory.py``), so two control planes — or a rolling update's old
+  and new — take turns. The batch is also claimed ``FOR UPDATE SKIP
+  LOCKED``, so even a relay that predates the lock never takes the same
+  event as this one.
 * **Idempotent.** ``auth_audit_log.source_event_id`` is UNIQUE and a batch
   skips events that already have a row, so a crash between the insert and
   the processed-flag commit cannot double-record on retry.
@@ -51,6 +53,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.advisory import claim_this_pass
 from backend.app.db.models import AuthAuditLogORM, OutboxEventORM
 from backend.app.services.activity import catalogue
 
@@ -67,6 +70,8 @@ _REPROJECT_BATCH = 1_000
 _DEFAULT_INTERVAL_SECONDS = 5.0
 #: How often a long drain reports its progress.
 _PROGRESS_EVERY_SECONDS = 10.0
+#: The advisory lock one relay at a time holds per batch.
+_LOCK = "outbox:relay"
 #: Between full batches, pause for this fraction of the time the batch took.
 #: A backlog — an install's whole history, on its first start — then gets at
 #: most two thirds of one database backend, and backs off by itself when the
@@ -275,12 +280,14 @@ async def run_relay(
     """Background loop: drain until ``shutdown`` is set.
 
     While batches come back full it goes on to the next after a short,
-    self-pacing pause (``_BACKLOG_PAUSE_RATIO``), so a backlog drains at the
-    database's pace rather than a batch per tick, and it spends idle ticks
-    re-projecting history. Each batch is its own transaction (the factory's
-    scope commits on success / rolls back on error). A failure is logged and
-    retried after a tick — a transient DB blip must not kill the relay, and a
-    persistent one must not spin it.
+    self-pacing pause (``_BACKLOG_PAUSE_RATIO``), so a backlog — an install
+    whose relay never ran has every event since it was installed waiting —
+    drains at the database's pace rather than a batch per tick, and it spends
+    idle ticks re-projecting history. Each batch is its own transaction (the
+    factory's scope commits on success / rolls back on error) and claims the
+    relay's lock in it; when another process holds it, this one skips the
+    pass. A failure is logged and retried after a tick — a transient DB blip
+    must not kill the relay, and a persistent one must not spin it.
     """
     logger.info("Outbox relay started (interval=%.0fs, batch=%d)", interval, _BATCH)
     recorded_since_report = 0
@@ -290,12 +297,16 @@ async def run_relay(
         started = time.monotonic()
         try:
             async with session_factory() as session:
-                recorded, claimed = await _drain_batch(session)
-            recorded_since_report += recorded
-            busy = claimed >= _BATCH
-            if not busy:
-                async with session_factory() as session:
-                    busy = await reproject_once(session) >= _REPROJECT_BATCH
+                relaying = await claim_this_pass(session, _LOCK)
+                recorded = await drain_once(session) if relaying else 0
+            if relaying:
+                recorded_since_report += recorded
+                # A short batch means the backlog is gone.
+                busy = recorded >= _BATCH
+                if not busy:
+                    async with session_factory() as session:
+                        if await claim_this_pass(session, _LOCK):
+                            busy = await reproject_once(session) >= _REPROJECT_BATCH
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — loop must survive blips

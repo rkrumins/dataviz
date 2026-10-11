@@ -219,14 +219,14 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Aggregation state-sync consumer started")
 
-    # 10. Platform housekeeping. It belongs to whichever process holds the
-    # scheduler role, and in the split topology that is this one — the web
-    # tier runs as SYNODIC_ROLE=web, so until these started here they ran
-    # only in a dev-role monolith: the activity ledger never filled, and
-    # product events and spent refresh tokens were never swept. Each is safe
-    # on every replica at once: the relay claims batches with SKIP LOCKED,
-    # the sweeps take an advisory lock per batch, and the warmer claims each
-    # slot in Redis.
+    # 10. Housekeeping the stateless web tier leaves to this process: the
+    # outbox relay that fills the activity ledger (outbox_events →
+    # auth_audit_log), the refresh-token and product-event retention sweeps,
+    # and the analytics warmer. ``main.py`` starts the same loops in a dev
+    # monolith, gated on its role, which a container running this module
+    # never reaches. Each loop claims an advisory lock per pass, so two
+    # control planes — or a rolling update's old and new — never run one at
+    # the same time.
     from backend.app.db.engine import get_readonly_session
     from backend.app.services.analytics_warmer import run_warmer
     from backend.app.services.outbox_relay import run_relay

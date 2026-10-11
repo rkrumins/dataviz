@@ -62,7 +62,7 @@ data:
   # every web process snaps its analytics windows to the same grid. One
   # ConfigMap serves both, so they cannot drift apart.
   ANALYTICS_WARM_INTERVAL_SECONDS: {{ .Values.config.analytics.warmIntervalSeconds | quote }}
-  # Only the scheduler role acts on this — the sweep is gated on
-  # runs_scheduler() — but it is harmless and clearer to ship it fleet-wide
-  # from the same place as everything else.
+  # Only the control plane acts on this — it runs the retention sweep —
+  # but it is harmless and clearer to ship it fleet-wide from the same
+  # place as everything else.
   PRODUCT_EVENT_RETENTION_DAYS: {{ .Values.config.analytics.productEventRetentionDays | quote }}

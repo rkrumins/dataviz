@@ -30,8 +30,9 @@ is stated rather than hidden.
 Runs on the aggregation control plane, and on a dev-role monolith through the
 ``runs_scheduler`` gate the outbox relay, the refresh-token sweeper and the
 product-event GC share — never on the web tier, where every replica warming the
-same keys would be that many times the work for one result. Control-plane
-replicas claim each slot in Redis (``analytics_cache.claim``), so one warms it.
+same keys would be that many times the work for one result. Each pass claims
+an advisory lock first (``db/advisory.py``), so of several control planes one
+warms each slot.
 """
 from __future__ import annotations
 
@@ -41,6 +42,7 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.advisory import claim_this_pass
 from backend.app.db.repositories import (
     analytics_data_repo,
     analytics_repo,
@@ -175,31 +177,31 @@ async def run_warmer(
     while not shutdown.is_set():
         started = time.monotonic()
         try:
-            # Every control-plane replica runs this loop: the first to claim
-            # a slot warms it, and the rest leave it alone.
-            slot = int(analytics_cache.epoch_start().timestamp())
-            if await analytics_cache.claim(f"warm:e{slot}", ttl=interval):
-                async with session_factory() as session:
-                    stored = await warm_once(session, ttl=ttl)
-                elapsed = time.monotonic() - started
-                if stored:
-                    logger.info(
-                        "Analytics warm pass stored %d document(s) in %.1fs",
-                        stored, elapsed,
-                    )
-                elif not warned_no_redis:
-                    # Nothing reached Redis. The dashboard still works —
-                    # readers fall back to read-through — but replicas no
-                    # longer share a warm copy, and an operator should know
-                    # that once.
-                    warned_no_redis = True
-                    logger.warning(
-                        "Analytics warm pass stored nothing; Redis is "
-                        "unreachable, so readers will rebuild documents on "
-                        "demand.",
-                    )
-                if stored:
-                    warned_no_redis = False
+            async with session_factory() as session:
+                # One warmer per slot: passes are phase-locked to the same
+                # boundary, so without this every control plane would warm
+                # the same documents at the same moment.
+                claimed = await claim_this_pass(session, "analytics:warmer")
+                stored = await warm_once(session, ttl=ttl) if claimed else 0
+            elapsed = time.monotonic() - started
+            if not claimed:
+                pass  # another process warmed this slot
+            elif stored:
+                logger.info(
+                    "Analytics warm pass stored %d document(s) in %.1fs",
+                    stored, elapsed,
+                )
+            elif not warned_no_redis:
+                # Nothing reached Redis. The dashboard still works — readers
+                # fall back to read-through — but replicas no longer share a
+                # warm copy, and an operator should know that once.
+                warned_no_redis = True
+                logger.warning(
+                    "Analytics warm pass stored nothing; Redis is unreachable, "
+                    "so readers will rebuild documents on demand.",
+                )
+            if stored:
+                warned_no_redis = False
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — loop must survive blips

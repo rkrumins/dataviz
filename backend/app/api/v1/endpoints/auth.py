@@ -831,6 +831,8 @@ async def reset_password(
         session,
         event_type="user.password_reset_completed",
         payload={"user_id": user.id},
+        aggregate_type="user",
+        aggregate_id=user.id,
     )
 
     logger.info("Password reset completed for user %s", user.id)

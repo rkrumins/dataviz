@@ -163,6 +163,31 @@ def _decode(token: str, *, audience: str, verify_exp: bool = True) -> dict:
 _RESERVED_CLAIMS = frozenset({"sub", "aud", "iss", "exp", "iat", "nbf", "jti"})
 
 
+#: How the session was signed in to: with the account's own password, or
+#: through an identity provider. Minted on every access token and kept
+#: through every rotation, because a pending password change concerns the
+#: password, not the account — see ``password_change_pending``.
+SIGNIN_CLAIM = "signin"
+SIGNIN_PASSWORD = "password"
+SIGNIN_SSO = "sso"
+
+
+def password_change_pending(payload: dict, account_must_change: bool) -> bool:
+    """Whether this session has to change the account's password first.
+
+    The requirement is about the account's local password — one somebody
+    else chose — so it holds a session that signed in WITH that password,
+    and never one that signed in through an identity provider: someone who
+    signs in with SSO nearly every day must not be stopped for a password
+    they don't use. ``mcp`` is minted on password sessions only; the
+    account flag holds a password session from the moment it is set. A
+    token from before ``signin`` existed is held by ``mcp`` alone.
+    """
+    if payload.get("mcp"):
+        return True
+    return account_must_change and payload.get(SIGNIN_CLAIM) == SIGNIN_PASSWORD
+
+
 def _safe_extra(extra: dict | None) -> dict:
     """``extra`` with reserved claims dropped and the drop logged."""
     if not extra:

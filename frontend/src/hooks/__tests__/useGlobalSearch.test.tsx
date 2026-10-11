@@ -37,7 +37,7 @@ vi.mock('@/components/docs/search/useDocsSearchIndex', async (importOriginal) =>
     getIndex: vi.fn(),
 }))
 
-import { getIndex, type IndexEntry } from '@/components/docs/search/useDocsSearchIndex'
+import { getIndex, indexFromEntries, type DocsSearchIndex } from '@/components/docs/search/useDocsSearchIndex'
 import { listViews, type View } from '@/services/viewApiService'
 import { DEFAULT_BRANDING } from '@/store/branding'
 import { useAuthStore } from '@/store/auth'
@@ -49,18 +49,21 @@ const listViewsMock = vi.mocked(listViews)
 const getIndexMock = vi.mocked(getIndex)
 
 /** One doc, carrying the `{brand}` tokens the real markdown carries. */
-const DOCS_INDEX: IndexEntry[] = [
+const DOCS_INDEX: DocsSearchIndex = indexFromEntries([
     {
+        id: 'guide:getting-started:0',
         area: 'guide',
         slug: 'getting-started',
-        title: 'Getting started with {brand}',
-        titleLower: 'getting started with {brand}',
+        kind: 'page',
+        pageTitle: 'Getting started with {brand}',
+        heading: '',
+        anchor: '',
         sectionLabel: 'User Guide',
-        headingsLower: 'first steps',
-        body: '{brand} draws lineage from every source you connect.',
-        bodyLower: '{brand} draws lineage from every source you connect.',
+        text: '{brand} draws lineage from every source you connect.',
+        code: '',
+        href: '/guide/getting-started',
     },
-]
+])
 
 const ORDERS_VIEW = {
     id: 'v1',
@@ -184,8 +187,8 @@ describe('useGlobalSearch', () => {
         // !isLoading`, so a docs-only query that reported "done" during the
         // build would say nothing matched and then fill in behind itself.
         listViewsMock.mockResolvedValue({ items: [], total: 3, hasMore: false, nextOffset: null })
-        let finishBuild: (index: IndexEntry[]) => void = () => {}
-        getIndexMock.mockReturnValue(new Promise<IndexEntry[]>(resolve => { finishBuild = resolve }))
+        let finishBuild: (index: DocsSearchIndex) => void = () => {}
+        getIndexMock.mockReturnValue(new Promise<DocsSearchIndex>(resolve => { finishBuild = resolve }))
 
         const { result } = renderHook(() => useGlobalSearch('lineage', { appWide: true }), { wrapper })
         const hero = renderHook(() => useGlobalSearch('lineage'), { wrapper })
@@ -215,5 +218,6 @@ describe('useGlobalSearch', () => {
         expect(hit.description).not.toContain('{brand}')
         expect(hit.area).toBe('guide')
         expect(hit.slug).toBe('getting-started')
+        expect(hit.href).toBe('/guide/getting-started')
     })
 })

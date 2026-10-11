@@ -1,220 +1,60 @@
-# Synodic — GKE Kubernetes Deployment
+# deploy/k8s — kustomize manifests for GKE
 
-Deploy the full Synodic platform (6 microservices + 3 infrastructure dependencies) to any GKE cluster with TLS Ingress.
+The full procedure — first-time setup, deploying an overlay, the schema upgrade, production
+settings, secrets, Cloud SQL and Memorystore, verifying, upgrading and troubleshooting — is
+[Deploying on Kubernetes](../../docs/KUBERNETES.md). The FalkorDB cluster overlay has its own
+page: [overlays/production-cluster/README.md](overlays/production-cluster/README.md).
 
+## Before you deploy
 
-> **Two environments on one cluster (or reachable from one browser)?** Each overlay
-> carries its own `AUTH_ENVIRONMENT_ID` (`patches/auth-environment.yaml`), which scopes
-> the session cookie names and JWT issuer so instances cannot evict each other's
-> sessions. Do not reuse an id across environments. See
-> [Running several environments side by side](../../docs/MULTI_ENVIRONMENT_SESSIONS.md).
-
-## Architecture
-
-```
-Internet → GKE Ingress (TLS) → frontend (Nginx SPA)
-                                    ├── /api/*  → viz-service:8000
-                                    └── /graph/* → graph-service:8001
-
-viz-service ──proxy──→ aggregation-controlplane:8091
-                              │ Redis Streams
-                        aggregation-worker (×N)
-
-Infrastructure: PostgreSQL 16 │ Redis 7 │ FalkorDB v4.16.0
-```
-
-## Quick Start
-
-### Prerequisites
-
-- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) (`gcloud`)
-- [kubectl](https://kubernetes.io/docs/tasks/tools/) (`gcloud components install kubectl`)
-- [Docker](https://docs.docker.com/get-docker/)
-
-### 1. Setup (one-time)
-
-```bash
-cd deploy/k8s
-./deploy.sh setup
-```
-
-The interactive wizard will:
-- Configure your GCP project and region
-- Create a GKE Autopilot cluster (or connect to an existing one)
-- Create an Artifact Registry for container images
-- Reserve a global static IP for the Ingress
-- Generate cryptographic secrets
-- Write all config to `.env.deploy`
-
-### 2. Point DNS
-
-After setup, point your domain's A record to the static IP printed by the wizard:
-
-```
-synodic.mycompany.com  →  A  <static-ip>
-```
-
-### 3. Deploy
-
-```bash
-./deploy.sh deploy dev          # Development (1 replica, minimal resources)
-./deploy.sh deploy staging      # Staging (2 replicas, moderate resources)
-./deploy.sh deploy production   # Production (3+ replicas, HA, anti-affinity)
-```
-
-### 4. Verify
-
-```bash
-./deploy.sh status              # Pod status, Ingress IP, TLS cert
-```
-
-GKE Ingress and TLS certificate provisioning takes 10-15 minutes on first deploy.
+- **These manifests run no schema migration.** Run the schema-upgrade Job from the guide after
+  the first deploy and before each release that changes the schema; until then `viz-service`
+  stays not ready.
+- **The FalkorDB StatefulSets mount their volume at `/data`,** but the image keeps its data in
+  `/var/lib/falkordb/data`. Add the guide's mount patch to your overlay before you load data.
+- **One environment per cluster.** Every overlay deploys into the `synodic` namespace.
+- **Run `./deploy.sh setup` once.** Running it again generates new secrets and overwrites
+  `.env.deploy`. Keep that file in your secrets store; it is gitignored.
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `./deploy.sh setup` | First-time setup wizard |
-| `./deploy.sh deploy <overlay>` | Build, push, and apply (dev/staging/production) |
-| `./deploy.sh status` | Show cluster status |
-| `./deploy.sh seed` | Load demo data |
-| `./deploy.sh teardown` | Delete everything (with confirmation) |
+Run from this directory.
 
-## Makefile Targets
+| Command | Does |
+|---|---|
+| `./deploy.sh setup` | Interactive first-time setup: GCP project, Artifact Registry, GKE cluster, static IP `synodic-ip`, generated secrets — all written to `.env.deploy` |
+| `./deploy.sh deploy <dev\|staging\|production>` | Builds and pushes every image tagged with the current commit, creates the `synodic` namespace and the Secrets, applies the overlay |
+| `./deploy.sh status` | Pods, Services, Ingress, certificate, volumes and autoscalers |
+| `./deploy.sh seed` | Runs the demo-data seed Job |
+| `./deploy.sh teardown` | Deletes the `synodic` namespace, after you type `yes-delete-everything` |
 
-For finer-grained control:
+`Makefile` targets, for finer control (`make help` lists them):
 
-```bash
-make help                         # Show all targets
-make build                        # Build all images
-make build-viz                    # Build one service
-make push                         # Push all images
-make apply OVERLAY=dev            # Apply manifests only (no build)
-make dry-run OVERLAY=production   # Preview rendered manifests
-make logs-viz-service             # Tail service logs
-make rollout-viz-service          # Check rollout status
-make restart-viz-service          # Rolling restart
-make port-forward-frontend        # Access frontend at localhost:8080
-make port-forward-falkordb        # Access FalkorDB UI at localhost:3000
-make seed                         # Run demo data seeder
-make status                       # Pod + Ingress status
-```
+| Target | Does |
+|---|---|
+| `make build` / `make push` | Build or push every image; `build-viz`, `push-worker` and so on for one |
+| `make apply OVERLAY=<overlay> TAG=<tag>` | Render the overlay, fill in `.env.deploy` values, apply — the only way to deploy `production-cluster` |
+| `make dry-run OVERLAY=<overlay>` | Print the rendered manifests without applying |
+| `make logs-<service>`, `make rollout-<service>`, `make restart-<service>` | Follow logs, watch a rollout, restart a Deployment |
+| `make port-forward-frontend` | The web app on `http://localhost:8080` |
+| `make seed`, `make status` | As the `deploy.sh` commands |
 
-## Environment Overlays
-
-| Overlay | Replicas | Resources | Logging | Features |
-|---------|----------|-----------|---------|----------|
-| **dev** | 1 each | Minimal | DEBUG | Single-instance, fast iteration |
-| **staging** | 2 each | Moderate | INFO | Pre-production validation |
-| **production** | 3+ each | Full | WARNING | HA, anti-affinity, aggressive HPA |
-
-## Secrets Management
-
-Secrets are managed via `.env.deploy` (auto-generated by `./deploy.sh setup`):
-
-- **Never committed** — the file is gitignored
-- **Injected at deploy time** — `deploy.sh deploy` creates K8s secrets from `.env.deploy` values
-- **Cryptographically random** — generated using `/dev/urandom` and Python's `cryptography` library
-
-### Rotating Secrets
-
-1. Edit `.env.deploy` with new values
-2. Re-deploy: `./deploy.sh deploy <overlay>`
-3. Restart affected services: `make restart-viz-service`
-
-### Advanced: External Secrets
-
-For production environments, consider replacing in-cluster secrets with:
-- [External Secrets Operator](https://external-secrets.io/) + Google Secret Manager
-- [Sealed Secrets](https://sealed-secrets.netlify.app/) for GitOps workflows
-
-## Swapping to Managed Services
-
-The base deployment runs PostgreSQL, Redis, and FalkorDB in-cluster. For production, swap to managed services:
-
-### Cloud SQL (PostgreSQL)
-
-1. Create a Cloud SQL instance
-2. Update `MANAGEMENT_DB_URL` in `.env.deploy`:
-   ```
-   MANAGEMENT_DB_URL=postgresql+asyncpg://user:pass@<cloud-sql-ip>:5432/synodic
-   ```
-3. Remove the postgres StatefulSet from `base/kustomization.yaml`
-
-### Memorystore (Redis)
-
-1. Create a Memorystore for Redis instance
-2. Update `REDIS_URL` in the common-config ConfigMap:
-   ```
-   REDIS_URL=redis://<memorystore-ip>:6379/0
-   ```
-3. Remove the redis StatefulSet from `base/kustomization.yaml`
-
-## File Structure
+## Layout
 
 ```
 deploy/k8s/
-├── deploy.sh                 # Main entry point
-├── Makefile                  # Build/push/apply automation
-├── .env.deploy.example       # Config template
-├── base/                     # Base manifests (Kustomize)
-│   ├── kustomization.yaml
-│   ├── namespace.yaml
-│   ├── rbac/                 # Service accounts
-│   ├── configmaps/           # Non-sensitive configuration
-│   ├── secrets/              # Secret templates (envsubst'd)
-│   ├── infrastructure/       # PostgreSQL, Redis, FalkorDB
-│   ├── services/             # Application deployments
-│   └── networking/           # Ingress, TLS, network policies
-└── overlays/                 # Environment-specific overrides
-    ├── dev/
-    ├── staging/
-    └── production/
-```
-
-## Troubleshooting
-
-### Pods stuck in Pending
-
-```bash
-kubectl describe pod <pod-name> -n synodic
-```
-
-Common causes: insufficient resources (scale up nodes), PVC binding issues (check StorageClass).
-
-### Ingress shows no IP
-
-GKE Ingress takes 5-10 minutes to provision. Check:
-
-```bash
-kubectl describe ingress synodic-ingress -n synodic
-```
-
-Ensure the static IP `synodic-ip` exists: `gcloud compute addresses list --global`
-
-### TLS certificate stuck in Provisioning
-
-The ManagedCertificate requires DNS to resolve to the Ingress IP. Verify:
-
-```bash
-dig synodic.example.com  # Should return the static IP
-kubectl get managedcertificate -n synodic
-```
-
-### viz-service CrashLoopBackOff
-
-Check if PostgreSQL is ready:
-
-```bash
-kubectl logs -n synodic -l app.kubernetes.io/name=viz-service -c wait-for-deps
-kubectl logs -n synodic -l app.kubernetes.io/name=viz-service -c viz-service
-```
-
-### Worker not processing jobs
-
-Verify Redis connectivity and controlplane health:
-
-```bash
-kubectl logs -n synodic -l app.kubernetes.io/name=aggregation-worker
-kubectl logs -n synodic -l app.kubernetes.io/name=aggregation-controlplane
+├── deploy.sh               setup / deploy / status / seed / teardown
+├── Makefile                build, push, apply (envsubst of .env.deploy values)
+├── .env.deploy.example     every setting .env.deploy can hold, explained
+├── base/                   namespace, service accounts, ConfigMaps, Secret templates,
+│                           Postgres / Redis / FalkorDB StatefulSets, the app Deployments,
+│                           GKE Ingress + managed certificate, NetworkPolicies
+├── overlays/
+│   ├── dev/                1 replica, smallest requests, DEBUG logs, AUTH_ENVIRONMENT_ID=dev
+│   ├── staging/            base sizing, AUTH_ENVIRONMENT_ID=staging
+│   ├── production/         Cloud SQL + Memorystore, 3 replicas, anti-affinity,
+│   │                       graph-store backup CronJob, AUTH_ENVIRONMENT_ID=production
+│   └── production-cluster/ production + FalkorDB as a 3-shard Redis Cluster
+├── loadtest/               opt-in load generator — see loadtest/README.md
+└── secret.example.yaml     old template for the Helm path's Secret; not used here
 ```

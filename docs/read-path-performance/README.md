@@ -6,7 +6,7 @@ never-504 semantics on multi-million-element graphs, over real network round-tri
 
 > **Status:** WS0–WS5 shipped. WS7 (saturation control, cache TTLs, transport)
 > shipped. WS6 landed its resilience half; the canvas frontend adoption of the
-> batched contract is deferred (see [Current status](#current-status--whats-deferred)).
+> batched contract is deferred (see [Current status](#9-current-status--whats-deferred)).
 
 ---
 

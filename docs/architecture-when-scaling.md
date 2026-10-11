@@ -5,7 +5,7 @@
 > services, plus a versioning worker and a stats service: Compose, the
 > Kubernetes manifests (with autoscaling, and a two-replica control plane in
 > the production overlay), and the Helm chart, which lags the manifests
-> ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §1.5). This document began as the
+> (`docs/TECHNICAL_DEBT.md` §1.5). This document began as the
 > deferred plan for that split — "Phase 6" of the schema-optimization plan —
 > and is now its design record plus the end-state items that have not
 > happened. [Scaling for Concurrent Users](SCALING_CONCURRENT_USERS.md) is the
@@ -40,7 +40,7 @@ not a deployment shape.
 
 - **Autoscaling on the real limit.** The worker scales on CPU, not on stream
   lag, and nothing scales on FalkorDB query threads, which is the actual
-  ceiling ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §2.6).
+  ceiling (`docs/TECHNICAL_DEBT.md` §2.6).
 - **Metrics nobody scrapes.** The exporter exists as `GET /api/v1/metrics`, off
   by default; no deployment turns it on or ships scrape config and alerts
   (§1.4 of the register).
@@ -155,7 +155,7 @@ remaining/steady-state design.
 Every module-level mutable state moves to Redis or is eliminated:
 
 - `_test_cache`, `_test_inflight` in `backend/app/api/v1/endpoints/providers.py` → Redis-backed `SharedCache`.
-- `_providers: dict` and negative cache in `backend/app/registry/provider_registry.py` → Redis-backed signal store; per-process driver pooling stays. (As built, the live path is `ProviderManager`, which keeps a per-process cache and drops entries on a Redis invalidation broadcast; the legacy registry survives for the stats service — [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §2.3.)
+- `_providers: dict` and negative cache in `backend/app/registry/provider_registry.py` → Redis-backed signal store; per-process driver pooling stays. (As built, the live path is `ProviderManager`, which keeps a per-process cache and drops entries on a Redis invalidation broadcast; the legacy registry survives for the stats service — `docs/TECHNICAL_DEBT.md` §2.3.)
 - `InProcessDispatcher._active_tasks` → web tier always uses an outbox-based dispatcher; the actual aggregation runs in the worker tier.
 - `AggregationScheduler` does NOT start in the web tier — control-plane only.
 - `recover_interrupted_jobs()` runs in the control-plane only, batched ≤10 dispatches/sec to avoid flood-on-restart.
@@ -210,7 +210,7 @@ Every module-level mutable state moves to Redis or is eliminated:
 
 ## Observability
 
-- New `/internal/metrics` endpoint (Prometheus exposition format, admin-auth gated). Shipped instead as `GET /api/v1/metrics`, behind `METRICS_ENABLED` and a token and off by default; nothing scrapes it yet ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §1.4). Designed to expose:
+- New `/internal/metrics` endpoint (Prometheus exposition format, admin-auth gated). Shipped instead as `GET /api/v1/metrics`, behind `METRICS_ENABLED` and a token and off by default; nothing scrapes it yet (`docs/TECHNICAL_DEBT.md` §1.4). Designed to expose:
   - DB pool stats per tier (today: JSON at `/internal/metrics/db`, from `backend/app/middleware/db_metrics.py`).
   - Redis stream lag (`XLEN` vs. consumer-group last-id) on `aggregation.jobs`.
   - Outbox backlog size.
@@ -220,7 +220,7 @@ Every module-level mutable state moves to Redis or is eliminated:
 
 ## Breaking changes (operator-visible)
 
-Designed before the split shipped, and kept as the record of intent. Item 5 did not happen as written: the legacy registry still runs beside `ProviderManager` ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §3.3).
+Designed before the split shipped, and kept as the record of intent. Item 5 did not happen as written: the legacy registry still runs beside `ProviderManager` (`docs/TECHNICAL_DEBT.md` §3.3).
 
 1. `MANAGEMENT_DB_URL` already enforced as `postgresql+asyncpg://` — no change.
 2. The CACHE and STREAMS roles (`REDIS_CACHE_*`, `REDIS_STREAMS_*`) are configured independently; as shipped they may share one instance on `volatile-lru`, and splitting them is config-only.
@@ -231,7 +231,7 @@ Designed before the split shipped, and kept as the record of intent. Item 5 did 
 
 ## Verification checklist
 
-None of these has been run as a recorded test yet ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) §1.7).
+None of these has been run as a recorded test yet (`docs/TECHNICAL_DEBT.md` §1.7).
 
 - `SYNODIC_ROLE=web` + 3 replicas behind nginx → POST `/aggregate/trigger` 100× concurrent: exactly 1 × 2xx, 99 × 409.
 - Kill 1 of 3 web replicas mid-request → load balancer routes; no requests dropped.
@@ -256,4 +256,4 @@ None of these has been run as a recorded test yet ([TECHNICAL_DEBT.md](TECHNICAL
 - [Data Architecture](/docs/data-architecture) — the Redis Topology & Decoupling runbook for the deploy-only cache split
 - [Decisions](/docs/decisions) — ADR-017/019/020, the decoupling work already landed toward this design
 - [Services Overview](/docs/services-overview) — the `SYNODIC_ROLE` topology (WEB, WORKER, CONTROLPLANE, DEV)
-- [Technical Debt](/docs/technical-debt) — the open deployment, observability and capacity items behind this page
+- The technical-debt register, `docs/TECHNICAL_DEBT.md` in the repository — the open deployment, observability and capacity items behind this page

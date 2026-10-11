@@ -23,7 +23,7 @@ cp .env.example .env.dev
 ./dev.sh              # generates a signing key, starts the stack, prints the URLs
 ```
 
-Full guide: [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md).
+Full guide: [docs/SETUP.md](docs/SETUP.md). Before your first pull request, read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md): where things live, the conventions, and what CI checks.
 
 ### 2. Self-host — run on a VM
 
@@ -48,7 +48,7 @@ docker compose -f docker-compose.quickstart.yml up --build
 Access:
 - Frontend: http://localhost:3080
 - API docs: http://localhost:8000/docs
-- Login: `admin@nexuslineage.local` / `admin123`
+- Login: `admin@nexuslineage.local` / `admin123` (the first sign-in asks you to choose a new password)
 
 > [!WARNING]
 > **The quickstart does not boot today.** It points the API at a baked-in SQLite database, and the backend has accepted only PostgreSQL for some time; its published signing key is also refused at startup. Use the Contributor or Self-host path until it is fixed — see [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md) §2.1.
@@ -69,7 +69,7 @@ Start here, then follow the trail for whatever you're doing.
 | Document | What it covers |
 |----------|----------------|
 | [QUICKSTART.md](QUICKSTART.md) | Get running locally with sample data |
-| [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | Contributor guide — architecture, roles, aggregation internals |
+| [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Contributor guide — where things live, the change workflow, conventions, common tasks |
 | [SPEC.md](SPEC.md) | The original design specification — historical; much of it was never built as written |
 | [PLAN.md](PLAN.md) | What's built today and what's next |
 | [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md) | Known risks, with evidence, and the order to fix them |

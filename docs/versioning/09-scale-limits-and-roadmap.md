@@ -121,7 +121,7 @@ either wiring; incremental rollups now carry level and depth stamps (`sourceLeve
 `sourceDepth`, `targetDepth`, `levelDigest`); and a provider edit is broadcast to the web process
 and the aggregation and versioning workers, so credential rotation no longer needs a restart there
 unless the broadcast is missed. (The stats service and the control plane do not listen yet —
-[TECHNICAL_DEBT.md](../TECHNICAL_DEBT.md) §2.3.)
+`docs/TECHNICAL_DEBT.md` §2.3.)
 
 ## 7. Security / authorization — closed
 

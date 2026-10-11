@@ -20,6 +20,7 @@ tests/test_additive_migrations_mirror.py
 tests/test_advanced_search.py
 tests/test_advanced_search_stub.py
 tests/test_advanced_search_view_scope.py
+tests/test_advisory_claims.py
 tests/test_aggregated_read_budget.py
 tests/test_aggregation_admission.py
 tests/test_aggregation_at_scale.py
@@ -86,6 +87,7 @@ tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
 tests/test_heal_native_leftovers.py
+tests/test_housekeeping_loops.py
 tests/test_import_formats.py
 tests/test_import_job_liveness.py
 tests/test_import_uploads.py
@@ -138,7 +140,6 @@ tests/test_search_semantics.py
 tests/test_search_values.py
 tests/test_seed_memory.py
 tests/test_shard_capacity.py
-tests/test_singleton_lock.py
 tests/test_source_changed_signal.py
 tests/test_sso_membership_events.py
 tests/test_store_governor.py

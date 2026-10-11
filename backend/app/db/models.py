@@ -1830,10 +1830,12 @@ class UserORM(Base):
     metadata_ = Column("metadata", Text, nullable=True, default="{}")  # JSON: idp_groups snapshot, attributes, prefs
     reset_token_hash = Column(Text, nullable=True)
     reset_token_expires_at = Column(Text, nullable=True)
-    # Force a rotation on the next request. Set on the bootstrap admin
-    # when it is seeded with a shipped default password; cleared by
-    # ``user_repo.update_password``. Carried into the access token as a
-    # claim and enforced by ``get_current_user``.
+    # Force a rotation on the next request. Set on a password somebody
+    # else chose: the bootstrap admin's starting password (see
+    # ``auth/bootstrap.py``) and one an administrator sets for this account.
+    # Cleared when the account holder sets their own. Carried into the
+    # access token as a claim and enforced by every resolver in
+    # ``auth/dependencies.py``.
     must_change_password = Column(
         Boolean, nullable=False, default=False, server_default="false",
     )

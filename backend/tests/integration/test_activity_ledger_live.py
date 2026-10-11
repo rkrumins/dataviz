@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.db.models import AuthAuditLogORM, OutboxEventORM
 from backend.app.db.repositories import activity_repo
 from backend.app.db.repositories.activity_repo import ActivityFilter
-from backend.app.db.singleton import try_xact_lock
+from backend.app.db.advisory import claim_this_pass
 from backend.app.services import outbox_relay
 from backend.app.services.activity import catalogue
 
@@ -115,15 +115,15 @@ async def test_two_relays_never_record_an_event_twice(factory, run_id):
     assert pending == 0
 
 
-async def test_the_retention_lock_is_single_flight(factory):
+async def test_a_pass_lock_is_single_flight(factory):
     async with factory() as a, factory() as b:
         async with a.begin():
-            assert await try_xact_lock(a, "gc:live-test") is True
+            assert await claim_this_pass(a, "gc:live-test") is True
             async with b.begin():
-                assert await try_xact_lock(b, "gc:live-test") is False
+                assert await claim_this_pass(b, "gc:live-test") is False
         # A's commit released it.
         async with b.begin():
-            assert await try_xact_lock(b, "gc:live-test") is True
+            assert await claim_this_pass(b, "gc:live-test") is True
 
 
 async def test_a_value_postgres_refuses_costs_only_its_own_projection(

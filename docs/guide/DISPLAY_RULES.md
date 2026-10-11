@@ -1,9 +1,16 @@
 # Display Rules
 
-*For Builders.* A display rule puts a coloured tag on every entity that matches
-criteria you write — **PII**, **Needs owner**, **Certified** — so the canvas
-answers a question at a glance. Rules belong to a View: everyone who opens it
-sees the same tags, and the data itself is never changed.
+*For Builders.*
+
+A display rule puts a coloured tag on every entity that matches criteria you
+write — **PII**, **Needs owner**, **Certified** — so the canvas answers a
+question at a glance. This page shows you how to create rules, keep them in
+order, and share them with other Views.
+
+> **Before you start:** Rules belong to a View: everyone who opens it sees the
+> same tags, and the data itself is never changed. To create or change rules
+> you need to be able to edit the View — see
+> [Who sees rules, and who can change them](#who-sees-rules-and-who-can-change-them).
 
 > **Note:** *The one-sentence model* — A rule is a **label, a colour, an
 > optional icon and a search**. Every entity the search matches, inside the
@@ -110,7 +117,7 @@ the whole View.
 - **Everyone who can open the View** sees its rules, their chips and counts, can
   **Show every match in search** and can **Export** them.
 - **People who can edit the View** — its creator, workspace members and admins
-  with *edit views*, and anyone given the **editor** role on it — can create,
+  with *edit views*, and anyone given the **Editor** role on it — can create,
   change, reorder, switch, delete and import rules. Others see "Only people who
   can edit this view can change them", and **Tag** in search is greyed out.
 
@@ -120,8 +127,9 @@ rules at the same time both keep their changes.
 
 ### Rules on a draft
 
-While a **draft** of the View's data source is open, rule changes belong to
-that draft: the published View keeps its rules until the draft is published.
+While a [**draft**](/guide/editing-in-a-draft) of the View's data source is
+open, rule changes belong to that draft: the published View keeps its rules
+until the draft is published.
 Then the two are merged rule by rule — a rule the draft added, changed or
 removed takes the draft's version, and every other rule keeps the published
 one, including rules added to the published View in the meantime.
@@ -254,7 +262,7 @@ Number).
 | "A rule can't use 'within hops' or a path…" | Those describe a route through the graph; a rule asks about one entity at a time | Use a lineage-shape filter (No upstream lineage…) or keep it as a saved search |
 | "…only allowed in the top-level AND group" | *Inside Subtree* sits inside an OR or NOT group | Move it to the top level |
 | **Can't be counted** on a card | The rule arrived with a View file or a restored version and its criteria can't run as a rule | Hover for the reason, then **Edit rule** and save it again |
-| No **New rule**, **Edit** or **Import…** | You can't edit this View | Ask someone who can, or for the **editor** role on it |
+| No **New rule**, **Edit** or **Import…** | You can't edit this View | Ask someone who can, or for the **Editor** role on it |
 | "Missing permission: workspace:view:edit" | The same, from an import or a script | As above |
 | A rule matches nothing | A property name or value differs, the rule names a type the View doesn't show, or the rule is off | **Show every match in search** and adjust the criteria there; check the switch |
 | A colleague doesn't see your new rule | Their View was open before you saved | They reopen the View |
@@ -264,6 +272,6 @@ Number).
 
 ## Where to next
 
-- The search behind every rule → [Advanced Search](/guide/advanced-search)
-- Moving Views and libraries around → [Import & Export](/guide/import-export)
-- The rule and pack formats, every endpoint, scripting → [Search & Display Rules Reference](/docs/feature-search-and-rules-reference)
+- [Advanced Search](/guide/advanced-search) — when you want to build the search behind a rule, or see every match.
+- [Import & Export](/guide/import-export#view-libraries-rules-and-saved-searches) — when you want to move a rule library, or a whole View, somewhere else.
+- [Search & Display Rules Reference](/docs/feature-search-and-rules-reference) — when you need the rule and pack formats, every endpoint, or scripting.
