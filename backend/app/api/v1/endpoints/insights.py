@@ -63,6 +63,7 @@ from backend.app.db.models import (
     ProviderORM,
     WorkspaceDataSourceORM,
 )
+from backend.app.services.activity import recorder
 from backend.insights_service.admission import invalidate_config as invalidate_admission_cache
 from backend.insights_service.enqueue import enqueue_discovery_job_safe
 from backend.insights_service.redis_streams import DISCOVERY_STREAM, claim_exists
@@ -194,14 +195,17 @@ async def _refresh_in_flight(provider_id: str, asset_name: str) -> bool:
 
 async def _ensure_provider_exists(
     session: AsyncSession, provider_id: str
-) -> None:
+) -> str:
+    """404 unless the provider exists; its name when it does."""
     row = await session.execute(
-        select(ProviderORM.id).where(ProviderORM.id == provider_id)
+        select(ProviderORM.name).where(ProviderORM.id == provider_id)
     )
-    if row.scalar_one_or_none() is None:
+    name = row.scalar_one_or_none()
+    if name is None:
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider_id}' not found"
         )
+    return name
 
 
 async def _build_response(
@@ -405,6 +409,13 @@ async def refresh_asset(
 
     await _ensure_provider_exists(session, provider_id)
     job_id = await enqueue_discovery_job_force(provider_id, asset_name)
+    # Best-effort: the job is already on the stream.
+    await recorder.record_for_request(
+        session, "stats.asset.refresh_requested",
+        target_type="asset", target_id=f"{provider_id}:{asset_name}", target_label=asset_name,
+        details={"providerId": provider_id, "queued": job_id is not None},
+        best_effort=True,
+    )
     return {
         "provider_id": provider_id,
         "asset_name": asset_name,
@@ -448,7 +459,7 @@ async def refresh_all_assets(
 
     from backend.insights_service.enqueue import enqueue_discovery_job_force
 
-    await _ensure_provider_exists(session, provider_id)
+    provider_name = await _ensure_provider_exists(session, provider_id)
 
     # What the provider currently LISTS, from the sentinel's payload (the
     # empty-string row is the inventory, not an asset — ``list_assets``
@@ -532,6 +543,12 @@ async def refresh_all_assets(
     list_job_id = await enqueue_discovery_job_force(provider_id, "")
     asset_job_ids = list(
         await asyncio.gather(*(_enqueue_one(n) for n in asset_names))
+    )
+    await recorder.record_for_request(
+        session, "stats.discovery.triggered",
+        target_type="provider", target_id=provider_id, target_label=provider_name,
+        details={"assets": sum(1 for j in asset_job_ids if j is not None)},
+        best_effort=True,   # the jobs are already on the stream
     )
 
     return {
@@ -839,7 +856,9 @@ async def get_discovery_status() -> DiscoverySchedulerStatusResponse:
 
 
 @router.post("/discovery/trigger", status_code=202)
-async def trigger_discovery_now() -> dict:
+async def trigger_discovery_now(
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Run one discovery tick immediately.
 
     Useful for ops verifying scheduler wiring without waiting for the
@@ -851,6 +870,14 @@ async def trigger_discovery_now() -> dict:
     from backend.insights_service.scheduler import trigger_discovery_tick_now
 
     summary = await trigger_discovery_tick_now()
+    await recorder.record_for_request(
+        session, "stats.discovery.triggered",
+        details={
+            "providers": summary.providers, "listJobs": summary.list_jobs,
+            "assetJobs": summary.asset_jobs,
+        },
+        best_effort=True,   # the tick has run
+    )
     return {
         "status": "completed",
         "providers": summary.providers,

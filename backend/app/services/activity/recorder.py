@@ -27,6 +27,7 @@ from backend.app.common.activity_context import (
     CORRELATION_KEY,
     STATED_REASON_KEY,
     Provenance,
+    current_provenance,
 )
 from backend.app.db.repositories import outbox_event_repo
 
@@ -118,3 +119,27 @@ async def record_activity(
             "activity: could not record %s for %s", event_type,
             kwargs["aggregate_id"], exc_info=True,
         )
+
+
+async def record_for_request(session: AsyncSession, event_type: str, **fields: Any) -> bool:
+    """:func:`record_activity` as the person making this request — the one
+    authentication bound — with the reason they gave. Records nothing when
+    no one is signed in. Returns whether it recorded."""
+    provenance = current_provenance()
+    if provenance is None:
+        return False
+    await record_activity(session, event_type=event_type, provenance=provenance, **fields)
+    return True
+
+
+def data_source_target(ds: Any) -> dict[str, Any]:
+    """The envelope fields that file an event under a data source and its
+    workspace, named as the source is named now — for an ORM row or a
+    response model alike."""
+    return {
+        "workspace_id": ds.workspace_id,
+        "data_source_id": ds.id,
+        "target_type": "data_source",
+        "target_id": ds.id,
+        "target_label": ds.label or ds.graph_name,
+    }

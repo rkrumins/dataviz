@@ -101,7 +101,8 @@ def _summary_group_lifecycle(verb: str):
 
 def _summary_group_membership(verb: str):
     def _build(p: dict) -> str:
-        return f"User {verb} group '{p.get('group_id') or '?'}'"
+        how = " by IdP group sync" if p.get("via") == "sso" else ""
+        return f"User {verb} group '{p.get('group_id') or '?'}'{how}"
     return _build
 
 
@@ -400,7 +401,10 @@ _EVENT_META.update({
     "aggregation.reconcile.run_requested": ("info", lambda p: "Ran reconciliation now"),
     "aggregation.policy.updated": ("info", lambda p: "Changed the reconciliation policy"),
     "aggregation.settings.updated": ("info", lambda p: "Changed the fleet's aggregation defaults"),
-    "stats.discovery.triggered": ("info", _envelope_summary("Ran asset discovery on {}")),
+    "stats.discovery.triggered": ("info", lambda p: (
+        f"Ran asset discovery on {_subject(p)}" if p.get("target_id")
+        else "Ran asset discovery on every provider"
+    )),
     "stats.asset.refresh_requested": ("info", _envelope_summary("Refreshed the statistics of {}")),
     # ── data: onboarding, sources, providers, version control
     "workspace.data_source.added": ("info", _envelope_summary("Added data source {}")),

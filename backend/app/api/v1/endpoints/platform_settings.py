@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import PlatformSettingsORM
+from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
     DEFAULT_IDENTITY_PROPERTY,
     DEFAULT_NAME_PROPERTY,
@@ -116,6 +117,15 @@ async def put_node_identity_defaults(
         row.name_property = req.name_property.strip() or None
     row.updated_at = datetime.now(timezone.utc).isoformat()
     row.updated_by = getattr(user, "id", None)
+    after = (row.identity_property, row.name_property)
+    if before != after:
+        await recorder.record_for_request(
+            session, "platform.node_identity.updated",
+            details={
+                "from": {"identityProperty": before[0], "nameProperty": before[1]},
+                "to": {"identityProperty": after[0], "nameProperty": after[1]},
+            },
+        )
     await session.commit()
 
     # Same-process readers see the new value immediately; other pods are bounded

@@ -13,6 +13,7 @@
 # Read by `.github/workflows/backend-tests.yml` and by
 # `tests/test_ci_required_list.py`, which fails if an entry stops existing or
 # if the workflow stops reading this file.
+tests/test_activity_capture_endpoints.py
 tests/test_activity_catalogue.py
 tests/test_activity_context.py
 tests/test_additive_migrations_mirror.py
@@ -137,6 +138,7 @@ tests/test_seed_memory.py
 tests/test_shard_capacity.py
 tests/test_singleton_lock.py
 tests/test_source_changed_signal.py
+tests/test_sso_membership_events.py
 tests/test_store_governor.py
 tests/test_thread_count_assumption.py
 tests/test_timeout_ladder.py
