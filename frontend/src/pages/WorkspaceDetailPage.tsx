@@ -9,7 +9,7 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2,
     GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
-    Users, ShieldOff, Send, GitPullRequestArrow, LineChart,
+    Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
@@ -40,6 +40,8 @@ import { WorkspaceMembers } from '@/components/workspaces/WorkspaceMembers'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { ProfilingBoard } from '@/components/ingestion/profiling/ProfilingBoard'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
+import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
+import { workspaceActivityScope } from '@/components/activity/activityMeta'
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -90,8 +92,8 @@ export function WorkspaceDetailPage() {
     // link straight to a specific tab — used by the WorkspacesPage
     // "Members" shortcut.
     const tabParam = searchParams.get('tab') as
-        | 'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | null
-    const [activeSection, setActiveSection] = useState<'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members'>(
+        | 'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | 'activity' | null
+    const [activeSection, setActiveSection] = useState<'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | 'activity'>(
         tabParam ?? 'sources',
     )
     // Reviews are a versioning surface; the tab (and a ?tab=reviews deep link)
@@ -102,6 +104,10 @@ export function WorkspaceDetailPage() {
     // `usePermission` re-renders this component on permission changes
     // (e.g. after silent refresh), so the tab appears/disappears live.
     const canManageMembers = usePermission('workspace:admin', wsId ?? null)
+    // The Activity tab: a workspace admin reads this workspace's activity; an
+    // auditor reads everything recorded against it, through the platform log.
+    const isAuditor = usePermission('system:audit:read')
+    const activityScope = workspaceActivityScope(wsId, { isAdmin: canManageMembers, isAuditor })
     // Data-source mutations (Add / Edit / Delete / Re-aggregate / Purge)
     // gate on workspace:datasource:manage. Edit + Delete are gated
     // inside the detail panel itself; Add lives here. system:admin is
@@ -490,6 +496,9 @@ export function WorkspaceDetailPage() {
                     ...(canManageMembers
                         ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Workspace role bindings — admins / users / viewers' }]
                         : []),
+                    ...(activityScope
+                        ? [{ id: 'activity' as const, label: 'Activity', icon: History, hint: 'Who changed what in this workspace, when, and why' }]
+                        : []),
                 ]).map(tab => {
                     const Icon = tab.icon
                     const isActive = activeSection === tab.id
@@ -705,6 +714,12 @@ export function WorkspaceDetailPage() {
             {/* ── Members Tab (RBAC) ──────────────────────── */}
             {activeSection === 'members' && canManageMembers && wsId && (
                 <WorkspaceMembers workspaceId={wsId} />
+            )}
+
+            {activeSection === 'activity' && activityScope && (
+                <div className="py-4">
+                    <ActivityExplorer scope={activityScope} />
+                </div>
             )}
 
             {/* ── Modals ──────────────────────────────────── */}
