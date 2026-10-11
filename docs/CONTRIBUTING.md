@@ -189,6 +189,9 @@ The full contract, with the reasons, is in [Feature switch lifecycle](/docs/feat
 2. Register it:
    - A doc: add an entry to `docEntries` in `frontend/src/components/docs/docsConfig.ts`: `slug`, then `section` on the next line, `title`, `description`, and `importFn: () => import('@docs/<FILE>.md?raw')`. The integrity test reads entries in that shape.
    - A guide page: add an entry to `guideEntries` in `frontend/src/components/guide/guideConfig.ts` with `slug`, `section`, `persona`, `title`, `description` and `importFn: () => import('@docs/guide/<FILE>.md?raw')`.
+   - On a persona's reading path? Add the slug to that persona's `path` (`docPersonas` or `guidePersonas`) and to the list the reader sees — the **Your path** list on a doc persona's start page, or the persona's list on the guide's Welcome page. `readingPaths.test.ts` fails when the two disagree.
+
+   Search and **Filter pages** pick up a registered page, and each of its `##` and `###` sections, with nothing more to do.
 3. For a doc, give it a Diátaxis type in `DOC_TYPES` in `frontend/src/components/docs/reading/DocTypeBadge.tsx` (`tutorial`, `how-to`, `reference` or `explanation`); the test fails without one. If other docs will link to the file by name, add `'<FILE>.md': '<slug>'` to `filenameMap` in `frontend/src/components/docs/MarkdownComponents.tsx`.
 4. Write for the reader:
    - &#123;brand} and &#123;brandShort} instead of the product name; the reader substitutes the live brand.
