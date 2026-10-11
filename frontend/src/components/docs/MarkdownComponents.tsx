@@ -219,7 +219,7 @@ function CodeCopyButton({ text }: { text: string }) {
           window.setTimeout(() => setCopied(false), 1500)
         })
       }
-      className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-lg border border-glass-border bg-canvas-elevated/80 px-2 py-1 text-[11px] text-ink-muted opacity-0 backdrop-blur-sm transition-opacity hover:text-ink focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 group-hover:opacity-100"
+      className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-lg border border-glass-border bg-canvas-elevated/80 px-2 py-1 text-[11px] text-ink-muted backdrop-blur-sm transition-opacity hover:text-ink [@media(hover:hover)]:opacity-0 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 group-hover:opacity-100"
     >
       {copied ? (
         <>
@@ -301,7 +301,8 @@ export const markdownComponents: Components = {
 
   // Intercept <pre> to detect mermaid blocks (avoids nesting <div> inside <pre>)
   // and to overlay a copy-to-clipboard control on ordinary code blocks.
-  pre: ({ children, ...props }) => {
+  // `node` is react-markdown's syntax-tree node: not an attribute for the DOM.
+  pre: ({ node: _node, children, ...props }) => {
     const info = extractCodeFromPre(children)
     if (info?.lang === 'mermaid') {
       return <MermaidBlock code={info.text} />
@@ -320,7 +321,7 @@ export const markdownComponents: Components = {
   },
 
   // Tables: scrollable wrapper
-  table: ({ children, ...props }) => (
+  table: ({ node: _node, children, ...props }) => (
     <div className="overflow-x-auto my-4 rounded-xl border border-glass-border">
       <table {...props}>{children}</table>
     </div>
@@ -347,12 +348,12 @@ export const markdownComponents: Components = {
   },
 
   // Links: rewrite .md links to SPA routes
-  a: ({ href, children, ...props }) => {
+  a: ({ node: _node, href, children, ...props }) => {
     if (!href) return <a {...props}>{children}</a>
 
     const rewritten = rewriteDocLink(href)
 
-    if (rewritten.startsWith('/docs/') || rewritten.startsWith('/guide/')) {
+    if (/^\/(docs|guide)(\/|#|$)/.test(rewritten)) {
       return (
         <RouterLink to={rewritten} {...props}>
           {children}

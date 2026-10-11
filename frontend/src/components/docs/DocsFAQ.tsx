@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { ChevronDown, HelpCircle } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
@@ -9,13 +10,24 @@ import { useBrand } from '@/store/branding'
 import { faqEntries } from './docsConfig'
 import { markdownComponents } from './MarkdownComponents'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { faqAnchor } from './reading/headings'
+import { useScrollLanding } from './reading/useScrollLanding'
 
 export function DocsFAQ() {
   const brand = useBrand()
   const interp = (t: string) => interpolateBrand(t, brand)
-  const [openIndex, setOpenIndex] = useState<number | null>(null)
+  const { hash } = useLocation()
+  const linked = faqEntries.findIndex((f) => `#${faqAnchor(f.question)}` === decodeURIComponent(hash))
+  const [openIndex, setOpenIndex] = useState<number | null>(linked === -1 ? null : linked)
+  // A link that names a question — a search result, say — opens it.
+  const [seenHash, setSeenHash] = useState(hash)
+  if (hash !== seenHash) {
+    setSeenHash(hash)
+    if (linked !== -1) setOpenIndex(linked)
+  }
 
   useDocumentTitle('FAQ · Docs')
+  useScrollLanding(true)
 
   // Group entries by category
   const categories = Array.from(new Set(faqEntries.map((e) => e.category)))
@@ -32,7 +44,7 @@ export function DocsFAQ() {
   }))
 
   return (
-    <div className="max-w-3xl mx-auto px-8 py-10">
+    <div className="max-w-3xl mx-auto px-4 sm:px-8 py-8 sm:py-10">
       {/* Header */}
       <div className="flex items-center gap-3 mb-8">
         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
@@ -57,8 +69,9 @@ export function DocsFAQ() {
                 return (
                   <div
                     key={item.idx}
+                    id={faqAnchor(item.question)}
                     className={cn(
-                      'rounded-xl border transition-all duration-200',
+                      'scroll-mt-6 rounded-xl border transition-all duration-200',
                       isOpen
                         ? 'border-indigo-500/20 bg-gradient-to-r from-indigo-500/5 to-violet-500/5'
                         : 'border-glass-border bg-canvas-elevated hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
