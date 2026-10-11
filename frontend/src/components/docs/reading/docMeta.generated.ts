@@ -7,7 +7,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/ONBOARDING_A_SOURCE.md"
   },
   "contributing": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/CONTRIBUTING.md"
   },
   "architecture": {
@@ -23,7 +23,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -43,7 +43,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "backend/app/db/DOMAIN_OWNERSHIP.md"
   },
   "setup": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/SETUP.md"
   },
   "testing-and-ci": {
@@ -55,7 +55,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/features/feature-flags.md"
   },
   "integration-testing": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/local-integration-testing.md"
   },
   "api-guide": {
@@ -175,19 +175,19 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md"
   },
   "security-overview": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/SECURITY_OVERVIEW.md"
   },
   "rbac": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/RBAC.md"
   },
   "sso": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/SSO.md"
   },
   "sso-integration": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/SSO_INTEGRATION.md"
   },
   "multi-environment-sessions": {
@@ -195,7 +195,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/MULTI_ENVIRONMENT_SESSIONS.md"
   },
   "signup-service": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/SIGNUP_USER_SERVICE_PLAN.md"
   },
   "sso-backchannel-contract": {
@@ -203,7 +203,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/SSO_BACKCHANNEL_CONTRACT.md"
   },
   "deployment": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/DEPLOYMENT.md"
   },
   "kubernetes": {
@@ -215,7 +215,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "deploy/k8s/overlays/production-cluster/README.md"
   },
   "configuration": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/CONFIGURATION.md"
   },
   "observability": {
@@ -337,7 +337,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/IMPORT_EXPORT.md"
   },
   "admin-setup": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/guide/ADMIN_SETUP.md"
   },
   "workspace-admin": {
@@ -345,7 +345,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/WORKSPACE_ADMIN.md"
   },
   "users-access": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/guide/USERS_ACCESS.md"
   },
   "sso-setup": {
