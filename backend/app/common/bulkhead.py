@@ -64,8 +64,9 @@ class Bulkhead:
             return
         slots = self._semaphore()
         try:
-            await asyncio.wait_for(slots.acquire(), timeout=self.wait_seconds)
-        except asyncio.TimeoutError:
+            async with asyncio.timeout(self.wait_seconds):
+                await slots.acquire()
+        except TimeoutError:
             raise Busy(self.kind, self.retry_after_seconds) from None
         token = self._held.set(True)
         try:

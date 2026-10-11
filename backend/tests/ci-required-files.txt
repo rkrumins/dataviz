@@ -35,6 +35,8 @@ tests/test_aggregation_run_record.py
 tests/test_aggregation_scan_shrink.py
 tests/test_aggregation_settings.py
 tests/test_alembic_revision_lengths.py
+tests/test_analytics_cache_claim.py
+tests/test_analytics_warmer.py
 tests/test_api_activity.py
 tests/test_api_analytics_data.py
 tests/test_api_analytics_usage.py
