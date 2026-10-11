@@ -62,7 +62,7 @@ Two subsystems run outside the FastAPI process entirely:
   in `versioning-worker` and the other two in `versioning-jobs`. The API
   only queues these jobs, so they run only where a lane runs. With
   `SYNODIC_ROLE=dev` and `GRAPHVER_PROJECTION_INPROCESS=1`, the dev process
-  runs the lanes itself. The SQLite quickstart runs no versioning worker
+  runs the lanes itself. The quickstart (`docker-compose.quickstart.yml`) runs no versioning worker
   (`docs/versioning/08-import-export.md` §2a).
 
 Backing stores are shared across roles:

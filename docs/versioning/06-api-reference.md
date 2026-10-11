@@ -418,6 +418,18 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   `GET /bootstrap/status?dataSourceId=…` → `{jobId, graphId, status, phase, processed, total,
   percent, startedAt, updatedAt, error, report}`; `status` ends `completed`, `failed` or `cancelled`.
   The status route isn't switch-gated, so a job stays observable after the switch is turned off.
+  When the pre-flight finds identifiers used by more than one item, the job pauses before copying
+  anything: `status` reads `needs_decision`, with `duplicates` (the counts, the `fingerprint` a
+  decision must carry, a sample, and `sharedWith`, the other data sources reading the same graph).
+  `GET /bootstrap/duplicates?dataSourceId=…&after&limit(100, max 500)` (`_READ`) pages every copy —
+  `{items: [{urn, copy, kept, label, internalId, lastSyncedAt}], next}`, or with `format=csv` the
+  whole list as a download; **404** when the job found none, and the list is kept after the job
+  ends. `POST /bootstrap/decision?dataSourceId=…` `{action: "collapse", fingerprint}` (`_MANAGE` +
+  **Version control**) keeps one copy of each identifier (the latest `lastSyncedAt`, then the
+  lowest internal id), moves the others' connections to it, removes the others from the source
+  graph and lets the copy carry on: **202** with the job, **200** when the same decision was
+  already recorded, **409 `stale_decision`** when the list changed since it was shown,
+  **409 `not_awaiting_decision`** when the job isn't paused.
   `POST /bootstrap/retry?dataSourceId=…&mode=resume|restart` (**202**) and
   `POST /bootstrap/abandon?dataSourceId=…` drive recovery. The worker reads the source in bounded
   windows, can resume after a crash, and finishes only after an integrity report proves the copy —

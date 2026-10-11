@@ -62,7 +62,7 @@ The other processes have health endpoints of their own:
 | `aggregation-controlplane` | `:8091/health` | `:8091/health` (all three) | `:8091/health` (all three); waits for the schema |
 | `aggregation-worker` | `:8090/health` (the image's check) | `:8090/health` (all three) | `:8090/health` (startup, liveness) |
 | `stats-service` | `:8092/health` | `:8092/health` (all three) | `:8092/health` (all three) |
-| `versioning-worker` and the other lanes (`versioning-jobs`; `versioning-transfer`, `versioning-bootstrap`) | none (restart on exit) | none | none (restart on exit) |
+| `versioning-worker` and the other lanes (`versioning-jobs`; `versioning-transfer`, `versioning-bootstrap`) | none (restart on exit) | none | none (restart on exit); waits for the schema |
 | `frontend` | `/health` (the image's check) | Startup and liveness `/health`; readiness `/readyz`; load balancer `/health` | Liveness and readiness `/health` |
 | FalkorDB | `redis-cli ping` answers `PONG` or `LOADING` | Readiness: `PONG` only; liveness: `PONG` or `LOADING` | The same, when `stores.falkordb.enabled` |
 
