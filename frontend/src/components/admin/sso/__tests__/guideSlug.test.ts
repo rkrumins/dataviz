@@ -12,6 +12,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { getGuideEntry } from '@/components/guide/guideConfig'
+import { getEntryBySlug } from '@/components/docs/docsConfig'
 
 const SLUGS = ['sso-setup', 'sso-operations'] as const
 
@@ -100,11 +101,12 @@ describe('the parts of the gateway flow an operator cannot infer', () => {
         expect(text).toMatch(/readable by anyone who opens the sign-in/i)
     })
 
-    it('points at the contract doc by path, not as an in-app link', async () => {
-        // It is written for the client's engineers and deliberately not
-        // registered as a /docs route — a link would 404 in-app.
+    it('links the contract the gateway team implements', async () => {
+        // It is written for the client's engineers, and the operator is told
+        // to send it before the work starts: it is a registered doc, so the
+        // link opens in the reader rather than pointing into the repository.
         const text = (await getGuideEntry('sso-setup')!.importFn()).default
-        expect(text).toMatch(/SSO_BACKCHANNEL_CONTRACT\.md/)
-        expect(text).not.toMatch(/\/docs\/sso-backchannel/)
+        expect(text).toMatch(/\]\(\/docs\/sso-backchannel-contract\)/)
+        expect(getEntryBySlug('sso-backchannel-contract')).toBeDefined()
     })
 })

@@ -23,6 +23,9 @@ interface DocsLinkProps {
   /** Overrides the default label (the Guide entry's title). */
   label?: string
   className?: string
+  /** Open in a new tab. Use it inside a wizard or dialog: navigating away in
+   *  the same tab unmounts it and throws away what the user has entered. */
+  newTab?: boolean
 }
 
 export function DocsLink({
@@ -31,6 +34,7 @@ export function DocsLink({
   variant = 'inline',
   label,
   className,
+  newTab,
 }: DocsLinkProps) {
   const entry = area === 'guide' ? getGuideEntry(slug) : undefined
   if (area === 'guide' && !entry && import.meta.env.DEV) {
@@ -39,11 +43,13 @@ export function DocsLink({
   }
   const to = `/${area}/${slug}`
   const text = label ?? entry?.title ?? 'Learn more'
+  const target = newTab ? { target: '_blank', rel: 'noopener noreferrer' } : {}
 
   if (variant === 'icon') {
     return (
       <Link
         to={to}
+        {...target}
         aria-label={`Guide: ${text}`}
         title={text}
         className={cn(
@@ -62,6 +68,7 @@ export function DocsLink({
     return (
       <Link
         to={to}
+        {...target}
         className={cn(
           'inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-ink-muted',
           'hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors',
@@ -79,6 +86,7 @@ export function DocsLink({
   return (
     <Link
       to={to}
+      {...target}
       className={cn(
         'group inline-flex items-center gap-1.5 text-sm font-semibold text-accent-lineage',
         'hover:underline underline-offset-2 rounded',

@@ -252,15 +252,15 @@ TOURS.push(
         target: '[data-tour="ingestion-tabs"]',
         route: '/ingestion',
         placement: 'bottom',
-        title: 'Three stages, three tabs',
-        body: 'Work left to right: connect **Providers**, register **Data Sources**, then watch **Job History** as the platform ingests them.',
+        title: 'Three stages, left to right',
+        body: 'Connect **Providers**, register **Data Sources**, then watch **Job History** as the platform ingests them. **Freshness** and **Profiling** show how current and how big the data is once it’s in.',
       },
       {
         target: '[data-tour="ingestion-connect"]',
         route: '/ingestion?tab=providers',
         placement: 'bottom',
         title: '1 · Connect & test a provider',
-        body: 'Register a graph database (FalkorDB, Neo4j, DataHub) and **Test** the connection before going further.',
+        body: 'Register a graph database (FalkorDB, Neo4j, Spanner, DataHub) and **Test** the connection before going further.',
       },
       {
         target: '[data-tour="ingestion-assets"]',

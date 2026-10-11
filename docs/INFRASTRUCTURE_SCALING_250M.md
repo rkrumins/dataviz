@@ -1,5 +1,7 @@
 # Infrastructure Scaling Architecture — 250M Nodes & Edges
 
+*For architects and platform operators.*
+
 **Document Version:** 1.0
 **Target Environment:** GCP — Cloud SQL for PostgreSQL 16 + GKE (FalkorDB Redis Cluster, 3 StatefulSets)
 **Workload:** Read-dominant interactive graph traversal; Postgres-authoritative append-only writes with asynchronous projection
@@ -24,7 +26,7 @@ Companion documents — this specification composes with, and does not replace:
 This document specifies the infrastructure required to operate {brand} at **250 million graph elements** (nodes + edges combined, across all workspace graphs):
 
 - **System of record:** Cloud SQL for PostgreSQL 16 (Enterprise Plus), split into a **management instance** and a dedicated **graphver instance** (the versioned node/edge store — the split needs no code change; it is the `GRAPHVER_DB_URL` decoupling designed into `backend/app/services/versioning/config.py`).
-- **Graph read layer:** FalkorDB in **Redis Cluster mode**, deployed as **3 StatefulSets (one per shard), 3 pods each** — 9 pods spread across 3 GCP zones. FalkorDB remains a *disposable projection*: any graph can be dropped and rebuilt from Postgres, which is what makes an aggressive-but-recoverable memory posture safe.
+- **Graph read layer:** FalkorDB in **Redis Cluster mode**, deployed as **3 StatefulSets (one per shard), 3 pods each** — 9 pods spread across 3 GCP zones. FalkorDB remains a *disposable projection* for every source under version control: such a graph can be dropped and rebuilt from Postgres, which is what makes an aggressive-but-recoverable memory posture safe. A source loaded straight into FalkorDB has no copy in Postgres — it comes back from a snapshot or by loading it again ([FalkorDB DR Runbook](/docs/falkordb-dr)).
 - **Supporting Redis:** separate cache and coordination instances per the rules in [architecture-when-scaling.md](./architecture-when-scaling.md).
 
 ### 1.1 Design targets
@@ -54,8 +56,7 @@ This document specifies the infrastructure required to operate {brand} at **250 
 flowchart TB
     subgraph GKE["GKE regional cluster (3 zones)"]
         subgraph app["app node pool (autoscaled)"]
-            VIZ["viz-service ×4"]
-            GRAPH["graph-service ×3"]
+            VIZ["viz-service ×4 (API and graph reads)"]
             AGG["aggregation workers ×2–8 (HPA)"]
             CP["controlplane ×1"]
             PROJ["graphver projection worker"]
@@ -73,11 +74,11 @@ flowchart TB
     GCS[("GCS multi-region bucket<br/>RDB snapshots + Cloud SQL backups")]
 
     VIZ -->|"asyncpg pools"| CSQL2
-    VIZ & GRAPH -->|"GRAPH.RO_QUERY / GRAPH.QUERY"| fk
+    VIZ -->|"GRAPH.RO_QUERY / GRAPH.QUERY"| fk
     PROJ -->|"read committed state"| CSQL1
     PROJ -->|"UNWIND MERGE projection"| fk
     AGG -->|"streams"| RK
-    VIZ & GRAPH -->|"CACHE_REDIS_URL"| RC
+    VIZ -->|"CACHE_REDIS_URL"| RC
     fk -.->|"RDB export"| GCS
     CSQL1 & CSQL2 -.->|"PITR + cross-region replica"| GCS
 ```
@@ -312,7 +313,7 @@ The recovery scenarios in FALKORDB_DEPLOYMENT §5 apply unchanged — the 3-Stat
 | Pod/node loss | Shard's surviving replica promoted (< 1 s writes); GKE reschedules onto the tainted pool, PV reattaches, differential sync |
 | Zone loss | Every shard retains ≥ 1 master + 1 replica in surviving zones (the zonal spread guarantees it); reads never fall back onto masters |
 | Rolling update | Per-StatefulSet, replicas-first, PDB `maxUnavailable: 1`; shards update independently — a stuck rollout on shard 1 cannot block shards 0/2 |
-| Full-cluster data loss | **Acceptable by design**: every graph rebuilds from Postgres (`O(N·E)` seed or streaming projection); DR snapshots (§7) only shorten the rebuild, they are not the source of truth |
+| Full-cluster data loss | **Acceptable by design for version-controlled graphs**: they rebuild from Postgres (`O(N·E)` seed or streaming projection), and DR snapshots (§7) only shorten the rebuild. Graphs loaded straight into FalkorDB come back from those snapshots or by loading them again |
 
 ### 4.7 Sensitivity: one 250M-element graph
 
@@ -337,8 +338,7 @@ Tier shape per [architecture-when-scaling.md](./architecture-when-scaling.md); s
 
 | Tier | Replicas | Notes |
 | :--- | :--- | :--- |
-| viz web | 4 (HPA to 8 on CPU/RPS) | `GUNICORN_WORKERS=4`; pool overrides per §3.3 |
-| graph-service | 3 | Read-heavy; scales with trace QPS |
+| viz web | 4 (HPA to 8 on CPU/RPS) | Serves every graph read — canvas, trace, search — so it scales with their QPS (the separate graph-service tier was retired); `GUNICORN_WORKERS=4`; pool overrides per §3.3 |
 | aggregation workers | 2–8 (HPA on stream lag) | `JOBS` pool sized up; graceful SIGTERM drain ≤ 60 s |
 | graphver projection worker | 1 (Recreate) | `GRAPHVER_PROJECTION_CONCURRENCY=8`, health on `GRAPHVER_WORKER_HEALTH_PORT` |
 | controlplane | 1 (Recreate) | Scheduler, outbox relay, Alembic gate |
@@ -352,10 +352,10 @@ App node pool: `n4-standard-8`, autoscaled 6–16 nodes across 3 zones.
 | Layer | Mechanism | RPO | RTO |
 | :--- | :--- | :--- | :--- |
 | Cloud SQL (both) | PITR + cross-region replica; promote on region loss | seconds | minutes (promote + repoint `*_DB_URL`) |
-| FalkorDB | CronJob: `BGSAVE` → copy RDBs to multi-region GCS every 4–6 h (FALKORDB_DEPLOYMENT §6); cold-standby GKE in secondary region | 4–6 h *for the cache*; **effective RPO = Postgres RPO** since graphs rebuild from the promoted graphver instance | ≈ 1 h (restore RDBs, or reseed hot graphs directly) |
+| FalkorDB | CronJob: `BGSAVE` → copy RDBs to multi-region GCS every 4–6 h (FALKORDB_DEPLOYMENT §6); cold-standby GKE in secondary region | 4–6 h *for the cache*; **effective RPO = Postgres RPO** for version-controlled graphs, which rebuild from the promoted graphver instance; the snapshot interval for graphs loaded straight into FalkorDB | ≈ 1 h (restore RDBs, or reseed hot graphs directly) |
 | Cutover | Multi-Cluster Ingress / global LB repoint | — | minutes |
 
-> **Invariant.** DR never treats FalkorDB as data. If snapshots and Postgres disagree, Postgres wins and the graph is reseeded.
+> **Invariant.** DR never treats FalkorDB as the source of truth for a version-controlled graph: if snapshots and Postgres disagree, Postgres wins and the graph is reseeded. A graph loaded straight into FalkorDB has no copy in Postgres — its snapshot, or its upstream system, is the way back ([FalkorDB DR Runbook](/docs/falkordb-dr)).
 
 ---
 
@@ -414,10 +414,17 @@ Phased, each gate verifiable before the next:
 | `GRAPHVER_PROJECTION_CONCURRENCY` | projection worker | 8 |
 | `GRAPHVER_READ_MAX_LAG` | web tiers | 0 (strict) |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS` | projection worker | ≈ shard `maxmemory` × 0.8 per provider |
-| `FALKORDB_MODE` | web/graph/projection tiers | `cluster` |
+| `FALKORDB_MODE` | every tier that reads or writes FalkorDB (web, workers, projection) | `cluster` |
 | `FALKORDB_CLUSTER_NODES` | same | three shard-0 pod DNS names |
 | `FALKORDB_TLS_*` | same | per security posture |
 | `CACHE_REDIS_URL` | same | `synodic-redis-cache` |
 | `REDIS_CACHE_*` / `REDIS_STREAMS_*` (`_HOST`, `_PORT`, `_DB`, `_PASSWORD`, `_TLS_*`, `_MAX_CONNECTIONS`) | same | cache / coord instances |
 | `AGGREGATION_MAX_PAIRS_PER_PAGE` | workers | 200000 (default) |
 | `IMPORT_COMMIT_WINDOW` | import worker | 50000 (default) |
+
+## See also
+
+- [Infrastructure: Launch Scale](/docs/infra-launch-scale) — the launch-sized GCP spec, for about 1,000 users and 300 graphs.
+- [FalkorDB Deployment](/docs/falkordb-deployment) — memory sizing, replication and engine upgrades for the graph store.
+- [FalkorDB DR Runbook](/docs/falkordb-dr) — restoring snapshots and rebuilding graphs.
+- [Production cluster overlay](/docs/kubernetes-cluster-overlay) — the shipped manifests for FalkorDB in cluster mode.

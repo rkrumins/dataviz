@@ -55,6 +55,7 @@ import {
   getGuideEntry,
   type GuideEntry,
 } from '@/components/guide/guideConfig'
+import { helpSlugsFor } from './pageHelp'
 import { guideMarkdownComponents } from '@/components/guide/guideMarkdown'
 import { GettingStarted } from '@/components/onboarding/GettingStarted'
 
@@ -209,12 +210,21 @@ function HomeView({
       .filter((g) => g.items.length > 0)
   }, [ready, query, search])
 
+  // Articles for the page the user is on, then the general quick start —
+  // without repeating anything "For this page" already offers.
+  const forThisPage = useMemo(
+    () =>
+      helpSlugsFor(pathname)
+        .map((slug) => getGuideEntry(slug))
+        .filter((e): e is GuideEntry => Boolean(e)),
+    [pathname],
+  )
   const quickStart = useMemo(
     () =>
-      QUICK_START_SLUGS.map((slug) => getGuideEntry(slug)).filter(
-        (e): e is GuideEntry => Boolean(e),
-      ),
-    [],
+      QUICK_START_SLUGS.filter((slug) => !forThisPage.some((e) => e.slug === slug))
+        .map((slug) => getGuideEntry(slug))
+        .filter((e): e is GuideEntry => Boolean(e)),
+    [forThisPage],
   )
 
   const hasQuery = query.trim().length > 0
@@ -366,29 +376,24 @@ function HomeView({
                 </ul>
               </div>
             )}
+            {forThisPage.length > 0 && (
+              <>
+                <div className="px-1 pb-2 text-2xs font-semibold uppercase tracking-wider text-ink-muted">
+                  For this page
+                </div>
+                <ul className="mb-4 space-y-1">
+                  {forThisPage.map((entry) => (
+                    <ArticleButton key={entry.slug} entry={entry} brand={brand} onSelect={onSelectGuide} />
+                  ))}
+                </ul>
+              </>
+            )}
             <div className="px-1 pb-2 text-2xs font-semibold uppercase tracking-wider text-ink-muted">
               Quick start
             </div>
             <ul className="space-y-1">
               {quickStart.map((entry) => (
-                <li key={entry.slug}>
-                  <button
-                    onClick={() => onSelectGuide(entry.slug)}
-                    className="w-full flex items-start gap-3 px-3 py-2.5 rounded-lg text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors duration-100 group"
-                  >
-                    <div className="mt-0.5 w-8 h-8 rounded-lg bg-accent-lineage/10 text-accent-lineage flex items-center justify-center shrink-0">
-                      <BookOpen className="w-4 h-4" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-ink">
-                        {interpolateBrand(entry.title, brand)}
-                      </p>
-                      <p className="mt-0.5 text-xs text-ink-secondary line-clamp-2">
-                        {interpolateBrand(entry.description, brand)}
-                      </p>
-                    </div>
-                  </button>
-                </li>
+                <ArticleButton key={entry.slug} entry={entry} brand={brand} onSelect={onSelectGuide} />
               ))}
             </ul>
 
@@ -421,6 +426,36 @@ function HomeView({
         )}
       </div>
     </>
+  )
+}
+
+/** One guide article in the Help home lists. */
+function ArticleButton({
+  entry,
+  brand,
+  onSelect,
+}: {
+  entry: GuideEntry
+  brand: ReturnType<typeof useBrand>
+  onSelect: (slug: string) => void
+}) {
+  return (
+    <li>
+      <button
+        onClick={() => onSelect(entry.slug)}
+        className="w-full flex items-start gap-3 px-3 py-2.5 rounded-lg text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors duration-100 group"
+      >
+        <div className="mt-0.5 w-8 h-8 rounded-lg bg-accent-lineage/10 text-accent-lineage flex items-center justify-center shrink-0">
+          <BookOpen className="w-4 h-4" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-ink">{interpolateBrand(entry.title, brand)}</p>
+          <p className="mt-0.5 text-xs text-ink-secondary line-clamp-2">
+            {interpolateBrand(entry.description, brand)}
+          </p>
+        </div>
+      </button>
+    </li>
   )
 }
 

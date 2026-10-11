@@ -151,7 +151,7 @@ export function DocsHome() {
           <>
             {/* ── Persona cards ───────────────────────────── */}
             <Section title="Choose your path" subtitle="Most people land here for one reason — start where you fit.">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                 {docPersonas.map((p, i) => {
                   const entries = getEntriesForSection(p.sectionId)
                   return (
@@ -226,7 +226,6 @@ export function DocsHome() {
                         <div className="w-9 h-9 rounded-lg flex items-center justify-center bg-accent-lineage/10 text-accent-lineage dark:text-accent-lineage">
                           <j.icon className="w-5 h-5" />
                         </div>
-                        <span className="text-[10px] text-ink-muted">{j.time}</span>
                       </div>
                       <h3 className="mt-3 text-sm font-bold text-ink group-hover:text-accent-lineage dark:group-hover:text-accent-lineage transition-colors">
                         {j.title}
