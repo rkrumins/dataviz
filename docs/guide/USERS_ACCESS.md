@@ -397,7 +397,8 @@ The administrator changes it again whenever they like on **Account settings**.
 that still has to choose its own password. The requirement is about the
 password: someone who also signs in through single sign-on keeps doing so
 without being asked, and only signing in with that password takes them to
-**Choose a new password**.
+**Choose a new password**. An account that signs in only through single
+sign-on has no password, so it is never asked.
 
 ### System accounts (break-glass)
 

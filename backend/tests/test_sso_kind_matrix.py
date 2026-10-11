@@ -17,6 +17,7 @@ the axis in a few lines rather than being quietly forgotten for two of them.
 """
 from __future__ import annotations
 
+import secrets
 import time
 import uuid
 from dataclasses import dataclass
@@ -26,12 +27,19 @@ import jwt as pyjwt
 import pytest
 from sqlalchemy import func, select
 
+from backend.app.auth.dependencies import (
+    get_current_user, get_optional_user, get_permission_claims,
+)
+from backend.app.auth.password import hash_password
 from backend.app.db import models as _models
-from backend.app.db.repositories import idp_provider_repo
+from backend.app.db.repositories import idp_provider_repo, user_repo
+from backend.auth_service.cookies import ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME
+from backend.auth_service.core.password import is_password_set
 from backend.auth_service.core.tokens import (
     create_dryrun_token,
     create_oidc_state_token,
     create_saml_state_token,
+    decode_token,
 )
 from backend.auth_service.providers.base import ProviderIdentity
 
@@ -285,3 +293,173 @@ async def test_a_failure_mints_a_reference_for_every_kind(
         location = resp.headers["location"]
         assert "sso_error=1" in location, driver.kind
         assert re.search(r"ref=[0-9a-f]{8}", location), driver.kind
+
+
+def _set_cookies(resp) -> dict[str, str]:
+    """The cookies a response sets, by name; deletions left out."""
+    jar = {}
+    for header in resp.headers.get_list("set-cookie"):
+        name, _, rest = header.partition("=")
+        value = rest.split(";", 1)[0].strip('"')
+        if value:
+            jar[name.strip()] = value
+    return jar
+
+
+def _cookie_header(**cookies: str) -> dict[str, str]:
+    return {"Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items())}
+
+
+def _upstream_cookies(driver: KindDriver, monkeypatch) -> dict[str, str]:
+    """What the browser sends with every request besides our own cookies.
+
+    A back-channel session is re-confirmed with the gateway at every
+    rotation, using the gateway's cookie, so a refresh without it reads as
+    a sign-out upstream. The confirmation is stubbed at the same seam as
+    the driver's sign-in.
+    """
+    if driver.kind != "backchannel":
+        return {}
+    from backend.auth_service.providers.backchannel import BackchannelProvider
+
+    async def _still_signed_in(self, raw):
+        assert raw == "ambient-xyz"
+
+    monkeypatch.setattr(
+        BackchannelProvider, "confirm_still_authenticated", _still_signed_in,
+    )
+    return {"corp_session": "ambient-xyz"}
+
+
+def _use_the_real_sign_in_checks() -> None:
+    """The real dependencies, not the conftest's stand-in user."""
+    from backend.app.main import app
+
+    for dep in (get_current_user, get_optional_user, get_permission_claims):
+        app.dependency_overrides.pop(dep, None)
+
+
+async def _sign_in(client, driver: KindDriver, slug: str, monkeypatch) -> dict:
+    signed_in = await driver.drive(client, slug, monkeypatch, {})
+    session = _set_cookies(signed_in)
+    assert ACCESS_COOKIE_NAME in session, (
+        f"{driver.kind}: no session minted — {signed_in.headers.get('location')}"
+    )
+    return session
+
+
+async def _assert_the_session_works(
+    client, driver: KindDriver, session: dict, monkeypatch,
+    *, account_flag: bool,
+) -> None:
+    """An SSO session is answered like any other, before and after a
+    rotation — which re-reads the account — and is never sent to the
+    password change."""
+    claims = decode_token(session[ACCESS_COOKIE_NAME])
+    assert claims["signin"] == "sso" and "mcp" not in claims, driver.kind
+
+    me = await client.get(
+        "/api/v1/auth/me",
+        headers=_cookie_header(**{ACCESS_COOKIE_NAME: session[ACCESS_COOKIE_NAME]}),
+    )
+    assert me.status_code == 200, me.text
+    assert me.json()["passwordChangeRequired"] is False, driver.kind
+    assert me.json()["user"]["mustChangePassword"] is account_flag
+    works = await client.get(
+        "/api/v1/users/me/activity",
+        headers=_cookie_header(**{ACCESS_COOKIE_NAME: session[ACCESS_COOKIE_NAME]}),
+    )
+    assert works.status_code == 200, f"{driver.kind}: {works.text}"
+
+    rotated = await client.post(
+        "/api/v1/auth/refresh",
+        headers=_cookie_header(**{
+            REFRESH_COOKIE_NAME: session[REFRESH_COOKIE_NAME],
+            **_upstream_cookies(driver, monkeypatch),
+        }),
+    )
+    assert rotated.status_code == 200, f"{driver.kind}: {rotated.text}"
+    assert rotated.json()["passwordChangeRequired"] is False, driver.kind
+    renewed = _set_cookies(rotated)[ACCESS_COOKIE_NAME]
+    assert decode_token(renewed)["signin"] == "sso"
+    assert "mcp" not in decode_token(renewed)
+    still_works = await client.get(
+        "/api/v1/users/me/activity",
+        headers=_cookie_header(**{ACCESS_COOKIE_NAME: renewed}),
+    )
+    assert still_works.status_code == 200, f"{driver.kind}: {still_works.text}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("driver", DRIVERS, ids=_IDS)
+async def test_an_sso_only_account_works_for_every_kind(
+    test_client, db_session, registry, sso_events, monkeypatch, driver,
+):
+    """Someone who has only ever signed in through the IdP and never had a
+    local password: nothing about passwords applies to them."""
+    _use_the_real_sign_in_checks()
+    slug = f"matrix-sso-only-{driver.kind}".replace("_", "-")
+    await _make(db_session, driver, slug)
+
+    session = await _sign_in(test_client, driver, slug, monkeypatch)
+    user = await user_repo.get_user_by_id(
+        db_session, decode_token(session[ACCESS_COOKIE_NAME])["sub"],
+    )
+    assert not is_password_set(user.password_hash)
+    assert user.must_change_password is False
+
+    await _assert_the_session_works(
+        test_client, driver, session, monkeypatch, account_flag=False,
+    )
+    # And there is no password to sign in with, so no session to hold.
+    by_password = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": user.email, "password": "Aa1!" + secrets.token_urlsafe(18)},
+    )
+    assert by_password.status_code == 401, by_password.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("driver", DRIVERS, ids=_IDS)
+async def test_a_pending_password_change_holds_no_kind(
+    test_client, db_session, registry, sso_events, monkeypatch, driver,
+):
+    """Someone who signs in through the IdP nearly every day and also
+    holds a local password that has to be replaced, because an
+    administrator set it. The requirement is about that password, so it
+    holds a session signed in with it and no session signed in through
+    any kind of provider."""
+    _use_the_real_sign_in_checks()
+    slug = f"matrix-held-{driver.kind}".replace("_", "-")
+    await _make(db_session, driver, slug)
+    first = await _sign_in(test_client, driver, slug, monkeypatch)
+    user_id = decode_token(first[ACCESS_COOKIE_NAME])["sub"]
+    email = (await user_repo.get_user_by_id(db_session, user_id)).email
+
+    admin_set = "Aa1!" + secrets.token_urlsafe(18)
+    await user_repo.update_password(
+        db_session, user_id, hash_password(admin_set), must_change=True,
+    )
+    await db_session.commit()
+
+    # The control: signing in with the password is held, so the
+    # requirement really is live on this account.
+    by_password = await test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": admin_set},
+    )
+    assert by_password.status_code == 200, by_password.text
+    assert by_password.json()["passwordChangeRequired"] is True
+    held = await test_client.get(
+        "/api/v1/users/me/activity",
+        headers=_cookie_header(**{
+            ACCESS_COOKIE_NAME: _set_cookies(by_password)[ACCESS_COOKIE_NAME],
+        }),
+    )
+    assert held.status_code == 403, held.text
+    assert held.json()["detail"]["error"] == "password_change_required"
+
+    session = await _sign_in(test_client, driver, slug, monkeypatch)
+    assert decode_token(session[ACCESS_COOKIE_NAME])["sub"] == user_id
+    await _assert_the_session_works(
+        test_client, driver, session, monkeypatch, account_flag=True,
+    )
