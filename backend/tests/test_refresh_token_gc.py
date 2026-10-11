@@ -150,7 +150,7 @@ async def test_an_empty_table_is_a_no_op(db_session):
     assert await purge_expired(db_session) == 0
 
 
-async def test_sweeper_drains_the_backlog_then_waits(db_session):
+async def test_sweeper_drains_the_backlog_then_waits(db_session, monkeypatch):
     """A deployment upgrading into this has months of rows.
 
     Waiting a full interval between batches would take weeks to clear,
@@ -170,18 +170,25 @@ async def test_sweeper_drains_the_backlog_then_waits(db_session):
     shutdown = asyncio.Event()
     # A batch smaller than the backlog forces more than one pass.
     import backend.app.services.refresh_token_gc as gc_mod
-    original = gc_mod._BATCH
-    gc_mod._BATCH = 4
-    try:
-        task = asyncio.create_task(run_sweeper(factory, shutdown, interval=30.0))
-        for _ in range(50):
-            await asyncio.sleep(0.01)
-            if await _count(db_session) == 0:
-                break
-        shutdown.set()
-        await asyncio.wait_for(task, timeout=2.0)
-    finally:
-        gc_mod._BATCH = original
+    monkeypatch.setattr(gc_mod, "_BATCH", 4)
+
+    # Told when a pass comes up short — the backlog is gone — so this test
+    # never queries the session while the sweeper is using it.
+    drained = asyncio.Event()
+    sweep = gc_mod.sweep_once
+
+    async def _sweep(session):
+        deleted = await sweep(session)
+        if deleted < gc_mod._BATCH:
+            drained.set()
+        return deleted
+
+    monkeypatch.setattr(gc_mod, "sweep_once", _sweep)
+    task = asyncio.create_task(run_sweeper(factory, shutdown, interval=30.0))
+    # Well inside the 30 s interval: only a greedy first tick gets here.
+    await asyncio.wait_for(drained.wait(), timeout=2.0)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=2.0)
 
     assert await _count(db_session) == 0, "the backlog should drain on the first tick"
 

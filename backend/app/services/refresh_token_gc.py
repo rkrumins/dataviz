@@ -28,6 +28,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.advisory import claim_this_pass
 from backend.app.db.repositories.refresh_token_repo import purge_expired
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,8 @@ async def run_sweeper(
         try:
             while not shutdown.is_set():
                 async with session_factory() as session:
+                    if not await claim_this_pass(session, "auth:refresh-token-gc"):
+                        break  # another process is sweeping
                     deleted = await sweep_once(session)
                 if deleted:
                     logger.info(

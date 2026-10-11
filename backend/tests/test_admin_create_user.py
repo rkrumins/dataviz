@@ -64,6 +64,29 @@ class TestCreateOne:
         user = await user_repo.get_user_by_email(db_session, "grace@company.com")
         assert is_password_set(user.password_hash)
 
+    async def test_an_admin_set_password_is_replaced_at_first_sign_in(
+        self, test_client, db_session,
+    ):
+        """The admin typed it, so the admin knows it."""
+        r = await _post(test_client, {
+            **BASE, "credential": "password", "password": "Str0ng-Passw0rd!x",
+        })
+        assert r.status_code == 201, r.text
+
+        from backend.app.db.repositories import user_repo
+        user = await user_repo.get_user_by_email(db_session, "grace@company.com")
+        assert user.must_change_password is True
+
+    async def test_a_setup_link_leaves_the_choice_to_the_person(
+        self, test_client, db_session,
+    ):
+        r = await _post(test_client, BASE)
+        assert r.status_code == 201, r.text
+
+        from backend.app.db.repositories import user_repo
+        user = await user_repo.get_user_by_email(db_session, "grace@company.com")
+        assert user.must_change_password is False
+
     async def test_sso_only_leaves_no_password_and_no_token(
         self, test_client, db_session,
     ):

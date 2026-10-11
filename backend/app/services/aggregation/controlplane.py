@@ -213,6 +213,35 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Aggregation state-sync consumer started")
 
+    # 10. Housekeeping the stateless web tier leaves to this process: the
+    # audit relay (outbox_events → auth_audit_log), the refresh-token and
+    # product-event retention sweeps, and the analytics warmer. ``main.py``
+    # starts the same loops in a dev monolith, gated on its role, which a
+    # container running this module never reaches. Each loop claims an
+    # advisory lock per pass, so two control planes during a rolling update
+    # never run one at the same time.
+    from backend.app.services.analytics_warmer import run_warmer
+    from backend.app.services.outbox_relay import run_relay
+    from backend.app.services.product_event_gc import (
+        run_sweeper as run_product_event_gc,
+    )
+    from backend.app.services.refresh_token_gc import (
+        run_sweeper as run_refresh_token_gc,
+    )
+    housekeeping_shutdown = asyncio.Event()
+    housekeeping_tasks = [
+        asyncio.create_task(loop(get_jobs_session, housekeeping_shutdown), name=name)
+        for name, loop in (
+            ("outbox-relay", run_relay),
+            ("refresh-token-gc", run_refresh_token_gc),
+            ("product-event-gc", run_product_event_gc),
+            ("analytics-warmer", run_warmer),
+        )
+    ]
+    logger.info(
+        "Housekeeping started: audit relay, retention sweeps, analytics warmer"
+    )
+
     # Store in app state
     app.state.aggregation_service = svc
     app.state.session_factory = get_jobs_session
@@ -223,6 +252,13 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    housekeeping_shutdown.set()
+    for task in housekeeping_tasks:
+        if not task.done():
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                task.cancel()
     reconciler_shutdown.set()
     if not reconciler_task.done():
         try:

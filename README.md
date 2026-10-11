@@ -48,7 +48,7 @@ docker compose -f docker-compose.quickstart.yml up --build
 Access:
 - Frontend: http://localhost:3080
 - API docs: http://localhost:8000/docs
-- Login: `admin@nexuslineage.local` / `admin123`
+- Login: `admin@nexuslineage.local` / `admin123` (the first sign-in asks you to choose a new password)
 
 > [!WARNING]
 > **The quickstart does not boot today.** It points the API at a baked-in SQLite database, and the backend has accepted only PostgreSQL for some time; its published signing key is also refused at startup. Use the Contributor or Self-host path until it is fixed — see [docs/TECHNICAL_DEBT.md](docs/TECHNICAL_DEBT.md) §2.1.

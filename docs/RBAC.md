@@ -640,8 +640,10 @@ sent.
 
 ## Audit log
 
-Every state-changing RBAC/auth mutation emits an outbox event; the
-relay lands it in `auth_audit_log`. Operators read it through:
+Every state-changing RBAC/auth mutation emits an outbox event in the
+same transaction as the change. The Audit Log reads those events; the
+control plane's relay also copies each one into the append-only
+`auth_audit_log`. Operators read it through:
 
 * `GET /api/v1/admin/audit` (gated `system:audit:read`) — filter by event
   type prefix (`rbac.role.*`), actor, target user / role, workspace,

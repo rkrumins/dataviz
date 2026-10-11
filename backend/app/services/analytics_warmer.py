@@ -40,6 +40,7 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.advisory import claim_this_pass
 from backend.app.db.repositories import analytics_repo
 from backend.app.services import analytics_cache
 
@@ -164,9 +165,15 @@ async def run_warmer(
         started = time.monotonic()
         try:
             async with session_factory() as session:
-                stored = await warm_once(session, ttl=ttl)
+                # One warmer per slot: passes are phase-locked to the same
+                # boundary, so without this every control plane would warm
+                # the same documents at the same moment.
+                claimed = await claim_this_pass(session, "analytics:warmer")
+                stored = await warm_once(session, ttl=ttl) if claimed else 0
             elapsed = time.monotonic() - started
-            if stored:
+            if not claimed:
+                pass  # another process warmed this slot
+            elif stored:
                 logger.info(
                     "Analytics warm pass stored %d document(s) in %.1fs",
                     stored, elapsed,

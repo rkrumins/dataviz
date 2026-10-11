@@ -51,7 +51,7 @@ Then set these:
 | `REDIS_URL` | Your coordination Redis, as this URL or the `REDIS_STREAMS_*` settings. The job bus, session revocation and shared rate limits use it. |
 | `CREDENTIAL_ENCRYPTION_KEY` | A Fernet key, for example from `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Keep it safe: stored credentials cannot be read without it. |
 | `AGGREGATION_INTERNAL_TOKEN` | A random shared secret, the same value for every service. |
-| `ADMIN_PASSWORD` | Your own password for the first administrator account, which is created only when the database has no users. |
+| `ADMIN_PASSWORD` | Your own starting password for the first administrator account, which is created only when the database has no users and must replace it at its first sign-in. |
 | `AUTH_ENVIRONMENT_ID` | A name unique to each environment, for example `production`, if people may have two environments open in the same browser. |
 | `CORS_ALLOWED_ORIGINS` | The address users open the UI at, for example `https://lineage.example.com`. |
 | `ALLOWED_HOSTS` | The host names users reach this deployment at. |
@@ -67,8 +67,8 @@ Sign-in, session tokens and cookies, single sign-on and the sign-in rate limits.
 
 | Variable | Default | Description | Read in |
 |---|---|---|---|
-| `ADMIN_EMAIL` | `admin@nexuslineage.local` | Email address of the first administrator account. The account is created at startup only when the database has no users. | `backend/app/main.py` |
-| `ADMIN_PASSWORD` | — (secret, set your own) | Password for the first administrator account. If it is one of the example passwords published in this repository, the account must change it at first sign-in. | `backend/app/main.py` |
+| `ADMIN_EMAIL` | `admin@nexuslineage.local` | Email address of the first administrator account. The account is created at startup only when the database has no users. | `backend/app/auth/bootstrap.py` |
+| `ADMIN_PASSWORD` | — (secret, set your own) | Starting password for the first administrator account, which must replace it at its first sign-in. Unset or empty means `changeme`. | `backend/app/auth/bootstrap.py` |
 | `ALLOWED_HOSTS` | (empty) | Host names this deployment answers to, comma-separated. When set, the API refuses requests for any other host (health checks excepted), and single sign-on never trusts a host outside the list. Unset accepts any host. | `backend/auth_service/core/config.py` |
 | `AUTH_COOKIE_DOMAIN` | — | Domain attribute of the session cookies. Set it only when the API and the UI are on different subdomains; unset gives host-only cookies. | `backend/auth_service/core/config.py` |
 | `AUTH_COOKIE_SAMESITE` | `lax` | SameSite attribute of the session cookies: `lax`, `strict` or `none`. | `backend/auth_service/core/config.py` |
