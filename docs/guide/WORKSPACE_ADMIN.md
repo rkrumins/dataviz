@@ -81,6 +81,32 @@ person when you need to answer "who changed this, and when."
 
 ---
 
+## What's happening in your workspace (the Activity tab)
+
+Workspace admins, and auditors, see an **Activity** tab on the workspace: every
+operation, access change and data change in it — rebuilds, retries and purges of
+its data sources, runs stopped, members added or removed, data sources added or
+moved in, version control turned on — each naming who did it, when, and why, if
+they said.
+
+- **Lenses** narrow it to *Operations*, *Access* or *Data*; filter by person,
+  by action, by outcome, or to the changes that came with a reason.
+- **The insight band** shows how busy the workspace has been against the period
+  before, which data sources people operate by hand most and how often, who is
+  most active, and the reasons people give.
+- **Select any event** for the full story: who it happened to, the run or data
+  source it touched, and the other events from the same request.
+
+Changes to the Views themselves stay on the Views tab's activity history above.
+Sign-ins, SSO and platform-wide settings are never shown here; auditors see
+those in **Admin → Activity**.
+
+When you rebuild, purge or stop a run, or add or remove a member, {brand} asks
+— optionally — why. Your answer is shown here and in **Admin → Activity**, to
+auditors and this workspace's admins.
+
+---
+
 ## Checking ontology health
 
 The **Health** tab (inside your Semantic Layer settings) answers a narrower

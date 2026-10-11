@@ -246,7 +246,7 @@ workspace).
 | --- | --- |
 | **Super Admin** | Everything, platform-wide: providers, ontologies, workspaces, users, features, announcements, permissions. Reserved for platform owners — bind sparingly. |
 | **Org Admin** | Create and manage workspaces, groups, and users, without Super Admin's full reach. |
-| **Org Auditor** | Read-only across every workspace, plus the audit log and who-has-access-to-what — built for compliance review, not day-to-day work. |
+| **Org Auditor** | Read-only across every workspace, plus **Admin → Activity** (who did what, where, when and why) and who-has-access-to-what — built for compliance review, not day-to-day work. |
 | **User** | The default tier for anyone with no explicit global role. No platform-wide access on its own — what they can do comes entirely from their workspace bindings below. |
 
 **Workspace roles** (bound separately in each workspace)
@@ -289,6 +289,11 @@ to *many* people at once:
 
 Now every member inherits that access, and you manage it in one place. Groups may
 be **local** or, where configured, synced from an identity provider (SCIM/SSO).
+
+Each membership change is recorded in **Admin → Activity**: who added or removed
+whom, and the reason, if they gave one when asked. Changes the identity
+provider's sync makes are recorded too, marked as coming from the sync. The
+group's member list shows who added each person.
 
 > **Tip:** Prefer groups over individuals for anything beyond a handful of
 > people. It keeps access auditable and easy to change.

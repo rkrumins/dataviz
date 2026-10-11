@@ -42,7 +42,7 @@ controls which subsystems the FastAPI lifespan starts.
 |-----------------------|--------|-------|
 | `web` | HTTP API, auth, reads, lightweight writes | Fully stateless; scale horizontally. |
 | `worker` | Aggregation execution, heavy provider I/O | Consumes the aggregation job stream. |
-| `controlplane` | Scheduler, outbox relay, crash recovery | HA-safe: each loop is single-flight, so production runs two replicas. Schema migrations belong to the separate `synodic-upgrade` job. |
+| `controlplane` | Scheduler, crash recovery, and the background loops: the outbox relay (which fills the activity ledger), the product-event and refresh-token retention sweeps, and the analytics warmer | HA-safe: each loop is single-flight — the relay claims batches with `SKIP LOCKED`, the sweeps take an advisory lock per batch, the warmer claims each pass in Redis — so production runs two replicas. Schema migrations belong to the separate `synodic-upgrade` job. |
 | `dev` | All-in-one | Default; runs every subsystem in one process for local development. |
 
 Two subsystems run outside the FastAPI process entirely:
@@ -70,7 +70,7 @@ flowchart TD
 
     subgraph Roles[Same image, SYNODIC_ROLE selects subsystems]
         WEB[WEB<br/>FastAPI HTTP API]
-        CP[CONTROLPLANE<br/>scheduler + outbox relay]
+        CP[CONTROLPLANE<br/>scheduler + outbox relay<br/>+ retention + analytics warmer]
         WK[WORKER<br/>aggregation execution]
     end
 

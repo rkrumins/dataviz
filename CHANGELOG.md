@@ -9,6 +9,140 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Who did what, where and why: one activity log, and analytics that see the data
+
+### Added
+
+**Admin → Activity: one log of what people do across the platform.** The RBAC-only audit page at
+`/admin/audit` is replaced by an explorer of every recorded change: sign-ins and access, aggregation
+and freshness operations, data sources and providers, version control, group membership and
+platform settings. Lenses (Operations, Access, Identity, Data, Content, Platform, Security), a date
+range, and filters for a person — as the one who acted or the one it happened to — action, outcome,
+whether a reason was given, and free text. An insight band compares the range with the period
+before it: events, people active, operations started by hand, the share of changes that said why,
+volume by kind, a weekday × hour punchcard (UTC), the most active people, the most hands-on data
+sources and how often each is touched, the most frequent actions, and the reasons people give. The
+timeline groups by day, folds repeats and offers newer events without moving the page; each event
+opens a drawer with who, when, where and why, links to the run, source, group, view or workspace,
+and the other events from the same request and on the same target. Every filtered view is a link,
+and **Export** downloads it as CSV. Workspaces gain an **Activity** tab with the same explorer,
+scoped to that workspace's operations, access and data changes, for its admins.
+
+**Every manual operation names its person.** Aggregation runs record who started them and why
+(`aggregation_jobs.triggered_by` and `stated_reason`), through the web tier and across the
+control-plane proxy. Job History shows *Manual · by {name} — "why"* on each run and filters by who
+started it. Recorded once each, as the person, with the request it came in: re-trigger, resume,
+cancel, delete, purge, skip, limits, schedules and fleet settings; Freshness rebuilds, retries, bulk
+and provider/fleet refreshes, reconcile runs and automation holds; data sources added, changed,
+removed, restored, made primary or switched projection mode; providers registered, changed or
+deleted; version control enabled, retried, abandoned or re-synced; discovery runs and asset
+statistics refreshes; feature flags, the profiling policy and the node-identity default; and group
+membership — by hand, or by the identity provider's sync, which now records the memberships it
+actually changed.
+
+**Asked, never required: why.** Wherever work is started, stopped or destroyed, the dialog asks
+for an optional reason, with one-click suggestions for that kind of change and the person's own
+recent reasons, and says who will be able to read it. One-click actions get a prompt that is also
+their confirmation, so nothing asks twice. Safe resets, previews, limit tweaks and settings edits
+do not ask.
+
+**Analytics → Data: what the platform holds, and how it got there.** Entities and relationships as
+they stood at the end of each period — so a pruned graph shows as a fall — overall, by workspace
+and by kind of source, with the sources that moved most; sources onboarded, under version control
+or external, by provider type, and the wait for a first build; and version-control adoption by how
+graphs are kept. When version control cannot be read, that section says so and the rest still
+loads.
+
+**Richer Analytics tabs.**
+- *Engagement:* who is around (active this week, seen, gone quiet, never signed in) and when
+  people use the platform, by weekday and hour.
+- *Content:* distinct viewers over time, how far each view reaches, how many new views are read by
+  someone other than their author and how soon, and views built against opened, by kind or by who
+  can see them.
+- *Health:* how ingestion is driven — runs started by hand against automatic and onboarding runs,
+  the share started by hand, the run failure rate, and the most hands-on sources.
+- *Workspaces:* a pulse of each workspace, period by period, so one that went quiet mid-range shows
+  as a gap; and *By hand* and *Access* columns in the table.
+- *Workspace drill-in:* what the workspace holds over time, and how its ingestion ran.
+
+**API.** `/api/v1/admin/activity/*` (`system:audit:read`) and
+`/api/v1/admin/workspaces/{ws_id}/activity/*` (that workspace's admins), each with `events`,
+`events/newer`, `events/{event_id}`, `summary`, `catalogue` and `export.csv`;
+`GET /api/v1/admin/analytics/data` and `/usage`; and `GET /api/v1/directory/people?ids=`, which
+names up to 100 people for any signed-in reader. Mutating requests may carry an optional
+`X-Activity-Reason` header. See `docs/RBAC.md` §Activity log.
+
+### Changed
+
+**The background loops that were documented as running now run.** The outbox relay that fills
+`auth_audit_log`, the product-event and refresh-token retention sweeps and the analytics warmer
+never started in the shipped topologies. They now run on the aggregation control plane, each
+single-flight, so its two production replicas take turns.
+
+**`auth_audit_log` is the activity ledger.** Each record stays immutable; beside it sits a
+rebuildable projection in indexed columns (category, audience, severity, outcome, actor, subject,
+target, workspace, data source, stated reason, correlation id), so every filter runs in SQL.
+
+**Admin's "Audit Log" is now "Activity"**, first in the System group, and holders of
+`system:audit:read` (Org Auditors) can reach Admin.
+
+**The public trigger endpoint accepts only `manual`, `onboarding` and `api`**, so a rebuild started
+by a person cannot be recorded as automation.
+
+The analytics document cache moves to schema version 3; documents rebuild on first read.
+
+### Fixed
+
+- Audit log filters for actor and target were applied after the page limit, so filtered pages came
+  back short or empty. Every filter is now part of the query.
+- Data sources added through the API recorded no creator; `created_by` is now set.
+- In proxy mode — every deployed topology — manual aggregation runs recorded nobody.
+
+### Security
+
+- A client `X-Request-ID` is honoured only when it matches `^[A-Za-z0-9._:-]{1,128}$`; otherwise the
+  server makes one. It is now the correlation id that groups a request's events.
+- The control plane trusts the forwarded `X-Activity-*` identity only behind its internal token,
+  and re-validates each value. The web tier builds them from the session, never from the client.
+- Recorded values are stripped of control, format and lone-surrogate characters, so a hostile
+  payload cannot stop the relay.
+- The workspace activity routes force the workspace scope on the server, and never return raw
+  payloads.
+- The CSV export neutralises spreadsheet formulas.
+
+### Upgrading
+
+- **Two migrations:** `20261010_1000_activity_ledger` (DDL on `auth_audit_log`, inspector-guarded,
+  no data updates) and `20261010_1100_job_provenance` (`aggregation_jobs.triggered_by` and
+  `stated_reason`). Run the upgrade job before rolling out.
+- **The first control-plane start imports the outbox history into the ledger**, newest first, at
+  roughly 3,000–5,000 events a second per replica — about ten minutes per two million events.
+  Admin → Activity says *Importing earlier activity* until it finishes.
+- **The retention sweeps run for the first time:** product events older than 400 days
+  (`PRODUCT_EVENT_RETENTION_DAYS`) and expired refresh-token records are deleted.
+- **Event storage roughly doubles** while the outbox is not pruned: events are kept both in
+  `outbox_events` and in the ledger.
+- Browser clients may send `X-Activity-Reason`; it is in the CORS allow-list.
+
+### Known limitations
+
+- The ledger has no retention or partitioning yet, and the outbox is not pruned, because other
+  readers still depend on it.
+- Who started a run, and why, starts at this release; earlier manual runs show their trigger only.
+- Entity history starts when daily profiling began, and aggregation runs are kept for 90 days, so
+  the Data tab and runs by origin reach no further back than that.
+- Client telemetry carries no workspace, so the workspace pulse counts view opens, view changes and
+  recorded operations only. Punchcards are in UTC.
+- A moved data source is attributed to its destination workspace only.
+- Version publishes and merges stay in graph history (Reviews); the ledger covers version control's
+  onboarding side.
+- Not yet recorded: insights dead-letter redrive and delete, admission settings, graph-store limits
+  and cache refresh.
+- A stated reason is free text and may contain personal data. Auditors can read it, and so can the
+  workspace's admins for a workspace change; the field says so.
+
+---
+
 ## [Unreleased] — Docs that stay inside the deployment, and a debt register that matches the code
 
 ### Changed

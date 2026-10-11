@@ -67,16 +67,39 @@ background job with states like *pending → running → ready*.
 
 ## Auditing changes
 
-Trust comes from traceability. {brand} records **audit trails** for sensitive
-actions — most notably the **ontology lifecycle** (created, updated, published,
-deleted). Use these to:
+Trust comes from traceability. **Admin → Activity** is one log of what people
+do across the platform: who did it, to what, in which workspace, when, and —
+when they said — why. It covers sign-ins and access changes, aggregation and
+freshness operations (rebuilds, retries, cancels, purges, holds), data sources
+and providers, version control, group membership (by hand or from the identity
+provider's sync) and platform settings such as feature flags. Use it to:
 
-- answer *"who changed this, and when?"*,
-- review schema evolution over time,
-- support compliance and post-incident reviews.
+- answer *"who rebuilt this source, when, and why?"* — pick the **Operations**
+  lens and select the source on the **Most hands-on sources** board, or open
+  the source's runs in **Job History**, where each run says who started it and
+  the reason they gave;
+- see *how often* a source needs a hand: the **Most hands-on sources** board
+  ranks sources by manual operations and says how often each one is touched;
+- review access: the **Access** and **Security** lenses, with a person as the
+  one who acted or the one it happened to;
+- support compliance and post-incident reviews: every filtered view is a link,
+  and **Export** downloads it as CSV (the export is recorded too).
 
-When something visual changes unexpectedly across many Views, the ontology audit
-log is the first place to look.
+Whenever someone starts, stops or destroys work, {brand} asks — optionally —
+why. Suggestions for that kind of change and their own recent reasons are one
+click away; nothing is required, and the log says *No reason given* when none
+was. The field says who will be able to read the answer: auditors, and for a
+workspace change, that workspace's admins.
+
+People with the **Org Auditor** role (`system:audit:read`) see everything.
+Workspace admins see their own workspaces' operations, access and data changes
+on the workspace's **Activity** tab. Analytics shows the trends — runs started
+by hand against automatic ones, and each workspace's pulse — without naming
+anyone.
+
+The **ontology lifecycle** (created, updated, published, deleted) keeps its
+own audit trail. When something visual changes unexpectedly across many
+Views, it is the first place to look.
 
 ---
 
