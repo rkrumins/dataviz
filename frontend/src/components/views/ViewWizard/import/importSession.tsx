@@ -12,8 +12,8 @@ import {
   getPackageUpload, getViewPackage, importPackageData, inspectViewFile, inspectViewPackage, isViewPackage,
   reconcileViews, ViewTransferError,
   type IdentityMatch, type ImportAction, type InspectResult, type InspectedView, type PackageDataStarted,
-  type PackageInspectResult, type PackageProgress, type ReconciledView, type Resolutions, type TargetSuggestion,
-  type TransferTarget, type UpdateStrategy,
+  type PackageInspectResult, type PackageNewSource, type PackageProgress, type ReconciledView, type Resolutions,
+  type TargetSuggestion, type TransferTarget, type UpdateStrategy,
 } from '@/services/viewTransferApiService'
 import { getImport, getImportPreview, pollJob, type ImportPreview, type Job } from '@/services/importExportApiService'
 import { getView } from '@/services/viewApiService'
@@ -146,6 +146,12 @@ export interface ImportSession {
    *  (asking again for one answers with its job), until the upload expires. (A new data source is
    *  created and followed by the Data step itself: NewSourceSeedStep.) */
   startData: (target: ExistingDataTarget) => Promise<void>
+  /** The data sources this package made, one per workspace at most: what the server said when the
+   *  package was read, kept up to date as this session makes one or gives one up. Every step reads
+   *  them from here, so an answer heard after its step was left is never lost. */
+  newSources: PackageNewSource[]
+  noteNewSource: (made: PackageNewSource) => void
+  dropNewSource: (dataSourceId: string) => void
 }
 
 const ImportSessionContext = createContext<ImportSession | null>(null)
@@ -207,6 +213,7 @@ export function useImportSessionState(opts: {
   const [reconciling, setReconciling] = useState(false)
   const [reconcileError, setReconcileError] = useState<string | null>(null)
   const [pkg, setPkg] = useState<ImportSession['pkg']>(null)
+  const [newSources, setNewSources] = useState<PackageNewSource[]>([])
   const [dataChoice, setDataChoice] = useState(true)
   const [data, setData] = useState<PackageData>(NO_DATA)
   // A later file (or a later reconcile) wins over an earlier one still in flight.
@@ -258,6 +265,7 @@ export function useImportSessionState(opts: {
   const adopt = useCallback(async (result: InspectResult, packaged: boolean) => {
     setInspect(result)
     setPkg(packaged ? { uploadId: (result as PackageInspectResult).uploadId, info: (result as PackageInspectResult).package } : null)
+    setNewSources(packaged ? (result as PackageInspectResult).newSources ?? [] : [])
     setDataChoice(true)
     setViewIndexState(0)
     // Several views, and not opened to update one of them: importing them all is the likely aim.
@@ -321,6 +329,15 @@ export function useImportSessionState(opts: {
     dataRun.current = null
     setPkg(null)
     setData(NO_DATA)
+    setNewSources([])
+  }, [])
+
+  const noteNewSource = useCallback((made: PackageNewSource) => {
+    setNewSources(prev => [...prev.filter(s => s.workspaceId !== made.workspaceId), made])
+  }, [])
+
+  const dropNewSource = useCallback((dataSourceId: string) => {
+    setNewSources(prev => prev.filter(s => s.dataSourceId !== dataSourceId))
   }, [])
 
   const loadFile = useCallback(async (file: File) => {
@@ -467,7 +484,7 @@ export function useImportSessionState(opts: {
     action, targetView, choose, strategy, setStrategy, resolutions, draft, setDraft,
     reconcile, reconciling, reconcileError, runReconcile, invalidateReconcile,
     intoViewId,
-    pkg, withData, setWithData, data, startData,
+    pkg, withData, setWithData, data, startData, newSources, noteNewSource, dropNewSource,
   }), [
     batch,
     fileName, fileSize, fileKey, inspect, inspecting, inspectProgress, inspectError, loadFile, clearFile,
@@ -475,6 +492,6 @@ export function useImportSessionState(opts: {
     action, targetView, choose, strategy, setStrategy, resolutions, draft,
     reconcile, reconciling, reconcileError, runReconcile, invalidateReconcile,
     intoViewId,
-    pkg, withData, setWithData, data, startData,
+    pkg, withData, setWithData, data, startData, newSources, noteNewSource, dropNewSource,
   ])
 }

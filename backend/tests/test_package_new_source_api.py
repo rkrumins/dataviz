@@ -5,7 +5,8 @@ chosen FalkorDB provider and queues the job that seeds its first version from th
 (``origin: 'package'``): 202, moving no data. It is safe to send again — the same ``requestId``, or
 the same target, answers 200 with what the first request made, and finishes what it left undone
 (a request that died after making the data source queues its job). One upload makes one source per
-workspace. A request that fails to make the version store removes the data source IT made, never
+workspace, and the package's read says which it made (``newSources``), where the caller may read
+them. A request that fails to make the version store removes the data source IT made, never
 one it found. Later: giving up removes the source; a purge never drops a key anything else reads
 (and keeps it when it cannot ask); the reaper tombstones a source that never got its graph.
 
@@ -216,7 +217,31 @@ async def test_asking_again_answers_with_what_the_first_made(
                                                  graphName="another_copy"))
     assert other.status_code == 409 and other.json()["detail"]["type"] == "upload_consumed"
     assert other.json()["detail"]["dataSourceId"] == first.json()["dataSourceId"]
+    assert other.json()["detail"]["source"] == {     # what to follow instead, as newSources has it
+        "workspaceId": uat, "dataSourceId": first.json()["dataSourceId"], "label": "Finance copy",
+        "graphName": "finance_copy", "providerId": prov, "ontologyId": None}
     assert len(await _sources(db_session, uat)) == 1 and len(seeds.jobs) == 1
+
+
+async def test_the_package_says_which_data_sources_it_made(
+        test_client, db_session, graph, services, small_parts, seeds):
+    """A wizard opened anywhere (another browser, after a reload) learns from the package what it
+    already made, and follows that copy rather than offering to make another."""
+    _versioning, jobs = services
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    prov = await _provider(db_session)
+    upload = await _ready_upload(test_client, jobs, dev)
+    package = f"{_TRANSFER}/packages/{upload}"
+    assert (await test_client.get(package)).json()["newSources"] == []
+
+    made = (await test_client.post(f"{package}/new-source", json=_ask(uat, prov))).json()
+    assert (await test_client.get(package)).json()["newSources"] == [{
+        "workspaceId": uat, "dataSourceId": made["dataSourceId"], "label": "Finance copy",
+        "graphName": "finance_copy", "providerId": prov, "ontologyId": None}]
+    # Only where the caller may read data sources: elsewhere, not even that it exists.
+    elsewhere = PermissionClaims(sid="s_d", ws_perms={dev: ("workspace:datasource:read",)})
+    with _as(_user("usr_test000000"), elsewhere):
+        assert (await test_client.get(package)).json()["newSources"] == []
 
 
 async def test_a_request_that_died_after_the_data_source_is_finished_by_the_retry(

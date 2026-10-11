@@ -563,8 +563,13 @@ async def get_view_package(
     itself (its parts, verified or not, and what its data holds by type: ``package.data.
     typeStats``), and per source, the semantic layer here that is its own (``ontologyMatch``).
     Only data sources under version control can take its data, since it goes into a draft, so each
-    suggested target says whether it is (``versioned``). 409 until the check is done; 422 when the
-    file is no package to import; 410 ``upload_expired`` once it is gone."""
+    suggested target says whether it is (``versioned``). ``newSources``: the data sources this
+    package already made, where the caller may read them — a wizard opened anywhere (another
+    browser, after a reload) follows that copy rather than offering to make another. 409 until the
+    check is done; 422 when the file is no package to import; 410 ``upload_expired`` once it is
+    gone."""
+    from backend.app.services import managed_sources
+
     await _importer(user)
     record = await _package_to_read(ie, upload_id, user)
     state = await _upload_state(ie, record)
@@ -591,6 +596,8 @@ async def get_view_package(
                 versioned[ds] = graph is not None and graph.get("workspace_id") == item.get("workspaceId")
             item["versioned"] = versioned[ds]
     bundle = parsed.bundle.model_dump(mode="json", exclude={"views"})
+    made = [ds for ds in await managed_sources.find_origin_data_sources(session, upload_id)
+            if has_permission(claims, "workspace:datasource:read", workspace_id=ds.workspace_id)]
     return await json_response({
         "uploadId": upload_id,
         "package": inspection["package"],
@@ -602,6 +609,7 @@ async def get_view_package(
         "targetSuggestions": suggestions,
         "ontologyMatch": await ontology_match(session, claims, bundle["sources"],
                                               (bundle.get("generator") or {}).get("environment")),
+        "newSources": [_made_source(ds) for ds in made],
         "expiresAt": state["expiresAt"],
     })
 
@@ -792,6 +800,12 @@ async def _seed_ontology(session: AsyncSession, claims: PermissionClaims, ontolo
     return ont
 
 
+def _made_source(ds) -> Dict[str, Any]:
+    """A data source a package made, as the wizard follows it (``newSources``)."""
+    return {"workspaceId": ds.workspace_id, "dataSourceId": ds.id, "label": ds.label,
+            "graphName": ds.graph_name, "providerId": ds.provider_id, "ontologyId": ds.ontology_id}
+
+
 def _new_source_answer(ds, origin: Dict[str, Any], job: Dict[str, Any]) -> Dict[str, Any]:
     return {"dataSourceId": ds.id, "graphId": job["graph_id"], "jobId": job["job_id"],
             "status": job["status"], "label": ds.label, "graphName": ds.graph_name,
@@ -821,11 +835,12 @@ async def create_source_from_package(
     again with the same ``requestId`` — or for the same target, once this upload has made one —
     answers 200 with what the first request made, finishing anything it left undone (a request
     that died after making the data source queues its job). One upload makes one source per
-    workspace: another target is 409 ``upload_consumed``. 409 ``not_inspected`` until the package
-    is checked; 410 ``upload_expired`` when the upload is gone or about to expire; 422 for a provider
-    that isn't usable, a semantic layer that isn't there, or a graph name that is taken (with a free
-    ``suggestion``); 502 ``provisioning_failed`` when the version store couldn't be made — the data
-    source this request made is removed, never one it found."""
+    workspace: another target is 409 ``upload_consumed``, with that ``source`` to follow instead.
+    409 ``not_inspected`` until the package is checked; 410 ``upload_expired`` when the upload is
+    gone or about to expire; 422 for a provider that isn't usable, a semantic layer that isn't
+    there, or a graph name that is taken (with a free ``suggestion``); 502 ``provisioning_failed``
+    when the version store couldn't be made — the data source this request made is removed, never
+    one it found."""
     from backend.app.services import managed_sources
     from backend.app.services.versioning.bootstrap_worker import (
         BootstrapConflict, create_bootstrap_job)
@@ -853,7 +868,7 @@ async def create_source_from_package(
                         and ds.graph_name == body.graphName.strip().lower()))
             if not same:
                 raise HTTPException(status_code=409, detail={
-                    "type": "upload_consumed", "dataSourceId": ds.id,
+                    "type": "upload_consumed", "dataSourceId": ds.id, "source": _made_source(ds),
                     "message": "This package already made a data source here. Open it, or give it "
                                "up to make another."})
         else:

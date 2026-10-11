@@ -398,23 +398,32 @@ def origin_of(extra_config: Optional[str]) -> Optional[Dict[str, Any]]:
     return origin if isinstance(origin, dict) else None
 
 
-async def find_origin_data_source(session: AsyncSession, ws_id: str, upload_id: str):
-    """The live data source in ``ws_id`` that the package upload ``upload_id`` created, if one was
-    (``extra_config.origin = {kind: 'viewPackage', uploadId}``) — so a retry of "new source from
-    this package" reuses it instead of making a second. ``extra_config`` is JSON in a text column:
-    narrowed by the id in SQL, confirmed by parsing."""
+async def find_origin_data_sources(session: AsyncSession, upload_id: str,
+                                   ws_id: Optional[str] = None) -> List[Any]:
+    """The live data sources the package upload ``upload_id`` created (``extra_config.origin =
+    {kind: 'viewPackage', uploadId}``), oldest first — one per workspace at most, and only in
+    ``ws_id`` when given. ``extra_config`` is JSON in a text column: narrowed by the id in SQL,
+    confirmed by parsing."""
     from backend.app.db.models import WorkspaceDataSourceORM
 
     ds = WorkspaceDataSourceORM
-    rows = (await session.execute(select(ds).where(
-        ds.workspace_id == ws_id, ds.deleted_at.is_(None),
-        ds.extra_config.contains(upload_id, autoescape=True),
-    ).order_by(ds.created_at))).scalars().all()
+    conds = [ds.deleted_at.is_(None), ds.extra_config.contains(upload_id, autoescape=True)]
+    if ws_id is not None:
+        conds.append(ds.workspace_id == ws_id)
+    rows = (await session.execute(select(ds).where(*conds).order_by(ds.created_at))).scalars().all()
+    found = []
     for row in rows:
         origin = origin_of(row.extra_config) or {}
         if origin.get("kind") == "viewPackage" and origin.get("uploadId") == upload_id:
-            return row
-    return None
+            found.append(row)
+    return found
+
+
+async def find_origin_data_source(session: AsyncSession, ws_id: str, upload_id: str):
+    """The live data source in ``ws_id`` that the package upload ``upload_id`` created, if one was
+    — so a retry of "new source from this package" reuses it instead of making a second."""
+    found = await find_origin_data_sources(session, upload_id, ws_id=ws_id)
+    return found[0] if found else None
 
 
 def ontology_coverage(types: Optional[Dict[str, Any]], ontology) -> Dict[str, Any]:

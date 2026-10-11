@@ -2,24 +2,26 @@
  * The Data step of importing a view package into a brand-new data source: the data source is
  * created as the Target step described it, and the package's data is copied into it in full.
  *
- * One request makes it, under a request id kept for the file in this browser (rememberNewSource):
- * a wizard closed meanwhile, or a page reloaded, finds the same data source again — never a second
- * one. The copy is a job on the server (the data source's own "enable version control" job, over
- * the package), followed with the same progress card the data source shows; it carries on when
- * this closes. Once it has checked out, the package's views come next, into the new data source.
- * "Finish importing views" opens here too, on a data source a package already made (`attached`).
+ * One request makes it, under a request id kept for the file in this browser (rememberNewSource),
+ * so asking again after a lost answer is the same request. What it made is the import session's
+ * (`newSources`: the package's own word when it was read, and this request's answer), which
+ * outlives this step: an answer heard after Back still lands, and a wizard opened again — after a
+ * reload, or in another browser — follows the same data source, never a second one. The copy is a
+ * job on the server (the data source's own "enable version control" job, over the package),
+ * followed with the same progress card the data source shows; it carries on when this closes.
+ * Once it has checked out, the package's views come next, into the new data source. "Finish
+ * importing views" opens here too, on a data source a package already made (`attached`).
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { AlertTriangle, ArrowRight, Database, DatabaseZap, FileUp, Loader2, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { WizardShell, type WizardStepDef } from '@/components/wizard/WizardShell'
-import { useWorkspacesStore } from '@/store/workspaces'
 import { useOntologies } from '@/features/ontology/hooks/useOntologies'
 import { useBootstrapStatus } from '@/features/versioning/hooks/useVersioning'
 import { BootstrapProgress } from '@/features/versioning/components/BootstrapProgress'
 import {
   ViewTransferError, createNewSourceFromPackage, newSourceRequestId, rememberNewSource, rememberedNewSource,
-  type NewSourceRequest, type RememberedNewSource,
+  type NewSourceRequest, type PackageNewSource, type RememberedNewSource,
 } from '@/services/viewTransferApiService'
 import { pluralize } from '@/features/view-transfer/format'
 import { useImportSession, type NewDataTarget } from './importSession'
@@ -27,11 +29,13 @@ import { useImportSession, type NewDataTarget } from './importSession'
 type Into = { workspaceId: string; dataSourceId: string }
 
 export function NewSourceSeedStep({
-  steps, target, providerName, attached, onBack, onClose, onSeeded, onChooseFileAgain, onUseGraphName,
+  steps, target, made, providerName, attached, onBack, onClose, onSeeded, onChooseFileAgain, onUseGraphName,
 }: {
   steps: WizardStepDef[]
   /** The new data source the Target step described; null when opened on one made already. */
   target: NewDataTarget | null
+  /** The data source this package already made in the chosen workspace: followed, not made again. */
+  made: PackageNewSource | null
   providerName?: string | null
   /** "Finish importing views": the data source this package was already copied into. */
   attached?: Into | null
@@ -45,50 +49,51 @@ export function NewSourceSeedStep({
   onUseGraphName: (graphName: string) => void
 }) {
   const session = useImportSession()!
-  const fileKey = session.fileKey
-  const workspaces = useWorkspacesStore(s => s.workspaces)
+  const { fileKey, noteNewSource, dropNewSource } = session
   const ontologies = useOntologies()
   const [record, setRecord] = useState<RememberedNewSource | null>(() => (fileKey ? rememberedNewSource(fileKey) : null))
-  /** A data source made already: by this package before ("upload_consumed"), or from the banner. */
+  /** The data source "Finish importing views" opened on, until it is given up. */
   const [adopted, setAdopted] = useState<Into | null>(attached ?? null)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<unknown>(null)
-  const alive = useRef(true)
-  useEffect(() => () => { alive.current = false }, [])
 
   const into: Into | null = adopted
-    ?? (record?.started && record.request
-      ? { workspaceId: record.request.workspaceId, dataSourceId: record.started.dataSourceId }
-      : null)
+    ?? (made ? { workspaceId: made.workspaceId, dataSourceId: made.dataSourceId } : null)
+  const intoId = into?.dataSourceId ?? null
   const status = useBootstrapStatus(into?.workspaceId, into?.dataSourceId, { enabled: !!into })
   const job = status.data ?? null
   const views = session.inspect?.views.length ?? 0
 
   /** Ask for the data source, remembered for the file before and after: a refusal leaves nothing
-   *  in flight; any other failure may have lost an answer, so it stays `sending`, to ask again. */
+   *  in flight; any other failure may have lost an answer, so it stays `sending`, to ask again.
+   *  What it made goes to the session: this step may be gone by the time it answers. */
   const send = useCallback(async (request: NewSourceRequest) => {
     if (!session.pkg || !fileKey) return
     const keep = (r: RememberedNewSource) => {
       rememberNewSource(fileKey, r)
-      if (alive.current) setRecord(r)
+      setRecord(r)
     }
     setSending(true)
     setError(null)
     keep({ requestId: request.requestId, request, sending: true })
     try {
       const started = await createNewSourceFromPackage(session.pkg.uploadId, request)
-      keep({ requestId: request.requestId, request, started })
+      keep({ requestId: request.requestId, request })
+      noteNewSource({
+        workspaceId: request.workspaceId, dataSourceId: started.dataSourceId, label: started.label,
+        graphName: started.graphName, providerId: request.providerId, ontologyId: started.ontologyId,
+      })
     } catch (err) {
       if (err instanceof ViewTransferError) keep({ requestId: request.requestId, request })
-      if (alive.current) setError(err)
+      setError(err)
     } finally {
-      if (alive.current) setSending(false)
+      setSending(false)
     }
-  }, [session.pkg, fileKey])
+  }, [session.pkg, fileKey, noteNewSource])
 
   // An answer a closed page never heard: asked again under the same id, it is the same data source.
   // Only what was remembered when this opened — a request sent from here is already being heard.
-  const interrupted = useRef(record?.sending && !record.started ? record.request ?? null : null)
+  const interrupted = useRef(record?.sending ? record.request ?? null : null)
   useEffect(() => {
     const request = interrupted.current
     if (!request || adopted || !session.pkg) return
@@ -100,9 +105,10 @@ export function NewSourceSeedStep({
    *  id — the old request's answer is the data source that is gone. */
   const forget = useCallback(() => {
     if (fileKey) rememberNewSource(fileKey, null)
+    if (intoId) dropNewSource(intoId)
     setRecord(null)
     setAdopted(null)
-  }, [fileKey])
+  }, [fileKey, intoId, dropNewSource])
 
   const create = () => {
     if (!target) return
@@ -221,10 +227,18 @@ export function NewSourceSeedStep({
               </div>
             )}
             {error ? (
-              <Refusal error={error} workspaces={workspaces} onRetry={create} onBack={onBack}
+              <Refusal error={error} onRetry={create} onBack={onBack}
                 onChooseFileAgain={onChooseFileAgain}
                 onUseGraphName={(name) => { setError(null); onUseGraphName(name) }}
-                onAdopt={(found) => { setError(null); setAdopted(found) }} />
+                onContinue={(source) => {
+                  // Asked for that one's own target, the server answers with it — and queues its copy
+                  // if the request that made it stopped first — so following it never finds no copy.
+                  void send({
+                    requestId: record?.requestId ?? newSourceRequestId(), workspaceId: source.workspaceId,
+                    providerId: source.providerId, label: source.label, graphName: source.graphName,
+                    ontologyId: source.ontologyId,
+                  })
+                }} />
             ) : !target ? (
               <Notice tone="amber" title="There is no data source to copy into">
                 <p>It was given up and removed. Describe a new one on the Target step to copy the package into it.</p>
@@ -259,24 +273,21 @@ export function NewSourceSeedStep({
 }
 
 /** Why the data source wasn't created, and what can be done about it. */
-function Refusal({ error, workspaces, onRetry, onBack, onChooseFileAgain, onUseGraphName, onAdopt }: {
+function Refusal({ error, onRetry, onBack, onChooseFileAgain, onUseGraphName, onContinue }: {
   error: unknown
-  workspaces: ReturnType<typeof useWorkspacesStore.getState>['workspaces']
   onRetry: () => void
   onBack: () => void
   onChooseFileAgain: () => void
   onUseGraphName: (name: string) => void
-  onAdopt: (into: Into) => void
+  /** `upload_consumed`: follow the data source this package already made here instead. */
+  onContinue: (source: PackageNewSource) => void
 }) {
   const refusal = error instanceof ViewTransferError ? error : null
   const message = error instanceof Error ? error.message : 'The data source couldn’t be created.'
   const suggestion = typeof refusal?.detail?.suggestion === 'string' ? refusal.detail.suggestion : null
-  const consumedId = typeof refusal?.detail?.dataSourceId === 'string' ? refusal.detail.dataSourceId : null
-  let consumed: (Into & { name: string }) | null = null
-  for (const ws of workspaces) {
-    const ds = consumedId ? ws.dataSources?.find(d => d.id === consumedId) : undefined
-    if (ds) consumed = { workspaceId: ws.id, dataSourceId: ds.id, name: `${ws.name} · ${ds.label || ds.id}` }
-  }
+  const source = refusal?.detail?.source as Partial<PackageNewSource> | undefined
+  const consumed = typeof source?.dataSourceId === 'string' && typeof source.workspaceId === 'string'
+    ? source as PackageNewSource : null
 
   if (refusal?.status === 410 || refusal?.type === 'upload_expired') {
     return (
@@ -300,12 +311,11 @@ function Refusal({ error, workspaces, onRetry, onBack, onChooseFileAgain, onUseG
     return (
       <Notice tone="amber" title="This package already made a data source">
         <p>
-          {consumed ? `It went into “${consumed.name}”.` : message} One package makes one new data source; its views can go
+          {consumed ? `It went into “${consumed.label}”.` : message} One package makes one new data source; its views can go
           into that one.
         </p>
         {consumed && (
-          <Action icon={<ArrowRight className="w-4 h-4" />}
-            onClick={() => onAdopt({ workspaceId: consumed.workspaceId, dataSourceId: consumed.dataSourceId })}>
+          <Action icon={<ArrowRight className="w-4 h-4" />} onClick={() => onContinue(consumed)}>
             Continue with it
           </Action>
         )}

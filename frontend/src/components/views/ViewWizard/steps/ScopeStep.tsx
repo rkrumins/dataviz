@@ -86,6 +86,9 @@ export interface ScopeStepProps {
     /** Blank mode: rendered in place of the published-semantic-layer picker (a new data source
      *  copied from a view package is matched to a layer of its own). */
     blankOntologySlot?: ReactNode
+    /** Blank mode: rendered in place of both pickers, when the selected workspace has nothing left
+     *  to pick (a view package's data source is already made there). */
+    blankBody?: ReactNode
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -1140,6 +1143,7 @@ export function ScopeStep({
     showModeToggle = true,
     aboveSlot,
     blankOntologySlot,
+    blankBody,
 }: ScopeStepProps) {
     const isBlank = scopeMode === 'blank'
     const importModeAvailable = useViewPortability().canImport
@@ -1506,7 +1510,9 @@ export function ScopeStep({
 
                 {/* Right: Data Source Cards, or blank-model pickers */}
                 <div className="flex-1 flex flex-col min-w-0">
-                    {selectedWorkspace && isBlank ? (
+                    {selectedWorkspace && isBlank && blankBody ? (
+                        blankBody
+                    ) : selectedWorkspace && isBlank ? (
                         <BlankScopePickers
                             providers={providers}
                             ontologies={ontologies}

@@ -7,11 +7,13 @@
  * marked as its copy (`lineage_copy`, derived by the wizard), checked live on the connection chosen
  * below it (useGraphNameCheck, as a blank model's is): a derived name that's taken moves to a free
  * one on its own, a typed one gets the free one offered. The copy is independent: nothing ties it to
- * where it was exported from.
+ * where it was exported from. Where the package already made its data source (one per workspace),
+ * there is nothing to describe: MadeSourceCard shows that one, and the copy is followed.
  */
 import { useMemo } from 'react'
 import { AlertCircle, AlertTriangle, Check, Database, DatabaseZap, Loader2, PlusCircle, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import type { PackageNewSource } from '@/services/viewTransferApiService'
 import { useGraphNameCheck, type GraphNameFields } from '../steps/useGraphNameCheck'
 
 /** The new data source as it's being described on the Target step. */
@@ -143,6 +145,26 @@ export function NewSourceTargetPanel({ value, onChange, workspaceId, providerId,
           Creating a data source in this workspace needs permission to manage its data sources. Choose another workspace, or ask an admin.
         </p>
       )}
+    </div>
+  )
+}
+
+/** The data source this package already made in the chosen workspace, in place of the pickers. */
+export function MadeSourceCard({ made, providerName }: { made: PackageNewSource; providerName?: string | null }) {
+  return (
+    <div className="flex-1 flex items-center justify-center p-6">
+      <div role="status" className="w-full max-w-md rounded-2xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/40 dark:bg-emerald-950/15 px-5 py-4 space-y-1.5">
+        <p className="flex items-center gap-2 text-sm font-semibold text-ink">
+          <DatabaseZap className="w-4 h-4 text-emerald-500 shrink-0" />
+          This package already made “{made.label}” here
+        </p>
+        <p className="text-xs text-ink-secondary">
+          <span className="font-mono">{made.graphName}</span>{providerName ? ` on ${providerName}` : ''}
+        </p>
+        <p className="text-[11px] text-ink-muted leading-relaxed">
+          One package makes one data source in a workspace. Next follows its copy; to make another, give this one up from its progress first.
+        </p>
+      </div>
     </div>
   )
 }

@@ -305,8 +305,9 @@ download is named for the package.
    whole, for scripts, and checks it the same way (202). The upload is kept for the caller only,
    for 24 hours and while any job still reads it. `GET /api/v1/views/transfer/packages/{uploadId}`
    then describes the views as for a view file, plus the package and, per source, the semantic
-   layer here that is its own (`ontologyMatch`); 409 until the check is done. Each suggested
-   target says whether it is under version control (`versioned`).
+   layer here that is its own (`ontologyMatch`), and the data sources it already made where the
+   caller may read them (`newSources`); 409 until the check is done. Each suggested target says
+   whether it is under version control (`versioned`).
 2. `POST /api/v1/views/transfer/packages/{uploadId}/data` brings the data into a **new draft** of
    the target data source, through the data source's own import job, adding and updating only
    (a package never deletes). For an update, name the view (`viewId`): the draft is opened for it.
@@ -314,7 +315,9 @@ download is named for the package.
    asking again for the same target returns its job, or, when that job failed, queues it again to
    resume into the same draft. 409 until the package is checked; 410 `upload_expired` once the
    upload is gone. Instead, `POST …/packages/{uploadId}/new-source` makes a new data source of
-   the data, as its first version with no draft, and the views are then imported into it.
+   the data, as its first version with no draft, and the views are then imported into it. A
+   package makes one per workspace: asking again answers with that one, and another target there
+   is 409 `upload_consumed`, with that one as `source`, to follow instead.
 3. The view is reconciled against **that draft** (`target.branchId`), so the entities the data
    brought count as found, then imported into it with `stage` set. A new view claims the draft as
    its own. The view and its data are reviewed and published together.
@@ -359,7 +362,7 @@ description, icon and tags, never visibility, and says the graph data isn't affe
 | `POST /api/v1/views/transfer/packages` | views + scope + data version → export job | `viewExportEnabled` and `graphExportEnabled`; read access; `workspace:datasource:read` |
 | `POST /api/v1/views/transfer/packages/uploads` · `PUT …/{uploadId}/parts/{n}` · `POST …/complete` | a zip in parts → **202**, checked by a `package_inspect` job | `viewImportEnabled`; version control on; sign-in |
 | `POST /api/v1/views/transfer/packages/inspect` | a raw zip of at most 100 MB → **202** `{uploadId, jobId}`, checked the same way | `viewImportEnabled`; version control on; sign-in |
-| `GET /api/v1/views/transfer/packages/{uploadId}` | the checked package: as inspect, plus the package and `ontologyMatch` | `viewImportEnabled`; the uploader |
+| `GET /api/v1/views/transfer/packages/{uploadId}` | the checked package: as inspect, plus the package, `ontologyMatch` and `newSources` | `viewImportEnabled`; the uploader |
 | `POST /api/v1/views/transfer/packages/{uploadId}/data` | target → the data's draft and import job | `viewImportEnabled`; version control on; the uploader; `workspace:datasource:manage` |
 | `POST /api/v1/views/transfer/packages/{uploadId}/new-source` | provider, label, graph name, semantic layer → **202**, a new data source and the job that copies the data into it | `viewImportEnabled`; version control on; the uploader; `workspace:datasource:manage` |
 | `GET /api/v1/views/{viewId}/versions` | a page of versions + the working copy | read access |

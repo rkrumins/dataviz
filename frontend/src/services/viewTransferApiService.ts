@@ -628,8 +628,20 @@ export interface PackageInspectResult extends InspectResult {
   }
   /** Keyed by the file's source key (`views[].source`). */
   ontologyMatch?: Record<string, OntologyMatch>
+  /** The data sources this package already made, where the caller may read them. */
+  newSources?: PackageNewSource[]
   /** When the upload may be swept, and its data can no longer be imported. */
   expiresAt?: string
+}
+
+/** A data source a package made (`createNewSourceFromPackage`): one per workspace at most. */
+export interface PackageNewSource {
+  workspaceId: string
+  dataSourceId: string
+  label: string
+  graphName: string
+  providerId: string
+  ontologyId: string | null
 }
 
 export type PackageUploadStatus = 'uploading' | 'inspecting' | 'ready' | 'invalid'
@@ -782,13 +794,13 @@ export function createNewSourceFromPackage(uploadId: string, body: NewSourceRequ
 }
 
 /** The new data source a package file was asked for in this browser: one request id per file, kept
- *  with what was asked and, once answered, what it created. `sending` marks a request whose answer
- *  was never heard (the page went away first): asked again under the same id, it is the same. */
+ *  with what was asked. `sending` marks a request whose answer was never heard (the page went away
+ *  first): asked again under the same id, it is the same. What it made, the package itself says
+ *  (`newSources`), for any browser. */
 export interface RememberedNewSource {
   requestId: string
   request?: NewSourceRequest
   sending?: boolean
-  started?: NewSourceStarted | null
 }
 
 const newSourceKey = (fileKey: string) => `view-package-new-source:${fileKey}`

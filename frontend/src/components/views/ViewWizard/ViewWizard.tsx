@@ -78,7 +78,7 @@ import {
     viewToViewConfig, updateViewLayout, requestViewPublication, getView,
 } from '@/services/viewApiService'
 import {
-    importView, newRequestId, rememberedNewSource, ViewTransferError,
+    importView, newRequestId, ViewTransferError,
     type ImportViewRequest, type ImportViewResult, type PackageInspectResult,
 } from '@/services/viewTransferApiService'
 import { recordEvent } from '@/services/telemetryService'
@@ -113,7 +113,7 @@ import {
 import { BatchImport } from './import/BatchImport'
 import { StageChoice } from './import/StageChoice'
 import { DRAFT_PERMISSION, useDraftStaging } from './import/useDraftStaging'
-import { DataTargetToggle, NewSourceTargetPanel, type NewSourceDraft } from './import/NewSourceTargetPanel'
+import { DataTargetToggle, MadeSourceCard, NewSourceTargetPanel, type NewSourceDraft } from './import/NewSourceTargetPanel'
 import { PackageOntologyPicker } from './import/PackageOntologyPicker'
 import { NewSourceSeedStep } from './import/NewSourceSeedStep'
 import { PublishDraftDialog } from '@/features/versioning/components/PublishDraftDialog'
@@ -657,9 +657,14 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 suggestedFor.current = key
                 if (top && (top.sampleHitRate ?? 0) >= 0.5) selectScope(top.workspaceId, top.dataSourceId)
             }
-            // This file already made a new data source here (the wizard closed, or the page
-            // reloaded, while its data was copied): back to following that copy.
-            if (newSourceOffered && importSession.fileKey && rememberedNewSource(importSession.fileKey)?.started) {
+            // This package already made a new data source (the wizard was closed, the page reloaded,
+            // or another browser made it): back to following that copy, in the workspace the wizard
+            // opened on if it made one there.
+            const made = newSourceOffered
+                ? importSession.newSources.find(s => s.workspaceId === selectedWsId) ?? importSession.newSources[0]
+                : undefined
+            if (made) {
+                setSelectedWsId(made.workspaceId)
                 setDataTargetMode('new')
                 setImportStep('seed')
                 return
@@ -672,8 +677,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         setSelectedWsId(target.workspaceId)
         setSelectedDsId(target.dataSourceId ?? null)
         setScopeConfirmed(true)
-    }, [importSession.batch, importSession.fileName, importSession.fileKey, importSession.view, importSession.suggestions,
-        importNeedsTarget, importSession.targetView, selectScope, newSourceOffered])
+    }, [importSession.batch, importSession.fileName, importSession.newSources, importSession.view, importSession.suggestions,
+        importNeedsTarget, importSession.targetView, selectScope, newSourceOffered, selectedWsId])
 
     // The new data source as the Target step describes it: the package's own label, and its graph
     // name marked as its copy (`lineage` → `lineage_copy`); both the person's to change.
@@ -692,9 +697,16 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
             ontologyId: newSource.ontologyId ?? null,
         }
     }, [newSource, newSourceDefaults, selectedWsId, selectedProviderId])
+    // The data source this package already made in the chosen workspace (the server's word when the
+    // package was read, or this session's): one per workspace, so it is followed rather than another
+    // described, whose name would read as taken, by it.
+    const madeHere = useMemo(
+        () => (newSourceOffered ? importSession.newSources.find(s => s.workspaceId === selectedWsId) ?? null : null),
+        [newSourceOffered, importSession.newSources, selectedWsId],
+    )
     // No data source id yet: what's needed is a complete description, a free name, and the right.
-    const newSourceReady = !!newSourceTarget && mayCreateSource && newSource.graphNameAvailable !== false
-        && !newSourceOntologyPending
+    const newSourceReady = !!madeHere || (!!newSourceTarget && mayCreateSource && newSource.graphNameAvailable !== false
+        && !newSourceOntologyPending)
 
     /** The package's data is in its new data source: its views follow, live. Several go through the
      *  batch flow, preset to it; one goes through the steps, as a view without its data does. */
@@ -784,6 +796,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                     <NewSourceSeedStep
                         steps={allSteps}
                         target={attachTo ? null : newSourceTarget}
+                        made={madeHere}
                         providerName={chosenProvider?.name}
                         attached={attachTo}
                         onBack={() => setImportStep(attachTo ? 'file' : 'target')}
@@ -852,15 +865,17 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                             aboveSlot={toNewSource ? (
                                 <>
                                     <DataTargetToggle mode={dataTargetMode} onChange={setDataTargetMode} />
-                                    <NewSourceTargetPanel
-                                        value={newSource}
-                                        onChange={updateNewSource}
-                                        workspaceId={selectedWsId}
-                                        providerId={selectedProviderId}
-                                        providerName={chosenProvider?.name}
-                                        defaults={newSourceDefaults}
-                                        allowed={mayCreateSource}
-                                    />
+                                    {!madeHere && (
+                                        <NewSourceTargetPanel
+                                            value={newSource}
+                                            onChange={updateNewSource}
+                                            workspaceId={selectedWsId}
+                                            providerId={selectedProviderId}
+                                            providerName={chosenProvider?.name}
+                                            defaults={newSourceDefaults}
+                                            allowed={mayCreateSource}
+                                        />
+                                    )}
                                 </>
                             ) : (
                                 <>
@@ -894,6 +909,10 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                             selectedOntologyId={selectedOntologyId}
                             onSelectProvider={setSelectedProviderId}
                             onSelectOntology={setSelectedOntologyId}
+                            blankBody={toNewSource && madeHere ? (
+                                <MadeSourceCard made={madeHere}
+                                    providerName={blankOptions.providers.find(o => o.provider.id === madeHere.providerId)?.provider.name} />
+                            ) : undefined}
                             blankOntologySlot={toNewSource ? (
                                 <PackageOntologyPicker
                                     match={(importSession.inspect as PackageInspectResult | null)?.ontologyMatch?.[importSession.view?.source ?? ''] ?? null}
