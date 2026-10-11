@@ -7,6 +7,9 @@ administrator who is linked to the IdP too. When that password has to be
 replaced, the requirement is about the password — a session signed in WITH
 it is held until it is changed, and a session signed in through the IdP
 carries on, through every rotation, without being sent to the change screen.
+
+Whichever came first: an account the IdP created and an administrator later
+gave a password, or a local account whose first SSO sign-in attaches to it.
 """
 from __future__ import annotations
 
@@ -192,3 +195,59 @@ async def test_the_password_can_be_replaced_from_an_sso_session(
     assert changed.status_code == 200, changed.text
     await db_session.refresh(await user_repo.get_user_by_id(db_session, dana.id))
     assert (await user_repo.get_user_by_id(db_session, dana.id)).must_change_password is False
+
+
+# ── A local account first, SSO second ────────────────────────────────
+
+_LOCAL_EMAIL = "max@example.com"
+
+
+@pytest.fixture()
+async def max_local(db_session):
+    """Created by an administrator with a password they typed, and not
+    signed in yet: no identity, and the password must be replaced."""
+    user = await user_repo.create_user(
+        db_session, email=_LOCAL_EMAIL, password_hash=hash_password(_ADMIN_SET),
+        first_name="Max", last_name="Local", status="active",
+        signup_source="admin_created",
+    )
+    user.must_change_password = True
+    await db_session.commit()
+    return user
+
+
+async def test_a_first_sso_sign_in_attaches_and_is_not_held(svc, provider, max_local):
+    identity = ProviderIdentity(
+        provider="oidc", external_id="max-sub", email=_LOCAL_EMAIL,
+        first_name="Max", last_name="Local", raw_claims={"email_verified": True},
+    )
+    user, tokens = await svc.complete_sso_login(
+        identity, provider_id=provider.id, provider_slug=provider.slug,
+        linking_policy="strict",
+    )
+    assert user.id == max_local.id
+    claims = decode_token(tokens.access_token)
+    assert claims["signin"] == "sso"
+    assert "mcp" not in claims
+
+    # The password is still pending, so signing in with it is held.
+    _, by_password = await svc.login(_LOCAL_EMAIL, _ADMIN_SET)
+    assert decode_token(by_password.access_token)["mcp"] is True
+
+
+async def test_a_held_password_session_cannot_link_its_way_out(
+    app_client, provider, max_local,
+):
+    """Linking an identity mints an SSO session, which isn't held — so
+    starting a link has to wait for the password like everything else."""
+    signed_in = await app_client.post(
+        "/api/v1/auth/login", json={"email": _LOCAL_EMAIL, "password": _ADMIN_SET},
+    )
+    assert signed_in.status_code == 200, signed_in.text
+    app_client.cookies.delete(CSRF_COOKIE_NAME)
+    app_client.cookies.set(CSRF_COOKIE_NAME, signed_in.cookies[CSRF_COOKIE_NAME])
+    app_client.headers[CSRF_HEADER_NAME] = signed_in.cookies[CSRF_COOKIE_NAME]
+
+    started = await app_client.post(f"/api/v1/me/identities/link/{provider.slug}/start")
+    assert started.status_code == 403, started.text
+    assert started.json()["detail"]["error"] == "password_change_required"
