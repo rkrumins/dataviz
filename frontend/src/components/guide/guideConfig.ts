@@ -31,6 +31,12 @@ export interface GuidePersona {
   tagline: string
   intro: string
   startSlug: string
+  /**
+   * The pages this persona reads, in order — its list under "Who is this
+   * guide for?" on the Welcome page, which `readingPaths.test.ts` keeps in
+   * step with this one.
+   */
+  path: string[]
   /** Tailwind accent classes used across cards, badges and active states. */
   accent: {
     gradient: string // e.g. 'from-indigo-500 to-violet-600'
@@ -91,6 +97,7 @@ export const guidePersonas: GuidePersona[] = [
     intro:
       'Find views in the Explorer, read their lineage, and trace it to answer your own questions — no setup required.',
     startSlug: 'browsing-views',
+    path: ['browsing-views', 'reading-lineage', 'exploring-graph', 'lineage-lens', 'advanced-search'],
     accent: {
       gradient: 'from-sky-500 to-indigo-600',
       text: 'text-sky-600 dark:text-sky-400',
@@ -107,6 +114,7 @@ export const guidePersonas: GuidePersona[] = [
     intro:
       'Build views with New View, share them at the right visibility, and shape what your data means through the semantic layer.',
     startSlug: 'creating-views',
+    path: ['creating-views', 'managing-views', 'display-rules', 'semantic-layer'],
     accent: {
       gradient: 'from-violet-500 to-fuchsia-600',
       text: 'text-violet-600 dark:text-violet-400',
@@ -123,6 +131,7 @@ export const guidePersonas: GuidePersona[] = [
     intro:
       'Connect data sources, manage users and access, keep data fresh, and decide which features everyone gets.',
     startSlug: 'admin-setup',
+    path: ['admin-setup', 'users-access', 'workspace-admin', 'feature-switches', 'governance-ops'],
     accent: {
       gradient: 'from-emerald-500 to-teal-600',
       text: 'text-emerald-600 dark:text-emerald-400',
@@ -139,6 +148,7 @@ export const guidePersonas: GuidePersona[] = [
     intro:
       'Change data in a private draft, get it reviewed in the Review Center, and undo one change or restore an earlier point when you need to.',
     startSlug: 'versioning-change-control',
+    path: ['versioning-change-control', 'editing-in-a-draft', 'review-center', 'import-export'],
     accent: {
       gradient: 'from-amber-500 to-orange-600',
       text: 'text-amber-600 dark:text-amber-400',

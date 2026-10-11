@@ -7,7 +7,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/ONBOARDING_A_SOURCE.md"
   },
   "contributing": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/CONTRIBUTING.md"
   },
   "architecture": {
@@ -23,7 +23,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -265,7 +265,7 @@ export const docMeta: Record<string, DocMeta> = {
 }
 export const guideMeta: Record<string, DocMeta> = {
   "welcome": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/guide/WELCOME.md"
   },
   "key-concepts": {

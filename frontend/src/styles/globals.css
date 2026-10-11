@@ -764,6 +764,25 @@
     scroll-margin-top: 1.5rem;
   }
 
+  /* The section a link or a search result opened the page at: a brief
+     highlight, so the eye finds it (reading/useScrollLanding.ts). */
+  .reader-landed {
+    border-radius: 6px;
+    animation: reader-landed 2.2s ease-out;
+  }
+
+  @keyframes reader-landed {
+    0%,
+    35% {
+      background-color: rgb(var(--nx-accent-lineage-rgb) / 0.14);
+      box-shadow: 0 0 0 6px rgb(var(--nx-accent-lineage-rgb) / 0.14);
+    }
+    100% {
+      background-color: transparent;
+      box-shadow: 0 0 0 6px transparent;
+    }
+  }
+
   .prose-synodic h1 {
     @apply text-3xl font-bold text-ink mt-0 mb-6 tracking-tight;
     font-family: 'Inter Variable', 'Inter', system-ui, sans-serif;

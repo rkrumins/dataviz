@@ -58,6 +58,12 @@ Most people are mainly one of these, but you can be all four on different days.
 Whatever your path, the [Quick Start](/guide/quick-start) is the best first
 ten minutes.
 
+Choose a path under **Choose your path** on the guide's home page, or with
+**Follow this path** at the end of any page on it, and the guide keeps your
+place: each page on it shows the step you're on, its end takes you to the next
+one, and the home page picks up where you left off. Your progress stays in
+this browser.
+
 ### Viewers — find, read and trace data
 
 You look things up, check where a number came from and follow lineage. Your
@@ -229,17 +235,28 @@ The panel has a search box and, below it:
 ### Search the guide and the documentation
 
 1. In the Help panel, type a few words in **Search the docs & user guide…**.
-2. Results appear grouped under **Documentation** and **User Guide**, each with
+2. Results appear grouped under **User Guide** and **Documentation**, each with
    the passage that matched.
-3. Click a **User Guide** result to read it right in the panel — **Back**
-   returns to your results, **Open full page** opens it in the guide. A
-   **Documentation** result opens in a new tab.
+3. Click a **User Guide** result to read it right in the panel, opened at the
+   part that matched — **Back** returns to your results, **Open full page**
+   opens it in the guide. A **Documentation** result, or an answer from the
+   guide's questions, opens in a new tab.
 
-> **Tip:** Every word you type has to appear on the page, so two or three
-> specific words find more than a long question.
+> **Tip:** Search matches a word in any form — *trace*, *traced*, *tracing* —
+> forgives a typo, and skips words like *how* and *the*, so a short question
+> works too. When no page has every word, you see the pages that have some of
+> them.
 
 Reading the guide itself? Use **Search** at the top of the page, or press `⌘K` /
-`Ctrl-K` or `/`, to search the same pages.
+`Ctrl-K` or `/`, to search the same pages. Each result is a page with the
+sections of it that matched underneath; choosing one opens the page at that
+section. **All**, **User Guide** and **Documentation** above the results narrow
+them to one or the other, and with nothing typed you see your recent searches.
+
+To narrow the list of pages on the left instead, type in **Filter pages** at
+the top of it: it lists the pages, and the sections of pages, that mention what
+you typed. Press `Enter` to open the highlighted one, or `Shift-Enter` to
+search everything for the same words.
 
 ### Jump anywhere with the command palette
 

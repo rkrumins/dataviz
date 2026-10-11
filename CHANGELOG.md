@@ -32,7 +32,21 @@ environment variable the backend reads. Pages that existed but weren't in the re
 Performance*, the *Back-channel SSO Contract*, the *Production Cluster Overlay* and the
 2026-09-10 upgrade note.
 
+**Reading paths that keep your place.** Each persona's pages — in the docs and in the guide — are
+a path you can follow: the page shows the step you're on, its end offers the next page, the sidebar
+ticks off what you've read, and the hub picks up where you left off. Progress stays in your
+browser.
+
+**The docs and the guide work on a phone.** The table of contents opens as a drawer, search fills
+the screen, and "On this page" folds into the top of the article.
+
 ### Changed
+
+**Search finds the part of a page that answers.** *Search everything* (⌘K / Ctrl+K, or "/")
+searches every section of every page and every FAQ answer, matches a word in any form, forgives a
+typo and ignores filler words. Results are grouped by page with the sections that matched, the best
+page first whichever reader it is in, and choosing one opens the page at that section. *Filter
+pages* in the sidebar uses the same index, and both hubs' search boxes open *Search everything*.
 
 **The User Guide teaches the product as it ships.** The pages people start with described an
 Explorer that was an open canvas, a "Save as View" button, renamed visibility tiers, a five-step
@@ -49,6 +63,12 @@ the ADRs record what superseded what.
 
 ### Fixed
 
+- A link to a section of a page opened the top of the page, and a new page opened as far down as
+  the previous one had been scrolled.
+- *Filter pages* matched only titles and descriptions — and only the exact phrase — so most
+  searches found nothing; on the hubs, "share a view" found nothing at all.
+- "On this page" links for headings that contain the product name went nowhere.
+- Code blocks' **Copy** buttons were invisible on touch screens.
 - Wizard help links opened the guide in the same tab, unmounting the wizard and throwing away what
   you had entered. They open a new tab.
 - Four deep links into the docs pointed at headings that don't exist.
