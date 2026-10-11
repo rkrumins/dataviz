@@ -27,6 +27,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.advisory import claim_this_pass
 from backend.app.db.repositories.product_event_repo import purge_older_than
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,8 @@ async def run_sweeper(
         try:
             while not shutdown.is_set():
                 async with session_factory() as session:
+                    if not await claim_this_pass(session, "analytics:product-event-gc"):
+                        break  # another process is sweeping
                     deleted = await sweep_once(session, days=days)
                 if deleted:
                     logger.info(

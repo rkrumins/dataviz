@@ -1596,8 +1596,9 @@ async def probe_outbox(app_state) -> Optional[dict]:
     if oldest is not None:
         oldest_age_s = max(0.0, (datetime.now(timezone.utc) - oldest).total_seconds())
 
-    # Relay ownership is role-based (controlplane/dev own it); when this
-    # process isn't the owner the task is absent → None, not a fault.
+    # In a split deployment the control plane relays, so the task is absent
+    # here → None, not a fault; ``pending`` and its age say whether events
+    # are being relayed. A dev monolith relays in-process.
     task = getattr(app_state, "_outbox_relay_task", None)
     relay_alive = (not task.done()) if task is not None else None
 

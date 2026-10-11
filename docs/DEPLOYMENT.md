@@ -266,13 +266,16 @@ provider that has a password; `versioning-worker` and `versioning-jobs` already 
   entered again. *Verify:*
   `docker compose exec viz-service sh -c 'test -n "$CREDENTIAL_ENCRYPTION_KEY" && echo set'`
   prints `set`.
-- [ ] **Give the first administrator a strong, unique `ADMIN_PASSWORD`.** *Protects:* the
-  deployment's break-glass account — it keeps password sign-in when single sign-on is
-  enforced, and forced sign-out sweeps skip it. The value is read only while no user exists,
-  so changing it in `.env` later does nothing: change the password on **Account settings**
-  (`/me/account`), or follow [Reset an administrator's password](/docs/runbooks#reset-an-administrators-password).
-  *Verify:* the first sign-in doesn't ask you to change the password — it does when the
-  value is one of the example passwords published in this repository.
+- [ ] **Give the first administrator a strong, unique `ADMIN_PASSWORD`, and replace it at the
+  first sign-in.** *Protects:* the deployment's break-glass account — it keeps password
+  sign-in when single sign-on is enforced, and forced sign-out sweeps skip it. The value sits
+  in your `.env`, so the account must choose its own password at its first sign-in before it
+  can do anything else; an existing installation whose administrator still uses that value,
+  or a password published in this repository, is made to change it at its next sign-in. The
+  value is read only while no user exists, so changing it in `.env` later does nothing:
+  change the password on **Account settings** (`/me/account`), or follow
+  [Reset an administrator's password](/docs/runbooks#reset-an-administrators-password).
+  *Verify:* after the change, signing in with the `ADMIN_PASSWORD` value fails.
 - [ ] **Set `AUTH_ENVIRONMENT_ID` if people open more than one environment in the same
   browser.** *Protects:* sessions of two deployments that would otherwise share cookie names
   and sign each other out. Use 1–32 characters of `a-z`, `0-9`, `_` and `-`, starting with a

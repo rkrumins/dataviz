@@ -578,7 +578,7 @@ graph TB
      Status:      ./dev.sh ps
    ```
 
-3. Open http://localhost:5173 and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env.dev`. A password published in this repository, like the example file's, has to be changed at first sign-in.
+3. Open http://localhost:5173 and sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env.dev`. The first sign-in asks you to choose a new password before anything else.
 
 To run the API and the frontend on your machine instead, with only PostgreSQL, Redis and FalkorDB in Docker, follow the [Setup Guide](/docs/setup): that path needs one extra step, applying the migrations yourself, because the API never migrates the database on its own.
 

@@ -7,11 +7,13 @@ same transaction as the state change (see
 it, so events piled up with ``processed = false`` and there was no
 durable audit trail.
 
-This relay is that consumer. It runs as a background loop on the
-CONTROLPLANE / DEV process (the documented owner of the outbox relay —
-see ``runtime/role.py``), copies each unprocessed event verbatim into
+This relay is that consumer. It runs as a background loop in the
+aggregation control plane (``services/aggregation/controlplane.py``) and in
+a dev monolith (``main.py``), copies each unprocessed event verbatim into
 ``auth_audit_log``, and flips ``processed = true`` in the **same
 transaction** so the record and the flag commit or roll back together.
+Each pass claims an advisory lock first, so two control planes never
+relay at once.
 
 Idempotency: ``auth_audit_log.source_event_id`` is UNIQUE and we skip
 events that already have an audit row, so a crash between the audit
@@ -25,6 +27,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.advisory import claim_this_pass
 from backend.app.db.models import AuthAuditLogORM, OutboxEventORM
 
 logger = logging.getLogger(__name__)
@@ -90,17 +93,27 @@ async def run_relay(
 ) -> None:
     """Background loop: drain until ``shutdown`` is set.
 
-    Each iteration opens its own session (the factory's scope commits
-    on success / rolls back on error). A drain failure is logged and
-    retried next tick — a transient DB blip must not kill the relay.
+    Each batch opens its own session (the factory's scope commits on
+    success / rolls back on error). A drain failure is logged and retried
+    next tick — a transient DB blip must not kill the relay.
+
+    Drains greedily within a tick: an install whose relay never ran has a
+    backlog of every event since it was installed, and one batch per tick
+    would take hours to clear it.
     """
     logger.info("Outbox relay started (interval=%.0fs)", interval)
     while not shutdown.is_set():
         try:
-            async with session_factory() as session:
-                count = await drain_once(session)
-            if count:
-                logger.info("Outbox relay recorded %d event(s)", count)
+            while not shutdown.is_set():
+                async with session_factory() as session:
+                    if not await claim_this_pass(session, "outbox:relay"):
+                        break  # another process is relaying
+                    count = await drain_once(session)
+                if count:
+                    logger.info("Outbox relay recorded %d event(s)", count)
+                # A short batch means the backlog is gone.
+                if count < _BATCH:
+                    break
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — loop must survive blips

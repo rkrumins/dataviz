@@ -42,18 +42,18 @@ if you later make single sign-on compulsory.
 
 1. Open {brand}. On the sign-in page, enter the **Email** and **Password**, then
    select **Enter Workspace**.
-2. If the deployment still uses a default password from the setup
-   documentation, the **Choose a new password** page opens instead of the app.
-   Enter the **Current password**, a **New password** (at least 8 characters,
-   rated **Strong** or better) and **Confirm new password**, then select **Set
-   new password**.
+2. The **Choose a new password** page opens instead of the app: the starting
+   password was set when the platform was installed, so it's replaced with
+   one only you know. Enter the **Current password**, a **New password** (at
+   least 8 characters, rated **Strong** or better) and **Confirm new
+   password**, then select **Set new password**.
 3. You are signed out. Sign in again with your new password.
 
 **You should now see** the **Dashboard**, with **Ingestion**, **Workspaces**,
 **Semantic Layers** and **Administration** in the sidebar.
 
 > **If every page sends you back to "Choose a new password":** that's expected.
-> Nothing else works until the default password is replaced.
+> Nothing else works until the starting password is replaced.
 
 ---
 

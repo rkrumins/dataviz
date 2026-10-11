@@ -84,13 +84,13 @@ The API creates one administrator the first time it starts against an empty data
 
 1. Open `http://localhost:5173`. The sign-in page opens.
 2. Enter the **Email** and **Password** from `.env.dev` (`admin@nexuslineage.local` and `admin123` unless you changed them), then select **Enter Workspace**.
-3. The **Choose a new password** page opens. `admin123` is published in this repository, so the account can't do anything else until it has a password of its own.
+3. The **Choose a new password** page opens. The starting password came from `.env.dev`, so the account can't do anything else until it has a password of its own.
 4. Fill in **Current password**, **New password** and **Confirm new password**, then select **Set new password**. The new password needs at least 8 characters and a strength rating of **Strong** or better.
 5. You're signed out. Sign in again with the new password. The dashboard opens.
 
-![The Choose a new password page shown at the first sign-in: Current password, New password with its strength meter, Confirm new password, and the Set new password button](/docs-assets/docs/setup-new-password.png)
+![The Choose a new password page shown at the first sign-in: Current password, New password with its strength meter, Confirm new password, the Set new password button, and Sign out instead below it](/docs-assets/docs/setup-new-password.png)
 
-> **Note:** The administrator is created only while the database has no users, and only the published defaults force a new password. If you put your own `ADMIN_PASSWORD` in `.env.dev` before the first start, you skip steps 3 to 5. Editing either value afterwards changes nothing; to recover a forgotten password, see [If it goes wrong](#if-it-goes-wrong).
+> **Note:** The administrator is created only while the database has no users, and whatever `ADMIN_PASSWORD` it starts with has to be replaced at the first sign-in. Editing either value afterwards changes nothing; to recover a forgotten password, see [If it goes wrong](#if-it-goes-wrong).
 
 ## Load demo data
 
@@ -131,7 +131,7 @@ The seeder takes `--scale N` (pads the graph with archive tables up to about N �
 ## Check that it works
 
 - `./dev.sh ps` shows every service `Up`, with `(healthy)` where there is a health check.
-- `./dev.sh logs viz-service` includes `Schema verified at Alembic head` and, on the very first start, `System admin created: admin@nexuslineage.local (default password — a change is required at first sign-in)`. Press Ctrl-C to stop following the log.
+- `./dev.sh logs viz-service` includes `Schema verified at Alembic head` and, on the very first start, `System admin created: admin@nexuslineage.local (it must choose a new password at first sign-in)`. Press Ctrl-C to stop following the log.
 - After the demo-data steps, **Ingestion → Data Sources** shows `nexus_lineage` as **Active**.
 
 ## Work on the code
@@ -261,7 +261,7 @@ Run the API and the frontend outside Docker when you want a debugger, a profiler
 | `FATAL: role "synodic" does not exist` or `password authentication failed` | The Postgres volume was created with other credentials than the ones in `.env.dev` | Put the original `POSTGRES_USER`, `POSTGRES_PASSWORD` and `POSTGRES_DB` back in `.env.dev`, or run `./dev.sh reset` to start over (it deletes all data) |
 | `./dev.sh up` stops because the `upgrade` service didn't complete successfully | A migration failed, so nothing that needs the database starts | `./dev.sh logs upgrade` shows the failing revision. [Database Migrations](/docs/migrations) explains the usual causes. |
 | The API log says **Schema verification failed** or **ALEMBIC HEAD MISMATCH** | The migrations haven't run, or they predate your code | In Docker: `./dev.sh rebuild`. On your machine: `python -m backend.scripts.upgrade upgrade`. |
-| Every page sends you to **Choose a new password** | The account still has the published default password | Expected at the first sign-in; see [Sign in for the first time](#sign-in-for-the-first-time) |
+| Every page sends you to **Choose a new password** | The account still has its starting password, or one an administrator set | Expected at the first sign-in; see [Sign in for the first time](#sign-in-for-the-first-time) |
 | You forgot the administrator's new password | The start-up bootstrap only creates an account when there are no users | `./dev.sh exec viz-service python -m backend.scripts.reset_admin_password --email admin@nexuslineage.local` prompts for a new one and signs every session out |
 | **Test connection** shows **Unable to connect** for host `localhost` | FalkorDB isn't up yet, or is still loading its data | `./dev.sh ps` should show `falkordb` as `(healthy)`; `./dev.sh logs falkordb` shows progress |
 | Compose warns **Found orphan containers** | A service was removed or renamed since you last started the stack | `./dev.sh up --remove-orphans` |
@@ -276,7 +276,7 @@ Run the API and the frontend outside Docker when you want a debugger, a profiler
 
 | Setting | In `.env.dev` | In a shared or production environment |
 |---|---|---|
-| `ADMIN_PASSWORD` | `admin123`, published in this repository, so it must be changed at the first sign-in | Set your own before the first start |
+| `ADMIN_PASSWORD` | `admin123`, published in this repository; changed at the first sign-in | Set your own before the first start; it is changed at the first sign-in too |
 | `JWT_SECRET_KEY` | Generated for your machine by `./dev.sh` | Generate one per environment and keep it stable. The API refuses to start without one, with one shorter than 32 characters, or with a value published in this repository. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Unset, so stored provider credentials aren't encrypted | Required. With `ENV=production`, the API refuses to store credentials without it. |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3080,http://localhost:5173,http://localhost:3000` | Your real frontend origins. When it's unset, the API allows only `http://localhost:3000` and `http://localhost:5173`. |

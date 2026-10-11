@@ -374,8 +374,8 @@ Bootstrapping order (the `app.main.lifespan` entry point):
 3. FastAPI mounts `auth_session_router` at `/api/v1/auth` and
    every admin router under `/api/v1/admin/*`.
 
-   7. The IdP health loop is started **only if `runs_scheduler()`** —
-      see §3.6.
+   7. The IdP health loop is started in every process that serves the
+      API — see §3.6.
 
 If you ever touch the bootstrap order, run the auth suite — most
 isolation regressions surface as `RuntimeError("IdentityService not
@@ -395,15 +395,18 @@ Three constraints shaped that, and each one is load-bearing:
   ("this storm hit the backend on every cold boot"). Doing it for IdPs
   would re-introduce a bug this codebase already paid for. Mirror the
   provider-warmup architecture instead.
-* **Gated on `runs_scheduler()`**, so N replicas do not run N sweeps
-  against the same IdPs.
+* **In every process that serves the API.** The cache is per process and
+  the endpoint reads its own process's copy; gated on the scheduler role,
+  as it first was, web replicas — every container deployment — served an
+  empty cache. The cost is one discovery or metadata fetch per provider
+  per process every 15 minutes; back-channel providers are not contacted.
 * **Shutdown via `await asyncio.wait_for(shutdown.wait(), timeout=interval)`**,
   the idiom from `outbox_relay.py` — not a bare `asyncio.sleep`, which
   would make every deploy wait out the interval.
 
-A replica that runs no schedulers serves an empty cache. That is expected:
-the provider list must render regardless, so the frontend treats the health
-read as separate and non-fatal.
+A process that has just started serves an empty cache until its first
+sweep finishes. The provider list must render regardless, so the frontend
+treats the health read as separate and non-fatal.
 
 Certificate expiry must be computed **server-side** — `idp_x509_cert` is a
 secret field and is redacted on read, so the UI cannot parse it. Note
@@ -1351,7 +1354,8 @@ Almost always one of:
   re-run `upgrade`.
 * **Postgres connection cycling** — relay reconnects each tick; if
   every tick fails, check the DB. The relay does NOT retry within
-  a tick; it relies on the loop.
+  a tick; it relies on the loop. In a split deployment it runs in the
+  aggregation control plane, so its warnings are in that service's log.
 * **A genuinely deleted table** — someone ran a destructive
   migration. Restore from the WAL or backups.
 

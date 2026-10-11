@@ -156,7 +156,7 @@ first. It works whether or not invite links are switched on.
    | Choose | When | What happens |
    | --- | --- | --- |
    | **Send them a setup link** | Most of the time | The account has no password until they choose one; nobody else ever knows it. |
-   | **Set a password yourself** | One person, and you'll pass it on | At least 12 characters. You will know their password, and nothing sends it for you. Not offered for a list. |
+   | **Set a password yourself** | One person, and you'll pass it on | At least 12 characters. Nothing sends it for you, and they choose their own the first time they sign in. Not offered for a list. |
    | **Single sign-on only** | They sign in through your identity provider | No password at all. |
 
    **Active straight away** is ticked; untick it to park the accounts in the
@@ -359,7 +359,7 @@ Each row has the actions for that account's state:
 | **Edit profile** | Change their name. Email is fixed, because it identifies them to an identity provider. |
 | **Change organization access** | Set their organization-wide role (see [Roles](#roles)). |
 | **Mark as system account** | Make it a break-glass account (see below). |
-| **Reset password** | **Generate Token** (a one-time token they enter at `/reset-password`) or **Set Password** directly. |
+| **Reset password** | **Generate Token** (a one-time token they enter at `/reset-password`) or **Set Password** directly; a password you set is one they replace the next time they sign in. |
 | **End sessions** | Sign them out everywhere, now. They can sign straight back in. |
 | **Suspend user** / **Reactivate** | Stop the account signing in — immediately — or let it back in. |
 
@@ -390,11 +390,11 @@ pass the token on.
 ## The system administrator account
 
 A fresh deployment creates one administrator from its `ADMIN_EMAIL` and
-`ADMIN_PASSWORD` settings. If that password is one of the defaults published
-in this project's setup documentation, the account must choose a new password
-at first sign-in — the API refuses everything else until it does. Supply your
-own `ADMIN_PASSWORD` and no prompt appears. **User Management** shows a
-**DEFAULT PASSWORD** badge against an account still in that state.
+`ADMIN_PASSWORD` settings. Whatever that password is, the account must choose a
+new one at its first sign-in — the API refuses everything else until it does.
+The administrator changes it again whenever they like on **Account settings**.
+**User Management** shows a **MUST CHANGE PASSWORD** badge against any account
+that still has to choose its own password.
 
 ### System accounts (break-glass)
 

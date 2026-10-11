@@ -13,13 +13,16 @@ import { useBrand } from '@/store/branding'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { extractHeadings } from './reading/headings'
 import { readingTime } from './reading/readingTime'
-import { OnThisPage } from './reading/OnThisPage'
+import { OnThisPage, OnThisPageInline } from './reading/OnThisPage'
 import { Pager } from './reading/Pager'
 import { ContentSkeleton } from './reading/ContentSkeleton'
 import { UpdatedChip } from './reading/UpdatedChip'
 import { PageFeedback } from './reading/PageFeedback'
 import { getDocType, DocTypeBadge } from './reading/DocTypeBadge'
 import { docMeta } from './reading/docMeta.generated'
+import { useScrollLanding } from './reading/useScrollLanding'
+import { NextStep, PathProgress } from './reading/ReadingPath'
+import { useReadTracking } from './reading/useReadTracking'
 
 export function DocsContent() {
   const { slug } = useParams<{ slug: string }>()
@@ -32,9 +35,13 @@ export function DocsContent() {
 
   useDocumentTitle(entry?.title ? `${entry.title} · Docs` : 'Docs')
 
-  const headings = useMemo(() => (content ? extractHeadings(content) : []), [content])
+  // From the page as rendered — brand filled in — so each id matches its heading.
+  const headings = useMemo(() => (content ? extractHeadings(interpolateBrand(content, brand)) : []), [content, brand])
   const minutes = useMemo(() => (content ? readingTime(content) : ''), [content])
   const { prev, next } = entry ? getPagerNeighbors(entry.slug) : { prev: undefined, next: undefined }
+  const ready = !isLoading && !!content
+  useScrollLanding(ready, content)
+  const endRef = useReadTracking('docs', entry?.slug, ready)
 
   if (error || !entry) {
     return (
@@ -45,7 +52,7 @@ export function DocsContent() {
           <p className="text-sm text-ink-muted">
             The document <code className="text-accent-lineage">"{slug}"</code> doesn't exist.
           </p>
-          <Link to="/docs" className="btn btn-secondary inline-flex mt-2">
+          <Link to="/docs" className="btn btn-secondary btn-md inline-flex mt-2">
             <Home className="w-3.5 h-3.5" /> Back to docs
           </Link>
         </div>
@@ -56,23 +63,25 @@ export function DocsContent() {
   if (isLoading) return <ContentSkeleton />
 
   return (
-    <div className="mx-auto max-w-6xl px-6 sm:px-8 py-10">
+    <div className="mx-auto max-w-6xl px-4 sm:px-8 py-8 sm:py-10">
       {/* Breadcrumb */}
-      <nav className="flex items-center gap-1.5 text-xs text-ink-muted mb-6">
+      <nav className="flex flex-wrap items-center gap-1.5 text-xs text-ink-muted mb-6" aria-label="Breadcrumb">
         <Link to="/docs" className="hover:text-ink transition-colors">Documentation</Link>
         {section && (
           <>
-            <ChevronRight className="w-3 h-3" />
-            <span>{section.label}</span>
+            <ChevronRight className="w-3 h-3" aria-hidden />
+            <Link to="/docs#browse-by-topic" className="hover:text-ink transition-colors">{section.label}</Link>
           </>
         )}
-        <ChevronRight className="w-3 h-3" />
-        <span className="text-ink font-medium">{interp(entry.title)}</span>
+        <ChevronRight className="w-3 h-3" aria-hidden />
+        <span className="text-ink font-medium" aria-current="page">{interp(entry.title)}</span>
       </nav>
 
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_220px] gap-10">
         {/* Article column */}
         <div className="min-w-0">
+          <PathProgress area="docs" slug={entry.slug} />
+
           {/* Meta row */}
           <div className="flex flex-wrap items-center gap-2 mb-5">
             <DocTypeBadge type={getDocType(entry.slug)} />
@@ -85,6 +94,8 @@ export function DocsContent() {
             <UpdatedChip date={docMeta[entry.slug]?.updated} />
           </div>
 
+          {headings.length > 1 && <OnThisPageInline headings={headings} />}
+
           <article className="prose-synodic">
             <ReactMarkdown
               key={location.pathname}
@@ -95,6 +106,9 @@ export function DocsContent() {
               {interp(content ?? '')}
             </ReactMarkdown>
           </article>
+          <div ref={endRef} aria-hidden />
+
+          <NextStep area="docs" slug={entry.slug} />
 
           <PageFeedback pageKey={`docs:${entry.slug}`} />
 

@@ -50,7 +50,8 @@ class User(BaseModel):
     # Chosen avatar illustration, or None to fall back to initials.
     avatar_id: Optional[str] = Field(None, alias="avatarId")
     # True while the account is holding a password it must rotate before
-    # it can do anything else. See ``get_current_user``.
+    # it can do anything else. See ``_hold_for_password_change`` in
+    # ``backend/app/auth/dependencies.py``.
     must_change_password: bool = Field(False, alias="mustChangePassword")
     # IdP-mapped attributes. Empty dict for local-only users.
     attributes: dict = Field(default_factory=dict)

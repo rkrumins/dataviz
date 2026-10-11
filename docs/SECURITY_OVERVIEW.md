@@ -75,15 +75,19 @@ The server refuses weak passwords — anything the zxcvbn estimator scores below
 4 scale — at sign-up, password reset, a self-service change, and when an administrator sets
 one. The forms show a matching strength meter as you type.
 
-A new installation creates one administrator from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. If that
-password is one of the defaults shipped with the repository, the account must choose a new
-one before it can work: the app takes it to **Choose a new password**, and the server — not
-just the page — enforces the change, refusing with the error `password_change_required`.
+A new installation creates one administrator from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Whatever
+that password is, someone other than the administrator chose it, so the account must choose its
+own before it can work: the app takes it to **Choose a new password**, and the server — not
+just the page — refuses every other request with the error `password_change_required`,
+whichever way the request signs in. The same applies to a password an administrator sets for
+someone else, when creating the account or with **Reset password**, and, at every start, to a
+system account still using its starting password or one published in this repository.
 
 **How to configure it.**
 
 - Set `ADMIN_EMAIL` and a strong `ADMIN_PASSWORD` before the first start. They're used only
-  while the database has no users.
+  while the database has no users, and the administrator replaces the password at the first
+  sign-in.
 - Self-registration is off by default. Turn it on with **Administration → Features →
   Self-registration**. Accounts created that way wait for approval in **Administration →
   User Management**. Invitations work either way, unless you also turn off **Invite links**.
@@ -95,8 +99,9 @@ just the page — enforces the change, refusing with the error `password_change_
 **Where in the code.** `backend/auth_service/core/password.py` (`hash_password`,
 `verify_password`), `backend/auth_service/providers/local.py` (`LocalIdentityProvider`),
 `backend/app/api/v1/endpoints/auth.py` (`_check_password_strength`, `signup`),
-`backend/app/auth/dependencies.py` (`get_current_user`, which enforces the forced password
-change).
+`backend/app/auth/dependencies.py` (`_hold_for_password_change`, which every resolver that
+signs a request in applies), `backend/app/auth/bootstrap.py` (the first administrator and the
+check at every start).
 
 ### Single sign-on
 
@@ -565,7 +570,8 @@ These surfaces are off by default in production. Turn one on only when you need 
 **How it works.** A security-relevant change writes an event in the same database transaction
 as the change, so the change can't be saved without its record. A background relay copies each
 event into an audit table (`auth_audit_log`) that the app only ever adds to, skipping any event
-it has already copied. Recorded events include:
+it has already copied. The relay runs in the aggregation control plane (or in-process when the
+whole platform runs as one process), and only one copy of it works at a time. Recorded events include:
 
 - sign-ins and sign-outs, and failed sign-ins with the reason, client address and user agent;
 - sessions refused or revoked, and why;

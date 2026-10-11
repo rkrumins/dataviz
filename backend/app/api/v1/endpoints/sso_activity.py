@@ -77,6 +77,7 @@ OUTCOMES: dict[str, tuple[str, ...]] = {
         "auth.config.all_sessions_ended",
         "rbac.sso_mapping.created", "rbac.sso_mapping.updated",
         "rbac.sso_mapping.deleted",
+        "sso.backchannel_host_allowed", "sso.backchannel_host_withdrawn",
     ),
 }
 EVENT_TYPES: tuple[str, ...] = tuple(t for ts in OUTCOMES.values() for t in ts)

@@ -8,8 +8,8 @@ records which parts of the plan shipped and which didn't.
 
 > **Note:** **Status.** The service shipped: self-registration with administrator approval,
 > invitations, administrator-created accounts, Argon2id password hashing with a server-side
-> strength check, a forced change of the seeded administrator's default password
-> (`must_change_password`), administrator-assisted password reset, per-account rate limits,
+> strength check, a forced change of any password someone else chose — the seeded
+> administrator's and one an administrator sets (`must_change_password`), administrator-assisted password reset, per-account rate limits,
 > and an audit trail built on a transactional outbox. Some of the original plan did not
 > ship: moving the user domain into its own repository and database, publishing events to a
 > message bus, sending email, idempotency keys on sign-up, and UUID v7 identifiers. The
@@ -27,7 +27,7 @@ records which parts of the plan shipped and which didn't.
 | Administrator-created accounts | Shipped | **Add people** in **Administration → User Management**, with a setup link, a password the administrator sets, or single sign-on only. |
 | Password hashing | Shipped | Argon2id. Checking a password costs the same whether or not the account exists. |
 | Password strength | Shipped | The server refuses a password that zxcvbn scores below 3 on its 0 to 4 scale; the forms show a matching meter. |
-| Forced password change | Shipped | When the seeded administrator's password is a shipped default, the account must choose a new one at first sign-in (`must_change_password`). |
+| Forced password change | Shipped | The seeded administrator, and anyone given a password by an administrator, must choose a new one at their next sign-in (`must_change_password`). |
 | Password reset | Shipped, without email | An administrator generates a one-time reset token (valid for 1 hour) or sets a password directly; the user redeems the token on the password-reset page. |
 | Sessions | Shipped, differently from the plan | `HttpOnly` cookies carrying a short-lived access token, with rotating refresh tokens and server-side revocation — not a bearer token kept in `sessionStorage`. |
 | Rate limiting | Shipped | In the application: per-account limits on failed sign-ins and on reset requests, plus per-address flood guards. |
@@ -91,11 +91,12 @@ a weak password is caught before it's submitted.
 
 **The seeded administrator.** On first start with an empty database, the backend creates one
 administrator from `ADMIN_EMAIL` and `ADMIN_PASSWORD` and marks it as a break-glass system
-account. If the password is one of the defaults shipped in the repository, the account is
-flagged `must_change_password`: at sign-in the app takes it to **Choose a new password**, and
-the server — not just the page — enforces the change, refusing with
-`password_change_required` until there's a new password. Setting any new password clears
-the flag.
+account, flagged `must_change_password` whatever its password: at sign-in the app takes it to
+**Choose a new password**, and the server — not just the page — enforces the change, refusing
+with `password_change_required` until there's a new password. At every start, a system account
+still using its starting password, or one published in the repository, is flagged the same way.
+A password an administrator sets for someone else sets the flag too; one the account holder
+sets — on **Account settings**, or with a reset link — clears it.
 
 **Changing your own password.** On **Account settings**, the **Password** card asks for the
 current password. A successful change signs the account out of every device, including the

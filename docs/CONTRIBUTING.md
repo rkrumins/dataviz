@@ -189,6 +189,9 @@ The full contract, with the reasons, is in [Feature switch lifecycle](/docs/feat
 2. Register it:
    - A doc: add an entry to `docEntries` in `frontend/src/components/docs/docsConfig.ts`: `slug`, then `section` on the next line, `title`, `description`, and `importFn: () => import('@docs/<FILE>.md?raw')`. The integrity test reads entries in that shape.
    - A guide page: add an entry to `guideEntries` in `frontend/src/components/guide/guideConfig.ts` with `slug`, `section`, `persona`, `title`, `description` and `importFn: () => import('@docs/guide/<FILE>.md?raw')`.
+   - On a persona's reading path? Add the slug to that persona's `path` (`docPersonas` or `guidePersonas`) and to the list the reader sees — the **Your path** list on a doc persona's start page, or the persona's list on the guide's Welcome page. `readingPaths.test.ts` fails when the two disagree.
+
+   Search and **Filter pages** pick up a registered page, and each of its `##` and `###` sections, with nothing more to do.
 3. For a doc, give it a Diátaxis type in `DOC_TYPES` in `frontend/src/components/docs/reading/DocTypeBadge.tsx` (`tutorial`, `how-to`, `reference` or `explanation`); the test fails without one. If other docs will link to the file by name, add `'<FILE>.md': '<slug>'` to `filenameMap` in `frontend/src/components/docs/MarkdownComponents.tsx`.
 4. Write for the reader:
    - &#123;brand} and &#123;brandShort} instead of the product name; the reader substitutes the live brand.
@@ -202,7 +205,7 @@ The full contract, with the reasons, is in [Feature switch lifecycle](/docs/feat
 1. Guide images live in `frontend/public/docs-assets/guide/`, and a page shows one with an ordinary Markdown image whose path is `/docs-assets/guide/<name>.png`. The integrity test fails if the file is missing.
 2. Shots are captured with `frontend/scripts/guide-shots.mjs`, which signs in and photographs the running app. Before you run it:
    - The stack is up, with the API on 8000 and Vite on `http://localhost:5173`, and the demo data onboarded ([Developer Setup](/docs/setup#load-demo-data)).
-   - `ADMIN_PASSWORD` in `.env.dev` holds the password you chose at the first sign-in. The script signs in with `ADMIN_EMAIL` and `ADMIN_PASSWORD`, and the published default can't get past the password change.
+   - `ADMIN_PASSWORD` in `.env.dev` holds the password you chose at the first sign-in. The script signs in with `ADMIN_EMAIL` and `ADMIN_PASSWORD`, and a starting password can't get past the password change.
    - Chrome or Chromium is available. The script uses one listening on remote-debugging port 9222, or starts a headless one if it finds Chrome installed.
 3. Take the shots:
 

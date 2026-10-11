@@ -46,6 +46,11 @@ export interface DocPersona {
   sectionId: string
   /** Slug the persona's card links to. */
   startSlug: string
+  /**
+   * The pages this persona reads, in order — the "Your path" list on its
+   * start page, which `readingPaths.test.ts` keeps in step with this one.
+   */
+  path: string[]
   accent: {
     gradient: string
     text: string
@@ -89,6 +94,7 @@ export const docPersonas: DocPersona[] = [
       'Run the stack with one command, load demo data, learn what CI checks, and ship a first pull request with confidence.',
     sectionId: 'dev-workflow',
     startSlug: 'setup',
+    path: ['setup', 'testing-and-ci', 'contributing', 'architecture', 'backend', 'frontend'],
     accent: {
       gradient: 'from-sky-500 to-blue-600',
       text: 'text-sky-600 dark:text-sky-400',
@@ -106,6 +112,7 @@ export const docPersonas: DocPersona[] = [
       'System design, service boundaries, the data model, and the trade-offs behind them — including the decisions that were later superseded.',
     sectionId: 'architecture',
     startSlug: 'architecture',
+    path: ['architecture', 'data-architecture', 'decisions', 'services-overview', 'versioning-overview', 'security-overview', 'scaling-architecture'],
     accent: {
       gradient: 'from-slate-500 to-slate-700',
       text: 'text-slate-600 dark:text-slate-300',
@@ -123,6 +130,7 @@ export const docPersonas: DocPersona[] = [
       'Deploy with Docker Compose or Kubernetes, harden it for production, watch the right signals, and recover when something breaks.',
     sectionId: 'operations',
     startSlug: 'deployment',
+    path: ['deployment', 'kubernetes', 'configuration', 'observability', 'runbooks'],
     accent: {
       gradient: 'from-amber-500 to-orange-600',
       text: 'text-amber-600 dark:text-amber-400',
@@ -140,6 +148,7 @@ export const docPersonas: DocPersona[] = [
       'Sign in from a script, find the endpoint you need, follow the API’s conventions, and automate the jobs people script most.',
     sectionId: 'reference',
     startSlug: 'api-guide',
+    path: ['api-guide', 'feature-search-and-rules-reference', 'versioning-api-reference', 'versioning-import-export', 'feature-view-portability', 'api-features'],
     accent: {
       gradient: 'from-violet-500 to-purple-600',
       text: 'text-violet-600 dark:text-violet-400',
@@ -157,6 +166,7 @@ export const docPersonas: DocPersona[] = [
       'Sign-in, sessions, permissions, secrets and network posture — how each control works, how to configure it, and where it lives in the code.',
     sectionId: 'security-identity',
     startSlug: 'security-overview',
+    path: ['security-overview', 'rbac', 'sso', 'multi-environment-sessions', 'deployment', 'configuration'],
     accent: {
       gradient: 'from-indigo-500 to-blue-600',
       text: 'text-indigo-600 dark:text-indigo-400',
@@ -174,6 +184,7 @@ export const docPersonas: DocPersona[] = [
       'Register a graph store, onboard its data, give it a semantic layer, and keep its lineage summaries fresh and within limits.',
     sectionId: 'services',
     startSlug: 'onboarding-a-source',
+    path: ['onboarding-a-source', 'aggregation-pipeline', 'feature-aggregation-reconciliation', 'feature-external-change-notification', 'api-guide'],
     accent: {
       gradient: 'from-teal-500 to-emerald-600',
       text: 'text-teal-600 dark:text-teal-400',
