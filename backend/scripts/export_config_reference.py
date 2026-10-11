@@ -1410,36 +1410,36 @@ def render(variables: dict, patterns: dict, descriptions: dict) -> str:
         "",
         "*For platform operators and developers.*",
         "",
-        "This page lists every environment variable the backend reads, with its default, what it "
-        "does and where it is read, so you can configure a deployment without reading the code. "
-        "Start with [Must set in production](#must-set-in-production); the sections after it follow "
-        "the backend's subsystems.",
+        ("This page lists every environment variable the backend reads, with its default, what it "
+         "does and where it is read, so you can configure a deployment without reading the code. "
+         "Start with [Must set in production](#must-set-in-production); the sections after it follow "
+         "the backend's subsystems."),
         "",
-        f"> **Note:** This page is generated from the code by `{SCRIPT}`. Don't edit it by hand: "
-        "change the comment beside the variable in `.env.example` (or the script's `NOTES`), then "
-        f"run `{REGENERATE}` and commit the result. CI runs the same script with `--check` and fails "
-        "when this page is out of date.",
+        (f"> **Note:** This page is generated from the code by `{SCRIPT}`. Don't edit it by hand: "
+         "change the comment beside the variable in `.env.example` (or the script's `NOTES`), then "
+         f"run `{REGENERATE}` and commit the result. CI runs the same script with `--check` and fails "
+         "when this page is out of date."),
         "",
         "## How configuration works",
         "",
-        "Every setting is an environment variable. A process reads its environment when it starts, "
-        "so after you change a value, restart or redeploy the processes that read it.",
+        ("Every setting is an environment variable. A process reads its environment when it starts, "
+         "so after you change a value, restart or redeploy the processes that read it."),
         "",
         "Where you set the variables depends on how you run the platform:",
         "",
         *_table(["You run", "Set variables in", "Good to know"], [
             ["Local development (`./dev.sh`)", "`.env.dev`",
-             "`./dev.sh` creates it from `.env.example` on the first run, with a fresh "
-             "`JWT_SECRET_KEY`. Outside production the backend also reads `.env.dev` (or `.env`) "
-             "from its working directory, without overriding variables that are already set."],
+             ("`./dev.sh` creates it from `.env.example` on the first run, with a fresh "
+              "`JWT_SECRET_KEY`. Outside production the backend also reads `.env.dev` (or `.env`) "
+              "from its working directory, without overriding variables that are already set.")],
             ["Docker Compose (`./deploy.sh`)", "`.env`",
-             "Copy `.env.prod.example` to `.env` and replace every `REPLACE_ME` value; "
-             "`./deploy.sh` refuses to start while one is left. A container receives only the "
-             "variables its service lists under `environment:` in `docker-compose.yml`; to set "
-             "any other, add it there."],
+             ("Copy `.env.prod.example` to `.env` and replace every `REPLACE_ME` value; "
+              "`./deploy.sh` refuses to start while one is left. A container receives only the "
+              "variables its service lists under `environment:` in `docker-compose.yml`; to set "
+              "any other, add it there.")],
             ["Kubernetes", "ConfigMaps and a Secret",
-             "Settings live in `deploy/k8s/base/configmaps/`, secrets in "
-             "`deploy/k8s/base/secrets/`. See [Kubernetes](/docs/kubernetes)."],
+             ("Settings live in `deploy/k8s/base/configmaps/`, secrets in "
+              "`deploy/k8s/base/secrets/`. See [Kubernetes](/docs/kubernetes).")],
         ]),
         "",
         "**Secrets from files.** "
@@ -1453,14 +1453,14 @@ def render(variables: dict, patterns: dict, descriptions: dict) -> str:
         "",
         "How to read the tables:",
         "",
-        "- **Default** is the value used when the variable is unset. `—` means the code has no "
-        "fallback value: the feature stays off, or the value is worked out at run time. *computed* "
-        "means the default is calculated in code; *required* means a process that reads it fails "
-        "without it. When the code reads a variable in several places with different defaults, "
-        "each one is listed and marked *differs by call site*.",
+        ("- **Default** is the value used when the variable is unset. `—` means the code has no "
+         "fallback value: the feature stays off, or the value is worked out at run time. *computed* "
+         "means the default is calculated in code; *required* means a process that reads it fails "
+         "without it. When the code reads a variable in several places with different defaults, "
+         "each one is listed and marked *differs by call site*."),
         "- **Read in** names up to three source files that read the variable.",
-        "- Settings without a description are listed, with their defaults, under "
-        "**Internal tuning** in each section.",
+        ("- Settings without a description are listed, with their defaults, under "
+         "**Internal tuning** in each section."),
         "",
         "## Must set in production",
         "",
@@ -1473,10 +1473,10 @@ def render(variables: dict, patterns: dict, descriptions: dict) -> str:
         *_table(["Variable", "What to set"],
                 [[f"`{name}`", _cell(prod)] for name, (_, prod) in NOTES.items() if prod]),
         "",
-        "> **Docker Compose:** a container receives only the variables its service lists under "
-        "`environment:` in `docker-compose.yml`. If a variable above is not listed for a service "
-        "that reads it, add it there: setting it in `.env` alone has no effect. See "
-        "[Deployment](/docs/deployment#production-hardening-checklist).",
+        ("> **Docker Compose:** a container receives only the variables its service lists under "
+         "`environment:` in `docker-compose.yml`. If a variable above is not listed for a service "
+         "that reads it, add it there: setting it in `.env` alone has no effect. See "
+         "[Deployment](/docs/deployment#production-hardening-checklist)."),
         "",
     ]
     by_section: dict = {key: [] for key in SECTIONS}
@@ -1501,9 +1501,9 @@ def render(variables: dict, patterns: dict, descriptions: dict) -> str:
     out += [
         "## Name patterns",
         "",
-        "These names are built in code from a fixed part and a variable part. Replace the part in "
-        "angle brackets with one of its values, for example `REDIS_<ROLE>_HOST` becomes "
-        "`REDIS_CACHE_HOST`.",
+        ("These names are built in code from a fixed part and a variable part. Replace the part in "
+         "angle brackets with one of its values, for example `REDIS_<ROLE>_HOST` becomes "
+         "`REDIS_CACHE_HOST`."),
         "",
         *_table(["Pattern", "Values", "Default", "Read in"], [
             [_code(p),
@@ -1515,11 +1515,11 @@ def render(variables: dict, patterns: dict, descriptions: dict) -> str:
         "## Where to next",
         "",
         "- [Deployment](/docs/deployment) — when you want to install or upgrade with Docker Compose.",
-        "- [Kubernetes](/docs/kubernetes) — when you deploy to a cluster and need the ConfigMaps "
-        "and Secrets these settings go in.",
+        ("- [Kubernetes](/docs/kubernetes) — when you deploy to a cluster and need the ConfigMaps "
+         "and Secrets these settings go in."),
         "- [Setup](/docs/setup) — when you want a local development environment.",
-        "- [Security overview](/docs/security-overview) — when you want the security controls "
-        "behind these settings.",
+        ("- [Security overview](/docs/security-overview) — when you want the security controls "
+         "behind these settings."),
         "- [Observability](/docs/observability) — when you want to turn on metrics and read the logs.",
     ]
     return "\n".join(out) + "\n"
