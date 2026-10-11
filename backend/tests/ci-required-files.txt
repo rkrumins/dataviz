@@ -26,6 +26,7 @@ tests/test_aggregation_capacity.py
 tests/test_aggregation_capacity_hints.py
 tests/test_aggregation_exec_lock.py
 tests/test_aggregation_job_limits.py
+tests/test_aggregation_job_provenance.py
 tests/test_aggregation_live_shape.py
 tests/test_aggregation_overrides.py
 tests/test_aggregation_run_record.py

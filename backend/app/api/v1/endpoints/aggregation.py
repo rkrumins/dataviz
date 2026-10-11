@@ -17,7 +17,7 @@ import asyncio
 import json as _json
 import logging
 import os
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import httpx
 from fastapi import (
@@ -31,6 +31,7 @@ from backend.app.auth.dependencies import (
     get_permission_claims,
     requires,
 )
+from backend.app.common import activity_context
 from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.db.repositories import data_source_repo
 from backend.app.ontology import gate as ontology_gate
@@ -86,16 +87,25 @@ def _get_proxy_client() -> httpx.AsyncClient:
 
 
 async def _proxy(method: str, path: str, request: Request, body: bytes | None = None) -> Response:
-    """Forward a request to the Control Plane and return its response."""
+    """Forward a request to the Control Plane and return its response.
+
+    The request's activity context goes with it — who is acting (from the
+    authenticated session, never from the client), the reason they gave and
+    the correlation id — so the control plane attributes what it records to
+    the person, not to the web tier calling on their behalf.
+    """
     client = _get_proxy_client()
     try:
         # Forward query params as-is
         url = httpx.URL(path, params=dict(request.query_params))
+        headers = activity_context.forward_headers()
+        if body:
+            headers["content-type"] = "application/json"
         resp = await client.request(
             method,
             str(url),
             content=body,
-            headers={"content-type": "application/json"} if body else {},
+            headers=headers,
         )
         return Response(
             content=resp.content,
@@ -312,6 +322,7 @@ async def put_aggregation_settings(
     body_model = AggregationSettingsRequest(**_json.loads(await request.body()))
     return await svc.put_settings(
         session, body_model.tuning, cadence=body_model.cadence,
+        provenance=activity_context.current_provenance(),
     )
 
 
@@ -442,6 +453,8 @@ async def list_jobs_global(
     search: Optional[str] = Query(None, alias="search"),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    # The person who started the run (``triggered_by``, a user id).
+    triggered_by: Optional[str] = Query(None, alias="triggeredBy", max_length=128),
 ):
     if _PROXY_ENABLED:
         return await _proxy("GET", "/aggregation/jobs", request)
@@ -457,6 +470,7 @@ async def list_jobs_global(
         search=search,
         limit=limit,
         offset=offset,
+        triggered_by=triggered_by,
     )
 
     # Overlay live Redis HSET state on the running rows. Without this,
@@ -530,7 +544,13 @@ async def trigger_aggregation(
     response: Response,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_db_session),
-    trigger_source: str = Query("manual", alias="triggerSource"),
+    # What a person (or their script) may say about how a run started. The
+    # automatic sources — schedule, drift, reconcile, auto, post_purge — are
+    # minted by the platform itself, never through this route: a manual
+    # rebuild must not be able to pass for automation.
+    trigger_source: Literal["manual", "onboarding", "api"] = Query(
+        "manual", alias="triggerSource",
+    ),
 ):
     # ── Proxy mode preflight ─────────────────────────────────────────
     # The Control Plane has no access to viz-service ontology tables,
@@ -606,7 +626,10 @@ async def trigger_aggregation(
     body_data = _json.loads(await request.body())
     body = AggregationTriggerRequest(**body_data)
     try:
-        job = await svc.trigger(ds_id, body, trigger_source, session)
+        job = await svc.trigger(
+            ds_id, body, trigger_source, session,
+            provenance=activity_context.current_provenance(),
+        )
         response.headers["Location"] = (
             f"/api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job.id}"
         )
@@ -989,7 +1012,10 @@ async def resume_job(
         )
     _, _, _, _, NotFoundError = _direct_imports()
     try:
-        return await svc.resume(ds_id, job_id, session, overrides=overrides)
+        return await svc.resume(
+            ds_id, job_id, session, overrides=overrides,
+            provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -1025,7 +1051,10 @@ async def set_job_limits(
         )
     _, _, _, _, NotFoundError = _direct_imports()
     try:
-        return await svc.set_job_limits(ds_id, job_id, session, patch)
+        return await svc.set_job_limits(
+            ds_id, job_id, session, patch,
+            provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -1050,7 +1079,10 @@ async def cancel_job(
         return await _proxy("POST", f"/aggregation/data-sources/{ds_id}/jobs/{job_id}/cancel", request)
     _, _, _, _, NotFoundError = _direct_imports()
     try:
-        return await svc.cancel(ds_id, job_id, session)
+        return await svc.cancel(
+            ds_id, job_id, session,
+            provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -1075,7 +1107,9 @@ async def delete_job(
         return await _proxy("DELETE", f"/aggregation/jobs/{job_id}", request)
     _, _, _, _, NotFoundError = _direct_imports()
     try:
-        await svc.delete_job(job_id, session)
+        await svc.delete_job(
+            job_id, session, provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -1121,6 +1155,7 @@ async def purge_aggregation(
                 body.reaggregate.model_dump(by_alias=True, exclude_none=True)
                 if body is not None and body.reaggregate is not None else None
             ),
+            provenance=activity_context.current_provenance(),
         )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1263,7 +1298,9 @@ async def skip_aggregation(
     body_data = json.loads(await request.body())
     body = AggregationSkipRequest(**body_data)
     try:
-        return await svc.skip(ds_id, body, session)
+        return await svc.skip(
+            ds_id, body, session, provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -1292,7 +1329,10 @@ async def set_schedule(
     body_data = json.loads(await request.body())
     body = AggregationScheduleRequest(**body_data)
     try:
-        await svc.set_schedule(ds_id, body.cron_expression, session)
+        await svc.set_schedule(
+            ds_id, body.cron_expression, session,
+            provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

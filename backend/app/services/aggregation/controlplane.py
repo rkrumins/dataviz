@@ -43,7 +43,13 @@ from fastapi import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .internal_auth import assert_auth_mode_allowed, require_internal_token
+from backend.app.common import activity_context
+
+from .internal_auth import (
+    assert_auth_mode_allowed,
+    bind_forwarded_activity,
+    require_internal_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -315,8 +321,10 @@ app = FastAPI(
     lifespan=lifespan,
     # Internal service auth on every route except the exempt set (health +
     # docs). No-op when AGGREGATION_INTERNAL_TOKEN is unset, so a dev stack
-    # with no token configured keeps working (see internal_auth.py).
-    dependencies=[Depends(require_internal_token)],
+    # with no token configured keeps working (see internal_auth.py). The
+    # web tier's activity context is bound only after it: who is acting is
+    # taken on trust from the authenticated caller, and from nobody else.
+    dependencies=[Depends(require_internal_token), Depends(bind_forwarded_activity)],
 )
 
 
@@ -373,7 +381,7 @@ from .schemas import (  # noqa: E402
     SourceChangedResponse,
     WorkersResponse,
 )
-from .service import ConflictError, NotFoundError  # noqa: E402
+from .service import ConflictError, NotFoundError, record_operation  # noqa: E402
 
 
 # ── Health ──────────────────────────────────────────────────────────
@@ -433,6 +441,8 @@ async def list_jobs_global(
     search: Optional[str] = Query(None, alias="search"),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    # The person who started the run (``triggered_by``, a user id).
+    triggered_by: Optional[str] = Query(None, alias="triggeredBy", max_length=128),
 ):
     return await svc.list_jobs_global(
         session,
@@ -446,6 +456,7 @@ async def list_jobs_global(
         search=search,
         limit=limit,
         offset=offset,
+        triggered_by=triggered_by,
     )
 
 
@@ -466,7 +477,10 @@ async def trigger_aggregation(
     trigger_source: str = Query("manual", alias="triggerSource"),
 ):
     try:
-        job = await svc.trigger(ds_id, body, trigger_source, session)
+        job = await svc.trigger(
+            ds_id, body, trigger_source, session,
+            provenance=activity_context.current_provenance(),
+        )
         response.headers["Location"] = (
             f"/aggregation/data-sources/{ds_id}/jobs/{job.id}"
         )
@@ -555,7 +569,10 @@ async def resume_job(
     # (timeout / retries / tuning) silently never applied in proxy
     # deployments — accept and forward it.
     try:
-        return await svc.resume(ds_id, job_id, session, overrides=overrides)
+        return await svc.resume(
+            ds_id, job_id, session, overrides=overrides,
+            provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -576,7 +593,10 @@ async def cancel_job(
     session: AsyncSession = Depends(_get_session),
 ):
     try:
-        return await svc.cancel(ds_id, job_id, session)
+        return await svc.cancel(
+            ds_id, job_id, session,
+            provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -598,7 +618,10 @@ async def set_job_limits(
     session: AsyncSession = Depends(_get_session),
 ):
     try:
-        return await svc.set_job_limits(ds_id, job_id, session, patch)
+        return await svc.set_job_limits(
+            ds_id, job_id, session, patch,
+            provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -618,7 +641,9 @@ async def delete_job(
     session: AsyncSession = Depends(_get_session),
 ):
     try:
-        await svc.delete_job(job_id, session)
+        await svc.delete_job(
+            job_id, session, provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -652,6 +677,7 @@ async def purge_aggregation(
                 body.reaggregate.model_dump(by_alias=True, exclude_none=True)
                 if body is not None and body.reaggregate is not None else None
             ),
+            provenance=activity_context.current_provenance(),
         )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -684,7 +710,9 @@ async def skip_aggregation(
     session: AsyncSession = Depends(_get_session),
 ):
     try:
-        return await svc.skip(ds_id, body, session)
+        return await svc.skip(
+            ds_id, body, session, provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -715,7 +743,10 @@ async def put_settings(
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
 ):
-    return await svc.put_settings(session, body.tuning, cadence=body.cadence)
+    return await svc.put_settings(
+        session, body.tuning, cadence=body.cadence,
+        provenance=activity_context.current_provenance(),
+    )
 
 
 # ── GET /aggregation/capacity, /aggregation/data-sources/{ds_id}/capacity ──
@@ -806,7 +837,10 @@ async def set_schedule(
     session: AsyncSession = Depends(_get_session),
 ):
     try:
-        await svc.set_schedule(ds_id, body.cron_expression, session)
+        await svc.set_schedule(
+            ds_id, body.cron_expression, session,
+            provenance=activity_context.current_provenance(),
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -873,6 +907,15 @@ async def set_freshness_settings(
             breaker = await svc.reset_source_breaker(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    # One event for the PATCH, however many setters it took — best-effort:
+    # each setter has already committed its own change.
+    if sent and await record_operation(
+        session, "aggregation.source.settings_changed",
+        activity_context.current_provenance(), ds_id,
+        details=body.model_dump(mode="json", by_alias=True, exclude_unset=True),
+        best_effort=True,
+    ):
+        await session.commit()
     return FreshnessSettingsResponse(
         data_source_id=ds_id,
         rebuild_min_interval_secs=stored_interval,
@@ -913,6 +956,19 @@ async def run_reconcile(body: ReconcileRunInternal):
         # Another replica holds the sweep lock — nothing ran, and that is a
         # normal outcome rather than an error.
         return ReconcileRunResponse(skipped=True)
+    provenance = activity_context.current_provenance()
+    if provenance is not None and not body.dry_run:  # a preview changes nothing
+        details = {
+            "runId": result.run_id, "findings": result.findings,
+            "actions": result.actions,
+        }
+        if body.data_source_ids:
+            details["dataSources"] = len(body.data_source_ids)
+        async with get_jobs_session() as session:
+            await record_operation(
+                session, "aggregation.reconcile.run_requested", provenance,
+                details=details, best_effort=True,   # the sweep has run
+            )
     return ReconcileRunResponse(
         run=_run_model_cp(result),
         findings=_findings_from_result(result),
@@ -1027,6 +1083,7 @@ async def refresh_source(
             ds_id, session,
             scope=body.scope, force=body.force, reason=body.reason,
             actor=body.actor, origin=body.origin, wait=body.wait,
+            provenance=activity_context.current_provenance(),
         )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1087,6 +1144,7 @@ async def _run_provider_batch(
     svc,
     session_factory,
     redis,
+    provenance: Optional[activity_context.Provenance] = None,
 ) -> None:
     """Background fan-out over ``ds_rows``. Semaphore-bounded concurrency;
     each item gets a FRESH session and its outcome is written to the batch
@@ -1098,9 +1156,16 @@ async def _run_provider_batch(
     ``provider_id`` is really a generic lock-scope id: the per-provider
     route passes the real provider id, the fleet-wide route (G2) passes
     ``_FLEET_LOCK_SCOPE``. This function doesn't care which — it only uses
-    it to name the lock key and tag the batch hash."""
+    it to name the lock key and tag the batch hash.
+
+    ``provenance`` is the person who started the batch: the batch itself is
+    their one activity event, so each item's rebuild is attributed to them
+    without being recorded again."""
     hash_key = f"refreshbatch:{batch_id}"
     lock_key = f"refreshbatch:lock:{provider_id}"
+    attribution = (
+        {"provenance": provenance.without_recording()} if provenance else {}
+    )
     try:
         await redis.hset(hash_key, mapping={
             "provider_id": provider_id, "state": "running",
@@ -1142,6 +1207,7 @@ async def _run_provider_batch(
                                 ds_id, session,
                                 scope=body.scope, force=body.force,
                                 actor=body.actor, origin=body.origin,
+                                **attribution,
                             )
                     if resp is None:
                         item = {
@@ -1204,6 +1270,7 @@ async def _start_guarded_batch(
     request: Request,
     svc,
     redis,
+    provenance: Optional[activity_context.Provenance] = None,
 ) -> BatchStatus:
     """Acquire the single-flight lock named for ``scope_id`` and schedule
     the shared runner over ``ds_rows``. Shared by the per-provider route
@@ -1224,6 +1291,7 @@ async def _start_guarded_batch(
         _run_provider_batch(
             batch_id, scope_id, ds_rows, body,
             svc=svc, session_factory=request.app.state.session_factory, redis=redis,
+            provenance=provenance,
         )
     )
     return BatchStatus(
@@ -1256,9 +1324,19 @@ async def start_refresh_batch(
 
     ds_rows = await _live_ds_rows(session, provider_id=provider_id)
     redis = get_redis()
-    return await _start_guarded_batch(
+    provenance = activity_context.current_provenance()
+    started = await _start_guarded_batch(
         provider_id, ds_rows, body, request=request, svc=svc, redis=redis,
+        provenance=provenance,
     )
+    if await record_operation(
+        session, "aggregation.provider.refresh_requested", provenance,
+        target_type="provider", target_id=provider_id,
+        label=getattr(provider, "name", None),
+        details=_batch_details(started, body), best_effort=True,  # it has started
+    ):
+        await session.commit()
+    return started
 
 
 # ── POST /aggregation/refresh-batch — fleet-wide twin (G2) ──────────
@@ -1286,9 +1364,25 @@ async def start_fleet_refresh_batch(
 
     ds_rows = await _live_ds_rows(session)
     redis = get_redis()
-    return await _start_guarded_batch(
+    provenance = activity_context.current_provenance()
+    started = await _start_guarded_batch(
         _FLEET_LOCK_SCOPE, ds_rows, body, request=request, svc=svc, redis=redis,
+        provenance=provenance,
     )
+    if await record_operation(
+        session, "aggregation.fleet.refresh_requested", provenance,
+        details=_batch_details(started, body), best_effort=True,  # it has started
+    ):
+        await session.commit()
+    return started
+
+
+def _batch_details(started: BatchStatus, body: BatchRefreshRequestInternal) -> dict:
+    """What a batch's one activity event says about it."""
+    details = {"batchId": started.batch_id, "scope": body.scope, "dataSources": started.total}
+    if body.force:
+        details["force"] = True
+    return details
 
 
 # ── GET /aggregation/refresh-batches/{batch_id} ──────────────────────

@@ -36,6 +36,7 @@ from backend.app.api.v1.endpoints.aggregation import (
     _require_ingestion_read,
 )
 from backend.app.auth.dependencies import requires
+from backend.app.common import activity_context
 from backend.app.db.engine import (
     get_db_session,
     get_graph_read_db_session,
@@ -181,6 +182,7 @@ async def refresh_data_source(
             ds_id, session,
             scope=req.scope, force=req.force, reason=req.reason,
             actor=user.id, origin="api", wait=req.wait,
+            provenance=activity_context.current_provenance(),
         )
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -221,7 +223,10 @@ async def patch_freshness_settings(
                 body.model_dump(by_alias=True, exclude_unset=True)
             ).encode(),
         )
-    from backend.app.services.aggregation.service import NotFoundError
+    from backend.app.services.aggregation.service import (
+        NotFoundError,
+        record_operation,
+    )
 
     sent = body.model_fields_set
     stored_interval = None
@@ -265,6 +270,15 @@ async def patch_freshness_settings(
             breaker = await svc.reset_source_breaker(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    # One event for the PATCH, however many setters it took — best-effort:
+    # each setter has already committed its own change.
+    if sent and await record_operation(
+        session, "aggregation.source.settings_changed",
+        activity_context.current_provenance(), ds_id,
+        details=body.model_dump(mode="json", by_alias=True, exclude_unset=True),
+        best_effort=True,
+    ):
+        await session.commit()
     return FreshnessSettingsResponse(
         data_source_id=ds_id,
         rebuild_min_interval_secs=stored_interval,
@@ -353,6 +367,7 @@ async def put_reconciliation(
 
     return await save_reconcile_policy(
         session, body, sent=body.model_fields_set, actor=user.id,
+        provenance=activity_context.current_provenance(),
     )
 
 
@@ -375,7 +390,9 @@ async def put_provider_hold(
     already reads, and the rows are read by key on every resolution (never
     cached), so the Control Plane sees the hold on its very next decision.
     Partial-update semantics, same rule as the per-source PATCH."""
+    from backend.app.db.models import ProviderORM
     from backend.app.services.aggregation.holds import set_scope_hold
+    from backend.app.services.aggregation.service import record_operation
 
     sent = body.model_fields_set
     kwargs = {}
@@ -385,6 +402,14 @@ async def put_provider_hold(
         kwargs["stopped"] = body.stopped
     row = await set_scope_hold(
         session, scope="provider", scope_id=provider_id, actor=user.id, **kwargs,
+    )
+    provider = await session.get(ProviderORM, provider_id)
+    await record_operation(
+        session, "aggregation.provider.hold_changed",
+        activity_context.current_provenance(),
+        target_type="provider", target_id=provider_id,
+        label=provider.name if provider is not None else None,
+        details=body.model_dump(mode="json", by_alias=True, include=set(sent)),
     )
     await session.commit()
     return ScopeHoldResponse(

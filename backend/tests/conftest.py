@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from backend.app.common import activity_context
 from backend.app.db.engine import (
     Base,
     get_db_session,
@@ -437,6 +438,8 @@ async def test_client(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Session revoked",
             )
+        # And its attribution: what the request changes is the fake user's.
+        activity_context.bind_actor(_FAKE_USER.id)
         return _FAKE_USER
 
     async def _override_get_optional_user():

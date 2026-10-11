@@ -245,6 +245,28 @@ def test_mismatch_runs_full_sequence_in_order(monkeypatch):
     assert captured["mark_reason"] == "source_changed"
 
 
+def test_a_persons_refresh_hands_them_the_rebuild_it_queues(monkeypatch):
+    """``refresh_source(scope="auto")`` passes its person down, recording off:
+    the rebuild is theirs on the job row, and their refresh is the one
+    activity event. Automation passes no one, and its call is unchanged."""
+    from backend.app.common.activity_context import Provenance
+
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="OLD"), current_fp="NEW",
+    )
+    passed = []
+
+    async def _trigger(ds_id, request, trigger_source, session, **kw):
+        passed.append(kw)
+        return types.SimpleNamespace(id="agg_person")
+
+    monkeypatch.setattr(svc, "trigger", _trigger)
+    person = Provenance(actor_id="usr_ana").without_recording()
+    assert _run(svc.signal_source_changed("ds-1", session, provenance=person)).job_id == "agg_person"
+    assert _run(svc.signal_source_changed("ds-1", session)).job_id == "agg_person"
+    assert passed == [{"provenance": person}, {}]
+
+
 # ── Scenario 3: force overrides a matching gate ─────────────────────────
 
 

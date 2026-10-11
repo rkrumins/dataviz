@@ -35,6 +35,7 @@ from backend.auth_service.cookies import (
 )
 from backend.auth_service.core.tokens import decode_token, is_foreign_token_error
 from backend.auth_service.interface import IdentityService, User
+from backend.app.common import activity_context
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.app.services.permission_service import (
@@ -227,6 +228,10 @@ async def get_current_user(request: Request) -> User:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session revoked",
         )
+    # Whatever this request goes on to change is attributed to this person
+    # (``activity_context.current_provenance``), here and across the hop to
+    # the aggregation control plane.
+    activity_context.bind_actor(user.id)
     return user
 
 

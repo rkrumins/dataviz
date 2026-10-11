@@ -30,11 +30,20 @@ import re
 import unicodedata
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
-from typing import Any, Optional
-from urllib.parse import unquote
+from typing import Any, Mapping, Optional
+from urllib.parse import quote, unquote
 
 #: The request header a person's stated reason travels in.
 REASON_HEADER = "X-Activity-Reason"
+
+#: Who is acting, as the web tier tells the aggregation control plane on a
+#: proxied call. Set by the web tier from the authenticated session — never
+#: copied from a client's request — and read by the control plane only on
+#: its internal, token-authenticated channel.
+ACTOR_HEADER = "X-Activity-Actor"
+
+#: The correlation id, on the same hop (the web tier's ``X-Request-ID``).
+CORRELATION_HEADER = "X-Request-ID"
 
 #: Longest stated reason kept. A sentence or two — the ledger records why
 #: something was done, it is not a place to paste an incident write-up.
@@ -50,6 +59,10 @@ CORRELATION_KEY = "correlation_id"
 #: become an arbitrary string in an audit record.
 _CORRELATION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
+#: An actor id as the control plane will accept it from the web tier: a user
+#: id, or one of the service names a payload uses.
+_ACTOR_ID = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
+
 _WHITESPACE = re.compile(r"\s+")
 
 #: Unicode categories :func:`clean_text` replaces: control, format, surrogate.
@@ -62,6 +75,8 @@ class ActivityContext:
 
     correlation_id: Optional[str] = None
     stated_reason: Optional[str] = None
+    #: The authenticated person, once authentication has run.
+    actor_id: Optional[str] = None
 
 
 _current: ContextVar[ActivityContext] = ContextVar(
@@ -81,6 +96,16 @@ def bind(ctx: ActivityContext) -> Token:
 
 def reset(token: Token) -> None:
     _current.reset(token)
+
+
+def bind_actor(actor_id: Optional[str]) -> None:
+    """Record who is acting, for the rest of this request.
+
+    Called where authentication succeeds. No reset is needed: the binding
+    lives in the request's own task context, which ends with the request.
+    """
+    if actor_id:
+        _current.set(replace(current(), actor_id=str(actor_id)))
 
 
 def valid_correlation_id(value: Optional[str]) -> Optional[str]:
@@ -161,6 +186,47 @@ class Provenance:
 
     def without_recording(self) -> "Provenance":
         return replace(self, record=False)
+
+
+def current_provenance() -> Optional[Provenance]:
+    """This request's person, reason and correlation id — ``None`` when no
+    person is acting (a scheduled job, an anonymous request)."""
+    ctx = current()
+    if not ctx.actor_id:
+        return None
+    return Provenance(
+        actor_id=ctx.actor_id,
+        stated_reason=ctx.stated_reason,
+        correlation_id=ctx.correlation_id,
+    )
+
+
+def forward_headers() -> dict[str, str]:
+    """This request's activity context as headers, for a call to the
+    aggregation control plane (see :data:`ACTOR_HEADER`)."""
+    ctx = current()
+    headers: dict[str, str] = {}
+    if ctx.actor_id:
+        headers[ACTOR_HEADER] = ctx.actor_id
+    if ctx.stated_reason:
+        headers[REASON_HEADER] = quote(ctx.stated_reason, safe="")
+    if ctx.correlation_id:
+        headers[CORRELATION_HEADER] = ctx.correlation_id
+    return headers
+
+
+def from_forwarded(headers: Mapping[str, str]) -> ActivityContext:
+    """The context :func:`forward_headers` sent, read back and re-validated.
+
+    Only for a channel that is already authenticated as the web tier; a
+    value in the wrong shape is dropped rather than trusted.
+    """
+    actor = headers.get(ACTOR_HEADER)
+    return ActivityContext(
+        correlation_id=valid_correlation_id(headers.get(CORRELATION_HEADER)),
+        stated_reason=parse_stated_reason(headers.get(REASON_HEADER)),
+        actor_id=actor if actor and _ACTOR_ID.match(actor) else None,
+    )
 
 
 def provenance_for(user: Any) -> Provenance:
