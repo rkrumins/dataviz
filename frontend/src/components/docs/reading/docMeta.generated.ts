@@ -11,11 +11,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/CONTRIBUTING.md"
   },
   "architecture": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/ARCHITECTURE.md"
   },
   "data-architecture": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/DATA_ARCHITECTURE.md"
   },
   "decisions": {
@@ -27,7 +27,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/architecture-when-scaling.md"
   },
   "aggregation-pipeline": {
@@ -63,7 +63,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/API_GUIDE.md"
   },
   "backend": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/BACKEND.md"
   },
   "frontend": {
@@ -71,11 +71,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/FRONTEND.md"
   },
   "api-features": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/API_FEATURES.md"
   },
   "services-overview": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/services/OVERVIEW.md"
   },
   "services-insights": {
@@ -103,7 +103,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/features/external-change-notification.md"
   },
   "feature-view-portability": {
-    "updated": "2026-09-23",
+    "updated": "2026-10-11",
     "path": "docs/features/view-portability.md"
   },
   "feature-search-and-rules-reference": {
@@ -127,7 +127,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/03-branching-commits-merge.md"
   },
   "versioning-projection-and-cache": {
-    "updated": "2026-10-09",
+    "updated": "2026-10-11",
     "path": "docs/versioning/04-projection-and-cache.md"
   },
   "versioning-ontology-governance": {
@@ -135,7 +135,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/05-ontology-governance.md"
   },
   "versioning-api-reference": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/versioning/06-api-reference.md"
   },
   "versioning-frontend-integration": {
@@ -143,11 +143,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/07-frontend-integration.md"
   },
   "versioning-import-export": {
-    "updated": "2026-10-09",
+    "updated": "2026-10-11",
     "path": "docs/versioning/08-import-export.md"
   },
   "versioning-scale-and-roadmap": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/versioning/09-scale-limits-and-roadmap.md"
   },
   "versioning-authoritative-sources": {
@@ -167,7 +167,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/README-index.md"
   },
   "versioning-guide": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/versioning/README.md"
   },
   "versioning-drafts-and-merge": {
@@ -207,7 +207,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DEPLOYMENT.md"
   },
   "kubernetes": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/KUBERNETES.md"
   },
   "kubernetes-cluster-overlay": {
@@ -219,7 +219,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/CONFIGURATION.md"
   },
   "observability": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/OBSERVABILITY.md"
   },
   "runbooks": {
@@ -243,7 +243,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/CONCURRENCY_TUNING.md"
   },
   "scaling-concurrent-users": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/SCALING_CONCURRENT_USERS.md"
   },
   "falkordb-dr": {
@@ -251,11 +251,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/FALKORDB_DR_RUNBOOK.md"
   },
   "infra-launch-scale": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/INFRASTRUCTURE_LAUNCH_SCALE.md"
   },
   "infra-scaling-250m": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/INFRASTRUCTURE_SCALING_250M.md"
   },
   "read-path-performance": {
@@ -321,7 +321,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/SEMANTIC_LAYER.md"
   },
   "versioning-change-control": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/guide/VERSIONING_CHANGE_CONTROL.md"
   },
   "editing-in-a-draft": {
@@ -333,7 +333,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/REVIEW_CENTER.md"
   },
   "import-export": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-11",
     "path": "docs/guide/IMPORT_EXPORT.md"
   },
   "admin-setup": {
