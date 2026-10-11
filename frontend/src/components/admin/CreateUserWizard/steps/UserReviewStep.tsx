@@ -72,7 +72,7 @@ export function UserReviewStep({
                         {w.credential === 'setup_link'
                             ? 'Each gets a one-time setup link for you to send.'
                             : w.credential === 'password'
-                                ? 'The password you set is the only way in until they change it.'
+                                ? 'They sign in with the password you set, then choose their own.'
                                 : 'They sign in through your identity provider.'}
                         {!w.activate && ' Held in the pending queue rather than activated.'}
                     </p>

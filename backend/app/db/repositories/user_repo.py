@@ -869,16 +869,24 @@ async def create_outbox_event(
 
 # ── Password management ───────────────────────────────────────────────
 
-async def update_password(session: AsyncSession, user_id: str, password_hash: str) -> Optional[UserORM]:
+async def update_password(
+    session: AsyncSession, user_id: str, password_hash: str,
+    *, must_change: bool = False,
+) -> Optional[UserORM]:
+    """Set a new password and retire any pending reset.
+
+    ``must_change`` is for a password somebody else chose — an
+    administrator setting it for this account — which the account must
+    replace at its next sign-in. A password the account holder chose
+    (self-service change, reset link) clears the requirement.
+    """
     user = await get_user_by_id(session, user_id)
     if user is None:
         return None
     user.password_hash = password_hash
     user.reset_token_hash = None
     user.reset_token_expires_at = None
-    # Whatever route got them here — self-service, admin reset, token —
-    # the account is no longer holding the password it had to rotate.
-    user.must_change_password = False
+    user.must_change_password = must_change
     user.updated_at = _now()
     await session.flush()
     return user

@@ -1070,7 +1070,12 @@ async def admin_reset_password(
 
     _check_password_strength(body.new_password)
     hashed = hash_password(body.new_password)
-    await user_repo.update_password(session, user_id, hashed)
+    # A password the admin chose for someone else is theirs to replace at
+    # the next sign-in, so it stops being one the admin also knows. An
+    # admin setting their own is choosing it, like the self-service change.
+    await user_repo.update_password(
+        session, user_id, hashed, must_change=user_id != admin.id,
+    )
 
     if converting_sso_only:
         logger.warning(
@@ -2233,6 +2238,10 @@ async def _provision_user(
         status="active" if activate else "pending",
         signup_source="admin_created",
     )
+    if credential == "password":
+        # The admin typed it, so the admin knows it: the new account
+        # chooses its own at its first sign-in.
+        user.must_change_password = True
 
     if role:
         await _grant_invite_role(
