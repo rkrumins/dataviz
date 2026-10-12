@@ -22,7 +22,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import type { ActivityEvent, LedgerHealth } from '@/services/activityService'
 
-import { CATEGORY_META, actorName, reasonExpected } from './activityMeta'
+import { CATEGORY_META, actorName, reasonExpected, retentionPhrase } from './activityMeta'
 import { groupEvents, type TimelineRow } from './groupEvents'
 
 function LedgerBanner({ ledger }: { ledger: LedgerHealth | null }) {
@@ -67,6 +67,7 @@ function TimelineRowView({ row, onOpen }: { row: TimelineRow; onOpen: (id: strin
         <li>
             <button
                 type="button"
+                data-activity-row={event.id}
                 onClick={() => onOpen(event.id)}
                 className="group flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04] outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
             >
@@ -224,6 +225,11 @@ export function ActivityTimeline({
                                 Show older events
                             </button>
                         </div>
+                    )}
+                    {!hasNextPage && ledger?.retentionDays != null && (
+                        <p className="px-3 pb-2 pt-3 text-center text-[11px] text-ink-muted">
+                            The end of this range. The log keeps {retentionPhrase(ledger.retentionDays)} of activity.
+                        </p>
                     )}
                 </div>
             )}

@@ -31,6 +31,14 @@ vi.mock('@/services/activityService', async (importOriginal) => {
     }
 })
 
+// The spotlight names its person from the directory, like any PersonChip.
+vi.mock('@/services/userDirectoryService', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/services/userDirectoryService')>()),
+    peopleById: vi.fn(async (ids: string[]) => ids
+        .filter((id) => id === 'usr_ana')
+        .map((id) => ({ id, displayName: 'Ana Lyst', email: 'ana@example.com', deleted: false }))),
+}))
+
 import { ActivityExplorer } from '../ActivityExplorer'
 import {
     activityService,
@@ -242,7 +250,7 @@ describe('the drawer has the rest', () => {
         expect(within(dialog).getByRole('link', { name: /Open the run in Job History/ }))
             .toHaveAttribute('href', expect.stringContaining('search=agg_1'))
         expect(within(dialog).getByText('Raw event payload')).toBeInTheDocument()
-        expect(within(dialog).getByRole('group', { name: 'event payload' })).toHaveTextContent('"extra": "kept"')
+        expect(within(dialog).getByRole('group', { name: 'event payload as JSON' })).toHaveTextContent('"extra": "kept"')
         expect(within(dialog).getByRole('button', { name: 'Copy event payload as JSON' })).toBeInTheDocument()
     })
 
@@ -363,5 +371,187 @@ describe('live and honest', () => {
         renderExplorer(PLATFORM, '/admin/audit?act_person=nobody')
         await u.click(await screen.findByRole('button', { name: 'Clear filters' }))
         await waitFor(() => expect(urlParams().get('act_person')).toBeNull())
+    })
+})
+
+describe('the log says what it keeps', () => {
+    it('ends the list with how long activity is kept', async () => {
+        service.listEvents.mockResolvedValue({ events: [ev()], nextCursor: null, ledger: { ...LEDGER, retentionDays: 730 } })
+        renderExplorer()
+        expect(await timeline().findByText('The end of this range. The log keeps 2 years of activity.')).toBeInTheDocument()
+    })
+
+    it('says nothing about it while there are older events to show, or when everything is kept', async () => {
+        service.listEvents.mockResolvedValue({ events: [ev()], nextCursor: 'c', ledger: { ...LEDGER, retentionDays: 730 } })
+        const { unmount } = renderExplorer()
+        await loaded()
+        expect(screen.queryByText(/The log keeps/)).not.toBeInTheDocument()
+        unmount()
+        service.listEvents.mockResolvedValue({ events: [ev()], nextCursor: null, ledger: { ...LEDGER, retentionDays: null } })
+        renderExplorer()
+        await loaded()
+        expect(screen.queryByText(/The log keeps/)).not.toBeInTheDocument()
+    })
+
+    it('explains a missing comparison rather than inventing one', async () => {
+        service.getSummary.mockResolvedValue(summary({
+            window: { ...summary().window, keptFrom: '2024-10-13T00:00:00+00:00' },
+            totals: {
+                events: { current: 120, previous: null, delta: null },
+                people: { current: 7, previous: null, delta: null },
+                operations: { current: 12, previous: null, delta: null },
+                reasons: { given: 9, of: 12, share: 0.75 },
+            },
+        }))
+        renderExplorer()
+        expect(await screen.findByText(/No change is shown: the log keeps activity from/)).toBeInTheDocument()
+        expect(screen.queryByText(/^[+-]\d/)).not.toBeInTheDocument()
+    })
+})
+
+describe('the insight band says who, and what needs a look', () => {
+    it('shows who keeps operating each hands-on source', async () => {
+        service.getSummary.mockResolvedValue(summary({
+            handsOnSources: [{
+                ...summary().handsOnSources[0],
+                people: [
+                    { id: 'usr_ana', count: 4, name: 'Ana Lyst', deleted: false },
+                    { id: 'usr_ben', count: 2, name: 'Ben Ops', deleted: false },
+                ],
+            }],
+        }))
+        renderExplorer()
+        expect(await screen.findByText('Run by Ana Lyst, Ben Ops')).toBeInTheDocument()
+    })
+
+    it('calls out a source run by hand every few hours, and narrows to it in one click', async () => {
+        service.getSummary.mockResolvedValue(summary({
+            handsOnSources: [{ ...summary().handsOnSources[0], medianGapHours: 5 }],
+        }))
+        const u = userEvent.setup()
+        renderExplorer()
+        const callouts = await screen.findByRole('region', { name: 'Needs attention' })
+        await u.click(within(callouts).getByRole('button', { name: /Ledger is run by hand every ~5h/ }))
+        await waitFor(() => expect(lastQuery()?.dataSourceId).toBe('ds_1'))
+    })
+
+    it('says nothing when nothing needs a look', async () => {
+        service.getSummary.mockResolvedValue(summary({
+            totals: { ...summary().totals, operations: { current: 12, previous: 11, delta: 0.09 } },
+        }))
+        renderExplorer()
+        await screen.findByText('9 of 12 changes said why')
+        expect(screen.queryByRole('region', { name: 'Needs attention' })).not.toBeInTheDocument()
+    })
+})
+
+describe('a person in focus', () => {
+    it('shows who they are, when they are busiest and what they do most', async () => {
+        const u = userEvent.setup()
+        renderExplorer(PLATFORM, '/admin/audit?act_person=usr_ana&act_role=actor')
+        const spot = await screen.findByRole('region', { name: 'Person in focus' })
+        expect(await within(spot).findByText('Ana Lyst')).toBeInTheDocument()
+        expect(within(spot).getByText('What they did')).toBeInTheDocument()
+        expect(await within(spot).findByText('Tuesdays, 14:00 UTC')).toBeInTheDocument()
+
+        await u.click(within(spot).getByRole('button', { name: /Triggered aggregation/ }))
+        await waitFor(() => expect(urlParams().get('act_type')).toBe('aggregation.job.triggered'))
+
+        await u.click(within(spot).getByRole('button', { name: 'Clear the person filter' }))
+        await waitFor(() => expect(urlParams().get('act_person')).toBeNull())
+        expect(screen.queryByRole('region', { name: 'Person in focus' })).not.toBeInTheDocument()
+    })
+
+    it('is not shown for typed text, which may match several people', async () => {
+        renderExplorer(PLATFORM, '/admin/audit?act_person=ana')
+        await loaded()
+        expect(screen.queryByRole('region', { name: 'Person in focus' })).not.toBeInTheDocument()
+    })
+})
+
+describe('from the keyboard', () => {
+    const EVENTS = [
+        ev({ id: 'evt_1', summary: 'Triggered aggregation of Ledger' }),
+        ev({ id: 'evt_2', summary: 'Refreshed Ledger' }),
+        ev({ id: 'evt_3', summary: 'Reconciled Ledger' }),
+    ]
+    const row = (text: string) => timeline().getByText(text).closest('button')!
+
+    beforeEach(() => {
+        service.listEvents.mockResolvedValue({ events: EVENTS, nextCursor: null, ledger: LEDGER })
+        service.getEvent.mockImplementation(async (_scope, id) => ({
+            event: EVENTS.find((e) => e.id === id)!, sameRequest: [], sameTarget: [],
+        }))
+    })
+
+    it('walks the rows with j and k, and opens one with Enter', async () => {
+        const u = userEvent.setup()
+        renderExplorer()
+        await loaded()
+        await u.keyboard('j')
+        expect(row('Triggered aggregation of Ledger')).toHaveFocus()
+        await u.keyboard('jj')
+        expect(row('Reconciled Ledger')).toHaveFocus()
+        await u.keyboard('{ArrowUp}')
+        expect(row('Refreshed Ledger')).toHaveFocus()
+        await u.keyboard('{Enter}')
+        await screen.findByRole('dialog', { name: 'Activity event' })
+        expect(urlParams().get('act_event')).toBe('evt_2')
+    })
+
+    it('steps through events in the drawer, and Esc lands on the last one read', async () => {
+        const u = userEvent.setup()
+        renderExplorer(PLATFORM, '/admin/audit?act_event=evt_1')
+        const dialog = await screen.findByRole('dialog', { name: 'Activity event' })
+        await loaded()
+        expect(within(dialog).getByRole('button', { name: 'Newer event' })).toBeDisabled()
+        await u.keyboard('j')
+        await waitFor(() => expect(urlParams().get('act_event')).toBe('evt_2'))
+        await u.click(within(dialog).getByRole('button', { name: 'Older event' }))
+        await waitFor(() => expect(urlParams().get('act_event')).toBe('evt_3'))
+        expect(within(dialog).getByRole('button', { name: 'Older event' })).toBeDisabled()
+        await u.keyboard('{ArrowLeft}')
+        await waitFor(() => expect(urlParams().get('act_event')).toBe('evt_2'))
+
+        await u.keyboard('{Escape}')
+        await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Activity event' })).not.toBeInTheDocument())
+        expect(row('Refreshed Ledger')).toHaveFocus()
+    })
+
+    it('leaves the arrows to a region that scrolls sideways, such as the raw payload', async () => {
+        const u = userEvent.setup()
+        renderExplorer(PLATFORM, '/admin/audit?act_event=evt_1')
+        const dialog = await screen.findByRole('dialog', { name: 'Activity event' })
+        await loaded()
+        const raw = await within(dialog).findByText('Raw event payload')
+        await u.click(raw)
+        const tree = within(dialog).getByRole('group', { name: 'event payload as JSON' })
+        Object.defineProperty(tree, 'scrollWidth', { configurable: true, value: 900 })
+        Object.defineProperty(tree, 'clientWidth', { configurable: true, value: 400 })
+        tree.focus()
+        await u.keyboard('{ArrowRight}')
+        expect(urlParams().get('act_event')).toBe('evt_1')
+        await u.keyboard('j')
+        await waitFor(() => expect(urlParams().get('act_event')).toBe('evt_2'))
+    })
+
+    it('/ goes to search and ? lists the keys, but not while typing', async () => {
+        const u = userEvent.setup()
+        renderExplorer()
+        await loaded()
+        await u.keyboard('/')
+        expect(screen.getByLabelText('Search activity')).toHaveFocus()
+        await u.keyboard('j?')
+        expect(screen.getByLabelText('Search activity')).toHaveValue('j?')
+        expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).not.toBeInTheDocument()
+
+        await u.click(screen.getByRole('button', { name: 'Keyboard shortcuts' }))
+        const sheet = await screen.findByRole('dialog', { name: 'Keyboard shortcuts' })
+        expect(within(sheet).getByText('Next event')).toBeInTheDocument()
+        await u.keyboard('{Escape}')
+        await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).not.toBeInTheDocument())
+        ;(document.activeElement as HTMLElement | null)?.blur()
+        await u.keyboard('?')
+        expect(await screen.findByRole('dialog', { name: 'Keyboard shortcuts' })).toBeInTheDocument()
     })
 })

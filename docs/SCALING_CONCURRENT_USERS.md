@@ -440,7 +440,11 @@ every graph read.
 
 Per role: `_MODE` (`standalone` or `sentinel`), `_HOST`, `_PORT`, `_DB`, `_USERNAME`,
 `_PASSWORD` or `_PASSWORD_FILE`, `_TLS_*`, `_SENTINEL_*`, `_MAX_CONNECTIONS` (20),
-`_SOCKET_TIMEOUT` (10), `_SOCKET_CONNECT_TIMEOUT` (5) and `_HEALTH_CHECK_INTERVAL` (30).
+`_POOL_TIMEOUT` (2), `_SOCKET_TIMEOUT` (10), `_SOCKET_CONNECT_TIMEOUT` (5) and
+`_HEALTH_CHECK_INTERVAL` (30). With every pooled connection busy, a command waits up to
+`_POOL_TIMEOUT` seconds for one to come free rather than failing at once, so a burst queues
+briefly instead of sending every caller to its fallback; the cap itself does not change. `0`
+fails at once.
 **Redis Cluster is rejected for both roles** at startup; use a single node or Sentinel. When
 `CACHE` isn't configured, graph-cache payloads fall back to the `STREAMS` client, so one
 instance serves both. That is the Helm chart's shape. **Admin → Redis & Graph Store** shows

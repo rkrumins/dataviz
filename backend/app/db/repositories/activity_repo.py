@@ -67,6 +67,8 @@ _QUERY_CANCELED = "57014"
 
 _CURSOR = re.compile(r"^(\d{4}-\d{2}-\d{2}T[0-9:.+\-Z]+)\|([A-Za-z0-9_\-]+)$")
 _TOP = 10
+#: Faces shown per hands-on source: who keeps doing it, not everyone who did.
+_FACES = 3
 
 
 class InvalidCursor(ValueError):
@@ -391,8 +393,9 @@ async def ledger_health(session: AsyncSession) -> dict[str, Any]:
 
 # ── Summary ──────────────────────────────────────────────────────────
 
-def _metric(current: int, previous: int) -> dict[str, Any]:
-    delta = None if previous == 0 else round((current - previous) / previous, 4)
+def _metric(current: int, previous: Optional[int]) -> dict[str, Any]:
+    """``previous`` is ``None`` when there is nothing honest to compare with."""
+    delta = None if not previous else round((current - previous) / previous, 4)
     return {"current": current, "previous": previous, "delta": delta}
 
 
@@ -408,13 +411,21 @@ def _punchcard(by_hour: dict[str, int]) -> list[list[int]]:
     return grid
 
 
-def _cadence(rows: list[tuple[str, Optional[str], str]]) -> list[dict[str, Any]]:
-    """Per source: how many manual operations, the last, and the usual gap."""
+def _cadence(rows: list[tuple], *, people: bool = False) -> list[dict[str, Any]]:
+    """Per source: how many manual operations, the last and the usual gap.
+
+    With ``people``, each row ends with who did it, and each source names
+    the people who keep doing it, most first. Analytics asks without: its
+    documents decide for themselves who may see a person.
+    """
     by_source: dict[str, list[str]] = defaultdict(list)
     workspace_of: dict[str, Optional[str]] = {}
-    for ds, ws, at in rows:
+    people_of: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for ds, ws, at, *actor in rows:
         by_source[ds].append(at)
         workspace_of.setdefault(ds, ws)
+        if people and actor[0]:
+            people_of[ds][actor[0]] += 1
     out = []
     for ds, stamps in by_source.items():
         stamps.sort()
@@ -424,13 +435,19 @@ def _cadence(rows: list[tuple[str, Optional[str], str]]) -> list[dict[str, Any]]
                 gaps.append((datetime.fromisoformat(later) - datetime.fromisoformat(earlier)).total_seconds())
             except ValueError:
                 continue
-        out.append({
+        row = {
             "dataSourceId": ds,
             "workspaceId": workspace_of.get(ds),
             "count": len(stamps),
             "lastAt": stamps[-1],
             "medianGapHours": round(statistics.median(gaps) / 3600, 1) if gaps else None,
-        })
+        }
+        if people:
+            row["people"] = [
+                {"id": a, "count": n}
+                for a, n in sorted(people_of[ds].items(), key=lambda kv: (-kv[1], kv[0]))[:_FACES]
+            ]
+        out.append(row)
     # Most operations first; among equals, the most recently touched.
     out.sort(key=lambda r: r["lastAt"], reverse=True)
     out.sort(key=lambda r: r["count"], reverse=True)
@@ -500,7 +517,7 @@ async def _fold(
     # first, so a capped answer is the recent past. Cheap: operations are
     # few, and the category index finds them.
     fold["ops"] = [list(r) for r in (await session.execute(
-        select(L.data_source_id, L.workspace_id, L.occurred_at)
+        select(L.data_source_id, L.workspace_id, L.occurred_at, L.actor_id)
         .where(*base, L.category == "operations", L.data_source_id.is_not(None))
         .order_by(L.occurred_at.desc()).limit(_CADENCE_ROWS)
     )).all()]
@@ -581,6 +598,7 @@ async def _closed_fold(
 async def summary(
     session: AsyncSession, f: ActivityFilter, w: Window, *,
     reuse: Optional[Reuse] = None, now: Optional[datetime] = None,
+    kept_from: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """The insight band over ``w``, aligned to whole UTC days.
 
@@ -610,12 +628,19 @@ async def summary(
     # and then built a second time.)
     live0 = min(_midnight((now - timedelta(days=1)).isoformat()), w.end)
     previous0 = _midnight(w.previous_start)
+    # A previous period reaching back past the retention horizon was partly
+    # swept away. No comparison is better than a false one — and it is not
+    # read at all.
+    comparable = kept_from is None or datetime.fromisoformat(previous0) >= kept_from
 
     closed = await _closed_fold(session, f, day0, live0, full=True, reuse=reuse)
     live = (
         await _fold(session, f, live0, w.end, full=True) if live0 < w.end else _empty_fold()
     )
-    previous = await _closed_fold(session, f, previous0, day0, full=False, reuse=reuse)
+    previous = (
+        await _closed_fold(session, f, previous0, day0, full=False, reuse=reuse)
+        if comparable else None
+    )
     cur = _merge(closed, live)
 
     by_day_cat: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -637,11 +662,13 @@ async def summary(
             "days": w.days, "start": day0, "end": w.end,
             "granularity": w.granularity, "buckets": w.buckets,
             "previousStart": previous0,
+            # Set when the comparison was dropped: history before it is gone.
+            "keptFrom": None if comparable else kept_from.isoformat(),
         },
         "totals": {
-            "events": _metric(cur["events"], previous["events"]),
-            "people": _metric(len(cur["actors"]), len(previous["actors"])),
-            "operations": _metric(cur["operations"], previous["operations"]),
+            "events": _metric(cur["events"], previous and previous["events"]),
+            "people": _metric(len(cur["actors"]), previous and len(previous["actors"])),
+            "operations": _metric(cur["operations"], previous and previous["operations"]),
             "reasons": {
                 "given": cur["reasoned"], "of": cur["changes"],
                 "share": round(cur["reasoned"] / cur["changes"], 4) if cur["changes"] else None,
@@ -661,7 +688,7 @@ async def summary(
             {"type": t, "count": n}
             for t, n in sorted(cur["types"].items(), key=lambda kv: (-kv[1], kv[0]))[:_TOP]
         ],
-        "handsOnSources": _cadence([tuple(r) for r in ops]),
+        "handsOnSources": _cadence([tuple(r) for r in ops], people=True),
         "topReasons": [
             {"reason": r, "count": n}
             for r, n in sorted(cur["reasons"].items(), key=lambda kv: (-kv[1], kv[0]))[:5]

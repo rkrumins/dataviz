@@ -126,3 +126,13 @@ export function cadencePhrase(medianGapHours: number | null): string | null {
     if (medianGapHours < 36) return `every ~${Math.round(medianGapHours)}h`
     return `every ~${Math.round(medianGapHours / 24)} days`
 }
+
+/** "2 years", "400 days": how long the log keeps activity. */
+export function retentionPhrase(days: number): string {
+    if (days % 365 !== 0) return `${days} days`
+    const years = days / 365
+    return `${years} year${years === 1 ? '' : 's'}`
+}
+
+/** A user id, as a drill-in writes it — not text to match against names. */
+export const isPersonId = (value: string) => /^usr_[A-Za-z0-9_-]{2,}$/.test(value)

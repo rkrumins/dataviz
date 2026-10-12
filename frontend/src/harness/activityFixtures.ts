@@ -203,9 +203,18 @@ export const ACTIVITY_SUMMARY: ActivitySummary = {
         { type: 'aggregation.source.refresh_requested', count: 38, label: 'Refreshed a data source', category: 'operations' },
     ],
     handsOnSources: [
-        { dataSourceId: ledger.id, workspaceId: 'ws_fin', count: 23, lastAt: at(0.2), medianGapHours: 30, name: ledger.label, workspaceName: 'Finance Analytics' },
-        { dataSourceId: 'ds_rev', workspaceId: 'ws_fin', count: 17, lastAt: at(3.5), medianGapHours: 41, name: 'Revenue Forecast', workspaceName: 'Finance Analytics' },
-        { dataSourceId: 'ds_sup', workspaceId: 'ws_proc', count: 6, lastAt: at(49), medianGapHours: 120, name: 'Supplier Contracts', workspaceName: 'Procurement' },
+        {
+            dataSourceId: ledger.id, workspaceId: 'ws_fin', count: 23, lastAt: at(0.2), medianGapHours: 9, name: ledger.label, workspaceName: 'Finance Analytics',
+            people: [{ ...PEOPLE.ana, count: 15 }, { ...PEOPLE.ben, count: 6 }, { ...PEOPLE.dana, count: 2 }],
+        },
+        {
+            dataSourceId: 'ds_rev', workspaceId: 'ws_fin', count: 17, lastAt: at(3.5), medianGapHours: 41, name: 'Revenue Forecast', workspaceName: 'Finance Analytics',
+            people: [{ ...PEOPLE.chen, count: 17 }],
+        },
+        {
+            dataSourceId: 'ds_sup', workspaceId: 'ws_proc', count: 6, lastAt: at(49), medianGapHours: 120, name: 'Supplier Contracts', workspaceName: 'Procurement',
+            people: [{ ...PEOPLE.dana, count: 4 }, { ...PEOPLE.ben, count: 2 }],
+        },
     ],
     topReasons: [
         { reason: 'Upstream ETL re-ran after the March close fix', count: 11 },

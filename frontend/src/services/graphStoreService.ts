@@ -8,6 +8,7 @@
  * itself, and the server keeps its last good reading when a refresh fails.
  */
 import { authFetch } from './apiClient'
+import { withReason } from './activityReason'
 import type { CapacityLimits, ShardCapacity } from './aggregationService'
 
 export interface NodeMemory {
@@ -392,13 +393,14 @@ export const graphStoreService = {
      *  be served again from any path. */
     async refreshCache(
         workspaceId: string, dataSourceId: string, keepFallback = true,
+        opts?: { reason?: string },
     ): Promise<CacheRefreshResponse> {
         const params = new URLSearchParams({
             workspaceId, dataSourceId, keepFallback: String(keepFallback),
         })
-        return authFetch<CacheRefreshResponse>(`${BASE}/cache/refresh?${params}`, {
-            method: 'POST',
-        })
+        return authFetch<CacheRefreshResponse>(
+            `${BASE}/cache/refresh?${params}`, withReason({ method: 'POST' }, opts?.reason),
+        )
     },
 
     /** Where one data source's graphs live, and what shares their shards. */

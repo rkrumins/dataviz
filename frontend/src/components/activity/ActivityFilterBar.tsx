@@ -8,7 +8,7 @@
  * screen is always the selection in the URL.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Download, Filter, Search, X } from 'lucide-react'
+import { Download, Filter, Keyboard, Search, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { RangePicker, rangeSpanDays } from '@/components/analytics/RangePicker'
@@ -60,7 +60,7 @@ function DebouncedInput({ value, onCommit, ...props }: {
 }
 
 export function ActivityFilterBar({
-    params, catalogue, workspaceLocked, exportHref, isFetching, names,
+    params, catalogue, workspaceLocked, exportHref, isFetching, names, onShowShortcuts,
 }: {
     params: ActivityParams
     catalogue?: ActivityCatalogue
@@ -69,6 +69,7 @@ export function ActivityFilterBar({
     exportHref: string
     isFetching?: boolean
     names: ActivityNames
+    onShowShortcuts: () => void
 }) {
     const theme = useChartTheme()
     const lenses = workspaceLocked
@@ -142,6 +143,15 @@ export function ActivityFilterBar({
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                     <RangePicker range={params.range} onChange={params.setRange} isFetching={isFetching} />
+                    <button
+                        type="button"
+                        onClick={onShowShortcuts}
+                        aria-label="Keyboard shortcuts"
+                        title="Keyboard shortcuts (?)"
+                        className="p-2 rounded-lg text-ink-secondary hover:text-ink bg-canvas-elevated border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                    >
+                        <Keyboard className="w-3.5 h-3.5" />
+                    </button>
                     <a
                         href={exportHref}
                         download
@@ -216,6 +226,7 @@ export function ActivityFilterBar({
                     <Search className="w-3.5 h-3.5 text-ink-muted absolute left-2.5 top-1/2 -translate-y-1/2" aria-hidden />
                     <DebouncedInput
                         type="search"
+                        data-activity-search=""
                         aria-label="Search activity"
                         placeholder={searchAllowed ? 'Search what happened…' : `Search covers at most ${SEARCH_MAX_DAYS} days`}
                         title={searchAllowed ? undefined : `Text search reads every event in its window, so it covers at most ${SEARCH_MAX_DAYS} days. Pick a shorter range to search.`}

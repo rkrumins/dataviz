@@ -87,6 +87,8 @@ export interface LedgerHealth {
     backfilling: boolean
     /** Newest recorded_at — the point "N new" counts from. */
     watermark: string | null
+    /** Days of activity the log keeps; `null` when it keeps everything. */
+    retentionDays?: number | null
 }
 
 export interface ActivityPage {
@@ -122,9 +124,15 @@ export interface ActivityCatalogue {
 
 export interface ActivityMetric {
     current: number
-    previous: number
+    /** `null` when the previous period is no longer kept in full. */
+    previous: number | null
     /** A RATIO (0.25 = +25%), null when the previous period had none. */
     delta: number | null
+}
+
+/** Someone who keeps operating a source by hand, and how often they did. */
+export interface ActivityHandsOnPerson extends ActivityPersonRef {
+    count: number
 }
 
 export interface ActivitySummary {
@@ -135,6 +143,9 @@ export interface ActivitySummary {
         granularity: 'day' | 'week'
         buckets: string[]
         previousStart: string
+        /** Set when the previous period reaches back past what the log
+         *  keeps: the comparison was dropped, not computed on a remnant. */
+        keptFrom?: string | null
     }
     totals: {
         events: ActivityMetric
@@ -160,6 +171,8 @@ export interface ActivitySummary {
         medianGapHours: number | null
         name?: string | null
         workspaceName?: string | null
+        /** Who does it, most first — at most three. */
+        people?: ActivityHandsOnPerson[]
     }[]
     topReasons: { reason: string; count: number }[]
     /** The cadence figures read only the most recent operations. */

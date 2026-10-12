@@ -16,6 +16,7 @@
 tests/test_activity_capture_endpoints.py
 tests/test_activity_catalogue.py
 tests/test_activity_context.py
+tests/test_activity_retention.py
 tests/test_additive_migrations_mirror.py
 tests/test_advanced_search.py
 tests/test_advanced_search_stub.py

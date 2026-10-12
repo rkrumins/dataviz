@@ -20,7 +20,7 @@ const DOC = {
 describe('JsonTree', () => {
     it('shows the first levels open and folds deeper ones, saying how much they hold', () => {
         render(<JsonTree value={DOC} label="event payload" />)
-        const tree = screen.getByRole('group', { name: 'event payload' })
+        const tree = screen.getByRole('group', { name: 'event payload as JSON' })
         expect(tree).toHaveTextContent('"actor_id": "usr_ana"')
         expect(tree).toHaveTextContent('"count": 3')
         expect(tree).toHaveTextContent('"ok": true')
@@ -35,7 +35,7 @@ describe('JsonTree', () => {
     it('opens and shuts a branch, and opens or folds everything at once', async () => {
         const u = userEvent.setup()
         render(<JsonTree value={DOC} label="event payload" />)
-        const tree = screen.getByRole('group', { name: 'event payload' })
+        const tree = screen.getByRole('group', { name: 'event payload as JSON' })
         await u.click(within(tree).getByRole('button', { name: 'limits — 1 key' }))
         expect(tree).toHaveTextContent('"timeout": 10')
 
@@ -52,7 +52,7 @@ describe('JsonTree', () => {
         const u = userEvent.setup()
         const items = Array.from({ length: JSON_PAGE + 7 }, (_, i) => i)
         render(<JsonTree value={{ items, note: 'y'.repeat(JSON_STRING_CUT + 10) }} label="doc" openDepth={3} />)
-        const tree = screen.getByRole('group', { name: 'doc' })
+        const tree = screen.getByRole('group', { name: 'doc as JSON' })
         expect(tree).not.toHaveTextContent(`${JSON_PAGE + 6}`)
         await u.click(within(tree).getByRole('button', { name: 'Show 7 more of 7' }))
         expect(within(tree).queryByRole('button', { name: /Show .* more/ })).not.toBeInTheDocument()

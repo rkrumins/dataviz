@@ -11,8 +11,10 @@
  * takes ten seconds.
  */
 import { useCallback, useEffect, useState } from 'react'
+import { RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import { graphStoreService } from '@/services/graphStoreService'
 import type { CacheEndpointStats, CacheStatsResponse } from '@/services/graphStoreService'
 
@@ -110,6 +112,7 @@ export function CacheHealthCard({
     const [error, setError] = useState<string | null>(null)
     const [refreshing, setRefreshing] = useState(false)
     const [refreshed, setRefreshed] = useState<string | null>(null)
+    const [reasonPrompt, askReason] = useReasonPrompt()
 
     const load = useCallback(async () => {
         setLoading(true)
@@ -127,10 +130,21 @@ export function CacheHealthCard({
 
     const onRefresh = useCallback(async () => {
         if (!dataSourceId) return
+        // The prompt is the confirmation this one-click rebuild never had.
+        const answer = await askReason({
+            title: 'Rebuild this source’s cached views?',
+            message: `Every cached view of ${dataSourceName ?? 'this source'} is marked out of date. `
+                + 'Whoever opens each view next waits while it is rebuilt from the graph.',
+            confirmLabel: 'Rebuild cache',
+            confirmIcon: RefreshCw,
+            context: 'cache',
+            audience: 'workspace',
+        })
+        if (!answer) return
         setRefreshing(true)
         setRefreshed(null)
         try {
-            await graphStoreService.refreshCache(workspaceId, dataSourceId)
+            await graphStoreService.refreshCache(workspaceId, dataSourceId, true, { reason: answer.reason })
             setRefreshed('Cleared. The next person to open each view rebuilds it.')
             await load()
         } catch (e) {
@@ -138,7 +152,7 @@ export function CacheHealthCard({
         } finally {
             setRefreshing(false)
         }
-    }, [workspaceId, dataSourceId, load])
+    }, [workspaceId, dataSourceId, dataSourceName, load, askReason])
 
     const rows = Object.entries(stats?.endpoints ?? {})
         .sort((a, b) => (b[1].hit + b[1].miss + b[1].stale) - (a[1].hit + a[1].miss + a[1].stale))
@@ -311,6 +325,7 @@ export function CacheHealthCard({
                     </ul>
                 </>
             )}
+            {reasonPrompt}
         </section>
     )
 }

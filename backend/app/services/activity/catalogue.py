@@ -417,6 +417,13 @@ _EVENT_META.update({
         else "Ran asset discovery on every provider"
     )),
     "stats.asset.refresh_requested": ("info", _envelope_summary("Refreshed the statistics of {}")),
+    "stats.dlq.redriven": ("info", lambda p: "Re-sent a failed statistics message for another try"),
+    "stats.dlq.deleted": ("warning", lambda p: "Deleted a failed statistics message"),
+    "stats.admission.updated": ("info", _envelope_summary("Changed how fast statistics may query {}")),
+    "aggregation.source.cache_refreshed": ("info", _envelope_summary("Dropped the cached reads of {}")),
+    "aggregation.graph_store.limits_changed": (
+        "warning", _envelope_summary("Changed the per-query limits of graph store node {}"),
+    ),
     # ── data: onboarding, sources, providers, version control
     "workspace.data_source.added": ("info", _envelope_summary("Added data source {}")),
     "workspace.data_source.updated": ("info", _envelope_summary("Updated data source {}")),
@@ -464,6 +471,11 @@ LABELS: dict[str, str] = {
     "aggregation.settings.updated": "Changed aggregation defaults",
     "stats.discovery.triggered": "Ran asset discovery",
     "stats.asset.refresh_requested": "Refreshed asset statistics",
+    "stats.dlq.redriven": "Retried a failed statistics message",
+    "stats.dlq.deleted": "Deleted a failed statistics message",
+    "stats.admission.updated": "Changed statistics admission",
+    "aggregation.source.cache_refreshed": "Dropped cached reads",
+    "aggregation.graph_store.limits_changed": "Changed graph store limits",
     "workspace.data_source.added": "Added a data source",
     "workspace.data_source.updated": "Updated a data source",
     "workspace.data_source.removed": "Removed a data source",

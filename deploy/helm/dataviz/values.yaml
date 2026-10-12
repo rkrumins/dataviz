@@ -112,6 +112,7 @@ config:
   analytics:
     warmIntervalSeconds: "300"           # floor of 30 enforced in code
     productEventRetentionDays: "400"     # floor of 365; product_events grows with usage
+    activityRetentionDays: "730"         # activity log; 0 keeps everything, floor of 365
 
   # Import/export artifacts: uploads, export files, view packages. viz-service
   # stores an upload and a versioning lane reads it back to run the job, so

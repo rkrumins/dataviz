@@ -220,7 +220,7 @@ function OpenEntityDrawer({
               </TabsContent>
             )}
             <TabsContent value="json">
-              <JsonView data={form} label="Entity data as JSON" />
+              <JsonView data={form} label="Entity data" />
             </TabsContent>
           </DrawerBody>
 

@@ -160,7 +160,8 @@ function Branch({ name, value, depth, openDepth, last }: {
 
 export function JsonTree({ value, label, openDepth = 2, className }: {
     value: unknown
-    /** What the document is, for the copy button and assistive tech: "event payload". */
+    /** What the document is — "event payload", "Entity data" — read as
+     *  "event payload as JSON" by assistive tech and the copy button. */
     label: string
     /** Levels open on first draw; deeper branches start folded. */
     openDepth?: number
@@ -193,7 +194,7 @@ export function JsonTree({ value, label, openDepth = 2, className }: {
             </div>
             <div
                 role="group"
-                aria-label={label}
+                aria-label={`${label} as JSON`}
                 tabIndex={0}
                 className="max-h-[28rem] overflow-auto px-2 py-2 font-mono text-[11px] leading-5 custom-scrollbar outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40"
             >

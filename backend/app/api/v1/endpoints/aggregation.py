@@ -36,6 +36,7 @@ from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.db.repositories import data_source_repo
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
+from backend.app.services.activity import recorder
 from backend.app.services.aggregation.internal_auth import internal_auth_headers
 from backend.app.services.aggregation.schemas import (
     GraphStoreLimitsPatch,
@@ -394,6 +395,11 @@ async def get_data_source_capacity(
 # changes the store itself, not a job. The actor is always the
 # authenticated user, never what the client body says.
 
+#: The store's own names for its limits, as the activity log shows them —
+#: suffixed with their units so each is drawn in them.
+_LIMIT_FIELDS = {"TIMEOUT_MAX": "timeoutMaxMs", "QUERY_MEM_CAPACITY": "queryMemoryBytes"}
+
+
 @router.patch(
     "/graph-store/{endpoint}/limits",
     summary="Set a graph store node's per-query limits (TIMEOUT_MAX, QUERY_MEM_CAPACITY) at runtime",
@@ -403,6 +409,7 @@ async def set_graph_store_limits(
     patch: GraphStoreLimitsPatch,
     admin: User = Depends(_REQUIRE_SYSTEM_ADMIN),
     session: AsyncSession = Depends(get_graph_read_db_session),
+    write: AsyncSession = Depends(get_db_session),
 ):
     patch.actor = str(getattr(admin, "id", None) or getattr(admin, "email", None) or "")[:255] or None
     # In-process in every mode: the change goes out over a one-node client
@@ -411,11 +418,26 @@ async def set_graph_store_limits(
         GraphStoreEndpointNotFound, GraphStoreLimitsError, apply_graph_store_limits,
     )
     try:
-        return await apply_graph_store_limits(session, endpoint, patch)
+        result = await apply_graph_store_limits(session, endpoint, patch)
     except GraphStoreEndpointNotFound as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except GraphStoreLimitsError as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    # Recorded on the write pool (the read above is the graph-read pool),
+    # best-effort: the store has already taken the change.
+    await recorder.record_for_request(
+        write, "aggregation.graph_store.limits_changed",
+        target_type="graph_store_node", target_id=endpoint, target_label=endpoint,
+        details={
+            "changes": [
+                {"field": _LIMIT_FIELDS.get(k, k), "from": result.previous.get(k), "to": v}
+                for k, v in result.applied.items()
+            ],
+            "appliedTo": result.applied_to,
+        },
+        best_effort=True,
+    )
+    return result
 
 
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────

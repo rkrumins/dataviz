@@ -75,3 +75,6 @@ data:
   # but it is harmless and clearer to ship it fleet-wide from the same
   # place as everything else.
   PRODUCT_EVENT_RETENTION_DAYS: {{ .Values.config.analytics.productEventRetentionDays | quote }}
+  # The control plane sweeps the activity log to this horizon and the web
+  # tier tells readers what it is: one ConfigMap, so they cannot disagree.
+  ACTIVITY_RETENTION_DAYS: {{ .Values.config.analytics.activityRetentionDays | quote }}

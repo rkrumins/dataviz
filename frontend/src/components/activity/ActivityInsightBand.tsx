@@ -11,7 +11,7 @@
  * "when"; the leaderboards answer "who" and "where"; the reasons answer "why".
  */
 import { useMemo } from 'react'
-import { Activity, Hand, MessageSquareQuote, Users } from 'lucide-react'
+import { Activity, Hand, Info, MessageSquareQuote, Users } from 'lucide-react'
 
 import { KpiCard } from '@/components/analytics/KpiCard'
 import { Leaderboard, type LeaderboardRow } from '@/components/analytics/Leaderboard'
@@ -27,13 +27,33 @@ import { UserAvatar } from '@/components/ui/UserAvatar'
 import { cn } from '@/lib/utils'
 import { compact, exact, percent, shortDate } from '@/lib/formatMetric'
 import { timeAgo } from '@/lib/timeAgo'
-import type { ActivitySummary } from '@/services/activityService'
+import { describeInstant } from '@/lib/smartTime'
+import type { ActivityHandsOnPerson, ActivitySummary } from '@/services/activityService'
 
+import { ActivityAttention } from './ActivityAttention'
+import { attentionItems } from './attention'
 import { CATEGORY_META, cadencePhrase } from './activityMeta'
 import type { ActivityParams } from './useActivityParams'
 
 /** The server's delta is a ratio; a KPI card shows percent. */
 const pct = (delta: number | null) => (delta === null ? null : delta * 100)
+
+/** Who keeps operating a source: their faces, overlapping, most first. */
+function Faces({ people }: { people: ActivityHandsOnPerson[] }) {
+    if (people.length === 0) return null
+    const names = people.map((p) => p.name || p.email || p.id)
+    return (
+        <span className="inline-flex shrink-0 -space-x-1" title={names.map((n, i) => `${n} (${people[i].count})`).join(', ')}>
+            {people.map((p, i) => (
+                <UserAvatar
+                    key={p.id} userId={p.id} name={names[i]} avatarId={p.avatarId} hasImage={p.hasImage}
+                    className={cn('h-4 w-4 text-[7px] font-bold ring-2 ring-canvas-elevated', p.deleted && 'grayscale')}
+                />
+            ))}
+            <span className="sr-only">Run by {names.join(', ')}</span>
+        </span>
+    )
+}
 
 export function ActivityInsightBand({ summary, isLoading, isStale, error, params }: {
     summary?: ActivitySummary
@@ -49,6 +69,10 @@ export function ActivityInsightBand({ summary, isLoading, isStale, error, params
         return summary.window.buckets.map((_, i) =>
             summary.volume.reduce((sum, s) => sum + (s.values[i] ?? 0), 0))
     }, [summary])
+    const attention = useMemo(
+        () => (summary ? attentionItems(summary, { personFiltered: !!params.person }) : []),
+        [summary, params.person],
+    )
 
     if (error && !summary) {
         return (
@@ -97,7 +121,12 @@ export function ActivityInsightBand({ summary, isLoading, isStale, error, params
     const sources: LeaderboardRow[] = summary.handsOnSources.map((s) => ({
         id: s.dataSourceId,
         label: s.name || <span className="font-mono text-[11px]">{s.dataSourceId}</span>,
-        meta: s.workspaceName ?? undefined,
+        meta: s.people?.length || s.workspaceName ? (
+            <span className="flex min-w-0 items-center gap-1.5">
+                <Faces people={s.people ?? []} />
+                {s.workspaceName && <span className="truncate">{s.workspaceName}</span>}
+            </span>
+        ) : undefined,
         value: s.count,
         detail: [cadencePhrase(s.medianGapHours), `last ${timeAgo(s.lastAt)}`].filter(Boolean).join(' · '),
     }))
@@ -110,6 +139,8 @@ export function ActivityInsightBand({ summary, isLoading, isStale, error, params
 
     return (
         <section aria-label="Activity insights" className="space-y-4">
+            <ActivityAttention items={attention} onShow={params.patch} />
+
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 <KpiCard
                     label="Events"
@@ -149,6 +180,13 @@ export function ActivityInsightBand({ summary, isLoading, isStale, error, params
                     accent="emerald"
                 />
             </div>
+            {window.keptFrom && (
+                <p className="flex items-center gap-1.5 text-[11px] text-ink-muted">
+                    <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                    No change is shown: the log keeps activity from {describeInstant(new Date(window.keptFrom)).utcDate} on,
+                    so the period before this one is incomplete.
+                </p>
+            )}
 
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                 <ChartFrame
