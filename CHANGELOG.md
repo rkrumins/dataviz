@@ -60,6 +60,12 @@ the graph is now read by one query, streamed, and the next page is read while th
 On 2M nodes and 2M edges the whole package takes about three minutes, at full speed from the start.
 An export's plan counts and a replace import's read of the graph stream the same way.
 
+**Imports look entities up with one array, not thousands of parameters.** Each import window looked
+up the entities its rows name with IN lists of up to 20,000 bind parameters, compiled one at a time
+on the worker's event loop and planned again by Postgres for every length. They now go as one array:
+a 100k + 100k import takes 62 s instead of 80 s, and its windows no longer slow down as the draft
+grows.
+
 **Version-control jobs run only on the versioning worker, and resume.** Imports, exports, publishes,
 package checks, enabling version control and purges never run in a web server any more. The worker
 runs them on three lanes, `projection`, `transfer` and `bootstrap` (`GRAPHVER_WORKER_LANES`), which
@@ -98,7 +104,9 @@ loaded every created entity's payload. It now reads them page by page.
 
 ### Known limitations
 
-- Publishing 200k changes peaks at about 420 MB of worker memory.
+- Publishing holds the whole draft in worker memory: about 420 MB for 200k changes and 3.2 GB for
+  2M, which took 3.6 minutes under the graph's lock, with one 8.5 s stall of the worker's event
+  loop. A draft of several million changes needs a worker sized for it.
 - A worker's event loop can stall for 120–170 ms (p99) during the heaviest windows. Leases are kept
   alive by a separate thread, so jobs are not lost, and the web servers run no jobs.
 - Exports still write package format 1. This release reads both 1 and 2; the next one writes 2.

@@ -4367,14 +4367,12 @@ class GraphVersioningService:
         if not ids:
             return {}
         cand: set = set()
+        stmt = select(EdgeVersionORM.entity_id).where(
+            EdgeVersionORM.graph_id == graph_id,
+            EdgeVersionORM.target_entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+        ).distinct()
         for chunk in _chunks(ids, _IN_LIST_MAX):
-            rows = (await s.execute(
-                select(EdgeVersionORM.entity_id).where(
-                    EdgeVersionORM.graph_id == graph_id,
-                    EdgeVersionORM.target_entity_id.in_(chunk),
-                ).distinct()
-            )).scalars().all()
-            cand.update(rows)
+            cand.update((await s.execute(stmt, {"ids": list(chunk)})).scalars().all())
         vals = await self._current_values(s, graph_id, branch_id, cand)
         out: Dict[str, Tuple[str, str, dict]] = {}
         child_set = set(child_ids)
@@ -6223,17 +6221,18 @@ class GraphVersioningService:
         if not id_list:
             return out
         for model in (NodeVersionORM, EdgeVersionORM):
-            # Chunk the IN-list — asyncpg caps bind params at 32767 and a cascade delete
-            # can touch tens of thousands of entities in one pass.
+            # The ids go as one array (``= ANY``), a chunk at a time: an IN list of thousands is
+            # compiled one bind at a time, and a cascade delete can touch tens of thousands.
+            stmt = (
+                select(model.entity_id, model.op, model.payload)
+                .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                       model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                       model.commit_seq <= seq)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+            )
             for chunk in _chunks(id_list, _IN_LIST_MAX):
-                stmt = (
-                    select(model.entity_id, model.op, model.payload)
-                    .where(model.graph_id == graph_id, model.branch_id == branch_id,
-                           model.entity_id.in_(chunk), model.commit_seq <= seq)
-                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-                    .distinct(model.entity_id)
-                )
-                for eid, op, payload in (await s.execute(stmt)).all():
+                for eid, op, payload in (await s.execute(stmt, {"ids": list(chunk)})).all():
                     out[eid] = None if op == "delete" else payload
         return out
 
@@ -6280,15 +6279,17 @@ class GraphVersioningService:
             named = ((model.urn, model.entity_type, null(), null()) if kind == "node" else
                      (null(), func.coalesce(model.edge_type, model.payload["edge_type"].astext),
                       model.source_entity_id, model.target_entity_id))
+            stmt = (
+                select(model.entity_id, model.op, model.content_hash, *named)
+                .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                       model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                       model.commit_seq <= seq)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+            )
             for chunk in _chunks(id_list, _IN_LIST_MAX):
-                stmt = (
-                    select(model.entity_id, model.op, model.content_hash, *named)
-                    .where(model.graph_id == graph_id, model.branch_id == branch_id,
-                           model.entity_id.in_(chunk), model.commit_seq <= seq)
-                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-                    .distinct(model.entity_id)
-                )
-                for eid, op, chash, urn, typ, src, tgt in (await s.execute(stmt)).all():
+                for eid, op, chash, urn, typ, src, tgt in (
+                        await s.execute(stmt, {"ids": list(chunk)})).all():
                     if op == "delete" or chash == _HASH_NONE:    # a null payload reads as None too
                         out[eid] = None
                     elif chash == _HASH_EMPTY:
@@ -6412,14 +6413,14 @@ class GraphVersioningService:
         cols = {"source": EdgeVersionORM.source_entity_id, "target": EdgeVersionORM.target_entity_id}
         cand: set = set()
         for side in sides:
-            for chunk in _chunks(ids, _IN_LIST_MAX):   # bind-param-safe IN-list (see _values_at)
-                stmt = select(EdgeVersionORM.entity_id).where(
-                    EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(layers),
-                    cols[side].in_(chunk))
-                if edge_types is not None:
-                    stmt = stmt.where(or_(func.upper(EdgeVersionORM.edge_type).in_(list(edge_types)),
-                                          EdgeVersionORM.edge_type.is_(None)))
-                cand.update((await s.execute(stmt.distinct())).scalars().all())
+            stmt = select(EdgeVersionORM.entity_id).where(
+                EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(layers),
+                cols[side] == any_(bindparam("ids", type_=ARRAY(Text))))
+            if edge_types is not None:
+                stmt = stmt.where(or_(func.upper(EdgeVersionORM.edge_type).in_(list(edge_types)),
+                                      EdgeVersionORM.edge_type.is_(None)))
+            for chunk in _chunks(ids, _IN_LIST_MAX):   # one array a chunk (see _values_at)
+                cand.update((await s.execute(stmt.distinct(), {"ids": list(chunk)})).scalars().all())
         return cand
 
     async def _incident_live_edges(

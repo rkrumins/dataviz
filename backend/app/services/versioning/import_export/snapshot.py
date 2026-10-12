@@ -42,9 +42,9 @@ from ..models import BranchORM, EdgeVersionORM, EntityHeadORM, GraphORM, NodeVer
 PAGE_SIZE = int(os.getenv("GRAPH_EXPORT_PAGE_SIZE", "2000"))
 #: Ids per point lookup.
 _LOOKUP_CHUNK = 5000
-#: A point lookup's ids, as one array (``= ANY``): an IN list of thousands is compiled one bind at a
-#: time, and each length is a statement of its own to prepare and plan.
-_ANY_ID = any_(bindparam("ids", type_=ARRAY(Text)))
+#: A lookup's ids (or urns), as one array (``= ANY``): an IN list of thousands is compiled one bind at
+#: a time, and each length is a statement of its own to prepare and plan.
+_ANY = any_(bindparam("ids", type_=ARRAY(Text)))
 
 #: The session every read here goes through while :func:`pinned_reads` is open.
 _PINNED: ContextVar[Optional[AsyncSession]] = ContextVar("snapshot_pinned_reads", default=None)
@@ -174,7 +174,7 @@ class VersionLayer:
 
     async def lookup(self, kind: str, entity_ids: Sequence[str], payload: bool = False) -> Dict[str, Winner]:
         model = _model(kind)
-        stmt = self._winners(kind, payload).where(model.entity_id == _ANY_ID)
+        stmt = self._winners(kind, payload).where(model.entity_id == _ANY)
         out: Dict[str, Winner] = {}
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
             async with _session() as s:
@@ -229,7 +229,7 @@ class HeadsLayer:
             limit = None if limit is None else limit - want
 
     async def lookup(self, kind: str, entity_ids: Sequence[str], payload: bool = False) -> Dict[str, Winner]:
-        stmt = self._heads(kind, payload).where(EntityHeadORM.entity_id == _ANY_ID)
+        stmt = self._heads(kind, payload).where(EntityHeadORM.entity_id == _ANY)
         out: Dict[str, Winner] = {}
         for chunk in _chunks(list(entity_ids), _LOOKUP_CHUNK):
             async with _session() as s:
@@ -318,12 +318,12 @@ class Snapshot:
         wanted = [k for k in dict.fromkeys(keys) if k]
         candidates: Set[str] = set()
         for graph_id, branches in self._branches().items():
+            stmt = select(NodeVersionORM.entity_id).where(
+                NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id.in_(branches),
+                column == _ANY).distinct()
             for chunk in _chunks(wanted, _LOOKUP_CHUNK):
                 async with _session() as s:
-                    rows = (await s.execute(
-                        select(NodeVersionORM.entity_id).where(
-                            NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id.in_(branches),
-                            column.in_(chunk)).distinct())).all()
+                    rows = (await s.execute(stmt, {"ids": list(chunk)})).all()
                 candidates.update(r[0] for r in rows)
         live = await self.lookup_live("node", candidates)
         wanted_set = set(wanted)
@@ -335,12 +335,12 @@ class Snapshot:
         sources, targets = set(sources), set(targets)
         candidates: Set[str] = set()
         for graph_id, branches in self._branches().items():
+            stmt = select(EdgeVersionORM.entity_id, EdgeVersionORM.target_entity_id).where(
+                EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(branches),
+                EdgeVersionORM.source_entity_id == _ANY).distinct()
             for chunk in _chunks(list(sources), _LOOKUP_CHUNK):
                 async with _session() as s:
-                    rows = (await s.execute(
-                        select(EdgeVersionORM.entity_id, EdgeVersionORM.target_entity_id).where(
-                            EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(branches),
-                            EdgeVersionORM.source_entity_id.in_(chunk)).distinct())).all()
+                    rows = (await s.execute(stmt, {"ids": list(chunk)})).all()
                 candidates.update(eid for eid, target in rows if target in targets)
         live = await self.lookup_live("edge", candidates)
         return {(w.source_id, w.target_id, w.edge_type): eid for eid, w in live.items()
@@ -362,7 +362,8 @@ class Snapshot:
                             select(EdgeVersionORM.entity_id).where(
                                 EdgeVersionORM.graph_id == graph_id,
                                 EdgeVersionORM.branch_id.in_(branches),
-                                EdgeVersionORM.source_entity_id.in_(chunk)).distinct())).all()
+                                EdgeVersionORM.source_entity_id == _ANY).distinct(),
+                            {"ids": list(chunk)})).all()
                     candidates.update(r[0] for r in rows)
                 parents = set(chunk)
                 for w in (await self.lookup_live("edge", candidates)).values():
