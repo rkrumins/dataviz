@@ -51,7 +51,7 @@ places every table by area and schema.
 
 | Domain | Owned tables | Notes |
 |---|---|---|
-| **identity** | `users`, `user_roles`, `user_approvals`, `revoked_refresh_jti`, `refresh_tokens` | PII boundary — `email`, `password_hash`, `metadata` live here and only here. |
+| **identity** | `users`, `user_roles`, `user_approvals`, `revoked_refresh_jti`, `refresh_tokens`, `api_keys` | PII boundary — `email`, `password_hash`, `metadata` live here and only here. |
 | **workspace** | `workspaces`, `workspace_data_sources`, `assignment_rule_sets` | Tenancy boundary — `workspace_id` is THE tenant identifier. |
 | **provider** | `providers`, `catalog_items` | Pure infrastructure — no tenant data, no PII. |
 | **ontology** | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` | Versioned + immutable audit log. `revision` is the optimistic concurrency token. |
@@ -76,7 +76,7 @@ already:
 | aggregation → workspace | `aggregation_jobs.data_source_id`, `aggregation_jobs.workspace_id` | The job row stores the workspace id and the data source's label when it is created, so `list_jobs_global` reads `aggregation_jobs` alone — the "add a denormalised column when a real tenant-filtering query needs it" case. |
 | visualization → workspace | `views.workspace_id`, `views.data_source_id` | `views` owns its own `workspace_id` FK (intra-schema). |
 | stats → workspace | `data_source_stats.data_source_id`, `data_source_count_snapshots.{data_source_id,workspace_id}` | `data_source_stats` does not need workspace awareness. The snapshot table denormalises `workspace_id`/`provider_id` at capture time, so the per-provider history rollup reads the stats domain alone. It also has no FK: an audit trail must outlive the row it describes. |
-| identity → identity | `user_roles.user_id`, `user_approvals.user_id` | Intra-domain — keep DB FK forever. |
+| identity → identity | `user_roles.user_id`, `user_approvals.user_id`, `api_keys.user_id` | Intra-domain — keep DB FK forever. |
 | visualization → visualization | `views.context_model_id`, `view_favourites.view_id`, `view_versions.view_id` | Intra-domain. |
 | ontology → ontology | `ontology_audit_log.ontology_id`, `ontology_source_mappings.ontology_id` | Intra-domain. |
 

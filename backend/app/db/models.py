@@ -3149,6 +3149,79 @@ class RefreshTokenORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# api_keys  (bearer credentials that act as their principal)           #
+# ------------------------------------------------------------------ #
+#
+# One row per key ever minted. The secret itself is never stored — only
+# its SHA-256 — so the row is useless to whoever reads it, and the token
+# is shown to its owner exactly once. Revoked and expired rows are kept:
+# the admin inventory and the audit trail both point at them.
+#
+# ``user_id`` is the principal the key acts as. Today that is always the
+# person who minted it (``kind = 'personal'``); service accounts will be
+# non-human principals minted by their managers, which is what
+# ``created_by`` is for.
+
+class ApiKeyORM(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(Text, primary_key=True, default=lambda: f"apk_{uuid.uuid4().hex[:12]}")
+    user_id = Column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    kind = Column(Text, nullable=False, default="personal")
+    # Who minted it. Equal to ``user_id`` for a personal key.
+    created_by = Column(Text, nullable=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+
+    # ``nxpat_`` plus the first characters of the random part — enough for
+    # the owner to tell keys apart and find one in a config file.
+    token_prefix = Column(Text, nullable=False)
+    token_hash = Column(Text, nullable=False)
+
+    # The permission profile, JSON: {"views": none|read|write,
+    # "data": none|read|write, "publish": bool}.
+    permissions = Column(Text, nullable=False)
+    # The resource selection, JSON: "all", or {"workspaces": [...],
+    # "views": [...], "dataSources": [...]}.
+    resources = Column(Text, nullable=False)
+    # JSON list of CIDRs the key may be used from; NULL = anywhere.
+    allowed_cidrs = Column(Text, nullable=True)
+
+    expires_at = Column(Text, nullable=True)            # ISO; NULL = never
+    expiry_reminded_at = Column(Text, nullable=True)
+
+    created_at = Column(Text, nullable=False, default=_now)
+    created_ip = Column(Text, nullable=True)
+    created_user_agent = Column(Text, nullable=True)
+
+    # Stamped at most once per few minutes per key (see ``ActivityGate``),
+    # never on every request.
+    last_used_at = Column(Text, nullable=True)
+    last_used_ip = Column(Text, nullable=True)
+    last_used_user_agent = Column(Text, nullable=True)
+
+    revoked_at = Column(Text, nullable=True)
+    revoked_by = Column(Text, nullable=True)
+    revoked_reason = Column(Text, nullable=True)        # owner | admin | rotated | self
+    # The key this one replaced, when minted by a rotation.
+    rotated_from = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_api_keys_token_hash"),
+        Index("idx_api_keys_user", "user_id"),
+        Index("idx_api_keys_expires_at", "expires_at"),
+        CheckConstraint(
+            "kind IN ('personal', 'service')", name="ck_api_keys_kind",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ApiKey id={self.id!r} user={self.user_id!r} prefix={self.token_prefix!r}>"
+
+
+# ------------------------------------------------------------------ #
 # outbox_events  (transactional outbox for domain events)              #
 # ------------------------------------------------------------------ #
 

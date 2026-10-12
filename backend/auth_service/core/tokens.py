@@ -171,6 +171,12 @@ SIGNIN_CLAIM = "signin"
 SIGNIN_PASSWORD = "password"
 SIGNIN_SSO = "sso"
 
+#: On an SSO session's access token: when the person last authenticated at
+#: their identity provider (epoch seconds), carried unchanged through every
+#: rotation. What step-up reads before something sensitive — minting an API
+#: key — is allowed on a session that may have been open for hours.
+AUTH_TIME_CLAIM = "auth_time"
+
 
 def password_change_pending(payload: dict, account_must_change: bool) -> bool:
     """Whether this session has to change the account's password first.

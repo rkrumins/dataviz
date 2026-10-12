@@ -21,6 +21,7 @@ from backend.app.db.advisory import claim_this_pass
 from backend.app.db.repositories import user_repo
 from backend.app.services import (
     analytics_warmer,
+    api_key_housekeeping,
     outbox_relay,
     product_event_gc,
     refresh_token_gc,
@@ -41,7 +42,7 @@ def test_the_control_plane_starts_every_housekeeping_loop():
 
     source = inspect.getsource(controlplane.lifespan)
     for loop in ("run_relay", "run_refresh_token_gc",
-                 "run_product_event_gc", "run_warmer"):
+                 "run_product_event_gc", "run_warmer", "run_api_key_housekeeping"):
         assert f"{loop})" in source or f"{loop}(" in source, loop
 
 
@@ -75,6 +76,7 @@ async def test_claiming_is_free_off_postgres(db_session):
     (refresh_token_gc, "run_sweeper", "sweep_once"),
     (product_event_gc, "run_sweeper", "sweep_once"),
     (analytics_warmer, "run_warmer", "warm_once"),
+    (api_key_housekeeping, "run_sweeper", "remind_once"),
 ])
 async def test_a_pass_another_process_holds_is_skipped(
     module, loop, work, db_session, monkeypatch,

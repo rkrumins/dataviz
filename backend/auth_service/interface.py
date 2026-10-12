@@ -80,6 +80,43 @@ class SessionTokens:
     csrf_token: str
 
 
+@dataclass(frozen=True)
+class ApiKeyPolicy:
+    """The deployment's rules for API keys, read by the caller per request.
+
+    ``sso_signin_window_days``: an owner with an SSO identity must have signed
+    in through their identity provider within this many days, or their keys
+    pause. ``None`` turns the rule off.
+
+    ``max_lifetime_days``: no key outlives this many days from its creation,
+    whatever expiry it was minted with — applied to existing keys too. ``None``
+    means no maximum.
+    """
+    sso_signin_window_days: Optional[int] = 30
+    max_lifetime_days: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ApiKeyIdentity:
+    """A request authenticated by an API key: who it acts as, and through
+    which key.
+
+    ``claims`` is whatever the injected claims resolver produced — opaque
+    here, the application's permission claims for this key.
+
+    ``status`` is ``active`` for a key that may act. A caller that asked for
+    inactive keys too (a key inspecting or revoking itself) also receives the
+    reason it would otherwise have been refused, and ``claims`` is then
+    ``None``: such a key may describe or end itself and nothing more.
+    """
+    key_id: str
+    kind: str
+    user: "User"
+    claims: object
+    expires_at: Optional[str]
+    status: str = "active"
+
+
 # ── Service protocol ─────────────────────────────────────────────────
 
 @runtime_checkable
@@ -162,6 +199,29 @@ class IdentityService(Protocol):
         """
         ...
 
+    async def validate_api_key(
+        self,
+        token: str,
+        *,
+        client_ip: Optional[str],
+        user_agent: Optional[str],
+        policy: ApiKeyPolicy,
+        allow_inactive: bool = False,
+    ) -> ApiKeyIdentity:
+        """Authenticate a request by API key, checked afresh every time.
+
+        Raises ``ApiKeyRejected`` when the key is not honoured — unknown,
+        revoked, expired, its owner suspended or due to sign in again, or
+        presented from an address the key does not allow — and
+        ``ApiKeyLookupUnavailable`` when the answer could not be read, which
+        must never be mistaken for a bad key.
+
+        ``allow_inactive`` lets a key that is merely paused or expired through
+        with its ``status`` set, for the routes where a key describes or
+        revokes itself. A revoked or unknown key is refused regardless.
+        """
+        ...
+
 
 # ── Errors ───────────────────────────────────────────────────────────
 
@@ -235,9 +295,30 @@ class LocalLoginDisabled(AuthError):
         super().__init__("local_login_disabled")
 
 
+class ApiKeyRejected(AuthError):
+    """An API key was presented and is not honoured. ``reason`` is a stable
+    code: ``malformed``, ``unknown``, ``revoked``, ``expired``,
+    ``owner_inactive``, ``owner_reauth_required`` or ``ip_not_allowed``."""
+
+    def __init__(self, reason: str, *, key_id: Optional[str] = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.key_id = key_id
+
+
+class ApiKeyLookupUnavailable(AuthError):
+    """Whether the key is valid could not be determined — the store did not
+    answer. The caller answers 503, never 401: a database blip must not read
+    to a client as "your credential is bad"."""
+
+
 __all__ = [
     "User",
     "SessionTokens",
+    "ApiKeyPolicy",
+    "ApiKeyIdentity",
+    "ApiKeyRejected",
+    "ApiKeyLookupUnavailable",
     "IdentityService",
     "AuthError",
     "InvalidCredentials",

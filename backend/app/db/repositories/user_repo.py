@@ -15,6 +15,7 @@ from typing import Optional
 from sqlalchemy import select, func, delete, or_, update
 
 from backend.common.display_name import resolve_display_name
+from backend.app.common import api_key_context
 from backend.auth_service.activity import (
     RESOLUTION_SECONDS as ACTIVITY_RESOLUTION_SECONDS,
     ActivityGate,
@@ -858,7 +859,7 @@ async def create_outbox_event(
     """
     event = OutboxEventORM(
         event_type=event_type,
-        payload=json.dumps(payload),
+        payload=json.dumps(api_key_context.stamp(payload)),
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
     )

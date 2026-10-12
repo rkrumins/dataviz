@@ -38,9 +38,9 @@ import logging
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Mapping, Optional
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import (
@@ -144,6 +144,16 @@ class PermissionClaims:
     #: token is trustworthy unless the read path says otherwise. Never
     #: serialized: it is a fact about this request, not about the session.
     ws_available: bool = True
+
+    #: Set when the request authenticates with an API key: what the key may
+    #: touch of its owner's authority. ``None`` for a browser session.
+    #:
+    #: The permission half of a key's restriction is already applied to
+    #: ``ws_perms`` (see ``resolve_for_api_key``); this carries the rest —
+    #: which views and data sources it was limited to — for the checks that
+    #: grant access by identity rather than by permission (a creator, an
+    #: explicit view grant, the enterprise tier). Never serialized.
+    key_scope: Optional["KeyScope"] = None
 
     def to_jwt_dict(self) -> dict:
         """Serialize the half that travels in the access JWT.
@@ -292,6 +302,7 @@ class PermissionClaims:
             global_perms=self.global_perms,
             ws_perms=ws_perms if ws_perms is not None else {},
             ws_available=ws_perms is not None,
+            key_scope=self.key_scope,
         )
 
 
@@ -613,6 +624,275 @@ def has_permission_any_workspace(
         if has_permission(claims, permission, workspace_id=ws_id):
             return True
     return False
+
+
+# ── API keys: what a key may exercise of its owner's authority ────────
+#
+# A key is one permission profile applied to one resource selection:
+#
+#   profile    views: none|read|write (+ publish), data: none|read|write
+#   selection  "all", or chosen workspaces / views / data sources
+#
+# Its effective authority on any resource is the owner's live authority on
+# that resource ∩ the profile ∩ the selection. Two things carry that:
+#
+#   * ``resolve_for_api_key`` writes the permission half into ``ws_perms``,
+#     with NO global permissions at all — so every ``has_permission`` and
+#     ``requires(...)`` check, and every place that reads ``global_perms``
+#     directly, sees a plain member of exactly the workspaces in reach;
+#   * ``KeyScope`` (on ``PermissionClaims.key_scope``) carries the selection,
+#     for the checks that grant by identity — a view's creator, an explicit
+#     view grant, the enterprise tier — and for the request-boundary fence
+#     that keeps a key limited to particular views and data sources to them.
+
+KEY_LEVELS: tuple[str, ...] = ("none", "read", "write")
+
+_KEY_VIEW_READ = frozenset({"workspace:view:read"})
+_KEY_VIEW_WRITE = _KEY_VIEW_READ | {
+    "workspace:view:create", "workspace:view:edit", "workspace:view:delete",
+}
+_KEY_VIEW_PUBLISH = frozenset({"workspace:view:publish"})
+# Reading data includes the metadata needed to interpret it: the semantic
+# layer and the catalog entry behind a data source.
+_KEY_DATA_READ = frozenset({
+    "workspace:datasource:read", "workspace:ontology:read",
+    "workspace:catalog:read",
+})
+_KEY_DATA_WRITE = _KEY_DATA_READ | {"workspace:datasource:manage"}
+
+#: Every permission any key can carry. Deliberately excludes
+#: ``workspace:admin`` and every ``system:*`` — keys are the data plane, not
+#: administration — so none of the fail-closed permissions is reachable.
+KEY_GRANTABLE_PERMISSIONS: frozenset[str] = (
+    _KEY_VIEW_WRITE | _KEY_VIEW_PUBLISH | _KEY_DATA_WRITE
+)
+
+
+@dataclass(frozen=True)
+class KeyScope:
+    """An API key's profile and resource selection. Immutable — a key's
+    scope is fixed when it is minted."""
+
+    key_id: str
+    kind: str = "personal"
+    views: str = "none"
+    data: str = "none"
+    publish: bool = False
+    all_resources: bool = False
+    workspaces: frozenset[str] = frozenset()
+    view_ids: frozenset[str] = frozenset()
+    data_source_ids: frozenset[str] = frozenset()
+    #: Where the selected views and data sources live (id → workspace id),
+    #: resolved when the claims are materialized. A selected resource that
+    #: no longer exists has no entry, and so admits nothing.
+    view_workspaces: Mapping[str, str] = field(default_factory=dict)
+    data_source_workspaces: Mapping[str, str] = field(default_factory=dict)
+    #: The owner holds an organisation-wide shortcut and the key covers
+    #: everything, so workspace-tier reads span every workspace without the
+    #: list being spelled out.
+    org_wide: bool = False
+
+    @property
+    def view_permissions(self) -> frozenset[str]:
+        if self.views == "write":
+            base = _KEY_VIEW_WRITE
+            return base | _KEY_VIEW_PUBLISH if self.publish else base
+        if self.views == "read":
+            return _KEY_VIEW_READ
+        return frozenset()
+
+    @property
+    def data_permissions(self) -> frozenset[str]:
+        if self.data == "write":
+            return _KEY_DATA_WRITE
+        if self.data == "read":
+            return _KEY_DATA_READ
+        return frozenset()
+
+    @property
+    def permissions(self) -> frozenset[str]:
+        return self.view_permissions | self.data_permissions
+
+    @property
+    def read_only(self) -> bool:
+        return all(p.endswith(":read") for p in self.permissions)
+
+    def allows(self, permission: str) -> bool:
+        return permission in self.permissions
+
+    def selects_workspace(self, workspace_id: Optional[str]) -> bool:
+        """The whole workspace is in reach — what a workspace-level
+        operation (creating a view, listing graphs) needs."""
+        return self.all_resources or (
+            workspace_id is not None and workspace_id in self.workspaces
+        )
+
+    def selects_view(self, view_id: Optional[str], workspace_id: Optional[str]) -> bool:
+        if self.selects_workspace(workspace_id):
+            return True
+        if view_id is None or view_id not in self.view_ids:
+            return False
+        # Admitted where it actually lives: a view selected by id that has
+        # since been deleted (no location) admits nothing.
+        return workspace_id is None or self.view_workspaces.get(view_id) == workspace_id
+
+    def selects_data_source(
+        self, data_source_id: Optional[str], workspace_id: Optional[str],
+    ) -> bool:
+        if self.selects_workspace(workspace_id):
+            return True
+        if data_source_id is None or data_source_id not in self.data_source_ids:
+            return False
+        return (
+            workspace_id is None
+            or self.data_source_workspaces.get(data_source_id) == workspace_id
+        )
+
+    def touches_workspace(self, workspace_id: Optional[str]) -> bool:
+        """Something in this workspace is in reach: the workspace itself, or
+        a selected view or data source inside it."""
+        if self.selects_workspace(workspace_id):
+            return True
+        return workspace_id is not None and (
+            workspace_id in self.view_workspaces.values()
+            or workspace_id in self.data_source_workspaces.values()
+        )
+
+    def admits_view(
+        self, view_id: Optional[str], workspace_id: Optional[str], permission: str,
+    ) -> bool:
+        return self.allows(permission) and self.selects_view(view_id, workspace_id)
+
+    def admits_data_source(
+        self, data_source_id: Optional[str], workspace_id: Optional[str],
+        permission: str,
+    ) -> bool:
+        return self.allows(permission) and self.selects_data_source(
+            data_source_id, workspace_id,
+        )
+
+
+def key_scope_from_profile(
+    key_id: str, *, kind: str, permissions: dict, resources,
+) -> KeyScope:
+    """Build a scope from a key's stored profile and selection.
+
+    Anything unrecognised reads as the narrowest value — an unknown level is
+    ``none``, an unreadable selection selects nothing — so a malformed row
+    costs the key its reach, never widens it.
+    """
+    profile = permissions if isinstance(permissions, dict) else {}
+    views = profile.get("views") if profile.get("views") in KEY_LEVELS else "none"
+    data = profile.get("data") if profile.get("data") in KEY_LEVELS else "none"
+    publish = bool(profile.get("publish")) and views == "write"
+    if resources == "all":
+        return KeyScope(
+            key_id=key_id, kind=kind, views=views, data=data, publish=publish,
+            all_resources=True,
+        )
+    selection = resources if isinstance(resources, dict) else {}
+
+    def _ids(key: str) -> frozenset[str]:
+        raw = selection.get(key)
+        if not isinstance(raw, (list, tuple)):
+            # A bare string would otherwise be read character by character.
+            return frozenset()
+        return frozenset(x for x in raw if isinstance(x, str) and x)
+
+    return KeyScope(
+        key_id=key_id, kind=kind, views=views, data=data, publish=publish,
+        workspaces=_ids("workspaces"), view_ids=_ids("views"),
+        data_source_ids=_ids("dataSources"),
+    )
+
+
+async def resolve_for_api_key(
+    session: AsyncSession, user_id: str, scope: KeyScope,
+) -> PermissionClaims:
+    """The claims a request made with this key carries.
+
+    The owner's live authority — role bindings, groups, ``workspace:admin``
+    implication and the organisation-wide shortcuts — expanded into concrete
+    per-workspace grants, each narrowed to the key's profile and to the
+    workspaces its selection touches. No global permission survives: a key
+    is never an administrator of anything, and code that reads
+    ``global_perms`` directly therefore cannot hand it a shortcut.
+
+    Per workspace, view permissions are kept only if views there are in reach
+    (the workspace is selected, or a selected view lives in it), and data
+    permissions only if data sources there are — so a key limited to one view
+    does not quietly read every data source in that view's workspace. Which
+    views and which data sources inside a workspace is the selection's job
+    (``KeyScope``), enforced where each one is resolved.
+    """
+    from backend.app.db.models import (  # local: avoid an import cycle
+        ViewORM,
+        WorkspaceDataSourceORM,
+        view_is_live,
+    )
+    from backend.app.db.repositories import workspace_repo
+
+    owner = await resolve(session, user_id, sid="")
+
+    view_workspaces: dict[str, str] = {}
+    if scope.view_ids:
+        rows = (await session.execute(
+            select(ViewORM.id, ViewORM.workspace_id).where(
+                ViewORM.id.in_(sorted(scope.view_ids)), view_is_live(),
+            )
+        )).all()
+        view_workspaces = {vid: ws for vid, ws in rows if ws}
+    ds_workspaces: dict[str, str] = {}
+    if scope.data_source_ids:
+        rows = (await session.execute(
+            select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.workspace_id).where(
+                WorkspaceDataSourceORM.id.in_(sorted(scope.data_source_ids)),
+                WorkspaceDataSourceORM.deleted_at.is_(None),
+            )
+        )).all()
+        ds_workspaces = {dsid: ws for dsid, ws in rows if ws}
+
+    org_wide_shortcut = bool(
+        {"system:admin", "system:org-admin", "system:org-viewer"}
+        & set(owner.global_perms)
+    )
+    if scope.all_resources:
+        candidates = (
+            set(await workspace_repo.list_workspace_ids(session))
+            if org_wide_shortcut else set(owner.ws_perms)
+        )
+    else:
+        candidates = (
+            set(scope.workspaces)
+            | set(view_workspaces.values())
+            | set(ds_workspaces.values())
+        )
+
+    ws_perms: dict[str, tuple[str, ...]] = {}
+    for ws in candidates:
+        whole = scope.all_resources or ws in scope.workspaces
+        wanted: set[str] = set()
+        if whole or ws in view_workspaces.values():
+            wanted |= scope.view_permissions
+        if whole or ws in ds_workspaces.values():
+            wanted |= scope.data_permissions
+        held = tuple(sorted(
+            p for p in wanted if has_permission(owner, p, workspace_id=ws)
+        ))
+        if held:
+            ws_perms[ws] = held
+
+    resolved_scope = KeyScope(
+        key_id=scope.key_id, kind=scope.kind, views=scope.views, data=scope.data,
+        publish=scope.publish, all_resources=scope.all_resources,
+        workspaces=scope.workspaces, view_ids=scope.view_ids,
+        data_source_ids=scope.data_source_ids,
+        view_workspaces=view_workspaces, data_source_workspaces=ds_workspaces,
+        org_wide=scope.all_resources and org_wide_shortcut,
+    )
+    return PermissionClaims(
+        sid="", global_perms=(), ws_perms=ws_perms, key_scope=resolved_scope,
+    )
 
 
 async def simulate_for_user(
@@ -1010,7 +1290,12 @@ async def reconcile_sso_role_bindings(
 
 __all__ = [
     "PermissionClaims",
+    "KeyScope",
+    "KEY_GRANTABLE_PERMISSIONS",
+    "KEY_LEVELS",
+    "key_scope_from_profile",
     "resolve",
+    "resolve_for_api_key",
     "new_session_id",
     "has_permission",
     "simulate_for_user",

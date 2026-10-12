@@ -29,6 +29,7 @@ from backend.app.api.v1.feature_gate import (
     feature_disabled,
     resolve_enterprise_view_policy,
 )
+from backend.app.auth import api_key_errors
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -172,6 +173,15 @@ _ANONYMOUS_USER = "anonymous"
 def _user_id(user) -> str:
     """Extract user_id from the optional user dependency, or fall back to anonymous."""
     return user.id if user else _ANONYMOUS_USER
+
+
+def _flight_principal(user, claims: PermissionClaims) -> str:
+    """Who a coalesced read is for. An API key sees less than the person who
+    owns it, so a request made with the key and one made by its owner must
+    never be merged into one result — in either direction."""
+    principal = normalised_principal(_user_id(user))
+    key = claims.key_scope
+    return f"{principal}#{key.key_id}" if key is not None else principal
 
 
 def _view_update_changes(old, req) -> dict:
@@ -352,7 +362,7 @@ async def list_popular_views(
     herd against the views + favourites tables.
     """
     clause, _scope = await _readable_clause(session, user, claims)
-    principal = normalised_principal(_user_id(user))
+    principal = _flight_principal(user, claims)
     key = ("popular", principal, limit)
     return await read_views_sf.run(
         key,
@@ -413,7 +423,7 @@ async def get_view_facets(
     asks, so the key must too.
     """
     clause, _scope = await _readable_clause(session, user, claims)
-    principal = normalised_principal(_user_id(user))
+    principal = _flight_principal(user, claims)
     return await read_views_sf.run(
         ("facets", principal),
         lambda: view_repo.get_view_facets(session, readable=clause),
@@ -621,6 +631,27 @@ async def authorize_view_create(
             status_code=422,
             detail="visibility must be one of: private, workspace, enterprise",
         )
+
+    key = claims.key_scope
+    if key is not None:
+        # A new view lands in a workspace, not in any view or data source the
+        # key may have been limited to, so creating one needs the whole
+        # workspace in reach. Creating it straight onto the enterprise tier
+        # needs the key's own publish: in an open workspace the rules below
+        # let any creator publish at birth, and a key minted to build views
+        # was not minted to share them with everyone.
+        if not (
+            key.allows("workspace:view:create")
+            and key.selects_workspace(workspace_id)
+        ):
+            raise api_key_errors.out_of_scope(
+                "This API key cannot create views in this workspace.",
+            )
+        if visibility == "enterprise" and not key.allows("workspace:view:publish"):
+            raise api_key_errors.key_forbidden(
+                "api_key_cannot_publish",
+                "This API key was not given permission to publish views.",
+            )
 
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         from backend.app.services.permission_service import has_permission

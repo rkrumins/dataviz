@@ -1102,6 +1102,12 @@ async def lifespan(_app: FastAPI):
             verify=verify,
         )
 
+    # API keys: the per-request lookup, what a key may do (the owner's
+    # authority narrowed to the key, cached briefly and dropped whenever the
+    # owner's sessions are ended), and the record of keys refused.
+    from backend.app.db.repositories import api_key_repo as _api_key_repo
+    from backend.app.services import api_key_service as _api_key_service
+
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
@@ -1118,6 +1124,9 @@ async def lifespan(_app: FastAPI):
         revocation_checker=_is_session_revoked,
         auth_config_provider=_auth_config_provider,
         avatar_fetcher=_fetch_avatar_image,
+        api_key_repo=_api_key_repo,
+        api_key_claims_resolver=_api_key_service.claims_for_key,
+        api_key_rejection_hook=_api_key_service.record_rejection,
     )
     # Refuse to serve without a signing secret. This used to happen as a
     # side effect of importing the auth config, which made the secret a
@@ -1598,6 +1607,20 @@ async def lifespan(_app: FastAPI):
             name="refresh-token-gc",
         )
 
+    # API key expiry reminders: a week ahead, once per key. Same owner role,
+    # and a lock per pass, so replicas never send the same reminder twice.
+    _app.state._api_key_housekeeping_shutdown = asyncio.Event()
+    _app.state._api_key_housekeeping_task = None
+    if runs_scheduler():
+        from .services.api_key_housekeeping import run_sweeper as _run_api_key_housekeeping
+        _app.state._api_key_housekeeping_task = asyncio.create_task(
+            _run_api_key_housekeeping(
+                get_jobs_session,
+                _app.state._api_key_housekeeping_shutdown,
+            ),
+            name="api-key-housekeeping",
+        )
+
     # Product-event retention sweep. ``product_events`` now takes a row per
     # view open, lineage trace and graph search, so it grows with usage and
     # needs a horizon. Same owner role, same reason.
@@ -1733,6 +1756,21 @@ async def lifespan(_app: FastAPI):
             _refresh_gc_task.cancel()
             try:
                 await _refresh_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the API key reminders before DB pool teardown, same shape.
+    _key_hk_shutdown = getattr(_app.state, "_api_key_housekeeping_shutdown", None)
+    _key_hk_task = getattr(_app.state, "_api_key_housekeeping_task", None)
+    if _key_hk_shutdown is not None:
+        _key_hk_shutdown.set()
+    if _key_hk_task is not None and not _key_hk_task.done():
+        try:
+            await asyncio.wait_for(_key_hk_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _key_hk_task.cancel()
+            try:
+                await _key_hk_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -2879,6 +2917,18 @@ app.add_middleware(_TimeoutMiddleware)
 # ------------------------------------------------------------------ #
 
 app.include_router(api_router, prefix="/api/v1")
+
+
+def _openapi_with_api_keys() -> dict:
+    """The generated schema, marking the operations an API key may call."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from backend.app.auth import api_key_surface
+
+    return api_key_surface.document(FastAPI.openapi(app), app)
+
+
+app.openapi = _openapi_with_api_keys
 
 # Internal pool-pressure metrics (Phase 2.5 §2.5.3) — opt-in via
 # INTERNAL_METRICS_ENABLED=true. Restrict at ingress in production.

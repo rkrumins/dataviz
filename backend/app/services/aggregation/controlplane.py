@@ -228,6 +228,9 @@ async def lifespan(app: FastAPI):
     from backend.app.services.refresh_token_gc import (
         run_sweeper as run_refresh_token_gc,
     )
+    from backend.app.services.api_key_housekeeping import (
+        run_sweeper as run_api_key_housekeeping,
+    )
     housekeeping_shutdown = asyncio.Event()
     housekeeping_tasks = [
         asyncio.create_task(loop(get_jobs_session, housekeeping_shutdown), name=name)
@@ -236,10 +239,12 @@ async def lifespan(app: FastAPI):
             ("refresh-token-gc", run_refresh_token_gc),
             ("product-event-gc", run_product_event_gc),
             ("analytics-warmer", run_warmer),
+            ("api-key-housekeeping", run_api_key_housekeeping),
         )
     ]
     logger.info(
-        "Housekeeping started: audit relay, retention sweeps, analytics warmer"
+        "Housekeeping started: audit relay, retention sweeps, analytics warmer, "
+        "API key expiry reminders"
     )
 
     # Store in app state

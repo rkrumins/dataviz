@@ -49,6 +49,7 @@ from fastapi import Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.auth import api_key_auth, api_key_errors
 from backend.app.auth.dependencies import (
     _audit_access_denied,
     get_current_user,
@@ -127,8 +128,28 @@ def datasource_read_or_view_capability(
             if ds_row is None or ds_row.workspace_id != ws_id:
                 raise _not_found("Data source", requested_ds)
 
+        key_scope = claims.key_scope
+        if key_scope is not None and not key_scope.selects_workspace(ws_id):
+            # An API key limited to particular data sources or views. Its
+            # claims hold ``datasource:read`` for the whole workspace, so the
+            # membership path alone would open every source in it: here it
+            # covers only a source the request names and the key covers. A
+            # view the key covers opens that view's data, read-only — the
+            # capability path below.
+            if (
+                requested_ds
+                and key_scope.selects_data_source(requested_ds, ws_id)
+                and has_permission(claims, _BASE_PERMISSION, workspace_id=ws_id)
+            ):
+                return user
+            if not (viewId and api_key_auth.reads_only(request)):
+                raise api_key_errors.out_of_scope(
+                    "This API key covers particular data sources and views: name "
+                    "one it covers with dataSourceId, or read through a view it "
+                    "covers with viewId."
+                )
         # Membership path — identical to the old requires() gate.
-        if has_permission(claims, _BASE_PERMISSION, workspace_id=ws_id):
+        elif has_permission(claims, _BASE_PERMISSION, workspace_id=ws_id):
             return user
 
         # Capability path.
@@ -214,6 +235,7 @@ def datasource_read_or_view_capability(
     _dependency.workspace_param = ws_param  # type: ignore[attr-defined]
     _dependency.workspace_any = False  # type: ignore[attr-defined]
     _dependency.accepts_view_capability = True  # type: ignore[attr-defined]
+    _dependency.pins_data_source = pin_data_source  # type: ignore[attr-defined]
 
     return _dependency
 

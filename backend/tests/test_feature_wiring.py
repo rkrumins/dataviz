@@ -372,9 +372,10 @@ def test_dependencies_point_at_real_flags():
 
 def test_a_flag_that_widens_access_fails_closed():
     """The posture rule, pinned. `signupEnabled` decides whether a stranger may create an
-    account; `semanticLayerNonAdminEditing` decides whether a non-admin may write. If we cannot
-    read either, we must assume the admin wanted the NARROWER world."""
-    for key in ("signupEnabled", "semanticLayerNonAdminEditing"):
+    account; `semanticLayerNonAdminEditing` decides whether a non-admin may write;
+    `apiKeysEnabled` decides whether a bearer credential is honoured at all. If we cannot
+    read any of them, we must assume the admin wanted the NARROWER world."""
+    for key in ("signupEnabled", "semanticLayerNonAdminEditing", "apiKeysEnabled"):
         assert FEATURE_WIRING[key].posture == "security"
         assert FEATURE_WIRING[key].fail_safe_default is False
 

@@ -56,6 +56,7 @@ _AUDIT_PREFIXES = (
     "auth.",             # config.updated
     "idp.",              # provider.created / updated / deleted
     "sso.",              # backchannel_host_allowed / backchannel_host_withdrawn
+    "identity.api_key.",  # created / rotated / revoked / expiring / rejected / misuse
 )
 
 
@@ -94,6 +95,9 @@ _SECURITY_HIDE = frozenset({
     # Access request lifecycle — only the approve / deny step is
     # interesting at security volume.
     "rbac.access_request.created",
+    # A key refused for being out of date — expired, its owner paused or
+    # suspended. Routine; the suspicious refusals are ``misuse``.
+    "identity.api_key.rejected",
 })
 
 # ``activity`` keeps the page useful for support work — adds back
@@ -291,6 +295,25 @@ def _summary_login_failed(p: dict) -> str:
     return f"Failed password sign-in for {email}: {reason}"
 
 
+def _api_key_label(p: dict) -> str:
+    return f"“{p.get('key_name') or '?'}” ({p.get('token_prefix') or '?'}…)"
+
+
+_API_KEY_REVOKED_BY = {"owner": "by its owner", "self": "with itself", "admin": "by an admin"}
+
+
+def _summary_api_key_revoked(p: dict) -> str:
+    how = _API_KEY_REVOKED_BY.get(p.get("reason"), "")
+    return f"API key {_api_key_label(p)} revoked {how}".rstrip()
+
+
+def _summary_api_key_refused(p: dict) -> str:
+    return (
+        f"API key {_api_key_label(p)} refused from {p.get('client_ip') or '?'}: "
+        f"{p.get('reason') or 'unspecified'}"
+    )
+
+
 def _summary_session_revoked(p: dict) -> str:
     reason = p.get("reason") or "unspecified"
     n = p.get("sessions_killed") or 1
@@ -369,6 +392,9 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
         lambda p: f"Every session of {p.get('user_id') or '?'} ended by an admin",
     ),
     "auth.config.updated": ("critical", lambda p: "SSO / login config changed"),
+    # A revoked key still being presented, or one used from an address it
+    # does not allow: the key is likely in the wrong hands.
+    "identity.api_key.misuse": ("critical", _summary_api_key_refused),
     "rbac.role.cascade_revoked": ("critical", _summary_cascade),
     "rbac.workspace.roles_cascaded": ("critical", _summary_ws_roles_cascaded),
     "rbac.workspace.deleted": (
@@ -387,6 +413,8 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.access_request.denied": ("warning", _summary_access_request("denied")),
     "user.login_failed": ("warning", _summary_login_failed),
     "user.logged_out": ("warning", lambda p: f"User {p.get('user_id') or '?'} signed out"),
+    "identity.api_key.revoked": ("warning", _summary_api_key_revoked),
+    "identity.api_key.rejected": ("warning", _summary_api_key_refused),
 
     # ── info: binds / creates / updates
     "rbac.workspace.member_bound": ("info", _summary_ws_member_bound),
@@ -411,6 +439,15 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.logged_in": ("info", _summary_login),
     "rbac.workspace.created": ("info", _summary_workspace_lifecycle("created")),
     "rbac.workspace.updated": ("info", _summary_workspace_lifecycle("updated")),
+    "identity.api_key.created": (
+        "info", lambda p: f"API key {_api_key_label(p)} created",
+    ),
+    "identity.api_key.rotated": (
+        "info", lambda p: f"API key {_api_key_label(p)} created by rotating another",
+    ),
+    "identity.api_key.expiring": (
+        "info", lambda p: f"API key {_api_key_label(p)} expires {p.get('expires_at') or 'soon'}",
+    ),
 
     # ── SSO sign-in outcomes.
     # ``ref`` is the handle the stuck user was shown on the login page, so it

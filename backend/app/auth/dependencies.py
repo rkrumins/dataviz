@@ -37,6 +37,7 @@ from backend.auth_service.core.tokens import (
     decode_token, is_foreign_token_error, password_change_pending,
 )
 from backend.auth_service.interface import IdentityService, User
+from backend.app.auth import api_key_auth
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.app.services.permission_service import (
@@ -235,7 +236,13 @@ async def get_current_user(request: Request) -> User:
     the platform; the JWT TTL is still the staleness floor. Fail-
     closed only applies on routes that explicitly opt-in via
     ``requires(...)`` against a sensitive permission.
+
+    A request presenting an API key authenticates with the key alone — see
+    ``api_key_auth``.
     """
+    key = await api_key_auth.acting(request)
+    if key is not None:
+        return key.user
     token = read_access_cookie(request)
     user = await _identity_service(request).validate_session(token)
     if user is None:
@@ -293,7 +300,13 @@ async def get_optional_user(request: Request) -> User | None:
     Optional means "may be anonymous", not "may skip the password-change
     hold": a session that must change its password is refused here as it
     is everywhere else.
+
+    Nor does it mean "a bad API key is anonymous": a request that presents
+    a key is refused if the key is, here as everywhere.
     """
+    key = await api_key_auth.acting(request)
+    if key is not None:
+        return key.user
     token = read_access_cookie(request)
     user = await _identity_service(request).validate_session(token)
     if user is None or not token:
@@ -426,7 +439,13 @@ async def get_permission_claims(request: Request) -> PermissionClaims:
     ``ws_available=False`` and an empty map. Callers that needed the
     workspace half must treat that as 503, not as a denial — see
     ``requires``.
+
+    For a request made with an API key, the key's own claims: the owner's
+    authority, narrowed to the key (``permission_service.resolve_for_api_key``).
     """
+    key = await api_key_auth.acting(request)
+    if key is not None:
+        return key.claims
     token = read_access_cookie(request)
     if not token:
         raise HTTPException(

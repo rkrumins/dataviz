@@ -264,6 +264,16 @@ class AccountRateLimiter:
             logger.warning("Account rate-limit check failed (%s): %s", scope, exc)
             return True
 
+    async def consume(self, scope: str, identity: str, limit: str) -> bool:
+        """Consume one attempt and say whether it fell inside the limit — the
+        check and the record in one round trip, for limits counted on every
+        request rather than on failures. Fails open, like ``check``."""
+        try:
+            return await self._limiter.hit(parse(limit), _bucket_key(scope, identity))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Account rate-limit consume failed (%s): %s", scope, exc)
+            return True
+
     async def record(self, scope: str, identity: str, limit: str) -> None:
         """Consume one attempt."""
         try:
