@@ -216,7 +216,7 @@ Every module-level mutable state moves to Redis or is eliminated:
 ## Observability
 
 - **Two** Prometheus scrape endpoints exist, which is the open item rather than
-  the achievement (see [TECHNICAL_DEBT](TECHNICAL_DEBT.md) §1.4):
+  the achievement (see `docs/TECHNICAL_DEBT.md` §1.4):
   - `GET /api/v1/metrics` — `METRICS_ENABLED` **plus a bearer token**, fail-closed,
     404 when the token is unset. Per-process registry. Exposes provider breaker
     and provider-manager events and the job counters.

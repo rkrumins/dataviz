@@ -397,7 +397,7 @@ Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monito
 | Memorystore | memory, evictions (cache) / rejected-writes (coord) | coord evictions **any**; cache OOM |
 | GKE | pod restarts (falkordb pool), PDB violations, HPA at ceiling | any / sustained-at-max |
 
-> **The single most important gap to close first** (see [TECHNICAL_DEBT](./TECHNICAL_DEBT.md) §1.4): these counters are now *exported* — on **two** endpoints, which is itself the open item. `GET /api/v1/metrics` is behind `METRICS_ENABLED` plus a bearer token; `GET /internal/metrics` is behind `INTERNAL_METRICS_ENABLED` alone and is the one aggregated across gunicorn workers via `PROMETHEUS_MULTIPROC_DIR`. Each has what the other lacks — the token gate and the fleet-wide aggregation — so consolidate onto one before pointing a scraper anywhere. **Nothing scrapes either, and nothing alerts.** Wire Prometheus/GCP Managed Prometheus and alerts before this topology goes live — resilience you can't observe fails silently.
+> **The single most important gap to close first** (see `docs/TECHNICAL_DEBT.md` §1.4): these counters are now *exported* — on **two** endpoints, which is itself the open item. `GET /api/v1/metrics` is behind `METRICS_ENABLED` plus a bearer token; `GET /internal/metrics` is behind `INTERNAL_METRICS_ENABLED` alone and is the one aggregated across gunicorn workers via `PROMETHEUS_MULTIPROC_DIR`. Each has what the other lacks — the token gate and the fleet-wide aggregation — so consolidate onto one before pointing a scraper anywhere. **Nothing scrapes either, and nothing alerts.** Wire Prometheus/GCP Managed Prometheus and alerts before this topology goes live — resilience you can't observe fails silently.
 
 ---
 
