@@ -29,6 +29,7 @@ from backend.app.api.v1.feature_gate import (
     feature_disabled,
     resolve_enterprise_view_policy,
 )
+from backend.app.api.v1.view_filter_query import ViewFilterQuery, view_filter_query
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -44,7 +45,7 @@ from backend.app.db.repositories import notification_repo, view_activity_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services import view_access, view_library
+from backend.app.services import view_access, view_library, view_source_kinds
 from backend.app.services.versioning.db import graphver_session
 from backend.app.services.versioning.models import BranchORM
 from backend.auth_service.interface import User
@@ -159,6 +160,52 @@ def _category_filters(
         # than everything.
         return [], None
     return list(scope.granted_view_ids), user.id if user else None
+
+
+_SOURCE_KIND_UNAVAILABLE = (
+    "We can't tell which data sources are versioned right now, so the "
+    "Versioned/External filter can't be applied. Try again in a minute, "
+    "or remove that filter."
+)
+
+
+async def _source_kind_filter_sets(
+    session: AsyncSession, f: ViewFilterQuery,
+) -> Optional[view_source_kinds.SourceKindSets]:
+    """What the Versioned/External filter needs; None when not filtering by it.
+
+    Unlike annotation, required: a filter we cannot apply would return the
+    unfiltered catalog dressed as the answer, so that is a 503.
+    """
+    if not f.source_kind:
+        return None
+    try:
+        return await view_source_kinds.load_sets(session, required=True)
+    except view_source_kinds.SourceKindUnavailable:
+        raise HTTPException(status_code=503, detail=_SOURCE_KIND_UNAVAILABLE)
+
+
+async def _annotate_source_kinds(
+    session: AsyncSession,
+    views: List[ViewResponse],
+    sets: Optional[view_source_kinds.SourceKindSets] = None,
+) -> None:
+    """Stamp ``sourceKind`` on views, leaving it None (unknown) when the lookup
+    fails — the versioning store being down must never fail a view read.
+
+    Without ``sets`` (the request is not filtering by kind), only the workspace
+    defaults these views read are loaded: none at all when each names its own
+    source.
+    """
+    if sets is None:
+        sets = await view_source_kinds.load_sets(
+            session, required=False,
+            workspace_ids={v.workspace_id for v in views if not v.data_source_id},
+        )
+    if sets is None:
+        return
+    for view in views:
+        view.source_kind = sets.kind_for(view.data_source_id, view.workspace_id)
 
 
 # Suppress the "imported but unused" hint while os is referenced via
@@ -354,12 +401,15 @@ async def list_popular_views(
     clause, _scope = await _readable_clause(session, user, claims)
     principal = normalised_principal(_user_id(user))
     key = ("popular", principal, limit)
-    return await read_views_sf.run(
-        key,
-        lambda: view_repo.list_popular_views(
+
+    async def _popular() -> List[ViewResponse]:
+        views = await view_repo.list_popular_views(
             session, limit=limit, user_id=_user_id(user), readable=clause,
-        ),
-    )
+        )
+        await _annotate_source_kinds(session, views)
+        return views
+
+    return await read_views_sf.run(key, _popular)
 
 
 @router.get("/audience", response_model=ViewAudience)
@@ -395,51 +445,37 @@ async def get_workspace_audience(
 
 @router.get("/facets", response_model=ViewFacetsResponse)
 async def get_view_facets(
+    workspace_ids: Optional[List[str]] = Query(None, alias="workspaceIds"),
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ) -> ViewFacetsResponse:
-    """Return distinct tags, view types, and creators across the views
-    the caller can read.
+    """Return distinct tags, view types, creators and contributors across
+    the views the caller can read — within ``workspaceIds`` when given.
 
-    Used to populate the Explorer's Tag / View Type / Creator filter
-    dropdowns from the authoritative set of values rather than deriving
+    Used to populate the Explorer's Tag / View Type / Creator / contributor
+    filter dropdowns from the authoritative set of values rather than deriving
     them from the currently-loaded page (which would miss tags/creators
     beyond the first page at scale). Scoped per principal — an
     unscoped facet aggregate leaks private views' tags and creator
     identities, which is how this endpoint shipped originally.
 
     Single-flight wrapped per principal: the response depends on who
-    asks, so the key must too.
+    asks, so the key must too (and on the workspaces asked about).
     """
     clause, _scope = await _readable_clause(session, user, claims)
     principal = normalised_principal(_user_id(user))
     return await read_views_sf.run(
-        ("facets", principal),
-        lambda: view_repo.get_view_facets(session, readable=clause),
+        ("facets", principal, tuple(sorted(workspace_ids or ()))),
+        lambda: view_repo.get_view_facets(
+            session, readable=clause, workspace_ids=workspace_ids,
+        ),
     )
 
 
 @router.get("/stats", response_model=ViewCatalogStats)
 async def get_view_stats(
-    visibility: Optional[str] = Query(None),
-    visibility_in: Optional[List[str]] = Query(None, alias="visibilityIn"),
-    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
-    workspace_ids: Optional[List[str]] = Query(None, alias="workspaceIds"),
-    context_model_id: Optional[str] = Query(None, alias="contextModelId"),
-    data_source_id: Optional[str] = Query(None, alias="dataSourceId"),
-    view_type: Optional[str] = Query(None, alias="viewType"),
-    view_types: Optional[List[str]] = Query(None, alias="viewTypes"),
-    created_by: Optional[str] = Query(None, alias="createdBy"),
-    created_by_in: Optional[List[str]] = Query(None, alias="createdByIn"),
-    created_after: Optional[str] = Query(None, alias="createdAfter"),
-    search: Optional[str] = Query(None),
-    tags: Optional[List[str]] = Query(None),
-    favourited_only: bool = Query(False, alias="favouritedOnly"),
-    include_deleted: bool = Query(False, alias="includeDeleted"),
-    deleted_only: bool = Query(False, alias="deletedOnly"),
-    attention_only: bool = Query(False, alias="attentionOnly"),
-    category: Optional[str] = Query(None),
+    f: ViewFilterQuery = Depends(view_filter_query),
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
@@ -450,48 +486,22 @@ async def get_view_stats(
     would actually return.
     """
     clause, scope = await _readable_clause(session, user, claims)
-    ids_in, created_by_not = _category_filters(category, scope, user)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
+    sets = await _source_kind_filter_sets(session, f)
     return await view_repo.get_view_stats(
         session,
-        visibility=visibility,
-        visibility_in=visibility_in,
-        workspace_id=workspace_id,
-        workspace_ids=workspace_ids,
-        context_model_id=context_model_id,
-        data_source_id=data_source_id,
-        view_type=view_type,
-        view_types=view_types,
-        created_by=created_by,
-        created_by_in=created_by_in,
+        **f.repo_kwargs(),
+        source_kind_sets=sets,
         created_by_not=created_by_not,
-        created_after=created_after,
-        search=search,
-        tags=tags,
         ids_in=ids_in,
         user_id=_user_id(user),
-        favourited_only=favourited_only,
-        include_deleted=include_deleted,
-        deleted_only=deleted_only,
-        attention_only=attention_only,
         readable=clause,
     )
 
 
 @router.get("/", response_model=ViewListResponse)
 async def list_views(
-    visibility: Optional[str] = Query(None),
-    visibility_in: Optional[List[str]] = Query(None, alias="visibilityIn"),
-    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
-    workspace_ids: Optional[List[str]] = Query(None, alias="workspaceIds"),
-    context_model_id: Optional[str] = Query(None, alias="contextModelId"),
-    data_source_id: Optional[str] = Query(None, alias="dataSourceId"),
-    view_type: Optional[str] = Query(None, alias="viewType"),
-    view_types: Optional[List[str]] = Query(None, alias="viewTypes"),
-    created_by: Optional[str] = Query(None, alias="createdBy"),
-    created_by_in: Optional[List[str]] = Query(None, alias="createdByIn"),
-    created_after: Optional[str] = Query(None, alias="createdAfter"),
-    search: Optional[str] = Query(None),
-    tags: Optional[List[str]] = Query(None),
+    f: ViewFilterQuery = Depends(view_filter_query),
     sort: Optional[str] = Query(
         None,
         description=(
@@ -502,10 +512,6 @@ async def list_views(
     ),
     limit: int = Query(50, le=200),
     offset: int = Query(0),
-    favourited_only: bool = Query(False, alias="favouritedOnly"),
-    include_deleted: bool = Query(False, alias="includeDeleted"),
-    deleted_only: bool = Query(False, alias="deletedOnly"),
-    attention_only: bool = Query(False, alias="attentionOnly"),
     include: List[str] = Query(
         default_factory=list,
         description=(
@@ -520,14 +526,6 @@ async def list_views(
         le=100,
         alias="popularLimit",
         description="Cap on the embedded popular list when include=popular.",
-    ),
-    category: Optional[str] = Query(
-        None,
-        description=(
-            "Explorer category with server-side meaning: "
-            "``shared-with-me`` = views shared with the caller through "
-            "an explicit grant (excluding their own)."
-        ),
     ),
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -549,40 +547,40 @@ async def list_views(
     - ``createdBy`` / ``createdByIn``
 
     Additional filters:
-    - ``createdAfter`` — ISO timestamp; returns views created on or after.
+    - ``createdAfter`` / ``createdBefore`` — ISO date or date-time (a bare
+      date is midnight UTC; no offset means UTC); after is inclusive,
+      before exclusive. Anything else is a 422.
+    - ``updatedAfter`` / ``updatedBefore`` — the same, on when the view last
+      changed: the later of its last settings/layout edit and its last data
+      publish.
+    - ``contributorIn`` (repeatable, at most 50) — views these people created
+      or last edited; ``contributorRole=created|edited|published`` narrows it
+      to one role (published = last published the data behind the view).
+      ANDed with ``createdBy``.
+    - ``sourceKind=versioned|external`` — by the view's data source, else its
+      workspace's default; a view with neither is in neither. 503 while the
+      versioned set cannot be read.
     - ``tags`` — OR semantics across the supplied tags.
     - ``attentionOnly`` — stale (>90d), inactive workspace/source, or
       broken data source reference. Mirrors the frontend health model
       so pagination stays accurate on large catalogs.
     - ``category=shared-with-me`` — explicit-grant shares only.
+
+    Every item (and ``popular``) carries ``sourceKind``; null when unknown.
     """
     clause, scope = await _readable_clause(session, user, claims)
-    ids_in, created_by_not = _category_filters(category, scope, user)
+    ids_in, created_by_not = _category_filters(f.category, scope, user)
+    sets = await _source_kind_filter_sets(session, f)
     response = await view_repo.list_views_filtered(
         session,
-        visibility=visibility,
-        visibility_in=visibility_in,
-        workspace_id=workspace_id,
-        workspace_ids=workspace_ids,
-        context_model_id=context_model_id,
-        data_source_id=data_source_id,
-        view_type=view_type,
-        view_types=view_types,
-        created_by=created_by,
-        created_by_in=created_by_in,
+        **f.repo_kwargs(),
+        source_kind_sets=sets,
         created_by_not=created_by_not,
-        created_after=created_after,
-        search=search,
-        tags=tags,
         ids_in=ids_in,
         sort=sort,
         limit=limit,
         offset=offset,
         user_id=_user_id(user),
-        favourited_only=favourited_only,
-        include_deleted=include_deleted,
-        deleted_only=deleted_only,
-        attention_only=attention_only,
         readable=clause,
     )
 
@@ -595,6 +593,7 @@ async def list_views(
             readable=clause,
         )
 
+    await _annotate_source_kinds(session, response.items + (response.popular or []), sets)
     return response
 
 
@@ -751,6 +750,8 @@ async def get_view(
             view.data_source_name = ds.label or view.data_source_name
     if ds is not None:
         view.provider_id = ds.provider_id
+    # Classified by the source just resolved (its own, else the workspace default).
+    await _annotate_source_kinds(session, [view])
 
     view.audience = ViewAudience(
         workspaceMemberCount=await notification_repo.workspace_member_count(

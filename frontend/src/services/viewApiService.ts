@@ -131,6 +131,11 @@ export interface View {
     dataUpdatedBy?: string | null
     dataUpdatedByName?: string | null
     dataUpdatedByEmail?: string | null
+    /** Whether a versioned graph backs the view's data source (edited here through
+     *  drafts and review) or an external one (mastered elsewhere). Null when the
+     *  server couldn't tell — the version store was unreachable, or the view has
+     *  no data source and its workspace no default. */
+    sourceKind?: 'versioned' | 'external' | null
     tags?: string[]
     isPinned: boolean
     favouriteCount: number
@@ -206,6 +211,19 @@ export interface ViewListParams {
     createdByIn?: string[]
     /** ISO timestamp — returns views created on or after this time. */
     createdAfter?: string
+    /** ISO timestamp — views created before this time (exclusive). */
+    createdBefore?: string
+    /** ISO timestamps bounding the view's LAST CHANGE — the later of its
+     *  settings/layout edit and its data publish. After inclusive, before exclusive. */
+    updatedAfter?: string
+    updatedBefore?: string
+    /** People filter: views these users created or last edited (see ``contributorRole``). */
+    contributorIn?: string[]
+    /** Narrows ``contributorIn`` to one role. Absent = created or edited; ``published``
+     *  (last published the view's data) is opt-in. */
+    contributorRole?: 'created' | 'edited' | 'published'
+    /** Versioned graph behind the view's data source, or an external one. */
+    sourceKind?: 'versioned' | 'external'
     search?: string
     /** OR semantics: match views whose tags array contains ANY of these. */
     tags?: string[]
@@ -238,6 +256,10 @@ export interface ViewListParams {
     /** Cap on the embedded ``popular`` list. Only honoured with ``include: ['popular']``. */
     popularLimit?: number
 }
+
+/** The filter half of ``ViewListParams`` — what every view endpoint that filters
+ *  accepts, without the list's own paging, sort and embeds. */
+export type ViewFilterParams = Omit<ViewListParams, 'sort' | 'limit' | 'offset' | 'include' | 'popularLimit'>
 
 /**
  * Paginated envelope returned by ``GET /api/v1/views/``.
@@ -274,6 +296,22 @@ export interface ViewFacetCreator {
 }
 
 /**
+ * A person who created, last edited or last published the data of at least one
+ * view the caller can read. ``count`` is the default People filter's number —
+ * views they created OR last edited, each view once.
+ */
+export interface ViewFacetContributor {
+    userId: string
+    displayName: string
+    email?: string | null
+    avatarId?: string | null
+    count: number
+    createdCount: number
+    editedCount: number
+    publishedCount: number
+}
+
+/**
  * Catalog stats consumed by the Explorer stats bar.
  *
  * Returned by ``GET /api/v1/views/stats`` which accepts the same
@@ -300,6 +338,8 @@ export interface ViewFacetsResponse {
     tags: ViewFacetValue[]
     viewTypes: ViewFacetValue[]
     creators: ViewFacetCreator[]
+    /** Absent from servers that predate the People filter. */
+    contributors?: ViewFacetContributor[]
 }
 
 // ============================================
@@ -314,6 +354,55 @@ const apiFetch = authFetch
 // ============================================
 // CRUD
 // ============================================
+
+/**
+ * Write a view filter set onto a query string — the ONE serializer for every
+ * endpoint that takes the view filters (list, stats, facets). The list and stats
+ * calls used to build theirs separately, and a filter added to one and not the
+ * other made the stats bar describe a different population than the list.
+ * Paging, sort and embeds are the list's own business and stay with it.
+ */
+export function appendViewQuery(sp: URLSearchParams, params?: ViewFilterParams): void {
+    if (!params) return
+    if (params.visibilityIn && params.visibilityIn.length > 0) {
+        params.visibilityIn.forEach(v => sp.append('visibilityIn', v))
+    } else if (params.visibility) {
+        sp.set('visibility', params.visibility)
+    }
+    if (params.workspaceIds && params.workspaceIds.length > 0) {
+        params.workspaceIds.forEach(id => sp.append('workspaceIds', id))
+    } else if (params.workspaceId) {
+        sp.set('workspaceId', params.workspaceId)
+    }
+    if (params.contextModelId) sp.set('contextModelId', params.contextModelId)
+    if (params.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
+    if (params.viewTypes && params.viewTypes.length > 0) {
+        params.viewTypes.forEach(v => sp.append('viewTypes', v))
+    } else if (params.viewType) {
+        sp.set('viewType', params.viewType)
+    }
+    if (params.createdByIn && params.createdByIn.length > 0) {
+        params.createdByIn.forEach(id => sp.append('createdByIn', id))
+    } else if (params.createdBy) {
+        sp.set('createdBy', params.createdBy)
+    }
+    if (params.contributorIn && params.contributorIn.length > 0) {
+        params.contributorIn.forEach(id => sp.append('contributorIn', id))
+        if (params.contributorRole) sp.set('contributorRole', params.contributorRole)
+    }
+    if (params.sourceKind) sp.set('sourceKind', params.sourceKind)
+    if (params.createdAfter) sp.set('createdAfter', params.createdAfter)
+    if (params.createdBefore) sp.set('createdBefore', params.createdBefore)
+    if (params.updatedAfter) sp.set('updatedAfter', params.updatedAfter)
+    if (params.updatedBefore) sp.set('updatedBefore', params.updatedBefore)
+    if (params.search) sp.set('search', params.search)
+    if (params.tags) params.tags.forEach(t => sp.append('tags', t))
+    if (params.favouritedOnly) sp.set('favouritedOnly', 'true')
+    if (params.includeDeleted) sp.set('includeDeleted', 'true')
+    if (params.deletedOnly) sp.set('deletedOnly', 'true')
+    if (params.attentionOnly) sp.set('attentionOnly', 'true')
+    if (params.category) sp.set('category', params.category)
+}
 
 /**
  * List views matching the given filters.
@@ -335,39 +424,10 @@ export async function listViews(
     signal?: AbortSignal,
 ): Promise<ViewListResponse> {
     const sp = new URLSearchParams()
-    if (params?.visibilityIn && params.visibilityIn.length > 0) {
-        params.visibilityIn.forEach(v => sp.append('visibilityIn', v))
-    } else if (params?.visibility) {
-        sp.set('visibility', params.visibility)
-    }
-    if (params?.workspaceIds && params.workspaceIds.length > 0) {
-        params.workspaceIds.forEach(id => sp.append('workspaceIds', id))
-    } else if (params?.workspaceId) {
-        sp.set('workspaceId', params.workspaceId)
-    }
-    if (params?.contextModelId) sp.set('contextModelId', params.contextModelId)
-    if (params?.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
-    if (params?.viewTypes && params.viewTypes.length > 0) {
-        params.viewTypes.forEach(v => sp.append('viewTypes', v))
-    } else if (params?.viewType) {
-        sp.set('viewType', params.viewType)
-    }
-    if (params?.createdByIn && params.createdByIn.length > 0) {
-        params.createdByIn.forEach(id => sp.append('createdByIn', id))
-    } else if (params?.createdBy) {
-        sp.set('createdBy', params.createdBy)
-    }
-    if (params?.createdAfter) sp.set('createdAfter', params.createdAfter)
-    if (params?.search) sp.set('search', params.search)
-    if (params?.tags) params.tags.forEach(t => sp.append('tags', t))
+    appendViewQuery(sp, params)
     if (params?.sort) sp.set('sort', params.sort)
     if (params?.limit != null) sp.set('limit', String(params.limit))
     if (params?.offset != null) sp.set('offset', String(params.offset))
-    if (params?.favouritedOnly) sp.set('favouritedOnly', 'true')
-    if (params?.includeDeleted) sp.set('includeDeleted', 'true')
-    if (params?.deletedOnly) sp.set('deletedOnly', 'true')
-    if (params?.attentionOnly) sp.set('attentionOnly', 'true')
-    if (params?.category) sp.set('category', params.category)
     if (params?.include) params.include.forEach(v => sp.append('include', v))
     if (params?.popularLimit != null) sp.set('popularLimit', String(params.popularLimit))
     const qs = sp.toString()
@@ -388,8 +448,11 @@ export async function listPopularViews(limit = 20): Promise<View[]> {
  * Used to populate Explorer filter dropdowns from the authoritative
  * DB-wide set rather than deriving from the currently-loaded page.
  */
-export async function getViewFacets(): Promise<ViewFacetsResponse> {
-    return apiFetch<ViewFacetsResponse>('/api/v1/views/facets')
+export async function getViewFacets(params?: ViewFilterParams): Promise<ViewFacetsResponse> {
+    const sp = new URLSearchParams()
+    appendViewQuery(sp, params)
+    const qs = sp.toString()
+    return apiFetch<ViewFacetsResponse>(`/api/v1/views/facets${qs ? `?${qs}` : ''}`)
 }
 
 /** Subset of ``ViewListParams`` that applies to the stats endpoint. */
@@ -403,35 +466,7 @@ export type ViewStatsParams = Omit<ViewListParams, 'limit' | 'offset' | 'context
  */
 export async function getViewStats(params?: ViewStatsParams): Promise<ViewCatalogStats> {
     const sp = new URLSearchParams()
-    if (params?.visibilityIn && params.visibilityIn.length > 0) {
-        params.visibilityIn.forEach(v => sp.append('visibilityIn', v))
-    } else if (params?.visibility) {
-        sp.set('visibility', params.visibility)
-    }
-    if (params?.workspaceIds && params.workspaceIds.length > 0) {
-        params.workspaceIds.forEach(id => sp.append('workspaceIds', id))
-    } else if (params?.workspaceId) {
-        sp.set('workspaceId', params.workspaceId)
-    }
-    if (params?.dataSourceId) sp.set('dataSourceId', params.dataSourceId)
-    if (params?.viewTypes && params.viewTypes.length > 0) {
-        params.viewTypes.forEach(v => sp.append('viewTypes', v))
-    } else if (params?.viewType) {
-        sp.set('viewType', params.viewType)
-    }
-    if (params?.createdByIn && params.createdByIn.length > 0) {
-        params.createdByIn.forEach(id => sp.append('createdByIn', id))
-    } else if (params?.createdBy) {
-        sp.set('createdBy', params.createdBy)
-    }
-    if (params?.createdAfter) sp.set('createdAfter', params.createdAfter)
-    if (params?.search) sp.set('search', params.search)
-    if (params?.tags) params.tags.forEach(t => sp.append('tags', t))
-    if (params?.favouritedOnly) sp.set('favouritedOnly', 'true')
-    if (params?.includeDeleted) sp.set('includeDeleted', 'true')
-    if (params?.deletedOnly) sp.set('deletedOnly', 'true')
-    if (params?.attentionOnly) sp.set('attentionOnly', 'true')
-    if (params?.category) sp.set('category', params.category)
+    appendViewQuery(sp, params)
     const qs = sp.toString()
     return apiFetch<ViewCatalogStats>(`/api/v1/views/stats${qs ? `?${qs}` : ''}`)
 }

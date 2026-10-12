@@ -50,8 +50,15 @@ logger = logging.getLogger(__name__)
 # if it were externally mastered.
 CACHE_TTL_SECS = 600
 
+# After a refresh fails, the previous answer is served for this long before the
+# store is asked again. Without it every caller past the TTL retried — and the
+# Explorer's view lists ask on every request (``view_source_kinds``), so while
+# the store stayed down each one waited out a fresh connection attempt.
+FAILURE_BACKOFF_SECS = 30
+
 _cache: Optional[FrozenSet[str]] = None
 _cache_at: float = 0.0
+_refresh_failed_at: Optional[float] = None
 
 
 class VersionedLookupUnavailable(RuntimeError):
@@ -74,10 +81,15 @@ async def versioned_data_source_ids(
     :class:`VersionedLookupUnavailable` only on a cold failure, i.e. when there
     is no previous answer to stand on.
     """
-    global _cache, _cache_at
+    global _cache, _cache_at, _refresh_failed_at
 
     now = time.monotonic()
     if _cache is not None and (now - _cache_at) < ttl_secs:
+        return _cache
+    if (
+        _cache is not None and _refresh_failed_at is not None
+        and (now - _refresh_failed_at) < FAILURE_BACKOFF_SECS
+    ):
         return _cache
 
     try:
@@ -100,6 +112,7 @@ async def versioned_data_source_ids(
             # Serve the previous answer. The set changes only when a source is
             # versioned or unversioned, so a stale read is very nearly always
             # still correct.
+            _refresh_failed_at = now
             logger.warning(
                 "versioned data-source lookup failed, reusing the cached set "
                 "(%d entries): %s", len(_cache), exc,
@@ -107,15 +120,15 @@ async def versioned_data_source_ids(
             return _cache
         raise VersionedLookupUnavailable(str(exc)) from exc
 
-    _cache, _cache_at = found, now
+    _cache, _cache_at, _refresh_failed_at = found, now, None
     return found
 
 
 def reset_cache() -> None:
     """Drop the cached set — used by tests, and after a deliberate
     bootstrap/unversion when the TTL is too long to wait out."""
-    global _cache, _cache_at
-    _cache, _cache_at = None, 0.0
+    global _cache, _cache_at, _refresh_failed_at
+    _cache, _cache_at, _refresh_failed_at = None, 0.0, None
 
 
 # ── Projector health ─────────────────────────────────────────────────────

@@ -9,6 +9,67 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Find views by how their data is kept, when they changed, and who changed them
+
+### Added
+
+**Versioned or External.** Two buttons in the Explorer's filter row narrow the list to views whose
+data is versioned in {brand} (changed through drafts, review and publishing) or kept by another
+system. Every card and list row says which it is, and so does the preview's *What this view is
+built on*. A view with no data source of its own is judged by its workspace's default source. The
+buttons and labels follow the **Version control** switch: off, they are hidden.
+
+**Date.** One menu filters on when a view was **Created** or last **Updated** — any change, to its
+settings, its layout or its data. Pick a period (Today, Past 7 days, This month, Last quarter…),
+type any number of past days, or choose a custom range on a two-month calendar. Days are the
+reader's own calendar days, both ends included. The address keeps the period rather than the
+dates, so a bookmarked *Past 7 days* means the past seven days whenever it is opened.
+
+**People.** Replaces **Creator**: pick one or more people and say what they did — **Any**
+(created it or edited it last), **Created**, **Edited** or **Published** (published the data
+behind it last). You are always first in the list, and a bookmark of *views I edited* means the
+same to whoever opens it. Old links filtered by creator still work.
+
+**The workspace Views tab filters like the Explorer.** Search, Versioned/External, Date, People
+and Source sit in its toolbar, with the same chips underneath. Its People list comes from the
+server, so it names everyone, not just the people behind the first 50 views. **Browse in
+Explorer** now opens the Explorer with the tab's filters.
+
+API: `GET /api/v1/views/` and `/views/stats` take `sourceKind`, `createdBefore`, `updatedAfter`,
+`updatedBefore`, `contributorIn` and `contributorRole`; list items carry `sourceKind`;
+`/views/facets` takes `workspaceIds` and returns `contributors`.
+
+### Changed
+
+- **A failed load says so.** The Explorer used to answer a server error with "No views match your
+  search". It now shows the error, with **Try again** — and, when the Versioned/External filter
+  can't be answered, a button that removes just that filter.
+- **The preview's data-source line names version control.** It said *Managed graph* or *External
+  graph* from how the source was first connected, which called many versioned sources external.
+- **Clearing every filter keeps your sort and layout.**
+- An invalid `createdAfter` is now refused with a 422 instead of being compared as text.
+- **A version store that goes down is asked again every 30 seconds, not on every request.** The
+  versioned-sources lookup kept serving its last answer after a failed refresh but retried on the
+  very next call, so with view lists now asking, each request would have waited on a connection.
+
+### Fixed
+
+- **Recent and a created date now narrow the list together.** Recent's 7-day cutoff used to replace
+  a narrower created date instead of combining with it.
+
+### Known limitations
+
+- **Edited** and **Published** match each view's latest change only: a view records who changed it
+  last, not everyone who has.
+- One role applies to everyone picked in **People**.
+- A view with no data source of its own (it reads its workspace's default) is never stamped by a
+  publish, so for it **Updated** sees only settings and layout edits, and **Published** never
+  matches.
+- While the version store can't be reached, views carry no Versioned/External label and that filter
+  can't be applied; the rest of the Explorer works.
+
+---
+
 ## [Unreleased] — Exports you can follow from anywhere, and cancel
 
 ### Added

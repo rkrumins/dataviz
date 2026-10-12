@@ -7,10 +7,11 @@ import asyncio
 import json
 import logging
 import os
+from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Set
 
-from sqlalchemy import and_, select, delete, func, or_, update
+from sqlalchemy import and_, case, select, delete, func, or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel
@@ -37,6 +38,7 @@ from backend.common.models.management import (
     ViewListResponse,
     ViewFacetValue,
     ViewFacetCreator,
+    ViewFacetContributor,
     ViewFacetsResponse,
     ViewCatalogStats,
 )
@@ -55,6 +57,9 @@ from backend.app.services.versioning.layout_promote import (
     merge_display_rules_3way,
     merge_default_sort_3way,
 )
+
+if TYPE_CHECKING:
+    from backend.app.services.view_source_kinds import SourceKindSets
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +162,31 @@ async def resolve_user_ids(
 # Backward-compatible private alias — internal callers below reference the
 # original underscored name; keep it so this diff stays surgical.
 _resolve_user_ids = resolve_user_ids
+
+
+async def _resolve_user_identities(
+    session: AsyncSession, user_ids: Set[Optional[str]],
+) -> Dict[str, tuple[Optional[str], Optional[str], Optional[str]]]:
+    """:func:`resolve_user_ids` plus the user's chosen avatar:
+    ``{id: (display_name, email, avatar_id)}``, same naming rule, same misses.
+
+    A sibling rather than a third tuple member there: other domains unpack
+    that function's values as pairs.
+    """
+    clean = {uid for uid in user_ids if uid and uid != "anonymous"}
+    if not clean:
+        return {}
+    result = await session.execute(
+        select(
+            UserORM.id, UserORM.first_name, UserORM.last_name, UserORM.email,
+            UserORM.avatar_id,
+        )
+        .where(UserORM.id.in_(clean))
+    )
+    return {
+        uid: (f"{first or ''} {last or ''}".strip() or email, email, avatar_id)
+        for uid, first, last, email, avatar_id in result.all()
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -1302,6 +1332,69 @@ async def permanently_delete_view(
 # Filtered listing & discovery                                         #
 # ------------------------------------------------------------------ #
 
+def _last_change_expr():
+    """When the view last changed: the later of its last settings/layout edit
+    and its last data publish.
+
+    ``updated_at`` alone misses data changes — the publish fan-out
+    (``versioning._touch_views_data_updated``) stamps ``data_updated_at`` and
+    deliberately leaves ``updated_at`` alone, so a publish never poses as a
+    settings edit. "Changed since" means either. ISO-8601 UTC strings compare
+    in time order; a NULL ``data_updated_at`` (never published) fails the
+    comparison and falls to the ELSE.
+    """
+    return case(
+        (ViewORM.data_updated_at > ViewORM.updated_at, ViewORM.data_updated_at),
+        else_=ViewORM.updated_at,
+    )
+
+
+def _contributor_clause(ids: List[str], role: Optional[str]):
+    """Views these people created, last edited, or last published data behind.
+
+    With no role, created OR last edited. Published is opt-in: a publish
+    stamps ``data_updated_by`` on every view of its data source, so counting
+    it by default would list hundreds of views a person never opened.
+    """
+    if role == "created":
+        return ViewORM.created_by.in_(ids)
+    if role == "edited":
+        return ViewORM.updated_by.in_(ids)
+    if role == "published":
+        return ViewORM.data_updated_by.in_(ids)
+    return or_(ViewORM.created_by.in_(ids), ViewORM.updated_by.in_(ids))
+
+
+def source_kind_clause(kind: str, sets: "SourceKindSets"):
+    """The Explorer's Versioned / External filter, as SQL.
+
+    A view is classified by its own data source, else (NULL) by its
+    workspace's default — the rule ``SourceKindSets.kind_for`` annotates the
+    returned rows with. Both kinds are written out because NOT-ing the
+    versioned predicate is NULL, not true, for a NULL-source view, which would
+    silently drop every such view from External. A NULL-source view in a
+    workspace with no default source reads no data and is in neither.
+    """
+    if kind == "versioned":
+        return or_(
+            ViewORM.data_source_id.in_(sets.versioned_ds),
+            and_(
+                ViewORM.data_source_id.is_(None),
+                ViewORM.workspace_id.in_(sets.versioned_ws),
+            ),
+        )
+    return or_(
+        and_(
+            ViewORM.data_source_id.isnot(None),
+            ViewORM.data_source_id.not_in(sets.versioned_ds),
+        ),
+        and_(
+            ViewORM.data_source_id.is_(None),
+            ViewORM.workspace_id.in_(sets.external_ws),
+        ),
+    )
+
+
 def _apply_view_filters(
     query,
     *,
@@ -1317,6 +1410,13 @@ def _apply_view_filters(
     created_by_in: Optional[List[str]] = None,
     created_by_not: Optional[str] = None,
     created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
+    updated_after: Optional[str] = None,
+    updated_before: Optional[str] = None,
+    contributor_in: Optional[List[str]] = None,
+    contributor_role: Optional[str] = None,
+    source_kind: Optional[str] = None,
+    source_kind_sets: Optional["SourceKindSets"] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
     ids_in: Optional[List[str]] = None,
@@ -1339,6 +1439,8 @@ def _apply_view_filters(
     ``has_more`` honest; the old Python post-filter over-reported both.
     ``ids_in`` / ``created_by_not`` exist for the shared-with-me
     category (explicit grants, excluding the caller's own views).
+    ``source_kind`` needs ``source_kind_sets`` (``view_source_kinds.load_sets``).
+    Time bounds are UTC ISO strings: ``*_after`` inclusive, ``*_before`` exclusive.
     """
     if readable is not None:
         query = query.where(readable)
@@ -1390,8 +1492,20 @@ def _apply_view_filters(
     elif created_by:
         query = query.where(ViewORM.created_by == created_by)
 
+    if contributor_in:
+        query = query.where(_contributor_clause(contributor_in, contributor_role))
+
     if created_after:
         query = query.where(ViewORM.created_at >= created_after)
+    if created_before:
+        query = query.where(ViewORM.created_at < created_before)
+    if updated_after:
+        query = query.where(_last_change_expr() >= updated_after)
+    if updated_before:
+        query = query.where(_last_change_expr() < updated_before)
+
+    if source_kind:
+        query = query.where(source_kind_clause(source_kind, source_kind_sets))
 
     # Visibility filters — visibility_in (set match) wins over single visibility.
     if visibility_in:
@@ -1630,6 +1744,13 @@ async def list_views_filtered(
     created_by_in: Optional[List[str]] = None,
     created_by_not: Optional[str] = None,
     created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
+    updated_after: Optional[str] = None,
+    updated_before: Optional[str] = None,
+    contributor_in: Optional[List[str]] = None,
+    contributor_role: Optional[str] = None,
+    source_kind: Optional[str] = None,
+    source_kind_sets: Optional["SourceKindSets"] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
     ids_in: Optional[List[str]] = None,
@@ -1663,6 +1784,13 @@ async def list_views_filtered(
         created_by_in=created_by_in,
         created_by_not=created_by_not,
         created_after=created_after,
+        created_before=created_before,
+        updated_after=updated_after,
+        updated_before=updated_before,
+        contributor_in=contributor_in,
+        contributor_role=contributor_role,
+        source_kind=source_kind,
+        source_kind_sets=source_kind_sets,
         search=search,
         tags=tags,
         ids_in=ids_in,
@@ -1715,18 +1843,23 @@ async def get_view_facets(
     session: AsyncSession,
     *,
     readable=None,
+    workspace_ids: Optional[List[str]] = None,
 ) -> ViewFacetsResponse:
-    """Aggregate distinct tags, view types, and creators across non-deleted views.
+    """Aggregate distinct tags, view types, creators and contributors across
+    non-deleted views.
 
-    Used by the Explorer to populate the Tag / View Type / Creator filter
-    dropdowns. Facets are intentionally unscoped by the caller's *other*
+    Used by the Explorer to populate the Tag / View Type / Creator / contributor
+    filter dropdowns. Facets are intentionally unscoped by the caller's *other*
     active filters (the picker is a discovery tool, not a query
     refinement) — but ALWAYS scoped by ``readable``: a facet computed
     over views the caller cannot read leaks their tags and creators.
+    ``workspace_ids`` narrows them to the workspaces an Explorer is showing.
     """
     base_where = view_is_live()
     if readable is not None:
         base_where = and_(base_where, readable)
+    if workspace_ids:
+        base_where = and_(base_where, ViewORM.workspace_id.in_(workspace_ids))
 
     # 1. Tags — parsed in Python since the column is a JSON string.
     tags_query = (
@@ -1803,10 +1936,57 @@ async def get_view_facets(
             count=cnt,
         ))
 
+    # 4. Contributors — creator, last editor and last data publisher, from ONE
+    # grouped scan whose rows are (creator, editor, publisher) combinations.
+    contributor_rows = (await session.execute(
+        select(
+            ViewORM.created_by, ViewORM.updated_by, ViewORM.data_updated_by,
+            func.count(func.distinct(ViewORM.id)),
+        )
+        .where(base_where)
+        .group_by(ViewORM.created_by, ViewORM.updated_by, ViewORM.data_updated_by)
+    )).all()
+    created, edited, published, either = Counter(), Counter(), Counter(), Counter()
+    for creator, editor, publisher, n in contributor_rows:
+        # NULL and the legacy "anonymous" sentinel are nobody.
+        creator, editor, publisher = (
+            p if p and p != "anonymous" else None for p in (creator, editor, publisher)
+        )
+        if creator:
+            created[creator] += n
+        if editor:
+            edited[editor] += n
+        if publisher:
+            published[publisher] += n
+        # A set: whoever created AND last edited a view counts it once.
+        for person in {creator, editor} - {None}:
+            either[person] += n
+
+    people = set(either) | set(published)
+    identities = await _resolve_user_identities(session, people)
+    contributor_facets = []
+    for uid in people:
+        # Unresolvable (record gone): fall back to the raw id, like creators.
+        name, email, avatar_id = identities.get(uid, (uid, None, None))
+        contributor_facets.append(ViewFacetContributor(
+            user_id=uid,
+            display_name=name,
+            email=email,
+            avatar_id=avatar_id,
+            count=either[uid],
+            created_count=created[uid],
+            edited_count=edited[uid],
+            published_count=published[uid],
+        ))
+    contributor_facets.sort(key=lambda c: (
+        -c.count, -c.published_count, c.display_name.lower(), c.user_id,
+    ))
+
     return ViewFacetsResponse(
         tags=tag_facets,
         view_types=view_type_facets,
         creators=creator_facets,
+        contributors=contributor_facets,
     )
 
 
@@ -1825,6 +2005,13 @@ async def get_view_stats(
     created_by_in: Optional[List[str]] = None,
     created_by_not: Optional[str] = None,
     created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
+    updated_after: Optional[str] = None,
+    updated_before: Optional[str] = None,
+    contributor_in: Optional[List[str]] = None,
+    contributor_role: Optional[str] = None,
+    source_kind: Optional[str] = None,
+    source_kind_sets: Optional["SourceKindSets"] = None,
     search: Optional[str] = None,
     tags: Optional[List[str]] = None,
     ids_in: Optional[List[str]] = None,
@@ -1855,6 +2042,13 @@ async def get_view_stats(
         created_by_in=created_by_in,
         created_by_not=created_by_not,
         created_after=created_after,
+        created_before=created_before,
+        updated_after=updated_after,
+        updated_before=updated_before,
+        contributor_in=contributor_in,
+        contributor_role=contributor_role,
+        source_kind=source_kind,
+        source_kind_sets=source_kind_sets,
         search=search,
         tags=tags,
         ids_in=ids_in,

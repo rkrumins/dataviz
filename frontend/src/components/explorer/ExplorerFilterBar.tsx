@@ -2,18 +2,19 @@
  * ExplorerFilterBar — toolbar combining category pills and filter dropdowns.
  *
  * Layout:
- *   [Category pills] | [Workspace ▾] [Source ▾] [Visibility ▾] [Type ▾] [Tag ▾] [Creator ▾]
+ *   [Category pills]
+ *   [Versioned | External] [Date ▾] [People ▾] [Workspace ▾] [Source ▾] [Type ▾] [Tag ▾] [Visibility ▾]
+ *   [active filter chips … Clear all]
  *
- * Multi-select dropdowns (Workspace / Type / Tag / Creator) use the shared
- * ``FilterDropdown`` component so their UX is consistent (same search
- * behaviour, same accent tokens, same keyboard isolation). Source and
- * Visibility remain bespoke — they are single-select with different
- * affordances and using them via FilterDropdown would be awkward.
+ * It edits one ``ViewFilterState`` (features/view-filters) — the value the page
+ * keeps in its address and the workspace Views tab keeps in state — so the two
+ * surfaces filter identically. Multi-select dropdowns use the shared
+ * ``FilterDropdown`` (same search behaviour, same accent tokens, same keyboard
+ * isolation). Source and Visibility remain bespoke single-selects.
  *
  * Performance: no transition-all, no backdrop-blur on persistent elements.
  */
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
 import {
   Layers,
   LayoutGrid,
@@ -24,21 +25,26 @@ import {
   Users,
   Globe,
   Lock,
-  X,
   ChevronDown,
   Check,
   Database,
   Trash2,
   Tag,
   Shapes,
-  UserCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { viewTypeLabel, viewTypeColor, viewTypeIconComponent } from '@/lib/viewUtils'
+import { keyboardScopeProps } from '@/lib/keyboardScope'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useViewFacets } from '@/hooks/useViewFacets'
-import { avatarPaletteFor } from '@/lib/avatar'
-import { UserAvatar } from '@/components/ui/UserAvatar'
+import type { ViewFilterState } from '@/features/view-filters/model'
+import { filterChips, clearDimensions } from '@/features/view-filters/dimensions'
+import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
+import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
+import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
+import { PeopleFilterMenu } from '@/features/view-filters/components/PeopleFilterMenu'
+import { peopleFromFacets, type CurrentPerson } from '@/features/view-filters/people'
+import { ActiveFilterChips } from '@/features/view-filters/components/ActiveFilterChips'
 import { FilterDropdown, type FilterOption } from './FilterDropdown'
 
 /* ------------------------------------------------------------------ */
@@ -46,20 +52,13 @@ import { FilterDropdown, type FilterOption } from './FilterDropdown'
 /* ------------------------------------------------------------------ */
 
 interface ExplorerFilterBarProps {
-  visibility: string | null
-  onVisibilityChange: (v: string | null) => void
-  workspaceIds: string[]
-  onWorkspaceIdsChange: (ids: string[]) => void
-  dataSourceId: string | null
-  onDataSourceIdChange: (id: string | null) => void
-  viewTypes: string[]
-  onViewTypesChange: (types: string[]) => void
-  tags: string[]
-  onTagsChange: (tags: string[]) => void
-  creatorIds: string[]
-  onCreatorIdsChange: (ids: string[]) => void
-  category: string | null
-  onCategoryChange: (c: string | null) => void
+  state: ViewFilterState
+  onChange: (next: ViewFilterState) => void
+  /** Local `YYYY-MM-DD` the date rules resolve against. */
+  today: string
+  currentUser: CurrentPerson | null
+  /** The page's own controls (sort, layout), at the end of the first row. */
+  trailing?: React.ReactNode
 }
 
 /* ------------------------------------------------------------------ */
@@ -104,24 +103,22 @@ function useClickOutside(ref: React.RefObject<HTMLElement | null>, onClose: () =
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
-export function ExplorerFilterBar({
-  visibility,
-  onVisibilityChange,
-  workspaceIds,
-  onWorkspaceIdsChange,
-  dataSourceId,
-  onDataSourceIdChange,
-  viewTypes,
-  onViewTypesChange,
-  tags,
-  onTagsChange,
-  creatorIds,
-  onCreatorIdsChange,
-  category,
-  onCategoryChange,
-}: ExplorerFilterBarProps) {
+export function ExplorerFilterBar({ state, onChange, today, currentUser, trailing }: ExplorerFilterBarProps) {
+  const {
+    visibility, workspaceIds, dataSourceId, viewTypes, tags, category,
+  } = state
+  const set = (patch: Partial<ViewFilterState>) => onChange({ ...state, ...patch })
+  const onVisibilityChange = (v: string | null) => set({ visibility: v })
+  const onWorkspaceIdsChange = (ids: string[]) => set({ workspaceIds: ids })
+  const onDataSourceIdChange = (id: string | null) => set({ dataSourceId: id })
+  const onViewTypesChange = (types: string[]) => set({ viewTypes: types })
+  const onTagsChange = (next: string[]) => set({ tags: next })
+  const onCategoryChange = (c: string | null) => set({ category: c })
+
   const workspaces = useWorkspacesStore(s => s.workspaces)
   const { facets } = useViewFacets()
+  const people = useMemo(() => peopleFromFacets(facets), [facets])
+  const lookups = useFilterLookups(people, today, currentUser?.id)
 
   // ── Source + Visibility bespoke dropdowns ────────────────────────
   const [dsOpen, setDsOpen] = useState(false)
@@ -180,70 +177,9 @@ export function ExplorerFilterBar({
     [facets.tags],
   )
 
-  const creatorOptions: FilterOption[] = useMemo(
-    () => facets.creators.map(c => ({
-      id: c.userId,
-      label: c.displayName,
-      sublabel: c.email ?? undefined,
-    })),
-    [facets.creators],
-  )
-
-  /** Fast lookup from userId → full facet row for the custom option renderer. */
-  const creatorById = useMemo(
-    () => new Map(facets.creators.map(c => [c.userId, c])),
-    [facets.creators],
-  )
-
   // ── Active filter chips ─────────────────────────────────────────
-
-  const activeFilters = useMemo(() => {
-    const chips: { key: string; prefix: string; value: string }[] = []
-    if (visibility) {
-      const opt = VISIBILITY_OPTIONS.find(o => o.key === visibility)
-      chips.push({ key: 'visibility', prefix: 'Visibility', value: opt?.label ?? visibility })
-    }
-    for (const wsId of workspaceIds) {
-      const ws = workspaces.find(w => w.id === wsId)
-      chips.push({ key: `ws-${wsId}`, prefix: 'Workspace', value: ws?.name ?? wsId })
-    }
-    if (dataSourceId) {
-      const ds = availableDataSources.find(d => d.id === dataSourceId)
-      chips.push({ key: 'ds', prefix: 'Source', value: ds?.label ?? dataSourceId })
-    }
-    for (const vt of viewTypes) {
-      chips.push({ key: `vt-${vt}`, prefix: 'Type', value: viewTypeLabel(vt) })
-    }
-    for (const t of tags) {
-      chips.push({ key: `tag-${t}`, prefix: 'Tag', value: t })
-    }
-    for (const cid of creatorIds) {
-      const c = facets.creators.find(x => x.userId === cid)
-      chips.push({ key: `creator-${cid}`, prefix: 'Creator', value: c?.displayName ?? cid })
-    }
-    return chips
-  }, [
-    visibility, workspaceIds, dataSourceId, viewTypes, tags, creatorIds,
-    workspaces, availableDataSources, facets.creators,
-  ])
-
-  function removeFilter(key: string) {
-    if (key === 'visibility') onVisibilityChange(null)
-    else if (key.startsWith('ws-')) onWorkspaceIdsChange(workspaceIds.filter(w => w !== key.slice(3)))
-    else if (key === 'ds') onDataSourceIdChange(null)
-    else if (key.startsWith('vt-')) onViewTypesChange(viewTypes.filter(v => v !== key.slice(3)))
-    else if (key.startsWith('tag-')) onTagsChange(tags.filter(t => t !== key.slice(4)))
-    else if (key.startsWith('creator-')) onCreatorIdsChange(creatorIds.filter(c => c !== key.slice(8)))
-  }
-
-  function clearAll() {
-    onVisibilityChange(null)
-    onWorkspaceIdsChange([])
-    onDataSourceIdChange(null)
-    onViewTypesChange([])
-    onTagsChange([])
-    onCreatorIdsChange([])
-  }
+  // Search and category have their own controls; every other filter is a chip.
+  const chips = useMemo(() => filterChips(state, lookups), [state, lookups])
 
   const visLabel = VISIBILITY_OPTIONS.find(o => o.key === visibility)?.label
 
@@ -251,7 +187,7 @@ export function ExplorerFilterBar({
   /*  Render                                                           */
   /* ---------------------------------------------------------------- */
   return (
-    <div className="space-y-3">
+    <div className="space-y-2.5">
       <div className="flex items-center gap-1 flex-wrap">
         {/* Category pills */}
         {CATEGORIES.map(tab => {
@@ -261,11 +197,12 @@ export function ExplorerFilterBar({
             <button
               key={tab.key ?? '__all'}
               onClick={() => onCategoryChange(tab.key)}
+              aria-pressed={active}
               className={cn(
                 'flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium',
                 'transition-colors duration-150',
                 active
-                  ? 'bg-accent-lineage/12 text-accent-lineage'
+                  ? 'bg-accent-lineage/10 text-accent-lineage'
                   : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
               )}
             >
@@ -275,7 +212,36 @@ export function ExplorerFilterBar({
           )
         })}
 
-        <div className="w-px h-5 bg-glass-border mx-1.5" />
+        {trailing && <div className="ml-auto flex items-center gap-1.5">{trailing}</div>}
+      </div>
+
+      <div className="flex items-center gap-1 flex-wrap">
+        {/* Versioned / External — two answers, both visible */}
+        <SourceKindToggle
+          value={state.sourceKind}
+          onChange={v => set({ sourceKind: v })}
+          className="mr-1"
+        />
+
+        {/* Date — created or last changed, presets + calendar */}
+        <DateFilterMenu
+          created={state.created}
+          updated={state.updated}
+          onChange={patch => set(patch)}
+          today={today}
+          recentActive={category === 'recently-added'}
+        />
+
+        {/* People — who created or last edited a view */}
+        <PeopleFilterMenu
+          ids={state.contributorIds}
+          role={state.contributorRole}
+          people={people}
+          currentUser={currentUser}
+          onChange={({ ids, role }) => set({ contributorIds: ids, contributorRole: role })}
+        />
+
+        <div className="w-px h-5 bg-glass-border mx-1" />
 
         {/* Workspace — multi-select + search */}
         <FilterDropdown
@@ -308,7 +274,7 @@ export function ExplorerFilterBar({
           </button>
 
           {dsOpen && (
-            <div className="absolute left-0 top-full z-50 mt-1.5 w-64 bg-canvas border border-glass-border rounded-xl shadow-xl overflow-hidden">
+            <div {...keyboardScopeProps('view-filters')} className="absolute left-0 top-full z-50 mt-1.5 w-64 bg-canvas border border-glass-border rounded-xl shadow-xl overflow-hidden">
               <div className="relative border-b border-glass-border/50 p-2">
                 <input
                   ref={dsSearchRef}
@@ -371,7 +337,7 @@ export function ExplorerFilterBar({
           </button>
 
           {visOpen && (
-            <div className="absolute left-0 top-full z-50 mt-1.5 w-48 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl">
+            <div {...keyboardScopeProps('view-filters')} className="absolute left-0 top-full z-50 mt-1.5 w-48 p-1 bg-canvas border border-glass-border rounded-xl shadow-xl">
               {VISIBILITY_OPTIONS.map(opt => {
                 const active = visibility === opt.key
                 const Icon = opt.icon
@@ -417,118 +383,15 @@ export function ExplorerFilterBar({
           emptyMessage="No tags yet"
         />
 
-        {/* Creator — multi-select + search, rendered with avatar + name +
-            email + view-count pill so users can visually pick from a roster
-            rather than scanning plain-text rows. Mirrors the hover card
-            treatment for continuity. */}
-        <FilterDropdown
-          icon={UserCircle}
-          label="Creator"
-          accent="rose"
-          options={creatorOptions}
-          selectedIds={creatorIds}
-          onChange={onCreatorIdsChange}
-          emptyMessage="No creators yet"
-          searchPlaceholder="Search creators..."
-          panelWidthClassName="w-80"
-          activeLabelFormatter={(ids, opts) => {
-            if (ids.length === 1) {
-              const match = opts.find(o => o.id === ids[0])
-              // Truncate very long names so the trigger button stays compact.
-              const name = match?.label ?? ids[0]
-              return name.length > 18 ? `${name.slice(0, 17)}…` : name
-            }
-            return `${ids.length} creators`
-          }}
-          renderOption={(opt, { isSelected }) => {
-            const creator = creatorById.get(opt.id)
-            const displayName = creator?.displayName ?? opt.label
-            const email = creator?.email
-            const count = creator?.count ?? 0
-            const palette = avatarPaletteFor(opt.id)
-            return (
-              <div className="flex items-center gap-3 px-3 py-2">
-                <UserAvatar
-                  userId={opt.id}
-                  name={displayName}
-                  shape="palette"
-                  className={cn(
-                    'w-8 h-8 text-[11px] font-bold',
-                    'transition-all duration-150',
-                    isSelected && cn('ring-2 ring-offset-1 ring-offset-canvas', palette.ring),
-                  )}
-                />
-                <div className="flex-1 min-w-0">
-                  <div className={cn(
-                    'text-xs truncate',
-                    isSelected ? 'font-semibold text-ink' : 'font-medium text-ink',
-                  )}>
-                    {displayName}
-                  </div>
-                  {email && (
-                    <div className="text-[10px] text-ink-muted/70 truncate">
-                      {email}
-                    </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <span className="inline-flex items-center rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-medium text-ink-muted/80">
-                    {count}
-                  </span>
-                  {isSelected && (
-                    <Check className="h-3.5 w-3.5 text-rose-500 shrink-0" />
-                  )}
-                </div>
-              </div>
-            )
-          }}
-        />
       </div>
 
-      {/* ── Active filter chips ──
-          Container animates height; each chip inside uses its own
-          spring for a tactile add/remove feel. */}
-      <AnimatePresence>
-        {activeFilters.length > 0 && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="flex flex-wrap items-center gap-1.5 overflow-hidden"
-          >
-            <AnimatePresence initial={false}>
-              {activeFilters.map(f => (
-                <motion.span
-                  key={f.key}
-                  layout
-                  initial={{ opacity: 0, scale: 0.7, y: -4 }}
-                  animate={{ opacity: 1, scale: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.7, y: -4 }}
-                  transition={{ type: 'spring', stiffness: 500, damping: 28, mass: 0.6 }}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-glass-border bg-canvas-elevated pl-2.5 pr-1 py-1 text-[11px]"
-                >
-                  <span className="text-ink-muted/60 font-medium">{f.prefix}:</span>
-                  <span className="font-semibold text-ink">{f.value}</span>
-                  <button
-                    onClick={() => removeFilter(f.key)}
-                    className="rounded-full p-0.5 text-ink-muted hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors duration-150"
-                    title="Remove filter"
-                  >
-                    <X className="h-2.5 w-2.5" />
-                  </button>
-                </motion.span>
-              ))}
-            </AnimatePresence>
-            <button
-              onClick={clearAll}
-              className="text-[11px] font-medium text-ink-muted hover:text-ink transition-colors duration-150 underline underline-offset-2"
-            >
-              Clear all
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <ActiveFilterChips
+        chips={chips}
+        currentUserId={currentUser?.id}
+        onRemove={chip => onChange(chip.without(state))}
+        // Category and search have their own controls and their own clears.
+        onClearAll={() => onChange(clearDimensions(state, ['category', 'search']))}
+      />
     </div>
   )
 }

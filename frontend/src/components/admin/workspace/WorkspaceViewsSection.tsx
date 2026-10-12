@@ -29,7 +29,7 @@ import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDraw
 import {
     Eye, Search, Plus, Compass, LayoutGrid, List as ListIcon,
     Lock, Users, Globe, AlertTriangle, UserRound, Clock, X, History, ChevronDown,
-    Check, Loader2, FileUp,
+    Check, Loader2, FileUp, Database,
 } from 'lucide-react'
 import { WorkspaceActivityFeed } from '@/components/views/WorkspaceActivityFeed'
 import { cn } from '@/lib/utils'
@@ -64,6 +64,19 @@ import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
 import { BulkDeleteDialog } from '@/components/explorer/BulkDeleteDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { FilterDropdown } from '@/components/explorer/FilterDropdown'
+import { useViewFacets } from '@/hooks/useViewFacets'
+import { EMPTY_FILTERS, isAnyFilterActive, type ViewFilterState } from '@/features/view-filters/model'
+import { resolveFilters } from '@/features/view-filters/params'
+import { writeFilterState } from '@/features/view-filters/url'
+import { filterChips } from '@/features/view-filters/dimensions'
+import { useLocalDay } from '@/features/view-filters/useLocalDay'
+import { useFilterLookups } from '@/features/view-filters/useFilterLookups'
+import { SourceKindToggle } from '@/features/view-filters/components/SourceKindToggle'
+import { DateFilterMenu } from '@/features/view-filters/components/DateFilterMenu'
+import { PeopleFilterMenu } from '@/features/view-filters/components/PeopleFilterMenu'
+import { peopleFromFacets, currentPersonOf } from '@/features/view-filters/people'
+import { ActiveFilterChips } from '@/features/view-filters/components/ActiveFilterChips'
 
 type Visibility = 'private' | 'workspace' | 'enterprise'
 
@@ -103,30 +116,39 @@ export default function WorkspaceViewsSection({
     const canAdminWorkspace = usePermission('workspace:admin', wsId)
 
     // ─── Filters + layout ────────────────────────────────────────────
-    const [search, setSearch] = useState('')
-    const [dsFilter, setDsFilter] = useState<string>('all')
-    const [visFilter, setVisFilter] = useState<Visibility | 'all'>('all')
-    const [ownerFilter, setOwnerFilter] = useState<string>('all')
-    const [attentionOnly, setAttentionOnly] = useState(false)
+    // The same filter value and controls as the Explorer, held here in state
+    // (this tab has never kept its filters in the address) and always scoped to
+    // this workspace. Visibility and "Need attention" are driven by the insight
+    // chips below; the rest by the toolbar.
+    const [fstate, setFstate] = useState<ViewFilterState>(EMPTY_FILTERS)
+    const patchFilters = (patch: Partial<ViewFilterState>) => setFstate(prev => ({ ...prev, ...patch }))
+    const visFilter = fstate.visibility
+    const attentionOnly = fstate.category === 'needs-attention'
     const [sort, setSort] = useState<SortOption>('updated')
     const [layout, setLayout] = useState<'grid' | 'list'>('grid')
     const [showActivity, setShowActivity] = useState(false)
+    const today = useLocalDay()
+    const me = useMemo(() => currentPersonOf(currentUser), [currentUser])
 
     const filters: ExplorerFilters = useMemo(() => ({
-        search,
-        visibility: visFilter === 'all' ? null : visFilter,
-        workspaceIds: [wsId],
-        dataSourceId: dsFilter === 'all' ? null : dsFilter,
-        viewTypes: [],
-        tags: [],
-        creatorIds: ownerFilter === 'all' ? [] : [ownerFilter],
+        ...resolveFilters(fstate, {
+            currentUserId: currentUser?.id ?? null, today, scopeWorkspaceId: wsId,
+        }),
         sort,
         favouritedOnly: false,
-        category: attentionOnly ? 'needs-attention' : null,
-        currentUserId: currentUser?.id ?? null,
         limit: 60,
         offset: 0,
-    }), [search, visFilter, wsId, dsFilter, ownerFilter, sort, attentionOnly, currentUser?.id])
+    }), [fstate, wsId, sort, today, currentUser?.id])
+
+    // People who made or edited this workspace's views — from the server, so
+    // the list isn't limited to the first page of views the parent loaded.
+    const { facets } = useViewFacets(useMemo(() => ({ workspaceIds: [wsId] }), [wsId]))
+    const people = useMemo(() => peopleFromFacets(facets), [facets])
+    const lookups = useFilterLookups(people, today, currentUser?.id)
+    const chips = useMemo(
+        () => filterChips(fstate, lookups, ['workspace', 'category', 'search']),
+        [fstate, lookups],
+    )
 
     const {
         views: loadedViews, totalCount, isLoading,
@@ -167,15 +189,6 @@ export default function WorkspaceViewsSection({
         }
         return { total: allViews.length, mine, priv, wsVis, ent, owners: owners.size, lastAt, lastBy }
     }, [allViews, currentUser?.id])
-
-    // Distinct owners for the owner filter (from the full population).
-    const ownerOptions = useMemo(() => {
-        const map = new Map<string, string>()
-        for (const v of allViews) if (v.createdBy) map.set(v.createdBy, v.createdByName ?? v.createdBy)
-        return [...map.entries()]
-            .map(([id, name]) => ({ id, name }))
-            .sort((a, b) => a.name.localeCompare(b.name))
-    }, [allViews])
 
     // ─── Selection + management handlers ─────────────────────────────
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -322,10 +335,8 @@ export default function WorkspaceViewsSection({
         notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     }
 
-    const hasActiveFilters = !!search || dsFilter !== 'all' || visFilter !== 'all' || ownerFilter !== 'all' || attentionOnly
-    const clearFilters = () => {
-        setSearch(''); setDsFilter('all'); setVisFilter('all'); setOwnerFilter('all'); setAttentionOnly(false)
-    }
+    const hasActiveFilters = isAnyFilterActive(fstate, { workspace: true })
+    const clearFilters = () => setFstate(EMPTY_FILTERS)
 
     // Shared per-view action props for card + row.
     const actionProps = (v: View) => ({
@@ -372,17 +383,17 @@ export default function WorkspaceViewsSection({
                 <div className="flex flex-wrap items-center gap-2">
                     <SegmentChip icon={Lock} label="Private" count={insight.priv}
                         active={visFilter === 'private'} tone="slate"
-                        onClick={() => setVisFilter(v => v === 'private' ? 'all' : 'private')} />
+                        onClick={() => patchFilters({ visibility: visFilter === 'private' ? null : 'private' })} />
                     <SegmentChip icon={Users} label="Workspace" count={insight.wsVis}
                         active={visFilter === 'workspace'} tone="emerald"
-                        onClick={() => setVisFilter(v => v === 'workspace' ? 'all' : 'workspace')} />
+                        onClick={() => patchFilters({ visibility: visFilter === 'workspace' ? null : 'workspace' })} />
                     <SegmentChip icon={Globe} label="Enterprise" count={insight.ent}
                         active={visFilter === 'enterprise'} tone="indigo"
-                        onClick={() => setVisFilter(v => v === 'enterprise' ? 'all' : 'enterprise')} />
+                        onClick={() => patchFilters({ visibility: visFilter === 'enterprise' ? null : 'enterprise' })} />
                     {stats.needsAttention > 0 && (
                         <SegmentChip icon={AlertTriangle} label="Need attention" count={stats.needsAttention}
                             active={attentionOnly} tone="amber"
-                            onClick={() => setAttentionOnly(a => !a)} />
+                            onClick={() => patchFilters({ category: attentionOnly ? null : 'needs-attention' })} />
                     )}
                 </div>
             </div>
@@ -600,7 +611,9 @@ export default function WorkspaceViewsSection({
                 </div>
                 <div className="flex items-center gap-2">
                     <Link
-                        to={`/explorer?workspace=${wsId}`}
+                        // Carries this tab's filters across, in the Explorer's own
+                        // spelling, so the wider list starts where this one is.
+                        to={`/explorer?${writeFilterState(new URLSearchParams(), { ...fstate, workspaceIds: [wsId] })}`}
                         className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-glass-border text-ink-muted hover:text-ink hover:border-indigo-500/30 text-sm font-medium transition-colors"
                     >
                         <Compass className="w-4 h-4" /> Browse in Explorer
@@ -624,64 +637,74 @@ export default function WorkspaceViewsSection({
             </div>
 
             {/* ── Toolbar ────────────────────────────────────────── */}
-            <div className="flex flex-wrap items-center gap-2 mb-5">
+            <div className="flex flex-wrap items-center gap-2 mb-3">
                 <div className="relative flex-1 min-w-[200px]">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
                     <input
-                        value={search}
-                        onChange={e => setSearch(e.target.value)}
+                        value={fstate.search}
+                        onChange={e => patchFilters({ search: e.target.value })}
                         placeholder="Search views by name or description…"
                         className="w-full pl-9 pr-4 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
                     />
                 </div>
-                <select
-                    value={dsFilter}
-                    onChange={e => setDsFilter(e.target.value)}
-                    className="px-3 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                >
-                    <option value="all">All sources</option>
-                    {dataSources.map(ds => (
-                        <option key={ds.id} value={ds.id}>{ds.label || ds.catalogItemId}</option>
-                    ))}
-                </select>
-                <select
-                    value={ownerFilter}
-                    onChange={e => setOwnerFilter(e.target.value)}
-                    className="px-3 py-2 rounded-xl bg-black/5 dark:bg-white/5 border border-glass-border text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 max-w-[180px]"
-                >
-                    <option value="all">All owners</option>
-                    {currentUser?.id && <option value={currentUser.id}>You</option>}
-                    {ownerOptions.filter(o => o.id !== currentUser?.id).map(o => (
-                        <option key={o.id} value={o.id}>{o.name}</option>
-                    ))}
-                </select>
+                <SourceKindToggle
+                    value={fstate.sourceKind}
+                    onChange={v => patchFilters({ sourceKind: v })}
+                />
+                <DateFilterMenu
+                    created={fstate.created}
+                    updated={fstate.updated}
+                    onChange={patch => patchFilters(patch)}
+                    today={today}
+                />
+                <PeopleFilterMenu
+                    ids={fstate.contributorIds}
+                    role={fstate.contributorRole}
+                    people={people}
+                    currentUser={me}
+                    onChange={({ ids, role }) => patchFilters({ contributorIds: ids, contributorRole: role })}
+                />
+                <FilterDropdown
+                    icon={Database}
+                    label="Source"
+                    accent="emerald"
+                    selectionMode="single"
+                    disableSearch={dataSources.length < 8}
+                    options={dataSources.map(ds => ({ id: ds.id, label: ds.label || ds.catalogItemId || ds.id }))}
+                    selectedIds={fstate.dataSourceId ? [fstate.dataSourceId] : []}
+                    onChange={ids => patchFilters({ dataSourceId: ids[0] ?? null })}
+                    activeLabelFormatter={(ids, opts) => opts.find(o => o.id === ids[0])?.label ?? 'Source'}
+                    emptyMessage="No data sources"
+                />
                 <ExplorerSortControl sort={sort} onSortChange={setSort} />
-                {hasActiveFilters && (
-                    <button
-                        onClick={clearFilters}
-                        className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                    >
-                        <X className="w-3.5 h-3.5" /> Clear
-                    </button>
-                )}
                 {/* Grid / list toggle */}
                 <div className="inline-flex items-center rounded-xl border border-glass-border overflow-hidden ml-auto">
                     <button
                         onClick={() => setLayout('grid')}
                         title="Grid"
-                        className={cn('p-2 transition-colors', layout === 'grid' ? 'bg-indigo-500/12 text-indigo-500' : 'text-ink-muted hover:text-ink')}
+                        className={cn('p-2 transition-colors', layout === 'grid' ? 'bg-indigo-500/10 text-indigo-500' : 'text-ink-muted hover:text-ink')}
                     >
                         <LayoutGrid className="w-4 h-4" />
                     </button>
                     <button
                         onClick={() => setLayout('list')}
                         title="List"
-                        className={cn('p-2 transition-colors', layout === 'list' ? 'bg-indigo-500/12 text-indigo-500' : 'text-ink-muted hover:text-ink')}
+                        className={cn('p-2 transition-colors', layout === 'list' ? 'bg-indigo-500/10 text-indigo-500' : 'text-ink-muted hover:text-ink')}
                     >
                         <ListIcon className="w-4 h-4" />
                     </button>
                 </div>
             </div>
+            <ActiveFilterChips
+                className="mb-4"
+                chips={chips}
+                currentUserId={currentUser?.id}
+                onRemove={chip => setFstate(prev => chip.without(prev))}
+                // In this tab "Clear all" resets everything — search and the
+                // insight chips included — back to the whole workspace.
+                onClearAll={clearFilters}
+            />
+            {!chips.length && <div className="mb-2" />}
 
             {/* ── Body ───────────────────────────────────────────── */}
             {isLoading ? (

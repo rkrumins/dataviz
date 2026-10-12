@@ -3,7 +3,7 @@ Pydantic models for the management database layer.
 Covers: graph connections, ontology configs, assignment rule sets, saved views.
 """
 import json
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
@@ -1320,6 +1320,10 @@ class ViewResponse(BaseModel):
     portable_id: Optional[str] = Field(None, alias="portableId")
     # Set while the view exists only in a draft, waiting to go live (see ViewORM.draft_branch_id).
     draft_branch_id: Optional[str] = Field(None, alias="draftBranchId")
+    # Whether the data it reads (its own source, else its workspace's default) is
+    # versioned on this platform or mastered elsewhere. Set by the view reads
+    # (backend.app.services.view_source_kinds); None = unknown, or no source at all.
+    source_kind: Optional[Literal["versioned", "external"]] = Field(None, alias="sourceKind")
 
     class Config:
         populate_by_name = True
@@ -1365,6 +1369,27 @@ class ViewFacetCreator(BaseModel):
         populate_by_name = True
 
 
+class ViewFacetContributor(BaseModel):
+    """A person behind views, for the Explorer's contributor filter.
+
+    ``count`` is the views they created or last edited, each counted once —
+    what ``contributorIn`` matches by default. ``publishedCount`` (views whose
+    data they published last) is kept apart and out of ``count``: a publish
+    stamps every view of the source, read or not.
+    """
+    user_id: str = Field(alias="userId")
+    display_name: str = Field(alias="displayName")
+    email: Optional[str] = None
+    avatar_id: Optional[str] = Field(None, alias="avatarId")
+    count: int
+    created_count: int = Field(alias="createdCount")
+    edited_count: int = Field(alias="editedCount")
+    published_count: int = Field(alias="publishedCount")
+
+    class Config:
+        populate_by_name = True
+
+
 class ViewCatalogStats(BaseModel):
     """Aggregate catalog counts surfaced in the Explorer stats bar.
 
@@ -1394,6 +1419,7 @@ class ViewFacetsResponse(BaseModel):
     tags: List[ViewFacetValue]
     view_types: List[ViewFacetValue] = Field(alias="viewTypes")
     creators: List[ViewFacetCreator]
+    contributors: List[ViewFacetContributor] = Field(default_factory=list)
 
     class Config:
         populate_by_name = True

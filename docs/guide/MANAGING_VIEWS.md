@@ -288,6 +288,10 @@ Each workspace has a **Views** tab for working with its whole collection: open
 - **Publication requests** lists pending requests for the people who can answer
   them, and holds the workspace's publishing settings for its admins.
 - **Recent activity** shows what changed across the workspace.
+- **Filter the list** with the same controls as the Explorer: search,
+  **Versioned** or **External**, **Date**, **People** and **Source** (see
+  [Narrow the list](/guide/browsing-views#narrow-the-list)). **Browse in
+  Explorer** opens the Explorer with the same filters.
 - **Select several Views** to **Change Visibility**, **Export** or **Delete**
   them together. (Delete is offered only when you may delete every selected
   View.)

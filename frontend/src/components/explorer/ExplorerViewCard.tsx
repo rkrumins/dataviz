@@ -31,6 +31,7 @@ import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
+import { SourceKindBadge } from '@/features/view-filters/components/SourceKindBadge'
 
 // View type theme (label + colours) comes from the SHARED resolver in
 // lib/viewUtils — see viewTypeMeta(). Do not reintroduce a local map: a
@@ -468,6 +469,10 @@ export function ExplorerViewCard({
               <VisIcon className="h-2.5 w-2.5" />
               {vis.label}
             </span>
+            {/* Versioned or external — the fact the filter pills select on, so a
+                filtered list explains itself. A short word, so it shares this
+                row; the glyph alone in compact density. */}
+            <SourceKindBadge kind={view.sourceKind} compact={compact} />
             {healthInfo && (
               <span
                 className={cn(

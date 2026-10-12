@@ -5,7 +5,7 @@ Each data source binds a Provider + Graph Name + Blueprint within a Workspace.
 import json
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -165,7 +165,10 @@ async def get_data_source_orm(
 async def get_primary_data_source(
     session: AsyncSession, workspace_id: str
 ) -> Optional[WorkspaceDataSourceORM]:
-    """Return the primary data source for a workspace."""
+    """Return the primary data source for a workspace.
+
+    ``default_data_source_ids`` below answers the same question for many
+    workspaces at once; change the rule in both or neither."""
     result = await session.execute(
         select(WorkspaceDataSourceORM)
         .options(selectinload(WorkspaceDataSourceORM.catalog_item))
@@ -191,6 +194,43 @@ async def get_primary_data_source(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def default_data_source_ids(
+    session: AsyncSession, workspace_ids: Optional[Iterable[str]] = None
+) -> Dict[str, str]:
+    """``{workspace_id: default data source id}`` in one query — the source a view
+    with no data source of its own actually reads.
+
+    The bulk twin of ``get_primary_data_source``, and it must pick exactly what that
+    picks for every workspace: the active primary, else the earliest-created active
+    source, never a deleted one. The view lists classify each NULL-source view by
+    its workspace's default and cannot afford that function once per workspace;
+    if the two rules drift, the Explorer's Versioned/External filter disagrees with
+    the source the view opens (tests/test_default_data_source_ids.py pins them
+    together). ``workspace_ids`` narrows the scan; empty means no workspaces.
+    """
+    query = (
+        select(
+            WorkspaceDataSourceORM.workspace_id,
+            WorkspaceDataSourceORM.id,
+            WorkspaceDataSourceORM.is_primary,
+        )
+        .where(WorkspaceDataSourceORM.is_active == True, _live())  # noqa: E712
+        .order_by(WorkspaceDataSourceORM.created_at)
+    )
+    if workspace_ids is not None:
+        workspace_ids = list(workspace_ids)
+        if not workspace_ids:
+            return {}
+        query = query.where(WorkspaceDataSourceORM.workspace_id.in_(workspace_ids))
+    earliest: Dict[str, str] = {}
+    primary: Dict[str, str] = {}
+    for ws_id, ds_id, is_primary in (await session.execute(query)).all():
+        earliest.setdefault(ws_id, ds_id)
+        if is_primary:
+            primary.setdefault(ws_id, ds_id)
+    return {**earliest, **primary}
 
 
 async def create_data_source(

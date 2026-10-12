@@ -25,6 +25,7 @@ import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
+import { SourceKindBadge } from '@/features/view-filters/components/SourceKindBadge'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 
 /* ------------------------------------------------------------------ */
@@ -190,6 +191,8 @@ export function ExplorerListRow({
               >
                 {view.dataSourceName ?? view.dataSourceId}
               </span>
+              {/* The glyph only: the column is narrow, and the tip names it. */}
+              <SourceKindBadge kind={view.sourceKind} compact className="shrink-0" />
             </div>
           ) : (
             <span className="text-xs text-ink-muted">—</span>

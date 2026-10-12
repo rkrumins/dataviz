@@ -30,8 +30,8 @@ flowchart LR
 
 Search looks for every word you type in each view's name, description and
 tags, and in the names of its workspace and data source. A view has to match
-all the words. To find the views one person made, use the **Creator** filter
-instead (next section). When you click into the empty search box, your
+all the words. To find the views one person made or edited, use the
+**People** filter instead (next section). When you click into the empty search box, your
 **Recent searches** in this browser appear; **Clear** empties the list.
 
 > **If you don't see the view:** the list says **No views match your search**.
@@ -53,11 +53,12 @@ The row under the search box starts with quick filters. Click one at a time:
 | **Attention** | Views that need attention: not updated for more than 90 days, or whose workspace or data source is inactive or no longer exists |
 | **Deleted** | Deleted views that can still be restored (see [Bring back a deleted view](#bring-back-a-deleted-view)) |
 
-After them come dropdowns you can combine: **Workspace**, **Source** (a data
-source), **Visibility**, **Type** (the canvas type, such as Context View),
-**Tag** and **Creator**. Each one you set shows as a chip under the row, such as
-*Workspace: Finance*. Click a chip's **×** to remove it, or **Clear all** to
-remove every dropdown filter.
+The row below holds the filters you can combine: **Versioned** and
+**External**, **Date**, **People**, **Workspace**, **Source** (a data source),
+**Type** (the canvas type, such as Context View), **Tag** and **Visibility**.
+Each one you set shows as a chip under the row, such as *Workspace: Finance* or
+*Edited by: You*. Click a chip's **×** to remove it, or **Clear all** to remove
+every filter in the row.
 
 - **Filter by a tag from a card.** Click any tag on a card to filter by it;
   click it again to remove it.
@@ -72,6 +73,53 @@ remove every dropdown filter.
 > **Tip:** **Shared** lists only views shared with you by name or through a
 > group. Views you can open because of their **Workspace** or **Enterprise**
 > visibility are under **All**.
+
+### Versioned or external
+
+Click **Versioned** to see only views whose data is versioned in {brand}: it is
+changed through drafts, review and publishing. Click **External** for views on a
+graph that another system looks after, which {brand} reads but doesn't edit.
+Click the highlighted one again to see both. Hover either for a reminder of what
+it means.
+
+A view without a data source of its own is judged by its workspace's default
+data source. When your administrator has switched **Version control** off, these
+buttons don't appear.
+
+### When a view was made or changed
+
+1. Click **Date**.
+2. At the top, choose **Created** (when the view was made) or **Updated** (its
+   last change of any kind: its settings, its layout or its data).
+3. Choose a period such as **Today**, **Past 7 days** or **Last month**, or type
+   a number of days next to **Past … days** and click **Apply**.
+4. For exact dates, click **Custom range…**, click the first and last day on the
+   calendar, then **Apply range**. Both days are included.
+
+The button then reads, for example, *Updated · Past 7 days*. Days are your own
+calendar days. A bookmarked list keeps the period, not the dates: a bookmark of
+*Past 7 days* still shows the past seven days when you open it next month. With
+**Recent** on as well, the list shows views that match both.
+
+### Who made or changed a view
+
+1. Click **People**. **You** is always first, then everyone who has made or
+   edited a view you can open, with how many views each has.
+2. At the top, choose what they did:
+
+   | Choose | To see views they… |
+   | --- | --- |
+   | **Any** | created, or edited last (the default) |
+   | **Created** | created |
+   | **Edited** | edited last: the layout or the settings |
+   | **Published** | published the data behind last |
+
+3. Click one or more people. Pick several to see views by any of them.
+
+**Edited** and **Published** go by each view's *latest* change: a view records
+who changed it last, not everyone who ever did. **Published** is a choice of its
+own because publishing data changes every view on that data source, including
+views the publisher never opened.
 
 ### Change the order and the layout
 
@@ -108,6 +156,7 @@ you open anything.
 | Canvas type and name | The kind of canvas (Graph, Hierarchy or Context View) and the view's name |
 | Workspace and semantic layer | The workspace the view belongs to, and an icon for the semantic layer that describes its data. Hover either for details |
 | **Private**, **Workspace** or **Enterprise** | Who can open it. Hover for a plain-language answer |
+| **Versioned** or **External** | Whether its data is versioned in {brand} or looked after by another system. Hover for what that means |
 | Health badge | Shown only when something is wrong (table below) |
 | Data source | The data the view is drawn from |
 | **New to you** | Other people open this view, but you never have |
@@ -141,8 +190,9 @@ shows:
 - a warning if the view is stale or its data source is missing;
 - a preview of its layers (for a Context View) or its shape (for a Hierarchy);
 - **Description** and **Tags**;
-- **What this view is built on**: its workspace, data source, graph data
-  provider and semantic layer;
+- **What this view is built on**: its workspace, data source (with whether it
+  is a versioned or an external graph), graph data provider and semantic
+  layer;
 - **Details**: who created it, and under **See all details** when it was
   created, last updated, and when its data last changed (**Data Updated**);
 - **Usage**: how many people opened it in the last 30 days, how often, and

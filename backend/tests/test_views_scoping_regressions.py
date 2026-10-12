@@ -164,6 +164,54 @@ async def test_facets_scoped_to_principal(test_client: AsyncClient, db_session):
     assert any(t["value"] == "secret" for t in r2.json()["tags"])
 
 
+@pytest.mark.asyncio
+async def test_contributor_facet_never_names_unreadable_people(
+    test_client: AsyncClient, db_session,
+):
+    """The contributor facet can leak just as the creator facet once did: someone
+    whose only part — in any role — is in views the caller cannot read is absent."""
+    ids = await _seed(db_session)
+    # Alice's PRIVATE view was last edited by frank; carol's ws_b view was
+    # last edited by erin, and dave published the data behind it.
+    private = await db_session.get(ViewORM, ids["private_a"])
+    private.updated_by = "usr_frank"
+    foreign = await db_session.get(ViewORM, ids["workspace_b"])
+    foreign.updated_by = "usr_erin"
+    foreign.data_updated_by = "usr_dave"
+    await db_session.commit()
+
+    with _auth(user=BOB, claims=BOB_CLAIMS):
+        r = await test_client.get("/api/v1/views/facets")
+    assert r.status_code == 200
+    assert {c["userId"] for c in r.json()["contributors"]} == {ALICE.id}
+    # The platform-admin default identity reads every view, so names everyone.
+    r_admin = await test_client.get("/api/v1/views/facets")
+    assert {c["userId"] for c in r_admin.json()["contributors"]} == {
+        ALICE.id, "usr_frank", "usr_carol", "usr_erin", "usr_dave",
+    }
+
+
+@pytest.mark.asyncio
+async def test_facets_narrow_to_workspace_ids(test_client: AsyncClient, db_session):
+    await _seed(db_session)
+    r = await test_client.get("/api/v1/views/facets", params={"workspaceIds": WS_B})
+    body = r.json()
+    assert [c["userId"] for c in body["creators"]] == ["usr_carol"]
+    assert [c["userId"] for c in body["contributors"]] == ["usr_carol"]
+    assert body["viewTypes"] == [{"value": "graph", "count": 1}]
+    assert body["tags"] == []
+    both = (await test_client.get(
+        "/api/v1/views/facets", params={"workspaceIds": [WS_A, WS_B]},
+    )).json()
+    assert {c["userId"] for c in both["creators"]} == {ALICE.id, "usr_carol"}
+    assert any(t["value"] == "secret" for t in both["tags"])
+    # Narrowing never widens reach: bob cannot read ws_b, so asking shows nothing.
+    with _auth(user=BOB, claims=BOB_CLAIMS):
+        r_bob = await test_client.get("/api/v1/views/facets", params={"workspaceIds": WS_B})
+    assert r_bob.json()["creators"] == []
+    assert r_bob.json()["contributors"] == []
+
+
 # ── stats ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

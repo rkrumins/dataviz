@@ -15,6 +15,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   getViewFacets,
   type ViewFacetsResponse,
+  type ViewFilterParams,
 } from '@/services/viewApiService'
 
 const EMPTY_FACETS: ViewFacetsResponse = {
@@ -25,10 +26,16 @@ const EMPTY_FACETS: ViewFacetsResponse = {
 
 const FACETS_QUERY_KEY = ['views', 'facets'] as const
 
-export function useViewFacets() {
+/**
+ * ``params`` narrows the facets to a filter set — the workspace Views tab passes
+ * its workspace, so its People list names this workspace's people only. Without
+ * params it is the catalogue-wide set, on the original key so existing callers
+ * keep sharing one cache entry.
+ */
+export function useViewFacets(params?: ViewFilterParams) {
   const query = useQuery({
-    queryKey: FACETS_QUERY_KEY,
-    queryFn: getViewFacets,
+    queryKey: params ? [...FACETS_QUERY_KEY, JSON.stringify(params)] : FACETS_QUERY_KEY,
+    queryFn: () => getViewFacets(params),
     staleTime: 60_000,
   })
 

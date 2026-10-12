@@ -18,7 +18,9 @@ const ENVELOPE = { items: [], total: 0, hasMore: false, nextOffset: null, popula
 function baseFilters(overrides: Partial<ExplorerFilters> = {}): ExplorerFilters {
   return {
     search: '', visibility: null, workspaceIds: [], dataSourceId: null,
-    viewTypes: [], tags: [], creatorIds: [], sort: 'recently-modified',
+    viewTypes: [], tags: [], contributorIds: [], contributorRole: null,
+    sourceKind: null, createdAfter: null, createdBefore: null,
+    updatedAfter: null, updatedBefore: null, sort: 'recently-modified',
     favouritedOnly: false, category: null, currentUserId: 'u1',
     limit: 24, offset: 0, ...overrides,
   }
@@ -112,5 +114,62 @@ describe('useExplorerViews — shared-with-me is a server category', () => {
     const params = mockListViews.mock.calls.at(-1)![0] as ViewListParams
     expect(params.category).toBe('shared-with-me')
     expect(params.visibilityIn).toBeUndefined()
+  })
+})
+
+describe('useExplorerViews — source kind, dates and people reach the server', () => {
+  beforeEach(() => {
+    mockListViews.mockReset()
+    mockListViews.mockResolvedValue(ENVELOPE as never)
+  })
+
+  it('sends the versioned filter, the date bounds and the people with their role', async () => {
+    renderHook(({ filters }) => useExplorerViews(filters), {
+      wrapper: makeWrapper(),
+      initialProps: {
+        filters: baseFilters({
+          sourceKind: 'versioned',
+          updatedAfter: '2026-10-05T22:00:00.000Z',
+          updatedBefore: '2026-10-12T22:00:00.000Z',
+          contributorIds: ['u2', 'u3'],
+          contributorRole: 'edited',
+        }),
+      },
+    })
+    await waitFor(() => expect(mockListViews).toHaveBeenCalled())
+    const params = mockListViews.mock.calls.at(-1)![0] as ViewListParams
+    expect(params).toMatchObject({
+      sourceKind: 'versioned',
+      updatedAfter: '2026-10-05T22:00:00.000Z',
+      updatedBefore: '2026-10-12T22:00:00.000Z',
+      contributorIn: ['u2', 'u3'],
+      contributorRole: 'edited',
+    })
+    // The People filter is its own param; the old creator list stays unused.
+    expect(params.createdByIn).toBeUndefined()
+  })
+
+  it('keeps the LATER created bound when Recent and a created date are both on', async () => {
+    // Recent alone means "the past 7 days"; a created rule from 2 days ago is
+    // narrower and must win. Before, Recent's cutoff silently replaced it.
+    const twoDaysAgo = new Date(Date.now() - 2 * 86_400_000).toISOString()
+    renderHook(({ filters }) => useExplorerViews(filters), {
+      wrapper: makeWrapper(),
+      initialProps: { filters: baseFilters({ category: 'recently-added', createdAfter: twoDaysAgo }) },
+    })
+    await waitFor(() => expect(mockListViews).toHaveBeenCalled())
+    const params = mockListViews.mock.calls.at(-1)![0] as ViewListParams
+    expect(params.createdAfter).toBe(twoDaysAgo)
+  })
+
+  it('sends no role when nobody is picked', async () => {
+    renderHook(({ filters }) => useExplorerViews(filters), {
+      wrapper: makeWrapper(),
+      initialProps: { filters: baseFilters({ contributorRole: 'published' }) },
+    })
+    await waitFor(() => expect(mockListViews).toHaveBeenCalled())
+    const params = mockListViews.mock.calls.at(-1)![0] as ViewListParams
+    expect(params.contributorIn).toBeUndefined()
+    expect(params.contributorRole).toBeUndefined()
   })
 })
