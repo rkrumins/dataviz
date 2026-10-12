@@ -8,7 +8,10 @@ job — a zombie and its successor — never both land a write: the zombie's win
 finish is a no-op, while the successor runs at the next epoch; a job whose worker keeps dying fails
 as poison; an import staged before leases fails rather than resuming; the job reaper fails what no
 worker will run; a real import, then an export of its draft, run to completion through the transfer
-lane; and a worker stopped mid-job hands the job back for the next one to finish.
+lane; and a worker stopped mid-job hands the job back for the next one to finish. An export is
+cancelled by its creator or a manager, never by anyone else: cancelled queued, it is never claimed;
+cancelled running, its worker's next write is refused and its lease is lost at the next renewal;
+and through the worker, it stops mid-file, its partial file gone, the job left cancelled.
 """
 import asyncio
 import json
@@ -19,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import insert, select, update
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import config, db, job_lease, models
@@ -33,7 +38,7 @@ from backend.app.services.versioning.import_export.runner import (
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.job_lease import INTERRUPTED, Superseded
 from backend.app.services.versioning.models import ImportRowORM, JobORM
-from backend.app.services.versioning.service import GraphVersioningService
+from backend.app.services.versioning.service import AccessDenied, GraphVersioningService, Viewer
 from backend.app.services.versioning.worker import ProjectionWorker
 
 
@@ -203,6 +208,47 @@ async def _the_inspect_slot() -> None:
     await _tidy(graph_id)
 
 
+async def _cancels() -> None:
+    ie = ImportExportService(versioning=GraphVersioningService(), store=object())
+    graph_id = "g_" + os.urandom(4).hex()
+    export_job = _export_jobs(ie, graph_id)
+    runner = TransferRunner(lambda: ie)
+    creator = Viewer(actor="u")
+
+    running = await export_job()
+    await ie.start_export(running)
+    lease = await runner.claim_one()
+    assert lease.job_id == running
+    queued = await export_job()
+    await ie.start_export(queued)
+
+    with pytest.raises(AccessDenied):
+        await ie.cancel_export(running, viewer=Viewer(actor="someone_else"))
+    assert (await ie.get_job(running))["status"] == "running"
+
+    assert await ie.cancel_export(queued, viewer=creator) is True
+    assert await runner.claim_one() is None, "a cancelled export is never claimed"
+    assert await ie.cancel_export(running, viewer=Viewer(actor="mgr", can_manage=True)) is True
+
+    with pytest.raises(Superseded):                     # the worker's next write is refused
+        async with db.graphver_session() as s:
+            await lease.checkpoint(s, summary={"nodes": 1})
+    engine = create_async_engine(config.graphver_db_url(), poolclass=NullPool)
+    try:                                                # and its lease is lost at the next renewal
+        keeper = job_lease.LeaseKeeper(engine_factory=lambda: engine)
+        keeper.register(lease)
+        assert await keeper.renew_once() == {running} and lease.lost.is_set()
+    finally:
+        await engine.dispose()
+    assert await lease.finish("completed") is False
+
+    job = await ie.get_job(running)
+    assert (job["status"], job["summary"]["cancelledBy"]) == ("cancelled", "mgr") and job["completedAt"]
+    assert await ie.cancel_export(running, viewer=creator) is False, "it already ended"
+    assert (await ie.get_job(running))["summary"]["cancelledBy"] == "mgr"
+    await _tidy(graph_id)
+
+
 async def _the_reaper() -> None:
     ie = ImportExportService(versioning=GraphVersioningService(), store=object())
     graph_id = "g_" + os.urandom(4).hex()
@@ -288,6 +334,38 @@ async def _through_the_worker() -> None:
             assert 0 < seen[-1]["bytes"] <= job["summary"]["bytes"], (seen, job["summary"])
             assert job["summary"] == {"nodes": 2, "edges": 1, "bytes": job["summary"]["bytes"]}
 
+            # Cancelled as it writes its file, an export stops there: its file is gone, and it
+            # stays cancelled.
+            stopped = []
+
+            async def slower_put(key, chunks):
+                async def slowly():
+                    async for chunk in chunks:
+                        await asyncio.sleep(0.5)
+                        yield chunk
+                try:
+                    return await put(key, slowly())
+                except BaseException as exc:
+                    stopped.append(exc)
+                    raise
+
+            store.put_stream = slower_put
+            cancelled = await ie.create_export_job(workspace_id="ws1", data_source_id=G["graph_id"],
+                                                   graph_id=gid, actor="u", export_format="csv",
+                                                   branch_id=created["branch_id"])
+            await ie.start_export(cancelled["job_id"])
+            while (await ie.get_job(cancelled["job_id"]))["status"] != "running":
+                await asyncio.sleep(0.02)
+            assert await ie.cancel_export(cancelled["job_id"], viewer=Viewer(actor="u")) is True
+            deadline = asyncio.get_running_loop().time() + 30
+            while not stopped:
+                assert asyncio.get_running_loop().time() < deadline, "the export never stopped"
+                await asyncio.sleep(0.02)
+            assert isinstance(stopped[0], Superseded), stopped
+            assert not (await store.stat(cancelled["result_uri"])).exists
+            job = await ie.get_job(cancelled["job_id"])
+            assert (job["status"], job["summary"]["cancelledBy"]) == ("cancelled", "u"), job
+
             # Stopped mid-job, a worker hands the job back (it doesn't fail it), and the next
             # worker finishes it at the next attempt.
             store.put_stream = slow_put
@@ -322,6 +400,7 @@ async def _run() -> None:
     await _a_zombie_and_its_successor()
     await _jobs_that_must_not_run_again()
     await _the_inspect_slot()
+    await _cancels()
     await _the_reaper()
     await _clear_queue()
     await _through_the_worker()

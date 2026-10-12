@@ -28,6 +28,7 @@ import { useAppliedTheme } from '@/hooks/useAppliedTheme'
 import { useApplyLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
 import { ViewEditorContext, useViewEditorModal, type ViewEditorOpenOptions } from './viewEditorContext'
 import { NotificationStack } from '@/components/ui/notifications'
+import { ExportTray } from '@/features/import-export/ExportTray'
 import { AccessDeniedModal } from '@/components/auth/AccessDeniedModal'
 import { useFeature } from '@/store/features'
 import { TourOverlay } from '@/features/tour/TourOverlay'
@@ -202,6 +203,8 @@ export function AppLayout() {
         />
 
         <HelpPanel />
+        {/* The exports the server prepares, followed and downloaded wherever the person goes. */}
+        <ExportTray />
         <NotificationStack />
         <AccessDeniedModal />
 

@@ -3012,6 +3012,28 @@ async def download_export(
         range_header=request.headers.get("range"), if_range=request.headers.get("if-range"))
 
 
+@router.post("/graphs/{graph_id}/exports/{job_id}/cancel")
+async def cancel_export(
+    ws_id: str, graph_id: str, job_id: str,
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Stop an export that hasn't ended: one started by mistake, or no longer wanted. Its creator
+    stops it, or a manager (403 for anyone else). A queued one never starts; a running one stops
+    within seconds, and the part of its file written so far is removed. One that already ended is
+    left as it is. Answers with the job, as ``GET`` does, so the caller sees where it ended."""
+    await _readable_export(ws_id, graph_id, job_id, meta, ie, viewer=viewer, user=user, claims=claims,
+                           session=session, svc=svc)
+    with _domain_errors():
+        await ie.cancel_export(job_id, viewer=viewer)
+    return await ie.get_job(job_id)
+
+
 # --------------------------------------------------------------------------- #
 # Forking + pull requests                                                      #
 # --------------------------------------------------------------------------- #

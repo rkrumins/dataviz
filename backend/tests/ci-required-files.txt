@@ -71,6 +71,7 @@ tests/test_edge_integrity_index.py
 tests/test_edge_update_patch_semantics.py
 tests/test_edges_beneath.py
 tests/test_entity_audit_unit.py
+tests/test_export_cancel.py
 tests/test_export_downloads.py
 tests/test_export_native_lines.py
 tests/test_export_view_scope.py
