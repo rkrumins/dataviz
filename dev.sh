@@ -102,6 +102,17 @@ reclaim_docker_disk() {
         pct=$(docker run --rm alpine df -P / 2>/dev/null \
                 | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
         echo "[dev] reclaimed — Docker disk now at ${pct}%" >&2
+        # Volumes are never pruned here (with the stack down, every dev data
+        # volume counts as unused), so name what holds the space rather than
+        # start silently on a disk where the next big sort or write fails.
+        if [ "${pct:-0}" -ge 80 ]; then
+            echo "[dev] WARNING: still ${pct}% full — volumes hold the space; a full disk fails" >&2
+            echo "[dev]   big queries (\"No space left on device\") and can corrupt stateful services." >&2
+            echo "[dev]   Largest volumes (remove unused ones with 'docker volume rm <name>'):" >&2
+            docker system df -v 2>/dev/null \
+                | awk '/^VOLUME NAME/ {v=1; next} v && NF == 0 {exit} v {print "[dev]     " $NF "\t" $1}' \
+                | sort -k2 -h -r | head -5 >&2
+        fi
     fi
 }
 
