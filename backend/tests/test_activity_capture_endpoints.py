@@ -254,6 +254,58 @@ async def test_a_version_control_step_is_recorded_once(
 
 
 @pytest.mark.asyncio
+async def test_collapsing_duplicates_is_recorded_once_with_what_it_removes(
+    test_client, db_session, estate, no_side_stores, versioning_on, monkeypatch,
+):
+    """It removes copies from the source graph itself: a person's decision
+    about their data, recorded with how much it removes — and a repeated
+    decision, which changes nothing, records nothing more."""
+    from backend.app.services.versioning import bootstrap_worker
+
+    decisions = iter([{"jobId": "vjob_1", "already": False}, {"jobId": "vjob_1", "already": True}])
+
+    async def _decide(**k):
+        return next(decisions)
+
+    async def _status(**k):
+        return {"jobId": "vjob_1", "status": "running",
+                "duplicates": {"identifiers": 3, "extraCopies": 5, "fingerprint": "fp_1"}}
+
+    monkeypatch.setattr(bootstrap_worker, "decide_duplicates", _decide)
+    monkeypatch.setattr(bootstrap_worker, "bootstrap_status", _status)
+    for _ in range(2):
+        resp = await test_client.post(
+            f"{GRAPH}/bootstrap/decision?dataSourceId=ds_1", headers=HEADERS,
+            json={"action": "collapse", "fingerprint": "fp_1"},
+        )
+        assert resp.status_code in (200, 202), resp.text
+
+    payload = await _only(db_session, "workspace.versioning.duplicates_collapsed")
+    _filed_under(payload, ws="ws_1", ds="ds_1", target=("data_source", "ds_1"), label="Ledger")
+    assert payload["details"] == {"jobId": "vjob_1", "identifiers": 3, "extraCopies": 5}
+
+
+@pytest.mark.asyncio
+async def test_giving_up_on_a_package_source_names_it_before_it_goes(
+    test_client, db_session, estate, no_side_stores, versioning_on, monkeypatch,
+):
+    """A data source made from a view package is removed when its copy is
+    given up. The record is written first, while there is a source to name."""
+    from backend.app.services.versioning import bootstrap_worker
+
+    async def _abandon(**k):
+        return {"status": "cancelled", "origin": "package"}
+
+    monkeypatch.setattr(bootstrap_worker, "abandon_bootstrap", _abandon)
+    resp = await test_client.post(f"{GRAPH}/bootstrap/abandon?dataSourceId=ds_1", headers=HEADERS)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["dataSourceRemoved"] is True
+
+    payload = await _only(db_session, "workspace.versioning.abandoned")
+    _filed_under(payload, ws="ws_1", ds="ds_1", target=("data_source", "ds_1"), label="Ledger")
+
+
+@pytest.mark.asyncio
 async def test_a_resync_is_recorded_once(test_client, db_session, estate, versioning_on, monkeypatch):
     from backend.app.api.v1.endpoints import graph
     from backend.app.main import app

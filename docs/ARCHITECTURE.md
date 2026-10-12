@@ -56,7 +56,7 @@ flowchart LR
 
 ### Every process and store
 
-As deployed by `docker-compose.yml`. The Kubernetes manifests in `deploy/k8s/base/` run the same processes as Deployments and StatefulSets; how each Kubernetes path runs the schema job is in [Kubernetes](/docs/kubernetes).
+As deployed by `docker-compose.yml`. The Kubernetes manifests in `deploy/k8s/base/` run the same processes as Deployments and StatefulSets, with the versioning lanes as three Deployments (`versioning-worker`, `versioning-transfer`, `versioning-bootstrap`), as the Helm chart does; how each Kubernetes path runs the schema job is in [Kubernetes](/docs/kubernetes).
 
 | Process (Compose service) | Started with | `SYNODIC_ROLE` | Port | What it does | Scales |
 |---|---|---|---|---|---|
@@ -65,7 +65,8 @@ As deployed by `docker-compose.yml`. The Kubernetes manifests in `deploy/k8s/bas
 | `upgrade` | `python -m backend.scripts.upgrade upgrade` (`backend/Dockerfile.upgrade`) | — | — | Builds and migrates the PostgreSQL schema, then exits. In Compose every backend service waits for it; the Helm chart runs it as a pre-install/pre-upgrade hook | Once per deploy |
 | `aggregation-controlplane` | `python -m backend.app.services.aggregation.controlplane` | `controlplane` | 8091 | The aggregation job and settings API, the scheduler, crash recovery, stuck-job reconciliation, drift probes, and the state sync that mirrors job status into the management database | One replica in the base; production runs two, because each loop is single-flight |
 | `aggregation-worker` | `python -m backend.app.services.aggregation` | `worker` | 8090 (health) | Takes aggregation jobs off a Redis stream and writes `:AGGREGATED` rollup edges into the graph | Horizontally |
-| `versioning-worker` | `python -m backend.app.services.versioning` | `worker` | — | Projects each version-controlled graph's `main` into FalkorDB, and runs the "enable version control", import and export jobs the API queues | Horizontally |
+| `versioning-worker` | `python -m backend.app.services.versioning` (`GRAPHVER_WORKER_LANES=projection`) | `worker` | — | Projects each version-controlled graph's `main` into FalkorDB; sweeps idle drafts and old import/export files | Horizontally |
+| `versioning-jobs` | The same command (`GRAPHVER_WORKER_LANES=transfer,bootstrap`) | `worker` | — | Runs the import, export and publish jobs and the "enable version control" and purge jobs the API queues; the API never runs them | Horizontally; replicas share the queue |
 | `stats-service` | `python -m backend.insights_service` (`backend/Dockerfile.insights`) | `stats` | 8092 (health) | Polls every data source for counts and schema so the API serves cached stats; also runs asset discovery, purges and the profiling sweeps | Horizontally; a per-source claim in Redis keeps at most one pending poll per source |
 | `postgres` | PostgreSQL 16 | — | 5432 | The management database, the `aggregation` schema and the `graphver` version store (which `GRAPHVER_DB_URL` can move to its own instance) | — |
 | `redis` | Redis 7 | — | 6379 (6380 on the Compose host) | The `STREAMS` role (job and event streams, locks, session store) and the `CACHE` role (response and provider caches) | Compose shares one instance between the roles (DB 0 and DB 1); production uses two |

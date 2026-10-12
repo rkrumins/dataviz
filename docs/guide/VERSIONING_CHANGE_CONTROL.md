@@ -63,8 +63,19 @@ even in a draft.
    now under version control — and we verified the copy against the source
    before switching it on.* Choose **Done**.
 
-Your existing data is never changed by turning version control on. If the copy
-stops part-way, the strip explains why and offers **Resume** or to start over.
+If some identifiers (URNs) belong to more than one item, the copy pauses before
+copying anything and the strip says **Some identifiers are used more than once**.
+It shows how many, which copy of each it would keep (the one synced most
+recently), a **Download full list (CSV)** button, and a warning when other data
+sources read the same graph. Someone who can manage the data sources then
+chooses **Collapse *N* duplicates and continue**, **Re-check source** after
+fixing them at the source, or **Give up**.
+
+Turning version control on doesn't change your existing data, unless you
+collapse duplicates: that removes the extra copies from the graph itself, for
+every data source that reads it, and **Give up** doesn't bring them back. If the
+copy stops part-way, the strip explains why and offers **Resume** or to start
+over.
 
 ![The canvas strip after turning on version control: 'Everything checked out', the list of passed checks, and the View history and Done buttons](/docs-assets/guide/versioning-change-control-enable.png)
 

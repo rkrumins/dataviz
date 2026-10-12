@@ -216,13 +216,11 @@ services:
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
       METRICS_ENABLED: ${METRICS_ENABLED:-false}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
-  versioning-worker:
-    environment:
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-}
 ```
 
-The two workers need `CREDENTIAL_ENCRYPTION_KEY` to read the stored credentials of a
-provider that has a password; the Kubernetes manifests already give it to them.
+The aggregation worker needs `CREDENTIAL_ENCRYPTION_KEY` to read the stored credentials of a
+provider that has a password; `versioning-worker` and `versioning-jobs` already get it from
+`docker-compose.yml`, and the Kubernetes manifests give it to all of them.
 
 - [ ] **Set `ENV=production`.** *Protects:* turns warnings into refusals — a production
   process won't start, or won't take the unsafe action, in the situations listed under

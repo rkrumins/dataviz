@@ -212,7 +212,8 @@ drop the file anywhere on the Explorer page.
    - or **overwrite** another View you can edit.
 2. **Target.** Pick the data source it goes into. {brand} suggests the one that
    holds the same graph, measured on a sample of the View's own entities
-   ("49 of 50 found here").
+   ("49 of 50 found here"). A View that brings its data can instead go
+   **Into a new data source** — see below.
 3. **Match.** Every entity the View places is looked up there, and you get a
    match percentage. Anything not found is **kept, marked "not found"** — it
    comes back to life if the entity appears later — or you can drop it, or remap
@@ -256,10 +257,23 @@ more step:
   brought count as found, and the View goes into the **same draft**. Publish the
   draft, or send it for review, and the View and its data go live together.
 
-Only a data source under version control can take the data. To bring in just the
-View — for example where the data is already there — choose **View only** on the
-File step. A package of several Views brings its data with one of them; import
-the others from the same file with **View only**.
+Only a data source under version control can take the data: one here, or a new
+one the package makes. On **Target**, choose **Into a new data source** and give
+it a label, a connection and a graph name (checked as you type). Then pick its
+semantic layer: {brand} picks the package's own or the best match, or choose
+**Create from this package** or **No semantic layer**. **Data** then copies the
+package into it as its first version, with no draft to publish, and every View
+in the package is imported into it. You need permission to manage the
+workspace's data sources. If you close the wizard meanwhile, the copy carries
+on, and the data source's panel offers **Finish importing views**. Going back
+to **Target**, or choosing the same file again, even in another browser, shows
+the data source the package made: **Next** follows its copy, and **Make another
+copy** makes a further one of your own, independent of it.
+
+To bring in just the View — for example where the data is already there —
+choose **View only** on the File step. Into a data source here, a package of
+several Views brings its data with one of them; import the others from the same
+file with **View only**.
 
 > **Note:** Moving Views between environments is a preview. If **Export** or
 > **Import view** is missing, your administrator hasn't turned it on

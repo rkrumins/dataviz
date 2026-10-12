@@ -113,6 +113,19 @@ config:
     warmIntervalSeconds: "300"           # floor of 30 enforced in code
     productEventRetentionDays: "400"     # floor of 365; product_events grows with usage
 
+  # Import/export artifacts: uploads, export files, view packages. viz-service
+  # stores an upload and a versioning lane reads it back to run the job, so
+  # this block goes into the ONE ConfigMap both read (as MANAGEMENT_DB_URL
+  # sits in the one Secret both read) and they cannot disagree on where an
+  # artifact lives. `database` (the default) keeps them in the management
+  # database, which every pod shares. `local` also needs IMPORT_STORE_ROOT on
+  # a ReadWriteMany volume mounted by viz-service AND every versioning lane;
+  # this chart mounts none, so add it by post-rendering
+  # (docs/versioning/08-import-export.md §9).
+  objectStore:
+    backend: database
+    ttlHours: "24"                       # the projection lane's sweep deletes older artifacts
+
 # ── Secrets ───────────────────────────────────────────────────────────
 # create=true renders a Secret from the values below. For production prefer
 # create=false + an existingSecret you created out-of-band (kubectl/SealedSecret).
@@ -315,6 +328,48 @@ services:
     resources:
       requests: { cpu: 100m, memory: 256Mi }
       limits: { cpu: 500m, memory: 512Mi }
+  # Versioning worker lanes (templates/versioning-worker.yaml): one Deployment
+  # per lane of `python -m backend.app.services.versioning`. viz-service only
+  # QUEUES import, export, publish and "Enable version control" jobs, so
+  # without these Deployments nothing runs them.
+  versioning:
+    skipSchemaCheck: false
+    # A stopping lane gives running jobs GRAPHVER_DRAIN_SECS (40) to hand
+    # themselves back at a window boundary, then cancels and releases the
+    # rest; all of it has to fit before the SIGKILL.
+    terminationGracePeriodSeconds: 60
+    # emptyDir behind TMPDIR for the jobs' spool files (an upload being
+    # inspected, an export being packaged). A pod that outgrows it is evicted
+    # and its jobs are taken over by another pod.
+    spoolSize: 12Gi
+    projection:
+      # Projection is serialized per graph (Postgres advisory lock + Redis
+      # consumer group), so more replicas only share the graphs lagging at once.
+      replicas: 1
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits: { cpu: "2", memory: 4Gi }
+    transfer:
+      # Each pod runs GRAPHVER_TRANSFER_SLOTS (2) jobs plus one package-inspect
+      # slot. CPU-bound, so CPU is the scaling signal. A pod scaled away
+      # mid-job hands its jobs back to another pod, which redoes an import's
+      # last window or a whole export, so scale-down waits out 15 quiet minutes.
+      autoscaling:
+        minReplicas: 2
+        maxReplicas: 8
+        targetCPUUtilizationPercentage: 70
+        scaleDownStabilizationWindowSeconds: 900
+      resources:
+        requests: { cpu: "1", memory: 1Gi }
+        limits: { cpu: "2", memory: 4Gi }
+    bootstrap:
+      # Each pod runs GRAPHVER_BOOTSTRAP_SLOTS (2) jobs, and the fleet runs at
+      # most GRAPHVER_BOOTSTRAP_PER_PROVIDER (2) at once against one FalkorDB
+      # provider, so more replicas only help with many providers.
+      replicas: 2
+      resources:
+        requests: { cpu: 500m, memory: 1Gi }
+        limits: { cpu: "2", memory: 4Gi }
   frontend:
     replicas: 2
     # frontend has no DB access — schema check is N/A

@@ -25,7 +25,7 @@ The management database is accessed through the SQLAlchemy 2.0 async ORM, and it
 
 ## Where every table belongs
 
-The ORM maps 87 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
+The ORM maps 88 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
 
 | Area | Schema | Tables | Examples |
 |---|---|---|---|
@@ -42,7 +42,7 @@ The ORM maps 87 tables across four PostgreSQL schemas. This page details the cor
 | Events and audit | `public` | 4 | `outbox_events`, `auth_audit_log`, `product_events`, `notifications` |
 | Legacy | `public` | 1 | `graph_connections` — do not write to it |
 | Aggregation jobs | `aggregation` | 6 | `aggregation_jobs`, `data_source_state`, `reconcile_runs`, `job_event_log` |
-| Version store | `graphver` (`GRAPHVER_SCHEMA`) | 13 | `graphs`, `branches`, `commits`, `node_versions`, `edge_versions`, `entity_heads`, `merge_requests` |
+| Version store | `graphver` (`GRAPHVER_SCHEMA`) | 14 | `graphs`, `branches`, `commits`, `node_versions`, `edge_versions`, `entity_heads`, `merge_requests` |
 | Property side index | `propidx` | 4 | `node_props`, `prop_keys`, `graph_state`, `hot_indexes` — created, not yet used ([Property storage](/docs/property-storage)) |
 
 The version store's design is in [Versioning: Data Model](/docs/versioning-data-model).

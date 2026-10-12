@@ -18,6 +18,7 @@ export type ReasonContext =
     | 'member-add'
     | 'member-remove'
     | 'versioning'
+    | 'duplicates'
 
 export const REASON_PRESETS: Record<ReasonContext, readonly string[]> = {
     aggregation: [
@@ -61,6 +62,7 @@ export const REASON_PRESETS: Record<ReasonContext, readonly string[]> = {
         'Source changed during the copy',
         'Turned on by mistake',
     ],
+    duplicates: ['Source loaded twice', 'Known duplicates upstream', 'Left over from a migration'],
 }
 
 /** Who can read a reason once it is saved — said under the field, because a

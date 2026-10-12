@@ -33,12 +33,12 @@ scoped to that workspace's operations, access and data changes, for its admins.
 control-plane proxy. Job History shows *Manual · by {name} — "why"* on each run and filters by who
 started it. Recorded once each, as the person, with the request it came in: re-trigger, resume,
 cancel, delete, purge, skip, limits, schedules and fleet settings; Freshness rebuilds, retries, bulk
-and provider/fleet refreshes, reconcile runs and automation holds; data sources added, changed,
-removed, restored, made primary or switched projection mode; providers registered, changed or
-deleted; version control enabled, retried, abandoned or re-synced; discovery runs and asset
-statistics refreshes; feature flags, the profiling policy and the node-identity default; and group
-membership — by hand, or by the identity provider's sync, which now records the memberships it
-actually changed.
+and provider/fleet refreshes, reconcile runs and automation holds; data sources added (by hand
+or from a view package), changed, removed, restored, made primary or switched projection mode;
+providers registered, changed or deleted; version control enabled, retried, abandoned or
+re-synced, and duplicate copies collapsed; discovery runs and asset statistics refreshes; feature
+flags, the profiling policy and the node-identity default; and group membership — by hand, or by
+the identity provider's sync, which now records the memberships it actually changed.
 
 **Asked, never required: why.** Wherever work is started, stopped or destroyed, the dialog asks
 for an optional reason, with one-click suggestions for that kind of change and the person's own
@@ -142,6 +142,111 @@ activity explorer for the last 7, 30 and 90 days, not only the unfiltered view.
   and cache refresh.
 - A stated reason is free text and may contain personal data. Auditors can read it, and so can the
   workspace's admins for a workspace change; the field says so.
+
+---
+
+## [Unreleased] — View packages at 100k+ entities, new data sources from a package, and duplicate-safe version control
+
+### Added
+
+**Import a view package into a new data source.** The view wizard's import can now target *a new
+data source* instead of an existing one. You pick the FalkorDB provider, a label and a graph name,
+and the name is checked as you type. The semantic layer is matched for you: the package's own one
+when it exists in this environment (a changed one is shown as drift), otherwise the best match by
+entity and relationship types, the same scoring the Add data source wizard uses. You can also pick
+another, *Create from this package* or *No semantic layer*. The package's data is written as the new
+source's first version, keeping its entity ids, with no draft and nothing to publish. The
+platform's rollup connections, when the package carries them, are rebuilt rather than copied, and
+the check report says how many. Every view in the package is imported afterwards. Opening the same
+package again follows the copy it made; *Make another copy* makes a further, independent one.
+Needs `viewImportEnabled`, `versioningEnabled` and permission to manage data sources
+(`POST /views/transfer/packages/{uploadId}/new-source`).
+
+**Duplicate identifiers no longer fail "Enable version control".** Before copying anything, the job
+now lists every urn that more than one node in the graph carries, and it pauses until a manager
+decides. The page shows the counts (same type and across types), a sample and a full CSV, and warns
+when other data sources read the same graph. *Collapse N duplicates and continue* keeps one copy
+per urn (the latest `lastSyncedAt`, then the lowest internal id), moves the other copies' edges to
+it and deletes those copies from the FalkorDB graph, then rebuilds the rollups. Nothing is deleted
+until the decision, and *Give up* after it does not bring the copies back
+(`GET /graph/bootstrap/duplicates[?format=csv]`, `POST /graph/bootstrap/decision`).
+
+**An optional S3-compatible store for import and export files.** `OBJECT_STORE_BACKEND=s3` keeps
+them in a bucket on Amazon S3, MinIO or Google Cloud Storage (through its HMAC interoperability
+keys), with optional presigned URLs so browsers upload and download straight from the bucket.
+It is off by default, and boto3 is only installed from `backend/requirements-s3.txt`.
+
+**`python -m backend.scripts.bench_versioning`** generates a package or a FalkorDB graph of any
+size and times export, inspect, import, publish, seeding a new source and enabling version control.
+
+### Changed
+
+**Large view packages import, and fast.** Importing 100k nodes and 100k edges took 7–12 minutes on
+a worker, and inside a web server it was killed at 120 s. Two integrity checks grew with the square
+of the graph; they are now linear and give the same answers. Measured at 100k + 100k: import into an
+empty source 85 s, publish of the 200k changes about 28 s (it was 23 minutes at a tenth of that),
+package export 15 s, a new source from the package 49 s, and enable version control with 1,000
+duplicates pauses within 3 s and finishes 42 s after the decision.
+
+**Exporting millions of entities takes minutes, not hours.** An export read the version store a
+page at a time, and Postgres planned each page on its own. Without statistics for the partitioned
+table it expected a few hundred entities, so for every page of 2,000 it sorted every version row
+left: about 500 entities a second on a 2M-node graph, around seven hours for 7M items. Each part of
+the graph is now read by one query, streamed, and the next page is read while the last is written.
+On 2M nodes and 2M edges the whole package takes about three minutes, at full speed from the start.
+An export's plan counts and a replace import's read of the graph stream the same way.
+
+**Imports look entities up with one array, not thousands of parameters.** Each import window looked
+up the entities its rows name with IN lists of up to 20,000 bind parameters, compiled one at a time
+on the worker's event loop and planned again by Postgres for every length. They now go as one array:
+a 100k + 100k import takes 62 s instead of 80 s, and 1M + 1M takes 592 s instead of 772 s.
+
+**Version-control jobs run only on the versioning worker, and resume.** Imports, exports, publishes,
+package checks, enabling version control and purges never run in a web server any more. The worker
+runs them on three lanes, `projection`, `transfer` and `bootstrap` (`GRAPHVER_WORKER_LANES`), which
+Helm, the Kubernetes base and compose now deploy. A job holds a lease: if its worker dies it is
+taken over within about two minutes and resumes from its last committed window, and a worker that
+was taken over cannot write any more. A job's status request no longer changes it. A failed job
+says whether to resume it or start again.
+
+**View package files move without copies.** A package is uploaded in resumable 16 MiB parts and
+checked by a job (`POST /views/transfer/packages/uploads`, `PUT …/parts/{n}`, `POST …/complete`).
+Its data is imported straight from the upload, which is kept while a job still needs it. Export is a
+job that writes the zip once (`POST /views/transfer/packages` now returns 202 with the job).
+`POST /views/transfer/packages/inspect` also returns 202. `/packages/{id}/data` answers 409
+`not_inspected` before the check finishes and 410 `upload_expired` once the upload is gone.
+
+**Drafts with 100k+ new entities open without loading them all.** The first read of a large draft
+loaded every created entity's payload. It now reads them page by page.
+
+### Upgrading
+
+- Three graphver migrations (`20261008_1000` to `20261008_1200`). They also run from
+  `create_schema_and_partitions` for a separate `GRAPHVER_DB_URL`.
+- **Cut over in one release.** Apply the migrations, scale the old `versioning-worker` to 0 (on Helm,
+  roll the web tier first, so nothing still runs jobs in-process), then start the three lanes. Jobs
+  the old worker left running are taken over once they go silent; an import that had already staged
+  rows fails with "Start it again". A deployment without the transfer lane queues imports, exports
+  and publishes that never start; system status shows the backlog per lane.
+- `GRAPHVER_TRANSFER_INPROCESS` is no longer read (a WARNING says so) and `JOB_STALE_AFTER_SECS` is
+  gone. `IMPORT_COMMIT_WINDOW` now defaults to 10000. New, all optional: `GRAPHVER_BOOTSTRAP_SLOTS`,
+  `GRAPHVER_BOOTSTRAP_PER_PROVIDER`, `GRAPHVER_JOBS_PER_WORKSPACE`, `GRAPHVER_DRAIN_SECS`,
+  `GRAPHVER_JOB_WEDGE_SECS`, `GRAPHVER_PACKAGE_SEED_WINDOW`, `GRAPHVER_PACKAGE_PROJECT_WINDOW`,
+  `GRAPHVER_BOOTSTRAP_BACKFILL_MAX_WRITES`, `GRAPHVER_BOOTSTRAP_BACKFILL_PAUSE_MS` and the
+  temporary `GRAPHVER_NARROW_SQUASH` kill switch. See `docs/versioning/08-import-export.md`.
+- With `OBJECT_STORE_S3_PRESIGN=1`, add the bucket's origin to the site's `connect-src`
+  (`CSP_CONNECT_SRC` or `frontend.cspConnectSrc`) and a CORS rule to the bucket.
+
+### Known limitations
+
+- Publishing holds the whole draft in worker memory: about 420 MB for 200k changes and 3.2 GB for
+  2M, which took 3.6 minutes under the graph's lock, with one 8.5 s stall of the worker's event
+  loop. A draft of several million changes needs a worker sized for it.
+- A worker's event loop can stall for 120–170 ms (p99) during the heaviest windows. Leases are kept
+  alive by a separate thread, so jobs are not lost, and the web servers run no jobs.
+- Exports still write package format 1. This release reads both 1 and 2; the next one writes 2.
+- Giving up a new data source while its data is being written into FalkorDB can leave the new graph
+  behind.
 
 ---
 

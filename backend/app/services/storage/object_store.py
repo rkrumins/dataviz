@@ -34,9 +34,15 @@ from backend.app.db.models import ObjectStoreChunkORM, ObjectStoreObjectORM
 
 # 1 MiB read chunk — bounded memory for arbitrarily large artifacts.
 _READ_CHUNK = 1 << 20
-# Chunks the database store writes per transaction: a multi-GB put commits every few MiB rather
-# than holding one transaction open for the whole object.
+# Chunks the database store moves per transaction: a multi-GB put commits every few MiB rather
+# than holding one transaction open for the whole object, and a read takes a few MiB per session
+# rather than a session (and a round trip) per MiB.
 _CHUNKS_PER_TXN = 8
+
+
+def _under(prefixes) -> tuple:
+    """``prefixes`` as what a key under one starts with (``str.startswith`` takes the tuple)."""
+    return tuple(p.rstrip("/") + "/" for p in prefixes)
 
 
 def storage_key(*parts: str) -> str:
@@ -75,7 +81,7 @@ class ObjectStore(Protocol):
     async def delete(self, key: str) -> None: ...
     async def delete_prefix(self, prefix: str) -> None: ...
     def upload_target(self, key: str) -> UploadTarget: ...
-    async def sweep(self, *, older_than_hours: float) -> int: ...
+    async def sweep(self, *, older_than_hours: float, keep_prefixes=()) -> int: ...
 
 
 class LocalFsObjectStore:
@@ -151,10 +157,12 @@ class LocalFsObjectStore:
         self._resolve(key)  # validate the key up front
         return UploadTarget(key=key, mode="backend", url=None)
 
-    async def prune_older_than(self, prefix: str, seconds: float) -> int:
-        """Delete each entry directly under ``prefix`` last changed more than ``seconds`` ago.
-        Returns how many went. Optional: callers check for it (see view_transfer.package)."""
+    async def prune_older_than(self, prefix: str, seconds: float, *, keep_prefixes=()) -> int:
+        """Delete each entry directly under ``prefix`` last changed more than ``seconds`` ago,
+        but none of ``keep_prefixes`` (inputs a job may still read). Returns how many went.
+        Optional: callers check for it (see view_transfer.package)."""
         root = self._resolve(prefix)
+        keep = {p.rstrip("/") for p in keep_prefixes}
 
         def _prune() -> int:
             if not root.is_dir():
@@ -162,6 +170,8 @@ class LocalFsObjectStore:
             cutoff = time.time() - seconds
             gone = 0
             for entry in root.iterdir():
+                if f"{prefix.rstrip('/')}/{entry.name}" in keep:
+                    continue
                 if entry.stat().st_mtime < cutoff:
                     if entry.is_dir():
                         shutil.rmtree(entry, True)
@@ -172,14 +182,19 @@ class LocalFsObjectStore:
 
         return await asyncio.to_thread(_prune)
 
-    async def sweep(self, *, older_than_hours: float) -> int:
-        """Delete every file under the root last written more than ``older_than_hours`` ago.
-        Returns how many went."""
+    async def sweep(self, *, older_than_hours: float, keep_prefixes=()) -> int:
+        """Delete every file under the root last written more than ``older_than_hours`` ago, but
+        none under ``keep_prefixes`` (inputs a job may still read, however old). Returns how many
+        went."""
+        keep = _under(keep_prefixes)
+
         def _sweep() -> int:
             cutoff = time.time() - older_than_hours * 3600
             gone = 0
             for path in self._root.rglob("*"):
                 if path.is_file() and path.stat().st_mtime < cutoff:
+                    if path.relative_to(self._root).as_posix().startswith(keep):
+                        continue
                     path.unlink(True)
                     gone += 1
             return gone
@@ -277,18 +292,22 @@ class DatabaseObjectStore:
             raise FileNotFoundError(key)
         blob_id, count = row
         offset = start % _READ_CHUNK
-        for seq in range(start // _READ_CHUNK, count):
-            # One chunk per session, and none held while the caller works through it.
+        for first in range(start // _READ_CHUNK, count, _CHUNKS_PER_TXN):
+            seqs = range(first, min(first + _CHUNKS_PER_TXN, count))
+            # A few chunks per session, and no session held while the caller works through them.
             async with self._session() as s:
-                data = (await s.execute(
-                    select(ObjectStoreChunkORM.data)
-                    .where(ObjectStoreChunkORM.blob_id == blob_id, ObjectStoreChunkORM.seq == seq)
-                )).scalar_one_or_none()
-            if data is None:
-                raise FileNotFoundError(f"{key} was replaced or deleted while it was read")
-            for i in range(offset, len(data), chunk_size):
-                yield data[i:i + chunk_size]
-            offset = 0
+                found = dict((await s.execute(
+                    select(ObjectStoreChunkORM.seq, ObjectStoreChunkORM.data)
+                    .where(ObjectStoreChunkORM.blob_id == blob_id,
+                           ObjectStoreChunkORM.seq.in_(list(seqs)))
+                )).all())
+            for seq in seqs:
+                data = found.pop(seq, None)
+                if data is None:
+                    raise FileNotFoundError(f"{key} was replaced or deleted while it was read")
+                for i in range(offset, len(data), chunk_size):
+                    yield data[i:i + chunk_size]
+                offset = 0
 
     async def stat(self, key: str) -> ObjectStat:
         async with self._session() as s:
@@ -319,10 +338,12 @@ class DatabaseObjectStore:
     def upload_target(self, key: str) -> UploadTarget:
         return UploadTarget(key=key, mode="backend", url=None)
 
-    async def sweep(self, *, older_than_hours: float) -> int:
-        """Delete every object written more than ``older_than_hours`` ago, one per transaction so a
+    async def sweep(self, *, older_than_hours: float, keep_prefixes=()) -> int:
+        """Delete every object written more than ``older_than_hours`` ago, but none under
+        ``keep_prefixes`` (inputs a job may still read, however old), one per transaction so a
         backlog never becomes one enormous delete; then the chunks no object names, once they are
         an hour old (a put still in progress has such chunks too). Returns how many objects went."""
+        keep = _under(keep_prefixes)
         async with self._session() as s:
             expired = (await s.execute(
                 select(ObjectStoreObjectORM.key, ObjectStoreObjectORM.blob_id)
@@ -330,6 +351,8 @@ class DatabaseObjectStore:
             )).all()
         removed = 0
         for key, blob_id in expired:
+            if key.startswith(keep):
+                continue
             async with self._session() as s:
                 # Only while the key still names this blob: a rewrite since took the blob with it.
                 gone = await s.execute(delete(ObjectStoreObjectORM).where(
@@ -346,10 +369,11 @@ class DatabaseObjectStore:
 
 def get_object_store() -> ObjectStore:
     """Return the configured object store (``OBJECT_STORE_BACKEND``): the management database by
-    default, which every API pod shares; ``local`` for files under ``IMPORT_STORE_ROOT``.
+    default, which every API pod shares; ``local`` for files under ``IMPORT_STORE_ROOT``; ``s3``
+    (optional) for an S3-compatible bucket, GCS included (``OBJECT_STORE_S3_*``).
 
-    S3/GCS backends implement the same Protocol; they're wired here when added. Kept as a
-    call-time factory (not a module constant) so env changes take effect without re-import."""
+    Kept as a call-time factory (not a module constant) so env changes take effect without
+    re-import. Only ``s3`` imports its module, and with it boto3."""
     from backend.app.services.versioning import config
 
     backend = config.object_store_backend()
@@ -357,6 +381,14 @@ def get_object_store() -> ObjectStore:
         return DatabaseObjectStore()
     if backend == "local":
         return LocalFsObjectStore(config.import_store_root())
+    if backend == "s3":
+        settings = config.object_store_s3()
+        if not settings["bucket"]:
+            raise RuntimeError("OBJECT_STORE_BACKEND=s3 needs OBJECT_STORE_S3_BUCKET, the bucket to keep "
+                               "import/export artifacts in")
+        from backend.app.services.storage.s3_store import shared
+
+        return shared(**settings)
     raise NotImplementedError(
-        f"OBJECT_STORE_BACKEND={backend!r} not yet implemented (use 'database' or 'local')"
+        f"OBJECT_STORE_BACKEND={backend!r} not yet implemented (use 'database', 'local' or 's3')"
     )

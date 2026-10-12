@@ -1,0 +1,126 @@
+{{- /*
+Versioning worker lanes: one Deployment per lane of
+`python -m backend.app.services.versioning` (GRAPHVER_WORKER_LANES), so each
+lane scales, and fails, on its own:
+
+  projection  versioning-worker     FalkorDB projection, idle-draft and artifact sweeps, eviction
+  transfer    versioning-transfer   import / export / publish jobs + one package-inspect slot (HPA)
+  bootstrap   versioning-bootstrap  "Enable version control", purges, the undo-window reaper
+
+viz-service only queues these jobs in graphver.jobs, so all three always render.
+The projection lane keeps the name the single worker has in the k8s base and
+compose; the synodic.io/lane label is what tells the lanes apart everywhere.
+
+Every lane reads the same dataviz-config and Secret as viz-service: the database
+URLs, OBJECT_STORE_* (config.objectStore) and FalkorDB settings come from there,
+never from a per-lane copy, so a job reads back exactly what the request that
+queued it stored. Only what is specific to a worker process is set here.
+*/}}
+{{- $v := .Values.services.versioning }}
+{{- range $lane := list "projection" "transfer" "bootstrap" }}
+{{- $cfg := index $v $lane }}
+{{- $name := ternary "versioning-worker" (printf "versioning-%s" $lane) (eq $lane "projection") }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "dataviz.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+spec:
+  {{- if not $cfg.autoscaling }}
+  replicas: {{ $cfg.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/part-of: dataviz
+        synodic.io/lane: {{ $lane }}
+    spec:
+      terminationGracePeriodSeconds: {{ $v.terminationGracePeriodSeconds }}
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not $v.skipSchemaCheck }}
+      initContainers:
+        {{- include "dataviz.schemaCheckInitContainer" (dict "ctx" $) | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          # The worker image bundles the whole backend; run the versioning
+          # worker instead of the aggregation one (the Dockerfile CMD).
+          image: {{ include "dataviz.image" (dict "ctx" $ "name" "aggregation-worker") | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["python", "-m", "backend.app.services.versioning"]
+          envFrom:
+            - configMapRef:
+                name: dataviz-config
+            - secretRef:
+                name: {{ include "dataviz.secretName" $ }}
+          env:
+            - name: SYNODIC_ROLE
+              value: "worker"
+            - name: GRAPHVER_WORKER_LANES
+              value: {{ $lane | quote }}
+            - name: FALKORDB_SOCKET_TIMEOUT
+              value: "60"
+            # The WEB pool only serves a job's management-database lookups
+            # here; its default (20) is sized for request handlers.
+            - name: DB_WEB_POOL_SIZE
+              value: "4"
+            # Only the "event_loop_lag CRITICAL" ERROR line (the one pages fire
+            # on) keys on this. No request waits on a worker's loop, so a
+            # sub-second stall is no outage here; keep the page for
+            # multi-second ones. A loop that stops for good is caught
+            # separately: GRAPHVER_JOB_WEDGE_SECS exits the process.
+            - name: EVENT_LOOP_CRITICAL_THRESHOLD_S
+              value: "5"
+            - name: TMPDIR
+              value: /spool
+          volumeMounts:
+            - name: spool
+              mountPath: /spool
+          resources:
+            {{- toYaml $cfg.resources | nindent 12 }}
+          # No HTTP health server on this worker yet, so no httpGet probes
+          # (they would flap and restart-loop). A crash exits the process and
+          # the Deployment restarts it; its jobs' leases lapse and another pod
+          # takes them over.
+      volumes:
+        - name: spool
+          emptyDir:
+            sizeLimit: {{ $v.spoolSize }}
+{{- with $cfg.autoscaling }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "dataviz.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}
+  minReplicas: {{ .minReplicas }}
+  maxReplicas: {{ .maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .scaleDownStabilizationWindowSeconds }}
+{{- end }}
+{{- end }}

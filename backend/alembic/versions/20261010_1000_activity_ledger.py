@@ -1,7 +1,7 @@
 """Promote ``auth_audit_log`` into the platform activity ledger.
 
 Revision ID: 20261010_1000_activity_ledger
-Revises: 20260930_1000_outbox_type_time
+Revises: 20261008_1200_import_rows_idx
 Create Date: 2026-10-10 10:00
 
 Every activity read — Admin → Activity, a workspace's Activity tab, the
@@ -30,7 +30,7 @@ import sqlalchemy as sa
 
 
 revision: str = "20261010_1000_activity_ledger"
-down_revision: Union[str, None] = "20260930_1000_outbox_type_time"
+down_revision: Union[str, None] = "20261008_1200_import_rows_idx"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

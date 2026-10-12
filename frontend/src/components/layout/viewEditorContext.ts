@@ -9,6 +9,8 @@ export interface ViewEditorOpenOptions {
   importFile?: File
   /** Import journey: update this view from a file. */
   importIntoViewId?: string
+  /** Import journey: a view package already uploaded ("Finish importing views"). */
+  importUploadId?: string
 }
 
 export interface ViewEditorContextType {

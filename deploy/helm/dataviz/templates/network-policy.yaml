@@ -138,6 +138,10 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: stats-service
+        # Every versioning lane (versioning-worker.yaml).
+        - podSelector:
+            matchExpressions:
+              - { key: synodic.io/lane, operator: Exists }
       ports:
         - { protocol: TCP, port: 6379 }
 ---
@@ -170,6 +174,10 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/component: seed
+        # Every versioning lane (versioning-worker.yaml).
+        - podSelector:
+            matchExpressions:
+              - { key: synodic.io/lane, operator: Exists }
       ports:
         - { protocol: TCP, port: 6379 }
 ---
@@ -196,6 +204,10 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/component: db-init
+        # Every versioning lane (versioning-worker.yaml).
+        - podSelector:
+            matchExpressions:
+              - { key: synodic.io/lane, operator: Exists }
       ports:
         - { protocol: TCP, port: 5432 }
 {{- end }}

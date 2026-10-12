@@ -34,7 +34,12 @@ function timeAgo(iso?: string): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
-export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; dataSourceId: string }) {
+export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
+  wsId: string
+  dataSourceId: string
+  /** Best-known size of the source graph (nodes + edges): how long enabling may take. */
+  itemCount?: number | null
+}) {
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const resolve = useResolveGraph(wsId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
@@ -119,6 +124,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
           onClose={() => setShowEnable(false)}
           wsId={wsId}
           dataSourceId={dataSourceId}
+          itemCount={itemCount}
         />
       </>
     )

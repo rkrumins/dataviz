@@ -301,15 +301,15 @@ NOTES: dict[str, tuple[str, str | None]] = {
         None,
     ),
     "GRAPHVER_PROJECTION_INPROCESS": (
-        "Run the versioning projection worker inside the API process (`1`, `true` or `yes`), for "
-        "development and single-node installs. Off by default: the separate versioning worker "
-        "does it.",
+        "Run the versioning worker lanes inside the API process (`1`, `true` or `yes`), only "
+        "under `SYNODIC_ROLE=dev`, for a single-process development run; any other role ignores "
+        "it. Off by default: the versioning worker lanes do it.",
         None,
     ),
     "GRAPHVER_TRANSFER_INPROCESS": (
-        "Run import and export jobs inside the API process that received them (on by default). "
-        "Set `0` to have the versioning worker run them, so large transfers don't compete with "
-        "interactive requests.",
+        "No longer read: import, export and publish jobs always run on the versioning worker's "
+        "transfer lane (`GRAPHVER_WORKER_LANES`). A process that still finds it set logs a "
+        "warning; remove it.",
         None,
     ),
     "LOCAL_DEV_FALKORDB_OVERRIDE": (

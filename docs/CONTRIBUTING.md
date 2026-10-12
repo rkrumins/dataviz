@@ -39,7 +39,7 @@ One backend codebase runs as several processes. `SYNODIC_ROLE` decides what each
 |---|---|---|
 | `web` | The HTTP API only, with no scheduler or background loops | `viz-service`, which forwards aggregation requests to the control plane |
 | `controlplane` | The aggregation API, the scheduler and crash recovery | `aggregation-controlplane` |
-| `worker` | Background jobs, with no scheduler | `aggregation-worker`, and `versioning-worker` (which runs `python -m backend.app.services.versioning`) |
+| `worker` | Background jobs, with no scheduler | `aggregation-worker`, and `versioning-worker` and `versioning-jobs` (both run `python -m backend.app.services.versioning`, on different lanes) |
 | `dev` (when unset) | The HTTP API plus the scheduler, crash recovery and background loops in one process. It runs aggregation jobs itself only when `REDIS_URL` is unset. | The API when you run it on your machine |
 
 [Platform Services](/docs/services-overview) and [Architecture](/docs/architecture) explain why the work is split this way.

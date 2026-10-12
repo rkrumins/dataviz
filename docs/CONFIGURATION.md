@@ -214,11 +214,11 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `FALKORDB_BULK_CREATE_TIMEOUT_S` | `60.0` / — *(differs by call site)* | per write/delete batch budget, seconds [writeTimeoutS] | `backend/app/providers/falkordb_materialize.py`, `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_CLUSTER_NODES` | — | cluster seed nodes | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
 | `FALKORDB_DOCKER_LOCALHOST_REWRITE` | (empty) | For a backend running in Docker: a graph data source stored with host `localhost` or `127.0.0.1` connects to this host instead, for example `host.docker.internal`. Unset, nothing is rewritten. | `backend/app/providers/falkordb_provider.py` |
-| `FALKORDB_HOST` | `falkordb` / `localhost` / — *(differs by call site)* | Host of the default FalkorDB graph store. Data sources registered in the app keep their own host; `LOCAL_DEV_FALKORDB_OVERRIDE` makes this one win during local development. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py`, `backend/app/providers/manager.py` +14 more |
+| `FALKORDB_HOST` | `falkordb` / `localhost` / — *(differs by call site)* | Host of the default FalkorDB graph store. Data sources registered in the app keep their own host; `LOCAL_DEV_FALKORDB_OVERRIDE` makes this one win during local development. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py`, `backend/app/providers/manager.py` +15 more |
 | `FALKORDB_MODE` | — | standalone \| sentinel \| cluster | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py`, `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_PASSWORD` | — (secret, set your own) | Password for the default FalkorDB graph store. `FALKORDB_PASSWORD_FILE` takes precedence. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py`, `backend/scripts/cleanup_graph_indices.py` +1 more |
 | `FALKORDB_PASSWORD_FILE` | — (secret, set your own) | Path to a mounted file holding the default graph store's password; wins over `FALKORDB_PASSWORD`. A missing or empty file is an error, never a silent connection without a password. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
-| `FALKORDB_PORT` | `6379` / — *(differs by call site)* | Port of the default FalkorDB graph store. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py`, `backend/app/providers/manager.py` +12 more |
+| `FALKORDB_PORT` | `6379` / — *(differs by call site)* | Port of the default FalkorDB graph store. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py`, `backend/app/providers/manager.py` +13 more |
 | `FALKORDB_READ_FROM_REPLICAS` | — | auto \| never; per provider as readFromReplicas | `backend/app/providers/falkordb_connection.py` |
 | `FALKORDB_REPLICA_READ_MAX_LAG_BYTES` | `8388608` | replication stream a replica may still owe and answer a read anyway | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_REPLICA_READ_SETTLE_S` | `10` | how long this process's own write pins that graph's reads to the master. | `backend/app/providers/falkordb_provider.py` |
@@ -483,7 +483,7 @@ Rollup rebuilds, the job bus, and automatic reconciliation of stale rollups.
 | `AGG_EVENTS_STREAM_MAXLEN` | `10000` | `backend/app/services/aggregation/redis_client.py` |
 | `AGG_EXEC_LOCK_TTL_MS` | `90000` | `backend/app/services/aggregation/redis_client.py` |
 | `FALKORDB_REDIS_POOL_SIZE` | `4` / computed / — *(differs by call site)* | `backend/app/services/aggregation/__main__.py`, `backend/app/services/aggregation/controlplane.py` |
-| `HOSTNAME` | (empty) / `boot-1` / `proj-1` / `purge-1` *(differs by call site)* | `backend/app/services/aggregation/admission.py`, `backend/app/services/versioning/__main__.py` |
+| `HOSTNAME` | (empty) / — *(differs by call site)* | `backend/app/services/aggregation/admission.py`, `backend/app/services/versioning/__main__.py` |
 | `JOB_BROKER_BACKEND` | `redis_streams` | `backend/app/jobs/__init__.py` |
 | `JOB_EVENTS_PER_JOB_MAXLEN` | `200` | `backend/app/jobs/redis_keys.py` |
 | `JOB_EVENTS_PER_TENANT_MAXLEN` | `1000` | `backend/app/jobs/redis_keys.py` |
@@ -580,20 +580,24 @@ Drafts and commits, projection into the graph store, and import and export.
 
 | Variable | Default | Description | Read in |
 |---|---|---|---|
-| `GRAPHVER_PROJECTION_INPROCESS` | (empty) | Run the versioning projection worker inside the API process (`1`, `true` or `yes`), for development and single-node installs. Off by default: the separate versioning worker does it. | `backend/app/services/versioning/config.py` |
-| `GRAPHVER_TRANSFER_INPROCESS` | `1` | Run import and export jobs inside the API process that received them (on by default). Set `0` to have the versioning worker run them, so large transfers don't compete with interactive requests. | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROJECTION_INPROCESS` | (empty) | Run the versioning worker lanes inside the API process (`1`, `true` or `yes`), only under `SYNODIC_ROLE=dev`, for a single-process development run; any other role ignores it. Off by default: the versioning worker lanes do it. | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_TRANSFER_INPROCESS` | — | No longer read: import, export and publish jobs always run on the versioning worker's transfer lane (`GRAPHVER_WORKER_LANES`). A process that still finds it set logs a warning; remove it. | `backend/app/services/versioning/config.py` |
 
 ### Internal tuning
 
 | Variable | Default | Read in |
 |---|---|---|
+| `GRAPHVER_BOOTSTRAP_BACKFILL_MAX_WRITES` | `20000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_BOOTSTRAP_BACKFILL_PAUSE_MS` | `200` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_EDGE_TARGET` | `50000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_MERKLE_MAX` | `1000000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_BOOTSTRAP_PER_PROVIDER` | `2` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_RETRY_BUDGET_SECS` | `600` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_RETRY_MAX_DELAY_SECS` | `30` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_SAMPLE_K` | `64` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_SCAN_MIN_WIDTH` | `10000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_SCAN_WIDTH` | `100000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_BOOTSTRAP_SLOTS` | `2` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_WINDOW` | `50000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DB_URL` | — | `backend/app/services/system_status/probes.py`, `backend/app/services/versioning/config.py` |
@@ -601,6 +605,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_DIFF_TREE_MAX_CHANGES` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DRAFT_SWEEP_SECS` | `86400` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DRAFT_TTL_DAYS` | `30` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_DRAIN_SECS` | `40` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EPHEMERAL_MAX_GRAPHS` | `32` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EPHEMERAL_TTL_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EVICT_SECS` | `300` | `backend/app/services/versioning/config.py` |
@@ -612,12 +617,17 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_INGEST_HEARTBEAT_SECS` | computed | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_INGEST_POLL_SECS` | `5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_INGEST_STALE_SECS` | `120` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_JOBS_PER_WORKSPACE` | `2` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_JOB_WEDGE_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_LEASE_TTL` | `60` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_MERKLE_DEPTH` | `4` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_NARROW_SQUASH` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_ONTOLOGY_ENFORCEMENT` | `strict` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PACKAGE_PROJECT_WINDOW` | `20000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PACKAGE_SEED_WINDOW` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PARTITIONS` | `64` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_POOL_MAX_OVERFLOW` | `5` | `backend/app/services/versioning/config.py` |
-| `GRAPHVER_POOL_SIZE` | `10` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_POOL_SIZE` | `10` / — *(differs by call site)* | `backend/app/services/versioning/__main__.py`, `backend/app/services/versioning/config.py` |
 | `GRAPHVER_POOL_TIMEOUT_SECS` | `10` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_BATCH_SIZE` | `5000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | `8` | `backend/app/services/versioning/config.py` |
@@ -642,12 +652,13 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_TRANSFER_SLOTS` | `2` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_VERSIONED_WRITES` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_WORKER_HEALTH_PORT` | `8092` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_WORKER_LANES` | computed | `backend/app/services/versioning/config.py` |
 | `GRAPH_EXPORT_CONCURRENCY` | `2` | `backend/app/services/versioning/import_export/stream.py` |
 | `GRAPH_EXPORT_MAX_BYTES` | `53687091200` | `backend/app/services/versioning/import_export/stream.py` |
 | `GRAPH_EXPORT_PAGE_SIZE` | `2000` | `backend/app/services/versioning/import_export/snapshot.py` |
 | `GRAPH_EXPORT_PLAN_BUDGET_SECS` | `20` | `backend/app/services/versioning/import_export/stream.py` |
 | `GRAPH_EXPORT_SLOT_WAIT_SECS` | `900` | `backend/app/services/versioning/import_export/stream.py` |
-| `IMPORT_COMMIT_WINDOW` | `50000` | `backend/app/services/versioning/config.py` |
+| `IMPORT_COMMIT_WINDOW` | `10000` | `backend/app/services/versioning/config.py` |
 | `IMPORT_MAX_BYTES` | `10737418240` | `backend/app/services/versioning/import_export/uploads.py` |
 | `IMPORT_MAX_ROWS` | `0` | `backend/app/services/versioning/config.py` |
 | `IMPORT_PREVIEW_SAMPLE_LIMIT` | `200` | `backend/app/services/versioning/config.py` |
@@ -655,8 +666,13 @@ Drafts and commits, projection into the graph store, and import and export.
 | `IMPORT_STORE_ROOT` | `/tmp/synodic-import-store` | `backend/app/services/versioning/config.py` |
 | `IMPORT_WHOLE_FILE_MAX_BYTES` | `104857600` | `backend/app/services/versioning/import_export/uploads.py` |
 | `INLINE_IMPORT_MAX` | `5000` | `backend/app/services/versioning/config.py` |
-| `JOB_STALE_AFTER_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `OBJECT_STORE_BACKEND` | `database` | `backend/app/services/versioning/config.py` |
+| `OBJECT_STORE_S3_ADDRESSING` | `auto` | `backend/app/services/versioning/config.py` |
+| `OBJECT_STORE_S3_BUCKET` | (empty) | `backend/app/services/versioning/config.py` |
+| `OBJECT_STORE_S3_ENDPOINT_URL` | — | `backend/app/services/versioning/config.py` |
+| `OBJECT_STORE_S3_PREFIX` | (empty) | `backend/app/services/versioning/config.py` |
+| `OBJECT_STORE_S3_PRESIGN` | (empty) | `backend/app/services/versioning/config.py` |
+| `OBJECT_STORE_S3_REGION` | — | `backend/app/services/versioning/config.py` |
 | `OBJECT_STORE_TTL_HOURS` | `24` | `backend/app/services/versioning/config.py` |
 | `PROJECTION_FALKOR_READ_TIMEOUT_S` | `30` | `backend/app/services/versioning/projection.py` |
 
@@ -796,7 +812,8 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `SEED_SCENARIOS` | `finance,ecommerce` | `backend/scripts/docker_seed.py` |
 | `SYNODIC_BASE_URL` | `http://localhost:8000` | `backend/scripts/publish_view_library.py` |
 | `SYNODIC_EMAIL` | — | `backend/scripts/publish_view_library.py` |
-| `SYNODIC_PASSWORD` | — (secret, set your own) | `backend/scripts/publish_view_library.py` |
+| `SYNODIC_PASSWORD` | — (secret, set your own) | `backend/scripts/bench_versioning.py`, `backend/scripts/publish_view_library.py` |
+| `SYNODIC_USER` | `admin@synodic.local` | `backend/scripts/bench_versioning.py` |
 | `WORKSPACE_ID` | `dev` | `backend/scripts/check_trace_query_plans.py` |
 
 ## Name patterns

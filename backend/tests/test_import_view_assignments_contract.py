@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,10 +20,12 @@ from backend.app.api.v1.endpoints import versioning as versioning_ep
 from backend.app.api.v1.endpoints.versioning import _write_view_import_assignments
 from backend.app.db.models import ViewORM, WorkspaceORM
 from backend.app.services.feature_flags import feature_flags
+from backend.app.services.versioning.import_export import import_worker
 from backend.app.services.versioning.import_export.import_worker import (
     ImportWorker,
     contract_import_root_assignments,
 )
+from backend.app.services.versioning.import_export.rowmodel import PROP_DELETE
 from backend.app.services.view_placement import PlacementSpec
 
 _NOW = "2026-10-04T00:00:00Z"
@@ -139,11 +142,23 @@ def test_no_layers_means_nothing_to_place():
 
 # ── the worker collects what the contract reads ─────────────────────────
 
-def test_worker_collects_the_row_facts():
+async def test_worker_derives_the_row_facts(monkeypatch):
+    """From the created node rows as staged; a create's PROP_DELETE marker is no property."""
+    results = [[("ent_1", "urn:x", "l1", "table", "X", ["pii"],
+                 {"owner": "finance", "gone": PROP_DELETE})], []]  # node rows, then edge ids
+
+    class _Session:
+        async def execute(self, _stmt):
+            rows = results.pop(0)
+            return SimpleNamespace(all=lambda: rows, scalars=lambda: SimpleNamespace(all=lambda: rows))
+
+    @contextlib.asynccontextmanager
+    async def _session():
+        yield _Session()
+
+    monkeypatch.setattr(import_worker.db, "graphver_session", _session)
     worker = ImportWorker(versioning=None, store=None)
-    worker._collect_facts([{"op": "create", "entity_kind": "node", "entity_id": "ent_1", "payload": {
-        "urn": "urn:x", "layerAssignment": "l1", "entityType": "table", "displayName": "X",
-        "tags": ["pii"], "properties": {"owner": "finance"}}}])
+    await worker._derive_facts("vjob_1", "g1", "br1")
     assert worker.created_node_facts == [{
         "eid": "ent_1", "urn": "urn:x", "layer_signal": "l1", "entity_type": "table",
         "display_name": "X", "tags": ["pii"], "properties": {"owner": "finance"}}]

@@ -27,11 +27,13 @@ migration handling, operator-visible changes, and a verification checklist.
 | `viz-service` | `web` | 2 replicas; HPA 2–8 on CPU and memory | 3 replicas; HPA 3–12 |
 | `aggregation-worker` | `worker` | 2 replicas; HPA 2–10 on CPU | 3 replicas; HPA 3–20 |
 | `aggregation-controlplane` | `controlplane` | 1 replica | 2 replicas |
-| `versioning-worker` | `worker` | 1 replica | 1 replica |
+| `versioning-worker` (projection lane) | `worker` | 1 replica | 1 replica |
+| `versioning-transfer` | `worker` | 2 replicas; HPA 2–8 on CPU | Same |
+| `versioning-bootstrap` | `worker` | 2 replicas | Same |
 | `stats-service` | none set | 1 replica | 1 replica |
 | `frontend` | — | 2 replicas; HPA 2–6 on CPU | 3 replicas; HPA 3–8 |
 
-Compose runs the same services, one replica each. The `production-cluster`
+Compose runs the same services, one replica each, with the transfer and bootstrap lanes in one `versioning-jobs` service. The `production-cluster`
 overlay adds a sharded FalkorDB cluster. The single-process `dev` role is the
 fallback when `SYNODIC_ROLE` is unset — uvicorn run on the host, for example —
 not a deployment shape.
