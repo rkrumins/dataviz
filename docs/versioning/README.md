@@ -135,12 +135,14 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 - **Read routing.** `main` fresh → live **FalkorDB**; `main` lagging (just after a merge) → Postgres
   composition (read-your-writes); a **draft** → `DraftOverlayProvider`; **as-of** / historical →
   Postgres snapshot.
-- **Deployment.** Compose and the Kubernetes manifests run the **standalone** versioning worker
-  (`python -m backend.app.services.versioning`), which hosts projection, "Enable version control"
-  jobs, the data-source purge and reaper, and import/export jobs. `GRAPHVER_PROJECTION_INPROCESS=1`
-  runs the same loops inside viz-service, for a single-node install. The Helm chart has neither, so
-  those loops do not run there (`docs/TECHNICAL_DEBT.md` §1.5). The browser never
-  touches Postgres directly — everything is API-only.
+- **Deployment.** The versioning worker (`python -m backend.app.services.versioning`) runs the lanes
+  `GRAPHVER_WORKER_LANES` names: `projection` (FalkorDB projection, sweeps), `transfer` (import,
+  export and publish jobs, package checks) and `bootstrap` ("Enable version control", purges, the
+  reaper). Compose runs `versioning-worker` (projection) and `versioning-jobs` (transfer,
+  bootstrap); the Kubernetes manifests and the Helm chart run one Deployment per lane. The web tier
+  only queues jobs; `GRAPHVER_PROJECTION_INPROCESS=1` runs the lanes inside viz-service only with
+  `SYNODIC_ROLE=dev` ([08 §2a](08-import-export.md)). The browser never touches Postgres
+  directly — everything is API-only.
 - **External sources.** Today graphs are predominantly **managed** (FalkorDB-backed, human-authored).
   **DataHub / OpenMetadata federation is designed-in** — the provider-capability seam, `source_mode`,
   graph `kind`, and authoritative `sync_ingest` all exist — **but not yet wired to those connectors**

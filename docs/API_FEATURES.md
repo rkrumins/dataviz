@@ -226,7 +226,7 @@ feature open to anyone who knows the URL.
 
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
-| Version control | `versioningEnabled` | On | Every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; `POST /{ws_id}/graph/bootstrap`, `…/bootstrap/retry`, `…/bootstrap/abandon` and `POST /{ws_id}/graph/resync`; view packages and staging a view import in a draft; and every write through a versioned graph | Reads stay open and history is kept. The widest switch: it withdraws editing too |
+| Version control | `versioningEnabled` | On | Every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; `POST /{ws_id}/graph/bootstrap`, `…/bootstrap/retry`, `…/bootstrap/decision`, `…/bootstrap/abandon` and `POST /{ws_id}/graph/resync`; view packages and staging a view import in a draft; and every write through a versioned graph | Reads stay open and history is kept. The widest switch: it withdraws editing too |
 | Lineage trace | `traceEnabled` | On | `POST /{ws_id}/graph/trace/v2`, `…/trace/closure`, `…/trace/expand`, `…/trace/expand-batch`, and the retired `…/trace` | Browsing and expanding by hand keep working |
 
 ### Data Governance
@@ -238,7 +238,7 @@ feature open to anyone who knows the URL.
 | Build lineage from scratch | `blankModelsEnabled` | On | `POST /{ws_id}/versioning/blank-graphs` | Needs Version control. Models already built keep working |
 | View versions, import and export | `viewPortabilityEnabled` | Off | Every `/views/transfer/*` and `/views/{view_id}/versions/*` route | Experimental preview. Versions keep being recorded while it is off |
 | Export views | `viewExportEnabled` | On | `POST /views/transfer/export`, `/views/transfer/export/preview`, `/views/transfer/packages` | Needs View versions, import and export |
-| Import views | `viewImportEnabled` | On | `POST /views/transfer/inspect`, `/reconcile`, `/import`, `/packages/inspect`, `/packages/{upload_id}/data` | Needs View versions, import and export |
+| Import views | `viewImportEnabled` | On | `POST /views/transfer/inspect`, `/reconcile`, `/import`, `/packages/inspect`, `/packages/{upload_id}/data`, `/packages/uploads` (and its parts, status and `complete`), `GET /packages/{upload_id}`, `/packages/{upload_id}/new-source` | Needs View versions, import and export |
 
 ### Display & UI
 

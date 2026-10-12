@@ -11,7 +11,7 @@ But the name is derived from the VIEW name, so two people both calling a view
 "Data Lineage" collide by construction. Refusing is correct; refusing and leaving
 them to invent a name is not. These pin the "here's a free one" half.
 """
-from backend.app.api.v1.endpoints.versioning import (
+from backend.app.services.managed_sources import (
     _NUMBERED_SUFFIX_RE,
     _next_free_graph_name,
 )

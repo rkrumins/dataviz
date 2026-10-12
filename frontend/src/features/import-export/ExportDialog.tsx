@@ -20,8 +20,8 @@ import {
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
-  createExport, downloadExportUrl, exportStreamUrl, getExport, planExport, pollJob, preparedExport, queuePosition,
-  rememberExport, triggerBrowserDownload,
+  createExport, downloadExportUrl, exportStreamUrl, getExport, jobProgressText, planExport, pollJob, preparedExport,
+  queuePosition, rememberExport, resumeNote, triggerBrowserDownload,
   type ExportPlan, type ExportSummary, type ExportTarget, type ImportFormat, type Job, type PreparedExport,
 } from '@/services/importExportApiService'
 import { recordEvent } from '@/services/telemetryService'
@@ -101,8 +101,7 @@ export function ExportDialog({
     following.current = ctl
     const forget = () => { rememberExport(wsId, graphId, null); setPrepared(null) }
     try {
-      const done = await pollJob(() => getExport(wsId, graphId, p.jobId), {
-        intervalMs: 2000, onTick: setJob, signal: ctl.signal })
+      const done = await pollJob(() => getExport(wsId, graphId, p.jobId), { onTick: setJob, signal: ctl.signal })
       forget()
       if (done.status === 'completed' && done.kept !== false) {
         triggerBrowserDownload(downloadExportUrl(wsId, graphId, p.jobId), p.fileName)
@@ -340,9 +339,11 @@ function PreparingStep({ job, prepared }: { job: Job | null; prepared: PreparedE
   const pct = pass && prepared.total
     ? Math.min(99, Math.floor((100 * (pass - 1 + Math.min(1, records / prepared.total))) / passes)) : null
   const label = queued ? 'Waiting to start…'
-    : !sofar || !pass ? 'Starting…'
-    : pass < passes ? `Finding the columns… ${count(records)}${of} records read`
-    : `Writing the file… ${count(records)}${of} records, ${prettyBytes(sofar.bytes)}`
+    : jobProgressText(job)
+    ?? (!sofar || !pass ? 'Starting…'
+      : pass < passes ? `Finding the columns… ${count(records)}${of} records read`
+      : `Writing the file… ${count(records)}${of} records, ${prettyBytes(sofar.bytes)}`)
+  const note = resumeNote(job)
   return (
     <div className="px-8 py-16 flex flex-col items-center gap-5">
       <div className="relative w-16 h-16">
@@ -354,6 +355,7 @@ function PreparingStep({ job, prepared }: { job: Job | null; prepared: PreparedE
       <div className="text-center">
         <p className="text-sm font-semibold text-ink">{label}</p>
         {queued && <p className="text-[11px] text-ink-muted mt-1">{queued}</p>}
+        {note && <p className="text-[11px] text-ink-muted mt-1">{note}</p>}
         <p className="text-[11px] text-ink-muted mt-1 truncate max-w-[24rem]">{prepared.fileName}</p>
       </div>
       <div className="w-full max-w-sm h-1 rounded-full bg-black/5 dark:bg-white/5 overflow-hidden">

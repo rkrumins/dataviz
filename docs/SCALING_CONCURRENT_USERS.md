@@ -79,7 +79,7 @@ flowchart LR
     subgraph BG["Background tier (one process per pod)"]
         CP["aggregation-controlplane"]
         AW["aggregation-worker"]
-        VW["versioning-worker"]
+        VW["versioning lanes<br/>projection / transfer / bootstrap"]
         ST["stats-service"]
     end
     BG --> PG
@@ -153,7 +153,9 @@ more pods. Different data sources on different shards add up.
 | `viz-service` (API and in-process auth) | gunicorn + UvicornWorker × `GUNICORN_WORKERS` (4) | 2, HPA 2–8 (CPU 70 %, memory 80 %); limit 1 CPU / 1Gi | 3, HPA 3–12; request 500m / 1Gi, limit 4 CPU / 2Gi | HPA, with the CPU limit ≥ workers | 4 × every Postgres pool, Redis client and FalkorDB socket pool, and 4 more admission gates. No store capacity. |
 | `aggregation-controlplane` | 1 process | 1 | 2 (for HA; every loop is HA-safe) | 2 replicas, for availability only | One process's pools; its FalkorDB pools are forced small (4) |
 | `aggregation-worker` | 1 process running `WORKER_CONCURRENCY` (4) jobs | 2, HPA 2–10 (CPU 60 %); limit 2 CPU / 4Gi | 3, HPA 3–20; limit 4 CPU / 12Gi | HPA; memory-bound on full rebuilds | Pools, plus a FalkorDB pool of `WORKER_CONCURRENCY × 4 + 8` (24). Write and read slots stay per FalkorDB node. |
-| `versioning-worker` | 1 process (projection, imports, exports) | 1; limit 2 CPU / 4Gi; no HPA, PDB or probes | Same | Replicas, up to the number of graphs lagging at once | `JOBS` and `GRAPHVER` pools; `GRAPHVER_TRANSFER_SLOTS` (2) jobs |
+| `versioning-worker` (projection lane) | 1 process | 1; limit 2 CPU / 4Gi; no HPA, PDB or probes | Same | Replicas, up to the number of graphs lagging at once | `JOBS` and `GRAPHVER` pools |
+| `versioning-transfer` (transfer lane: imports, exports, publishes) | 1 process running `GRAPHVER_TRANSFER_SLOTS` (2) jobs plus 1 inspect slot | 2, HPA 2–8 (CPU 70 %, scale-down after 900 s); request 1 CPU, limit 2 CPU / 4Gi; no PDB or probes | Same | HPA; CPU-bound | Pools (`WEB` 4 + 10, `GRAPHVER` sized for the lane); 3 job slots |
+| `versioning-bootstrap` (bootstrap lane: "Enable version control", purges) | 1 process running `GRAPHVER_BOOTSTRAP_SLOTS` (2) jobs | 2; limit 2 CPU / 4Gi; no HPA, PDB or probes | Same | Replicas, only with many FalkorDB providers: at most `GRAPHVER_BOOTSTRAP_PER_PROVIDER` (2) run at once per provider | Pools; 2 job slots |
 | `stats-service` (insights) | 1 process | 1; limit 500m / 512Mi | Same | Replicas (per-source Redis dedup) | 11 Postgres connections (explicit `JOBS` 4+2, `READONLY` 3+2) |
 | FalkorDB | `THREAD_COUNT` query threads per node | 1 node, `THREAD_COUNT 8`; limit 8 CPU / 14Gi | Same. The production-cluster overlay: 3 shards × (1 master + 1 replica), `THREAD_COUNT 6`, 7 CPU / 56Gi | Up (threads = CPU, plus the memory rule); replicas per shard for more read threads; shards for more data sources | See §5 |
 | Postgres | — | In-cluster, `max_connections=400` | Deleted: Cloud SQL behind its managed pooler (`DB_POOLER_MODE=transaction`) | A managed instance behind a transaction pooler | See §4 |
@@ -175,9 +177,12 @@ What the table doesn't say:
 - **The production overlay spreads replicas across nodes.** Its preferred anti-affinity for
   viz-service, frontend and aggregation-worker selects on `app.kubernetes.io/name`, the
   label the pods carry.
-- **The Helm chart has no HPAs, PDBs or versioning-worker.** Scale it with
-  `services.<name>.replicas`; `services.viz.workers` sets `GUNICORN_WORKERS`; the control
-  plane is fixed at one replica.
+- **The Helm chart's only HPA is the transfer lane's, and it has no PDBs.** Scale the rest
+  with `services.<name>.replicas` (the versioning lanes: `services.versioning.<lane>`);
+  `services.viz.workers` sets `GUNICORN_WORKERS`; the control plane is fixed at one replica.
+- **The API only queues versioning jobs.** Imports, exports, publishes and "Enable version
+  control" run only on the transfer and bootstrap lanes. A deployment without them queues
+  jobs that never start (`docs/versioning/08-import-export.md` §2a).
 
 ---
 
@@ -198,6 +203,12 @@ plus a separate engine for the versioned store.
 | `ADMIN` | 2 + 0 = 2 | `DB_ADMIN_POOL_SIZE`, `DB_ADMIN_POOL_MAX_OVERFLOW` | Migrations, startup |
 | **Per process** | **85** | | |
 | `GRAPHVER` (separate engine) | 10 + 5 = 15 | `GRAPHVER_POOL_SIZE`, `GRAPHVER_POOL_MAX_OVERFLOW` | The versioned store: `GRAPHVER_DB_URL`, else `MANAGEMENT_DB_URL` |
+
+A versioning lane process sizes `GRAPHVER` for its lane when `GRAPHVER_POOL_SIZE` is unset
+(`config.lane_pool_size`): 13 for projection (2 + `GRAPHVER_PROJECTION_CONCURRENCY` 8 + 3),
+8 for transfer (2 + 2 per slot, inspect slot included) and 10 for bootstrap (2 + 3 per slot
++ 2), each plus the overflow of 5. The lanes also set `DB_WEB_POOL_SIZE=4`, so their `WEB`
+role is 4 + 10.
 
 Shared by every role: `DB_POOL_TIMEOUT_SECS` 10 (the checkout wait), `DB_POOL_RECYCLE_SECS`
 1800, `DB_POOL_PRE_PING` true, `DB_CONNECT_TIMEOUT_SECS` 5 and `DB_COMMAND_TIMEOUT_SECS` 30
@@ -246,7 +257,9 @@ Fill one row per service. Use `maxReplicas` for anything with an HPA.
 | viz-service | ___ × `GUNICORN_WORKERS` | | | | |
 | aggregation-controlplane | ___ × 1 | | | | |
 | aggregation-worker | ___ × 1 | | | | |
-| versioning-worker | ___ × 1 | | | | |
+| versioning-worker (projection) | ___ × 1 | | | | |
+| versioning-transfer | ___ × 1 (HPA `maxReplicas`) | | | | |
+| versioning-bootstrap | ___ × 1 | | | | |
 | stats-service | ___ × 1 | 11 as shipped | | 7 as shipped | |
 | **Total** | | | **Σ** | | **Σ** |
 
@@ -609,9 +622,10 @@ graphs finish instead of failing. The price:
 | 429 rate with code `PROVIDER_BUSY` | Access logs | Sustained | Some limit in §5.4 is full |
 | FalkorDB queue depth against `MAX_QUEUED_QUERIES` | `GRAPH.INFO` on the node; `queue_full_not_counted` in `/health/deps` → `resilience.breaker`, `provider_breaker_events{event}`; the WARN `query queue full` | Any rise in `queue_full_not_counted` | The node's queue (64, or 150 on a cluster shard) overflowed and "Max pending queries exceeded" became a 429 (§5.4). Check `fleet_slots_fail_open` and how many busy sources share the node |
 | FalkorDB memory | `used_memory` ÷ `maxmemory` per node | Above 70 % | Launch-scale threshold |
-| Event-loop lag | `/health/deps` `event_loop_lag_p99_ms`; CRITICAL samples (`EVENT_LOOP_CRITICAL_THRESHOLD_S`, 0.5 s) | Any CRITICAL sample | A worker is CPU-starved or blocked: check CPU against workers |
+| Event-loop lag | `/health/deps` `event_loop_lag_p99_ms`; CRITICAL samples (`EVENT_LOOP_CRITICAL_THRESHOLD_S`, 0.5 s; 5 s on the versioning lanes) | Any CRITICAL sample | A worker is CPU-starved or blocked: check CPU against workers |
 | Evictions on the `STREAMS` instance | `evicted_keys` in `INFO stats` | Any | Locks and streams are at risk: split or grow |
 | HPA at `maxReplicas` | `kubectl get hpa` | Sustained | You have reached the connection budget you designed: redo §4 before raising it |
+| Versioning job backlog | `GET /api/v1/admin/system/status` → `bootstrapJobs.lanes.<transfer\|bootstrap>`: `claimable` and `oldestClaimableSecs` | Grows and doesn't drain | That lane is missing or saturated: check its pods, then raise the transfer HPA ceiling or the bootstrap replicas (§3) |
 | Aggregation and projection backlog | Admin → Infrastructure: the `aggregation.jobs` stream (depth, pending, oldest pending, group lag) and the projection panel (graphs catching up, max lag); `GET /api/v1/admin/system/status` → `streams`, `projection` | Rises and doesn't drain between bursts | The workers are behind: add aggregation-worker or versioning-worker replicas (§3) |
 | `aggregation_slot_fail_open_total`, `metrics_series_dropped_total` | Worker and API scrapes | Any | Write admission didn't hold, or the registry is undercounting |
 
@@ -707,7 +721,8 @@ decides. Choose by concurrent active users *and* by how many data sources are ho
 | viz-service | 2 pods (fixed), 4 workers, 4 CPU | HPA 3–8, 4 workers, 4 CPU | HPA 3–12 (as shipped), 4 workers, 4 CPU |
 | frontend | HPA 2–6 (as shipped) | HPA 3–8 (as shipped) | HPA 3–8 (as shipped) |
 | aggregation-worker | 2 (fixed) | HPA 3–10 | HPA 3–20 (as shipped) |
-| controlplane / versioning / stats | 1 / 1 / 1 | 2 / 2 / 1 | 2 / 2 / 1 |
+| controlplane / stats | 1 / 1 | 2 / 1 | 2 / 1 |
+| versioning lanes: projection / transfer / bootstrap | 1 / 2 (fixed) / 2 | 2 / HPA 2–8 / 2 | 2 / HPA 2–8 / 2 |
 | FalkorDB | Single node, `THREAD_COUNT 8` | Single node, or the cluster for many sources | Cluster; nine pods for one hot source |
 | Postgres | Direct, `max_connections` 400, trimmed pools | Managed + transaction pooler | Managed + transaction pooler |
 | Redis | One instance, 2gb, `volatile-lru` | Split streams and cache | Split, highly available |
@@ -753,6 +768,15 @@ metadata:
 spec:
   minReplicas: 2
   maxReplicas: 2
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: versioning-transfer
+  namespace: synodic
+spec:
+  minReplicas: 2
+  maxReplicas: 2
 ```
 
 **Pools.** Add to `viz-config`:
@@ -772,8 +796,10 @@ spec:
   GRAPHVER_POOL_MAX_OVERFLOW: "1"
 ```
 
-Add to `worker-config` (read by the aggregation and versioning workers). `JOBS` stays at
-its default of 8 + 4:
+Add to `worker-config` (read by the aggregation worker and all three versioning lanes).
+`JOBS` stays at its default of 8 + 4. Setting `GRAPHVER_POOL_SIZE` here replaces each lane's
+own sizing (§4.1), so the projection and bootstrap lanes may wait on the pool at their
+busiest:
 
 ```yaml
   DB_POOL_SIZE: "4"
@@ -797,17 +823,22 @@ Add the same keys to `controlplane-config`, but with `GRAPHVER_POOL_SIZE: "2"` a
 | viz-service | 2 × 4 = 8 | 10+10+3+2+2+2 + 3 = 32 | 256 | 6+6+2+1+1+2 + 2 = 20 | 160 |
 | aggregation-controlplane | 1 | 6+2+2+12+2 + 3 = 27 | 27 | 4+1+1+8+2 + 2 = 18 | 18 |
 | aggregation-worker | 2 | 6+2+2+12+2 + 8 = 32 | 64 | 4+1+1+8+2 + 4 = 20 | 40 |
-| versioning-worker | 1 | 32 | 32 | 20 | 20 |
+| versioning-worker (projection) | 1 | 6+2+2+12+2 + 8 = 32 | 32 | 4+1+1+8+2 + 4 = 20 | 20 |
+| versioning-transfer | 2 | 32 | 64 | 20 | 40 |
+| versioning-bootstrap | 2 | 32 | 64 | 20 | 40 |
 | stats-service | 1 | 11 | 11 | 7 | 7 |
-| **Total** | | | **390** | | **245** |
+| **Total** | | | **518** | | **325** |
 
-Against `max_connections` 400 − 3 reserved = 397, the ceiling fits (98 %) and the steady
-count sits at 62 %. **This is the most a 400-connection Postgres carries without a pooler.**
-A third viz pod, or any service at a larger size, needs the pooler in §10.2.
+Against `max_connections` 400 − 3 reserved = 397, the steady count fits (82 %) but the
+ceiling does not: the job lanes add four worker processes, 128 connections at their ceiling.
+**Without a pooler, raise the in-cluster Postgres to `max_connections` of at least 525**
+*(derived)* and give it the memory for that many backends, or use the pooler in §10.2. A
+third viz pod, or any service at a larger size, needs the pooler either way.
 
 **Redis:** the base instance as shipped (2gb, `volatile-lru`, 2Gi/2560Mi). **Helm:** set
-`stores.postgres.maxConnections` (400) and `stores.redis.maxmemory` / `maxmemoryPolicy`
-(2gb / `volatile-lru`, the defaults); the chart has no values for the pool sizes (see §11).
+`stores.postgres.maxConnections` (at least your worksheet's ceiling + 3) and
+`stores.redis.maxmemory` / `maxmemoryPolicy` (2gb / `volatile-lru`, the defaults); the chart
+has no values for the pool sizes (see §11).
 
 ### 10.2 ~500 concurrent users: managed Postgres behind a pooler
 
@@ -878,11 +909,16 @@ defaults, counted as every role except `GRAPH_READ` (65), plus `GRAPHVER` (15).
 | viz-service | 8 × 4 = 32 | 12+10+6+3+4+2 + 9 = 46 | 1,472 | 8+6+4+2+2+2 + 6 = 30 | 960 |
 | aggregation-controlplane | 2 | 65 + 15 = 80 | 160 | 44 + 10 = 54 | 108 |
 | aggregation-worker | 10 | 80 | 800 | 54 | 540 |
-| versioning-worker | 2 | 80 | 160 | 54 | 108 |
+| versioning-worker (projection) | 2 | 49 + 18 = 67 | 134 | 28 + 13 = 41 | 82 |
+| versioning-transfer | 8 | 49 + 13 = 62 | 496 | 28 + 8 = 36 | 288 |
+| versioning-bootstrap | 2 | 49 + 15 = 64 | 128 | 28 + 10 = 38 | 76 |
 | stats-service | 1 | 11 | 11 | 7 | 7 |
-| **Total (client side)** | | | **2,603** | | **1,723** |
+| **Total (client side)** | | | **3,201** | | **2,061** |
 
-- **Pooler client limit:** at least 2,603. The launch-scale `max_client_conn` of 5,000
+The lanes count every role except `GRAPH_READ` with `WEB` at 4 + 10 (49 ceiling, 28
+steady), plus `GRAPHVER` sized for each lane (§4.1).
+
+- **Pooler client limit:** at least 3,201. The launch-scale `max_client_conn` of 5,000
   covers it.
 - **Server side:** up to 32 × 6 = 192 concurrent graph requests, each pinning a server
   connection (§4.5), plus short transactions. Start the web server pool near that bound, at
@@ -915,19 +951,23 @@ crowd out canvases on a hot source, add `DEEP_SEARCH_CHUNK_CONCURRENCY: "1"`.
 | viz-service | 12 × 4 = 48 | 46 | 2,208 | 30 | 1,440 |
 | aggregation-controlplane | 2 | 80 | 160 | 54 | 108 |
 | aggregation-worker | 20 | 80 | 1,600 | 54 | 1,080 |
-| versioning-worker | 2 | 80 | 160 | 54 | 108 |
+| versioning-worker (projection) | 2 | 67 | 134 | 41 | 82 |
+| versioning-transfer | 8 | 62 | 496 | 36 | 288 |
+| versioning-bootstrap | 2 | 64 | 128 | 38 | 76 |
 | stats-service | 1 | 11 | 11 | 7 | 7 |
-| **Total (client side)** | | | **4,139** | | **2,743** |
+| **Total (client side)** | | | **4,737** | | **3,081** |
 
-- **Pooler client limit:** 5,000 covers it, with 17 % to spare. The aggregation-worker HPA
-  accounts for 39 % of the total; trim the workers' `WEB` and `READONLY` pools, or lower
-  that `maxReplicas`, if you need room.
+- **Pooler client limit:** 5,000 covers it, with only about 5 % to spare. The
+  aggregation-worker HPA accounts for 34 % of the total and the transfer lane's for 10 %;
+  trim the workers' `WEB` and `READONLY` pools, or lower those `maxReplicas`, if you need
+  room.
 - **Server side:** up to 48 × 6 = 288 concurrent graph requests plus short transactions on
   the web side, about 100 for the workers and about 50 reserved: `max_connections` of at
   least about 440 *(derived)*. The launch-scale 800 leaves room for failover.
 - **The versioned store:** if the `GRAPHVER` engine fails behind the pooler (§4.8) and you
-  route it directly, its pools add up to 48 × 9 + 24 × 15 = 792 direct connections at these
-  sizes *(derived)*. Trim `GRAPHVER_POOL_*` on the workers before you do that.
+  route it directly, its pools add up to 48 × 9 + 22 × 15 + 170 for the lanes = 932 direct
+  connections at these sizes *(derived)*. Trim `GRAPHVER_POOL_*` on the workers before you
+  do that.
 
 **Redis:** split, highly available, and check `connected_clients` against your tier's limit
 (§6.2). **FalkorDB sockets:** see §5.3.
@@ -944,6 +984,6 @@ crowd out canvases on a hot source, add `DEEP_SEARCH_CHUNK_CONCURRENCY: "1"`.
 | **Metrics are per process, off by default, and nothing ships a scrape config.** The worker's `9100` isn't a declared `containerPort`. | A pod scrape reads one gunicorn worker; there are no dashboards or alert rules. | Scrape every pod, sum in queries, build the alerts in §8. |
 | **NetworkPolicy is default-deny for ingress.** No rule admits the load generator or a Prometheus scraper. The cluster shards carry `app.kubernetes.io/name: falkordb-shard-N`, which the FalkorDB allow rule (`falkordb`) doesn't match. | Under an enforcing dataplane, backends may not reach the shards, and scrapes and load tests fail. | Verify in your cluster; add allow rules (§9 has the load-test pair). |
 | **The FalkorDB PVC is mounted at `/data` in the k8s base and cluster.** Compose and Helm mount `/var/lib/falkordb/data`, the image's data directory. | Graphs may not survive a pod restart. | Restart one pod and verify persistence before relying on it. |
-| **The Helm chart has no HPAs, PDBs, versioning-worker, pool-size values or `FORWARDED_ALLOW_IPS`.** The control plane is fixed at one replica. | Imports and exports run in API pods (`GRAPHVER_TRANSFER_INPROCESS` defaults on), and every user behind one nginx pod shares a rate-limit bucket. | Use the kustomize overlays at scale, or post-render the chart. |
-| **Autoscaling uses CPU only** (plus memory for viz). The aggregation worker is bound by memory and queue depth, and the versioning worker has no HPA, PDB or probes. | Scale-out lags real demand on the workers. | Scale workers by hand from queue and projection lag (§8.2). |
+| **The Helm chart has no PDBs, pool-size values or `FORWARDED_ALLOW_IPS`, and its only HPA is the transfer lane's.** The control plane is fixed at one replica. | viz-service runs a fixed replica count, and every user behind one nginx pod shares a rate-limit bucket. | Use the kustomize overlays at scale, or post-render the chart. |
+| **Autoscaling uses CPU only** (plus memory for viz). The aggregation worker is bound by memory and queue depth. Of the versioning lanes only transfer has an HPA, and none has a PDB or probes. | Scale-out lags real demand on the workers. | Scale workers by hand from queue and projection lag and the per-lane job backlog (§8.2). |
 | **nginx keeps 32 pooled upstream connections per worker.** | A newly scaled viz pod receives traffic only as pooled connections recycle (unverified). | After a scale-up, check that requests spread across the new pods. |

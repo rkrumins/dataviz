@@ -14,12 +14,14 @@ to a commit, so an edit landing between the two passes can add a property the he
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import json
 import logging
 import os
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Optional, Set
 
@@ -134,6 +136,53 @@ async def view_entities(snap: Snapshot, scope: Dict[str, Any]) -> Dict[str, Any]
 # ── Records ──────────────────────────────────────────────────────────────────
 
 
+class TypeStats:
+    """How many nodes and edges an export holds, by type, in the shape a provider's stats take
+    (``nodeCount``, ``edgeCount``, ``entityTypeCounts``, ``edgeTypeCounts``): what the onboarding
+    wizard's ontology suggestions read, so a package's data can be matched to a semantic layer
+    without its graph. A missing type counts as ``Entity`` / ``REL``, as the projector labels it."""
+
+    def __init__(self) -> None:
+        self.counts: Dict[str, Counter] = {"node": Counter(), "edge": Counter()}
+
+    def add(self, kind: str, types: Iterable[Optional[str]]) -> None:
+        fallback = "Entity" if kind == "node" else "REL"
+        self.counts[kind].update(str(t) if t else fallback for t in types)
+
+    def clear(self) -> None:
+        for counter in self.counts.values():
+            counter.clear()
+
+    def as_dict(self) -> Dict[str, Any]:
+        nodes, edges = self.counts["node"], self.counts["edge"]
+        return {"nodeCount": sum(nodes.values()), "edgeCount": sum(edges.values()),
+                "entityTypeCounts": dict(nodes), "edgeTypeCounts": dict(edges)}
+
+
+async def _payload_pages(snap: Snapshot, sel: Selection, kind: str) -> AsyncIterator[List[Winner]]:
+    """The live entities of ``kind`` with their payloads, a page at a time. With a view's entities
+    (``sel.keep``) only theirs are read: its nodes by id, and of the edges, the skeletons first
+    (ends, no payload) and then the payloads of those between two of its nodes — a view of 5,000
+    entities on a 200,000-entity graph reads 5,000 payloads, not 200,000."""
+    if sel.keep is None:
+        async for page in snap.iter_live(kind, payload=True):
+            yield page
+        return
+    if kind == "node":
+        ids = sorted(sel.keep)
+        for i in range(0, len(ids), snap.page_size):
+            chunk = ids[i:i + snap.page_size]
+            live = await snap.lookup_live("node", chunk, payload=True)
+            if live:
+                yield [live[eid] for eid in chunk if eid in live]
+        return
+    async for page in snap.iter_live("edge"):
+        kept = [w.entity_id for w in page if w.source_id in sel.keep and w.target_id in sel.keep]
+        live = await snap.lookup_live("edge", kept, payload=True) if kept else {}
+        if live:
+            yield [live[eid] for eid in kept if eid in live]
+
+
 def _node_records(page: List[Winner]) -> List[Dict[str, Any]]:
     return [{"kind": "node", **denormalize_node(w.entity_id, w.content_hash, json.loads(w.payload))}
             for w in page if w.payload is not None]
@@ -158,24 +207,116 @@ async def _edge_page(snap: Snapshot, sel: Selection, page: List[Winner]):
     return [w for w in page if sel.edge_ok(w, ends)], ends
 
 
-async def record_pages(snap: Snapshot, sel: Selection,
-                       tally: Optional[Dict[str, int]] = None) -> AsyncIterator[List[Dict[str, Any]]]:
+async def _edge_pages(snap: Snapshot, sel: Selection) -> AsyncIterator[tuple]:
+    """Each page of live edges with payloads, as the selection keeps them, and their ends."""
+    async for page in _payload_pages(snap, sel, "edge"):
+        yield await _edge_page(snap, sel, page)
+
+
+async def _read_ahead(pages: AsyncIterator[Any]) -> AsyncIterator[Any]:
+    """``pages``, the next one read while the caller works on this one: the database's time on a
+    page (an edge page's ends are a lookup of thousands of nodes) overlaps the records, encoding
+    and compression of the one before. About 30% faster on edges; one page more held."""
+    ahead = asyncio.ensure_future(anext(pages, None))
+    try:
+        while (page := await ahead) is not None:
+            ahead = asyncio.ensure_future(anext(pages, None))
+            yield page
+    finally:
+        if ahead.done():
+            await pages.aclose()
+        else:                  # closed early, mid-read: cancelled, ``pages`` ends where it waits
+            ahead.cancel()
+
+
+async def record_pages(snap: Snapshot, sel: Selection, tally: Optional[Dict[str, int]] = None,
+                       stats: Optional[TypeStats] = None) -> AsyncIterator[List[Dict[str, Any]]]:
     """The export's records, a page at a time: every node, then every edge. ``tally``, when
-    given, counts this pass's records by kind as they go, and the passes (a spreadsheet takes two)."""
+    given, counts this pass's records by kind as they go, and the passes (a spreadsheet takes two);
+    ``stats``, this pass's records by type."""
     tally = tally if tally is not None else {}
     tally.update(node=0, edge=0, passes=tally.get("passes", 0) + 1)
-    async for page in snap.iter_live("node", payload=True):
+    if stats is not None:
+        stats.clear()
+    async for page in _read_ahead(_payload_pages(snap, sel, "node")):
         page = [w for w in page if sel.node_ok(w)]
         if page:
             records = await asyncio.to_thread(_node_records, page)
             tally["node"] += len(records)
+            if stats is not None:
+                stats.add("node", (r.get("entityType") for r in records))
             yield records
-    async for page in snap.iter_live("edge", payload=True):
-        page, ends = await _edge_page(snap, sel, page)
+    async for page, ends in _read_ahead(_edge_pages(snap, sel)):
         if page:
             records = await asyncio.to_thread(_edge_records, page, ends)
             tally["edge"] += len(records)
+            if stats is not None:
+                stats.add("edge", (r.get("edgeType") for r in records))
             yield records
+
+
+def _native_lines(kind: str, page: List[Winner], ends: Dict[str, Winner]) -> bytes:
+    """Format-2 package lines for ``page``: identity, then the stored payload text verbatim."""
+    out = []
+    for w in page:
+        head: Dict[str, Any] = {"kind": kind, "entity_id": w.entity_id, "baseVersion": w.content_hash}
+        if kind == "edge":
+            s, t = ends.get(w.source_id), ends.get(w.target_id)
+            for key, value in (("sourceUrn", s and s.urn), ("targetUrn", t and t.urn),
+                               ("sourceQualifiedName", s and s.qualified_name),
+                               ("targetQualifiedName", t and t.qualified_name)):
+                if value:
+                    head[key] = value
+        out.append(f'{json.dumps(head)[:-1]},"payload":{w.payload}}}\n')
+    return "".join(out).encode("utf-8")
+
+
+async def native_pages(snap: Snapshot, sel: Selection, tally: Optional[Dict[str, int]] = None,
+                       stats: Optional[TypeStats] = None) -> AsyncIterator[bytes]:
+    """The export as a view package's format-2 data lines, a page of bytes at a time: every node,
+    then every edge, each ``{kind, entity_id, baseVersion, …, payload}`` with the payload exactly as
+    stored — its JSON text written as read, never decoded and encoded again, so nothing a flat record
+    can't hold is lost and the export costs no JSON work per row. An edge also carries its ends'
+    URNs and qualified names (its payload has only their entity ids, minted per graph).
+    ``tally``/``stats`` as for :func:`record_pages`, counted from the version columns.
+
+    What the package writer switches to one release after readers accept format 2
+    (``view_transfer.package``); ``rowmodel.normalize`` reads these lines today."""
+    tally = tally if tally is not None else {}
+    tally.update(node=0, edge=0, passes=tally.get("passes", 0) + 1)
+    if stats is not None:
+        stats.clear()
+    async for page in _read_ahead(_payload_pages(snap, sel, "node")):
+        page = [w for w in page if sel.node_ok(w) and w.payload is not None]
+        if page:
+            tally["node"] += len(page)
+            if stats is not None:
+                stats.add("node", (w.entity_type for w in page))
+            yield await asyncio.to_thread(_native_lines, "node", page, {})
+    async for page, ends in _read_ahead(_edge_pages(snap, sel)):
+        page = [w for w in page if w.payload is not None]
+        if page:
+            tally["edge"] += len(page)
+            if stats is not None:
+                stats.add("edge", (w.edge_type for w in page))
+            yield await asyncio.to_thread(_native_lines, "edge", page, ends)
+
+
+async def first_records(snap: Snapshot, limit: int) -> List[Dict[str, Any]]:
+    """Up to ``limit`` nodes and ``limit`` edges as export records — a starter template's rows —
+    from the first page of each that holds any, never the whole graph."""
+    records: List[Dict[str, Any]] = []
+    async with contextlib.aclosing(snap.iter_live("node", payload=True, limit=limit)) as pages:
+        async for page in pages:
+            records += await asyncio.to_thread(_node_records, page[:limit])
+            break
+    async with contextlib.aclosing(snap.iter_live("edge", payload=True, limit=limit)) as pages:
+        async for page in pages:
+            page = page[:limit]
+            ends = await snap.lookup_live("node", {e for w in page for e in (w.source_id, w.target_id) if e})
+            records += await asyncio.to_thread(_edge_records, page, ends)
+            break
+    return records
 
 
 @dataclass
@@ -271,16 +412,17 @@ async def count(snap: Snapshot, sel: Selection, *, budget_s: float = PLAN_BUDGET
     deadline = time.monotonic() + budget_s
     counts = {"node": 0, "edge": 0}
     for kind in ("node", "edge"):
-        async for page in snap.iter_live(kind):
-            if kind == "node":
-                counts[kind] += sum(1 for w in page if sel.node_ok(w))
-            elif sel.selects:
-                counts[kind] += len((await _edge_page(snap, sel, page))[0])
-            else:
-                counts[kind] += sum(1 for w in page if sel.edge_ok(w, {}))
-            if time.monotonic() > deadline:
-                seen = counts["node"] + counts["edge"]
-                return {"nodes": None, "edges": None, "exact": False, "seen": seen}
+        async with contextlib.aclosing(snap.iter_live(kind)) as pages:
+            async for page in pages:
+                if kind == "node":
+                    counts[kind] += sum(1 for w in page if sel.node_ok(w))
+                elif sel.selects:
+                    counts[kind] += len((await _edge_page(snap, sel, page))[0])
+                else:
+                    counts[kind] += sum(1 for w in page if sel.edge_ok(w, {}))
+                if time.monotonic() > deadline:
+                    seen = counts["node"] + counts["edge"]
+                    return {"nodes": None, "edges": None, "exact": False, "seen": seen}
     return {"nodes": counts["node"], "edges": counts["edge"], "exact": True}
 
 

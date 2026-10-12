@@ -65,7 +65,7 @@ so a read-only canvas can boot. Every other versioning route is membership-only.
 
 | Switch (Administration → Features) | Key | Closes |
 |---|---|---|
-| **Version control** | `versioningEnabled` | Every `POST`, `PUT`, `PATCH` and `DELETE` on the versioning router except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; on the graph router, `POST /bootstrap`, `/bootstrap/retry`, `/bootstrap/abandon` and `/resync`. Reads stay open |
+| **Version control** | `versioningEnabled` | Every `POST`, `PUT`, `PATCH` and `DELETE` on the versioning router except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; on the graph router, `POST /bootstrap`, `/bootstrap/retry`, `/bootstrap/decision`, `/bootstrap/abandon` and `/resync`. Reads stay open |
 | **Export graph data** | `graphExportEnabled` | Export plan, stream, job creation and download, on both routers |
 | **Build lineage from scratch** | `blankModelsEnabled` | `POST /blank-graphs` |
 | **Edit mode** | `editModeEnabled` | `POST /graph/changes` |
@@ -230,7 +230,7 @@ scripted run. The endpoints:
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `POST …/imports` | `_MANAGE` | `?format(ndjson)&reconcileMode(upsert \| replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status}`. Opens a draft (or adds to the one in `branchId`), streams the file to the object store, then starts the job: `status` is `running` when it runs in this process, `pending` when it is queued for the versioning worker (`GRAPHVER_TRANSFER_INPROCESS=0`). Never writes to `main` |
+| `POST …/imports` | `_MANAGE` | `?format(ndjson)&reconcileMode(upsert \| replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status}`. Opens a draft (or adds to the one in `branchId`), streams the file to the object store, then queues the job: `status` is `pending` until a versioning worker's transfer lane claims it (the web tier never runs jobs). Never writes to `main` |
 | `GET …/imports` | `_READ` | The graph's import jobs |
 | `GET …/imports/template` | `_READ` | `?format` (default `csv`) → a starter file with the columns and a few example rows |
 | `POST …/imports/uploads` | `_MANAGE` | Start a resumable upload: `{fileName, size, format}` → **201** `{uploadId, fileName, size, format, partBytes, parts, received: [], jobId: null}`. Parts are 16 MiB. **413** when the file is too large for its format: 10 GiB for NDJSON, CSV and TSV, 100 MB for JSON and Excel |
@@ -418,6 +418,18 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   `GET /bootstrap/status?dataSourceId=…` → `{jobId, graphId, status, phase, processed, total,
   percent, startedAt, updatedAt, error, report}`; `status` ends `completed`, `failed` or `cancelled`.
   The status route isn't switch-gated, so a job stays observable after the switch is turned off.
+  When the pre-flight finds identifiers used by more than one item, the job pauses before copying
+  anything: `status` reads `needs_decision`, with `duplicates` (the counts, the `fingerprint` a
+  decision must carry, a sample, and `sharedWith`, the other data sources reading the same graph).
+  `GET /bootstrap/duplicates?dataSourceId=…&after&limit(100, max 500)` (`_READ`) pages every copy —
+  `{items: [{urn, copy, kept, label, internalId, lastSyncedAt}], next}`, or with `format=csv` the
+  whole list as a download; **404** when the job found none, and the list is kept after the job
+  ends. `POST /bootstrap/decision?dataSourceId=…` `{action: "collapse", fingerprint}` (`_MANAGE` +
+  **Version control**) keeps one copy of each identifier (the latest `lastSyncedAt`, then the
+  lowest internal id), moves the others' connections to it, removes the others from the source
+  graph and lets the copy carry on: **202** with the job, **200** when the same decision was
+  already recorded, **409 `stale_decision`** when the list changed since it was shown,
+  **409 `not_awaiting_decision`** when the job isn't paused.
   `POST /bootstrap/retry?dataSourceId=…&mode=resume|restart` (**202**) and
   `POST /bootstrap/abandon?dataSourceId=…` drive recovery. The worker reads the source in bounded
   windows, can resume after a crash, and finishes only after an integrity report proves the copy —

@@ -271,7 +271,7 @@ Instance `max_connections=800` = 150 + 100 server pools + ~50 system/replication
 
 ### 5.5 Ingest & maintenance
 
-- Batch knobs at this scale: `GRAPHVER_INGEST_BATCH_SIZE=5000`, `GRAPHVER_PROJECTION_BATCH_SIZE=5000` (defaults are fine; raise only if p99 lock time stays low), `IMPORT_COMMIT_WINDOW=50000`.
+- Batch knobs at this scale: `GRAPHVER_INGEST_BATCH_SIZE=5000`, `GRAPHVER_PROJECTION_BATCH_SIZE=5000` (defaults are fine; raise only if p99 lock time stays low), `IMPORT_COMMIT_WINDOW=10000` (the default: short windows keep each transaction and each resume step small).
 - Partition pruning by `graph_id` + BRIN on `commit_seq` is the read path — verify plans keep pruning after PG major upgrades (`EXPLAIN` in a CI smoke test).
 - Schedule bulk reseeds / large imports **off-peak** — a full reseed of a multi-million-element graph is a minutes-long, IOPS-heavy scan; the 1 TB IOPS headroom (§2.3) exists for exactly this.
 
@@ -462,4 +462,4 @@ Phased; each gate verifiable before the next.
 | `GRAPHVER_FALKOR_BUDGETS` / `_MAX_RESIDENT` | projection worker | ≈ shard `maxmemory` × 0.8 per provider |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | projection worker | `8` |
 | `GRAPHVER_READ_MAX_LAG` | web tiers | `0` (strict) |
-| `IMPORT_COMMIT_WINDOW` | import worker | `50000` |
+| `IMPORT_COMMIT_WINDOW` | import worker | `10000` (default) |

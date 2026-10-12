@@ -5,9 +5,11 @@
  *   - while the file uploads, the dialog says how much of it is up;
  *   - an import job that failed or was cancelled on the server ends as a failure that says why,
  *     never as a finished import;
- *   - an import queued for the server's workers says it is waiting, and how many are ahead of it.
+ *   - an import queued for the server's workers says it is waiting, and how many are ahead of it;
+ *   - a running import says how far it has got, and that it resumed when a server took it over;
+ *   - closing the dialog stops following the import (it carries on on the server).
  */
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Job } from '@/services/importExportApiService'
@@ -22,9 +24,12 @@ vi.mock('@/services/importExportApiService', async (importOriginal) => ({
 import { importInParts, pollJob } from '@/services/importExportApiService'
 import { ImportDialog } from '../ImportDialog'
 
+let unmount = () => {}
+
 function open() {
-  const { container } = render(<ImportDialog wsId="ws1" graphId="g1" onClose={() => {}} />)
-  return container.querySelector('input[type="file"]') as HTMLInputElement
+  const view = render(<ImportDialog wsId="ws1" graphId="g1" onClose={() => {}} />)
+  unmount = view.unmount
+  return view.container.querySelector('input[type="file"]') as HTMLInputElement
 }
 
 function file(name: string, size: number, content = 'kind,urn\n'): File {
@@ -93,5 +98,22 @@ describe('ImportDialog', () => {
 
     expect(await screen.findByText('Waiting to start…')).toBeInTheDocument()
     expect(screen.getByText('2 jobs are ahead of it.')).toBeInTheDocument()
+  })
+
+  it('says how far a running import has got, and that it resumed; closed, it stops following it', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockImplementation(async (_fetcher, opts) => {
+      opts?.onTick?.({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'running', phase: 'nodes',
+        processed: 4000, total: 10000, attempt: 2 } as Job)
+      return new Promise<Job>(() => {})   // still running
+    })
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+
+    expect(await screen.findByText('Applying the changes… 4,000 of 10,000 rows')).toBeInTheDocument()
+    expect(screen.getByText('Resumed where it left off (attempt 2).')).toBeInTheDocument()
+    const signal = vi.mocked(pollJob).mock.calls[0][1]!.signal!
+    unmount()
+    await waitFor(() => expect(signal.aborted).toBe(true))
   })
 })

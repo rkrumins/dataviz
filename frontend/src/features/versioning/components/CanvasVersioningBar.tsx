@@ -69,10 +69,13 @@ export function CanvasVersioningBar({
   const graphId = resolve.data?.graphId ?? null
   const [showEnable, setShowEnable] = useState(false)
   // The enablement job: live progress while it runs (seeded from /resolve, so a reload
-  // lands straight back on it), then the integrity report until it's dismissed.
+  // lands straight back on it), then the integrity report until it's dismissed. Managers
+  // only: the copy is theirs to watch (no one else is shown its progress), so every other
+  // viewer of the canvas would be polling it for nothing.
   const boot = useBootstrapWatch(workspaceId, dataSourceId, {
     headSeq: resolve.data?.mainHeadCommitSeq ?? 0,
     seed: resolve.data?.bootstrap ?? undefined,
+    enabled: canManage,
   })
 
   const viewId = activeView?.id ?? null

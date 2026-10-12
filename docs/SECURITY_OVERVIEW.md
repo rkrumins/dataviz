@@ -493,7 +493,9 @@ one.
 - **The app page** gets the same protections from the frontend proxy, with a
   Content-Security-Policy whose `script-src` and `connect-src` are `'self'` only. `CSP_CONNECT_SRC`
   (on the frontend container) adds origins to `connect-src`; you need it only for an
-  **Enterprise gateway** whose sign-in calls run in the browser. The container refuses to start
+  **Enterprise gateway** whose sign-in calls run in the browser, or for the bucket's origin when
+  `OBJECT_STORE_S3_PRESIGN=1` sends view-package uploads straight to an S3-compatible bucket
+  ([Import / Export](/docs/versioning-import-export)). The container refuses to start
   if `CSP_CONNECT_SRC` holds anything but bare `https://` or `wss://` origins.
 
 **How to configure it.**

@@ -368,6 +368,19 @@
     },
     "OntologyRef": {
       "properties": {
+        "definitionDigest": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Definitiondigest"
+        },
         "digest": {
           "anyOf": [
             {
@@ -380,6 +393,19 @@
           ],
           "default": null,
           "title": "Digest"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
         },
         "name": {
           "anyOf": [

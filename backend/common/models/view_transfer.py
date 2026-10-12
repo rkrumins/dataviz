@@ -54,9 +54,17 @@ class DataSourceRef(_Model):
 
 
 class OntologyRef(_Model):
+    #: The semantic layer's id where the file was made: matched only within the same environment
+    #: (ids differ between environments).
+    id: Optional[str] = Field(None, max_length=128)
     name: Optional[str] = Field(None, max_length=MAX_NAME_LENGTH)
     version: Optional[int] = None
+    #: The data source's resolved ontology, its graph's gap-filled types included: what ranks
+    #: import targets (a target whose engine gives the same digest is the same source).
     digest: Optional[str] = Field(None, max_length=128)
+    #: The semantic layer's own digest, without any data source's gap-fill
+    #: (``sources.ontology_digest``): what tells whether it changed since the file was made.
+    definitionDigest: Optional[str] = Field(None, max_length=128)
 
 
 class SourceDescriptor(_Model):

@@ -33,6 +33,7 @@ import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
+import { FinishImportingViewsBanner } from '@/features/view-transfer/FinishImportingViewsBanner'
 import { DataSourceActionMenu } from './DataSourceActionMenu'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
@@ -134,6 +135,7 @@ export function DataSourceDetailPanel({
     ds,
     wsId,
     isOpen,
+    stats,
     providerInfo,
     ontologyName,
     ontologyId,
@@ -387,6 +389,7 @@ export function DataSourceDetailPanel({
                         {/* Per-source vocabulary-alignment drift (Task E) — own component,
                             no overlap with the header chips. */}
                         {!editing && <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />}
+                        {!editing && <FinishImportingViewsBanner wsId={wsId} dataSourceId={ds.id} viewCount={views.length} />}
 
                         {/* ── Tab Bar ────────────────────────────────────── */}
                         {!editing && (
@@ -675,7 +678,12 @@ export function DataSourceDetailPanel({
 
                             {/* ─── Versioning Tab ───────────────────────── */}
                             {versioningEnabled && activeTab === 'versioning' && (
-                                <DataSourceVersioningTab wsId={wsId} dataSourceId={ds.id} />
+                                <DataSourceVersioningTab
+                                    wsId={wsId}
+                                    dataSourceId={ds.id}
+                                    // A cold stats cache reads 0 / stale: no size beats a wrong one.
+                                    itemCount={stats && !stats.computing ? stats.nodeCount + stats.edgeCount : null}
+                                />
                             )}
                             </>)}
                         </div>

@@ -19,7 +19,7 @@ flowchart TB
     K2 --> K3["Run the schema upgrade"]
     P -->|"Helm"| H1["Build and push the images"]
     H1 --> H2["ingress-nginx, Secret and ConfigMap"]
-    H2 --> H3["helm install, add the versioning worker"]
+    H2 --> H3["helm install"]
     K3 --> V["Point DNS and verify"]
     H3 --> V
 ```
@@ -40,7 +40,7 @@ The two are not equivalent. What each one actually deploys:
 | Postgres and Redis | In the cluster for dev and staging; Cloud SQL and Memorystore for production | External by default; in-cluster Redis and FalkorDB are opt-in |
 | FalkorDB | In-cluster StatefulSet; a 3-shard cluster overlay | External by default; in-cluster opt-in (`stores.falkordb.enabled`) |
 | Schema migrations | **Not run** — you run them ([known gap](#known-gaps-and-their-workarounds)) | A pre-install / pre-upgrade Job (a first install needs one manual step — [known gap](#known-gaps-and-their-workarounds)); a `wait-for-schema` init container on every backend pod |
-| Versioning worker | Yes | **Not deployed** ([known gap](#known-gaps-and-their-workarounds)) |
+| Versioning worker | Three Deployments, one per lane: `versioning-worker` (projection), `versioning-transfer` (HPA 2–8), `versioning-bootstrap` | The same three ([The versioning worker lanes](#the-versioning-worker-lanes)) |
 | NetworkPolicies | Shipped (deny all ingress, then allow-list) | Opt-in (`networkPolicy.enabled`) |
 | Graph-store backups | A CronJob in the production overlay | None |
 
@@ -53,12 +53,6 @@ The two are not equivalent. What each one actually deploys:
 - **The Helm chart's schema Job can't start on a first install by itself.** It runs before the
   chart creates anything, yet reads the chart's `dataviz-config` ConfigMap and its Secret. Create
   both first: [Prepare the database, Secret and ConfigMap](#prepare-the-database-secret-and-configmap).
-- **The Helm chart deploys no versioning worker,** and the API pods don't run its loop
-  either. Without it, nothing runs **Enable version control**, finishes the graph-store
-  projections the API hands off, or runs purges — and on a first install the version
-  store's tables don't exist at all, because the schema Job builds a new database without
-  them and the worker creates them when it first starts. Add one:
-  [Add the versioning worker](#add-the-versioning-worker).
 - **The kustomize FalkorDB StatefulSets mount their data volume at the wrong path,** so the
   graph store's writes don't reach the volume. Fix it before you load data:
   [Keep FalkorDB's data on its volume](#keep-falkordbs-data-on-its-volume).
@@ -343,55 +337,25 @@ helm install dataviz deploy/helm/dataviz -n <namespace> \
 The pre-install hook runs the schema Job (`dataviz-upgrade`); every backend pod then waits in
 its `wait-for-schema` init container until the schema matches its image.
 
-### Add the versioning worker
+### The versioning worker lanes
 
-The chart has no Deployment for it. Mirror the aggregation worker, with the versioning command.
-Save as `versioning-worker.yaml`:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: versioning-worker
-  labels:
-    app.kubernetes.io/name: versioning-worker
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: versioning-worker
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: versioning-worker
-        app.kubernetes.io/part-of: dataviz
-    spec:
-      terminationGracePeriodSeconds: 60
-      containers:
-        - name: versioning-worker
-          image: <registry>/<org>/aggregation-worker:<tag>
-          command: ["python", "-m", "backend.app.services.versioning"]
-          envFrom:
-            - configMapRef:
-                name: dataviz-config
-            - secretRef:
-                name: <secret-name>
-          env:
-            - name: SYNODIC_ROLE
-              value: "worker"
-            - name: FALKORDB_SOCKET_TIMEOUT
-              value: "60"
-```
+The chart runs `python -m backend.app.services.versioning` as three Deployments, one per lane
+(`GRAPHVER_WORKER_LANES`): `versioning-worker` (projection, one replica), `versioning-transfer`
+(imports, exports and publishes; an HPA scales it from 2 to 8 at 70 % CPU) and
+`versioning-bootstrap` (**Enable version control** and purges, two replicas), sized under
+`services.versioning` in `values.yaml`. The API pods only queue those jobs. On a first install
+the version store's tables appear when the lanes first start. The chart's NetworkPolicies
+already admit every lane. See
+[Where the jobs run: the worker lanes](/docs/versioning-import-export#2a-where-the-jobs-run-the-worker-lanes).
 
 ```bash
-kubectl -n <namespace> apply -f versioning-worker.yaml
-kubectl -n <namespace> logs deploy/versioning-worker | grep "projection worker starting"
+kubectl -n <namespace> logs deploy/versioning-transfer | grep "versioning worker starting"
 ```
 
-The log shows `versioning projection worker starting`. It has no health endpoint, so it has
-no probes. Update its image tag whenever you upgrade the chart. If you turned on the chart's
-`networkPolicy.enabled` with in-cluster stores, those policies admit only the pods they name;
-extend them for this one.
+The log shows `lanes=transfer`. The lanes have no health endpoint, so they have no probes.
+If you added a `versioning-worker` Deployment by hand from an earlier version of this page,
+delete it before `helm upgrade` (`kubectl -n <namespace> delete deployment versioning-worker`):
+the chart now owns a Deployment of that name.
 
 ### Put TLS in front
 
@@ -644,8 +608,7 @@ To roll back, apply the previous tag the same way:
    ```
 
    The schema Job runs first, as a pre-upgrade hook; the new pods start once it has finished.
-3. Update the versioning worker's image to `<new-tag>`, then
-   [verify](#verify-the-deployment).
+3. [Verify](#verify-the-deployment).
 
 To roll back: `helm rollback dataviz <revision> -n <namespace>`.
 

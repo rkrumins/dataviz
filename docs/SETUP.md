@@ -72,7 +72,7 @@ Give Docker plenty of disk. Before `up`, `infra` and `rebuild`, if Docker's disk
    ./dev.sh ps
    ```
 
-   `viz-service` (the API), `frontend`, `aggregation-controlplane`, `aggregation-worker`, `versioning-worker`, `stats-service`, `postgres`, `redis` and `falkordb` are `Up`, and the ones with a health check say `(healthy)`. The one-shot `upgrade` service has already applied the migrations and exited, so it isn't listed; `./dev.sh logs upgrade` shows what it did.
+   `viz-service` (the API), `frontend`, `aggregation-controlplane`, `aggregation-worker`, `versioning-worker`, `versioning-jobs`, `stats-service`, `postgres`, `redis` and `falkordb` are `Up`, and the ones with a health check say `(healthy)`. The one-shot `upgrade` service has already applied the migrations and exited, so it isn't listed; `./dev.sh logs upgrade` shows what it did.
 
 > **If a service isn't healthy:** `./dev.sh logs <service>` shows why. [If it goes wrong](#if-it-goes-wrong) covers the common causes.
 
@@ -142,7 +142,7 @@ The seeder takes `--scale N` (pads the graph with archive tables up to about N Ã
 |---|---|---|
 | Frontend code under `frontend/src` | Vite reloads the page | Nothing |
 | Backend code used by the API | `viz-service` restarts its workers (it polls for file changes) | Nothing |
-| Backend code used by the headless services | They don't watch files | `./dev.sh restart <service>` for `aggregation-controlplane`, `aggregation-worker`, `versioning-worker` or `stats-service` |
+| Backend code used by the headless services | They don't watch files | `./dev.sh restart <service>` for `aggregation-controlplane`, `aggregation-worker`, `versioning-worker`, `versioning-jobs` or `stats-service` |
 | `backend/requirements.txt` or a `backend/Dockerfile.*` | Dependencies live in the images | `./dev.sh rebuild` |
 | A migration under `backend/alembic/versions/` | The `upgrade` service runs the migrations baked into its image | `./dev.sh rebuild` |
 | `frontend/package.json` | `node_modules` lives in a volume inside the container | `./dev.sh rebuild -V frontend` |
@@ -230,7 +230,7 @@ Run the API and the frontend outside Docker when you want a debugger, a profiler
    python -m uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
    ```
 
-   The log shows `Schema verified at Alembic head` and then `Application startup complete.`
+   The log shows `Schema verified at Alembic head` and then `Application startup complete.` The API only queues import, export, publish and **Enable version control** jobs: they wait until the versioning worker of step 7 runs, unless you start the API as `GRAPHVER_PROJECTION_INPROCESS=1 python -m uvicorn â€¦`, as `./dev.sh infra` prints (honoured only in this `dev` role).
 
 6. In a second terminal, start the frontend:
 
@@ -245,7 +245,7 @@ Run the API and the frontend outside Docker when you want a debugger, a profiler
    | For | Run |
    |---|---|
    | Aggregation jobs | `python -m backend.app.services.aggregation` |
-   | Versioned graphs projected into FalkorDB | `python -m backend.app.services.versioning` |
+   | Versioned graphs projected into FalkorDB, and the import, export, publish and **Enable version control** jobs the API queues | `python -m backend.app.services.versioning` (all three lanes by default) |
    | Data-source statistics, discovery and purges | `python -m backend.insights_service` |
 
    On your machine the API runs in the all-in-one `dev` role, so it runs the scheduler itself. Because `.env.dev` sets `REDIS_URL`, aggregation jobs still go to the Redis stream and wait there for a worker.

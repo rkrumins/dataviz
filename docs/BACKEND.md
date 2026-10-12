@@ -21,7 +21,7 @@ One FastAPI application serves the HTTP API; the other backend processes run in 
 | API (`viz-service`) | `backend/app/main.py` (`app`), under gunicorn | 8000 | Every `/api/v1` route below |
 | Aggregation control plane | `backend/app/services/aggregation/controlplane.py` | 8091 | Aggregation jobs, scheduling and recovery; the API forwards its aggregation endpoints here |
 | Aggregation worker | `backend/app/services/aggregation/__main__.py` | 8090 (health) | Builds `:AGGREGATED` rollup edges |
-| Versioning worker | `backend/app/services/versioning/__main__.py` | — | Projects version-controlled graphs into FalkorDB; runs import and export jobs |
+| Versioning worker | `backend/app/services/versioning/__main__.py` | — | Projects version-controlled graphs into FalkorDB; runs the import, export, publish and Enable-version-control jobs the API queues (lanes `projection`, `transfer`, `bootstrap`) |
 | Stats service | `backend/insights_service/__main__.py` | 8092 (health) | Keeps per-data-source stats fresh |
 | `upgrade` job | `backend/scripts/upgrade.py` | — | Builds and migrates the database schema |
 
@@ -122,7 +122,7 @@ The API never creates or migrates tables. The `upgrade` job builds the schema be
 3. **Creates the first administrator** if there are no users, from `ADMIN_EMAIL` and `ADMIN_PASSWORD`. If the password is one published in this repository, the account must change it at first sign-in.
 4. **Wires sign-in**: the local password provider and the database-backed identity-provider registry. If OIDC or SAML settings are present in the environment and no matching row exists, it records them once as a default identity provider.
 5. **Wires aggregation**: with `AGGREGATION_PROXY_ENABLED=true` (as Compose and Kubernetes set it) the aggregation endpoints are forwarded to the control plane; otherwise a local dispatcher is chosen by `AGGREGATION_DISPATCH_MODE`.
-6. **Starts background loops**: the provider-change listener, a provider warm-up loop, database health and event-loop monitoring, and any loops the process role enables. The versioning projector runs here only when `GRAPHVER_PROJECTION_INPROCESS=1`.
+6. **Starts background loops**: the provider-change listener, a provider warm-up loop, database health and event-loop monitoring, and any loops the process role enables. The versioning worker's lanes run here only when `GRAPHVER_PROJECTION_INPROCESS=1` and the role is `dev`; on any other role the setting is ignored with an error.
 7. **Opens the readiness gate**, so requests other than health probes are served.
 
 No graph provider, workspace or data source is created from environment variables: you register providers in the app — see [Admin Setup](/guide/admin-setup). On shutdown the API stops its loops, closes every cached provider (allowing 5 seconds) and closes its database pools.

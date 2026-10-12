@@ -27,7 +27,7 @@ from sqlalchemy import select, func
 
 from . import config, db
 from .messaging import get_broker_redis
-from .models import ProjectionStateORM
+from .models import GraphORM, ProjectionStateORM
 
 logger = logging.getLogger(__name__)
 
@@ -158,10 +158,15 @@ class CacheManager:
     # ---- LRU policy ------------------------------------------------------- #
     async def lru_candidates(self, provider: Optional[str] = None, limit: int = 10) -> List[str]:
         """Coldest resident graphs (oldest ``last_projected_at`` first) — the
-        eviction order for a RAM-budget sweep. Scoped to ``provider`` when given."""
+        eviction order for a RAM-budget sweep. Scoped to ``provider`` when given.
+
+        Never a graph still at genesis (head ≤ 1): that is one whose version control is being
+        enabled, is paused, failed, or is being seeded — its FalkorDB key is the data source's
+        own graph or a half-built copy, and a reseed from genesis would empty it."""
         async with self._session() as s:
             q = (select(ProjectionStateORM.graph_id)
-                 .where(ProjectionStateORM.status == "idle")
+                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+                 .where(ProjectionStateORM.status == "idle", GraphORM.main_head_commit_seq > 1)
                  .order_by(ProjectionStateORM.last_projected_at.asc().nulls_first())
                  .limit(limit))
             if provider is not None:
