@@ -7,12 +7,14 @@
  *
  * It first asks the server what the export would hold (the plan), so an empty export or one the
  * format can't hold is explained instead of downloaded. A data source with version control's
- * export is then prepared on the server, up to 50 GB, with its progress shown (the dialog can be
- * closed and opened again meanwhile), and downloaded once ready: a download the browser can
- * resume. One without version control exports its live graph, downloaded as the server reads it,
- * in view and edit mode alike: a cold copy, importable later into one with version control.
+ * export is then prepared on the server, up to 50 GB, with its progress shown, and downloaded by
+ * itself once ready (a download the browser can resume), wherever the person is by then: closed,
+ * the dialog hands it to the export tray (`backgroundExports`), and opened again it shows it once
+ * more. It can be cancelled while it is prepared. One without version control exports its live
+ * graph, downloaded as the server reads it, in view and edit mode alike: a cold copy, importable
+ * later into one with version control.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import {
   AlertTriangle, ArrowRight, CheckCircle2, Database, Download, FileDown, GitCompareArrows,
   Info, Layers, Loader2, RefreshCw, X,
@@ -20,11 +22,15 @@ import {
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
-  createExport, downloadExportUrl, exportStreamUrl, getExport, jobProgressText, planExport, pollJob, preparedExport,
-  queuePosition, rememberExport, resumeNote, triggerBrowserDownload,
-  type ExportPlan, type ExportSummary, type ExportTarget, type ImportFormat, type Job, type PreparedExport,
+  createExport, exportStreamUrl, planExport, triggerBrowserDownload,
+  type ExportPlan, type ExportSummary, type ExportTarget, type ImportFormat,
 } from '@/services/importExportApiService'
 import { recordEvent } from '@/services/telemetryService'
+import {
+  downloadExportFile, exportStage, findRunningExport, retryExport, trackExport, useBackgroundExport, useShownExport,
+} from './backgroundExports'
+import { CancelExport } from './CancelExport'
+import { ExportProgressPanel } from './ExportProgress'
 import { prettyBytes } from './format'
 
 export interface ExportDialogProps {
@@ -40,7 +46,9 @@ export interface ExportDialogProps {
   onClose: () => void
 }
 
-type Phase = 'choose' | 'checking' | 'preparing' | 'started' | 'empty' | 'limit' | 'failed'
+/** `server`: the export the server prepares, at whatever stage it is; `started`: a live export's
+ *  download started; `failed`: an export that didn't start. */
+type Phase = 'choose' | 'checking' | 'server' | 'started' | 'empty' | 'limit' | 'failed'
 
 const FORMATS: { id: ImportFormat; label: string; hint: string }[] = [
   { id: 'xlsx', label: 'Excel', hint: 'Nodes + Edges sheets, locked columns · best for editing' },
@@ -64,75 +72,30 @@ export function ExportDialog({
   wsId, dataSourceId, graphId, dataSourceName, viewId, viewName, branchId, onClose,
 }: ExportDialogProps) {
   const live = !graphId
-  // An export the server was preparing when the dialog last closed: it opens on that.
-  const [earlier] = useState(() => (graphId ? preparedExport(wsId, graphId) : null))
+  // An export of this data source the server was preparing when the dialog last closed: it opens on that.
+  const [earlier] = useState(() => (graphId
+    ? findRunningExport((e) => e.kind === 'data' && e.wsId === wsId && e.graphId === graphId) : null))
   const [format, setFormat] = useState<ImportFormat>('csv')
   const [scope, setScope] = useState<'view' | 'all'>(viewId && !live ? 'view' : 'all')
   const [source, setSource] = useState<'branch' | 'published'>(branchId && !live ? 'branch' : 'published')
   const [newProps, setNewProps] = useState('')
-  const [phase, setPhase] = useState<Phase>(earlier ? 'preparing' : 'choose')
+  const [phase, setPhase] = useState<Phase>(earlier ? 'server' : 'choose')
   const [plan, setPlan] = useState<ExportPlan | null>(null)
   const [fileName, setFileName] = useState(earlier?.fileName ?? '')
   const [error, setError] = useState<string | null>(null)
-  // The export the server is preparing, and its job as last seen.
-  const [prepared, setPrepared] = useState<PreparedExport | null>(earlier)
-  const [job, setJob] = useState<Job | null>(null)
-  const following = useRef<AbortController | null>(null)
+  // The export the server prepares, followed app-wide: it carries on, and downloads, once this closes.
+  const [jobId, setJobId] = useState<string | null>(earlier?.jobId ?? null)
+  const prepared = useBackgroundExport(phase === 'server' ? jobId : null)
+  useShownExport(prepared?.jobId)
+  const stage = prepared ? exportStage(prepared) : null
 
   const inView = !live && scope === 'view' && !!viewId
   const onDraft = !live && source === 'branch' && !!branchId
-
-  /** Show an export the server prepares, following it until its file is ready. */
-  function follow(p: PreparedExport) {
-    setPrepared(p)
-    setFileName(p.fileName)
-    setJob(null)
-    setError(null)
-    setPhase('preparing')
-    void watch(p)
-  }
-
-  /** Poll an export until its file is ready, then download it. `resumed`: one picked up again on
-   *  opening, let go quietly if it failed or is no longer kept. */
-  async function watch(p: PreparedExport, resumed = false) {
-    if (!graphId) return
-    following.current?.abort()
-    const ctl = new AbortController()
-    following.current = ctl
-    const forget = () => { rememberExport(wsId, graphId, null); setPrepared(null) }
-    try {
-      const done = await pollJob(() => getExport(wsId, graphId, p.jobId), { onTick: setJob, signal: ctl.signal })
-      forget()
-      if (done.status === 'completed' && done.kept !== false) {
-        triggerBrowserDownload(downloadExportUrl(wsId, graphId, p.jobId), p.fileName)
-        setPhase('started')
-      } else if (resumed) {
-        setPhase('choose')
-      } else {
-        setError(done.status === 'completed' ? 'The file is no longer kept. Export again.'
-          : done.errorMessage || 'The export could not be prepared.')
-        setPhase('failed')
-      }
-    } catch (e) {
-      if (ctl.signal.aborted) return            // the dialog closed: the server carries on
-      if (resumed) { forget(); setPhase('choose'); return }
-      // Still remembered: trying again checks on this export rather than starting another.
-      setError(e instanceof Error ? e.message : 'Lost touch with the export.')
-      setPhase('failed')
-    }
-  }
-
-  useEffect(() => {
-    if (earlier) void watch(earlier, true)
-    return () => following.current?.abort()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   async function run(fmt: ImportFormat = format) {
     setFormat(fmt)
     setPhase('checking')
     setError(null)
-    setJob(null)
     const target: ExportTarget = {
       wsId, dataSourceId, graphId,
       viewId: inView ? viewId : undefined,
@@ -160,31 +123,39 @@ export function ExportDialog({
         setPhase('started')
         return
       }
-      // The server's workers write the file, and the browser downloads it once it's ready.
+      // The server's workers write the file, and the browser downloads it once it's ready, wherever
+      // the person is in the app by then.
       const created = await createExport(target, fmt, { props, filename: stem })
-      const p: PreparedExport = {
-        jobId: created.jobId, fileName: `${stem}.${fmt}`, format: fmt,
+      const what = [...new Set([dataSourceName, inView ? viewName : undefined].filter(Boolean))].join(' · ')
+      trackExport({
+        jobId: created.jobId, kind: 'data', wsId, graphId, fileName: `${stem}.${fmt}`,
+        label: `${what || 'Data source'}${onDraft ? ' (your draft)' : ''} · ${fmt.toUpperCase()}`,
+        format: fmt, exact: planned.exact,
         total: planned.nodes != null && planned.edges != null ? planned.nodes + planned.edges : null,
-        exact: planned.exact,
-      }
-      rememberExport(wsId, graphId, p)
-      follow(p)
+      })
+      setJobId(created.jobId)
+      setFileName(`${stem}.${fmt}`)
+      setPhase('server')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The export could not be started.')
       setPhase('failed')
     }
   }
 
+  /** Choose another export: the one being prepared carries on, and downloads from the tray. */
   function exportSomethingElse() {
-    following.current?.abort()
-    if (graphId) rememberExport(wsId, graphId, null)
-    setPrepared(null)
+    setJobId(null)
     setPhase('choose')
   }
 
-  const busy = phase === 'checking'
-  const ready = job?.status === 'completed' ? job : null
-  const done = (ready?.summary ?? null) as ExportSummary | null
+  // An export no longer followed here (let go of in another tab) leaves the choice open again.
+  const view: Phase = phase === 'server' && !prepared ? 'choose' : phase
+  const busy = view === 'checking'
+  const working = stage === 'queued' || stage === 'running'
+  const ready = stage === 'ready' || stage === 'downloaded'
+  // It finished just as it was cancelled: it is the person's to download, or not.
+  const unasked = stage === 'ready' && !!prepared?.cancelRequested
+  const done = (ready ? prepared?.job?.summary ?? null : null) as ExportSummary | null
   return (
     <>
     <Backdrop open={true} onClick={busy ? undefined : onClose} zClassName="z-50" className="bg-black/50 backdrop-blur-sm" />
@@ -213,12 +184,12 @@ export function ExportDialog({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto">
-          {phase === 'choose' && (
+          {view === 'choose' && (
             <ChooseStep format={format} setFormat={setFormat} scope={scope} setScope={setScope}
               hasView={!!viewId && !live} source={source} setSource={setSource} hasBranch={!!branchId && !live}
               live={live} newProps={newProps} setNewProps={setNewProps} />
           )}
-          {phase === 'checking' && (
+          {view === 'checking' && (
             <div className="px-8 py-16 flex flex-col items-center gap-4">
               <div className="relative w-16 h-16">
                 <div className="absolute inset-0 rounded-full bg-indigo-500/10 animate-ping" />
@@ -229,8 +200,21 @@ export function ExportDialog({
               <p className="text-sm font-semibold text-ink">Checking what the {format.toUpperCase()} export will hold…</p>
             </div>
           )}
-          {phase === 'preparing' && prepared && <PreparingStep job={job} prepared={prepared} />}
-          {phase === 'started' && (done || plan) && (
+          {prepared && working && <div className="px-8 py-10"><ExportProgressPanel e={prepared} /></div>}
+          {prepared && unasked && (
+            <Outcome tone="info" title="It finished before it could be stopped">
+              <p>
+                <span className="font-medium text-ink">{fileName}</span> was ready before the cancel reached
+                the server. Download it if you still want it: the file is kept on the server for a day.
+              </p>
+            </Outcome>
+          )}
+          {prepared && stage === 'cancelled' && (
+            <Outcome tone="info" title="Export cancelled">
+              <p>The server stopped preparing <span className="font-medium text-ink">{fileName}</span>. Nothing was downloaded.</p>
+            </Outcome>
+          )}
+          {((view === 'started' && plan) || (ready && !unasked)) && (
             <Outcome tone="ok" title="Your download has started">
               {done ? (
                 <p>
@@ -260,62 +244,74 @@ export function ExportDialog({
               </p>
             </Outcome>
           )}
-          {phase === 'empty' && (
+          {view === 'empty' && (
             <Outcome tone="info" title="Nothing to export">
               <p>{emptyReason(plan, { inView, onDraft })}</p>
             </Outcome>
           )}
-          {phase === 'limit' && plan && (
+          {view === 'limit' && plan && (
             <Outcome tone="warn" title={`Too large for ${format.toUpperCase()}`}>
               <p>{plan.formatLimit}</p>
             </Outcome>
           )}
-          {phase === 'failed' && (
-            <Outcome tone="error" title={prepared ? 'Lost touch with the export'
-              : job ? "The export didn't finish" : "The export didn't start"}>
+          {view === 'failed' && (
+            <Outcome tone="error" title="The export didn't start">
               <p className="break-words">{error}</p>
-              {prepared && (
-                <p className="mt-2">It may still be under way on the server: try again to check on it.</p>
-              )}
+            </Outcome>
+          )}
+          {prepared && (stage === 'failed' || stage === 'expired') && (
+            <Outcome tone="error" title="The export didn't finish">
+              <p className="break-words">{stage === 'expired' ? 'The file is no longer kept. Export again.'
+                : prepared.job?.errorMessage || 'The export could not be prepared.'}</p>
+            </Outcome>
+          )}
+          {prepared && stage === 'lost' && (
+            <Outcome tone="error" title="Lost touch with the export">
+              <p className="break-words">{prepared.lost}</p>
+              <p className="mt-2">It may still be under way on the server: try again to check on it.</p>
             </Outcome>
           )}
         </div>
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-2 px-8 py-4 border-t border-glass-border/50 bg-black/[0.01] dark:bg-white/[0.01] flex-shrink-0">
-          {(phase === 'started' || phase === 'empty' || phase === 'limit') && (
-            <button onClick={() => setPhase('choose')} className="mr-auto px-3 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-              {phase === 'started' ? 'Export again' : 'Change what to export'}
+          {(view === 'started' || view === 'empty' || view === 'limit' || ready || stage === 'cancelled') && (
+            <button onClick={exportSomethingElse} className="mr-auto px-3 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+              {view === 'empty' || view === 'limit' ? 'Change what to export' : 'Export again'}
             </button>
           )}
-          {phase === 'preparing' && (
+          {working && (
             <button onClick={exportSomethingElse} className="mr-auto px-3 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
               Export something else
             </button>
           )}
+          {working && prepared && <CancelExport jobId={prepared.jobId} />}
           <button onClick={onClose} disabled={busy} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">
-            {phase === 'preparing' ? 'Close' : phase === 'choose' || busy || phase === 'failed' ? 'Cancel' : 'Done'}
+            {working ? 'Close'
+              : view === 'choose' || busy || view === 'failed' || stage === 'failed' || stage === 'expired' || stage === 'lost'
+                ? 'Cancel' : 'Done'}
           </button>
-          {phase === 'choose' && (
+          {view === 'choose' && (
             <button onClick={() => run()}
               className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20">
               <Download className="w-4 h-4" /> Export {format.toUpperCase()}
             </button>
           )}
-          {phase === 'started' && ready && graphId && (
-            <button onClick={() => triggerBrowserDownload(downloadExportUrl(wsId, graphId, ready.jobId), fileName)}
+          {ready && prepared && (
+            <button onClick={() => downloadExportFile(prepared.jobId)}
               className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
-              <Download className="w-4 h-4" /> Download again
+              <Download className="w-4 h-4" /> {unasked ? 'Download it' : 'Download again'}
             </button>
           )}
-          {phase === 'limit' && (
+          {view === 'limit' && (
             <button onClick={() => run('csv')}
               className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
               <Download className="w-4 h-4" /> Export CSV instead
             </button>
           )}
-          {phase === 'failed' && (
-            <button onClick={() => (prepared ? follow(prepared) : void run())}
+          {(view === 'failed' || stage === 'failed' || stage === 'expired' || stage === 'lost') && (
+            // One lost touch with is checked on again, rather than another started.
+            <button onClick={() => (stage === 'lost' && prepared ? retryExport(prepared.jobId) : void run())}
               className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
               <RefreshCw className="w-4 h-4" /> Try again
             </button>
@@ -324,52 +320,6 @@ export function ExportDialog({
       </div>
     </div>
     </>
-  )
-}
-
-// ── preparing (the server writes the file) ───────────────────────────────────
-function PreparingStep({ job, prepared }: { job: Job | null; prepared: PreparedExport }) {
-  const queued = queuePosition(job)
-  // A spreadsheet reads every record once for its columns, then again to write them.
-  const passes = SPREADSHEETS.includes(prepared.format) ? 2 : 1
-  const sofar = job?.status === 'running' ? (job.summary as ExportSummary | null) : null
-  const pass = Math.min(sofar?.passes ?? 0, passes)
-  const records = sofar ? sofar.nodes + sofar.edges : 0
-  const of = prepared.total ? ` of ${prepared.exact ? '' : 'about '}${count(prepared.total)}` : ''
-  const pct = pass && prepared.total
-    ? Math.min(99, Math.floor((100 * (pass - 1 + Math.min(1, records / prepared.total))) / passes)) : null
-  const label = queued ? 'Waiting to start…'
-    : jobProgressText(job)
-    ?? (!sofar || !pass ? 'Starting…'
-      : pass < passes ? `Finding the columns… ${count(records)}${of} records read`
-      : `Writing the file… ${count(records)}${of} records, ${prettyBytes(sofar.bytes)}`)
-  const note = resumeNote(job)
-  return (
-    <div className="px-8 py-16 flex flex-col items-center gap-5">
-      <div className="relative w-16 h-16">
-        <div className="absolute inset-0 rounded-full bg-indigo-500/10 animate-ping" />
-        <div className="relative w-16 h-16 rounded-full bg-indigo-50 dark:bg-indigo-950/40 flex items-center justify-center">
-          <Loader2 className="w-7 h-7 text-indigo-500 animate-spin" />
-        </div>
-      </div>
-      <div className="text-center">
-        <p className="text-sm font-semibold text-ink">{label}</p>
-        {queued && <p className="text-[11px] text-ink-muted mt-1">{queued}</p>}
-        {note && <p className="text-[11px] text-ink-muted mt-1">{note}</p>}
-        <p className="text-[11px] text-ink-muted mt-1 truncate max-w-[24rem]">{prepared.fileName}</p>
-      </div>
-      <div className="w-full max-w-sm h-1 rounded-full bg-black/5 dark:bg-white/5 overflow-hidden">
-        {pct != null
-          ? <div role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
-              className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-indigo-600 transition-[width]"
-              style={{ width: `${pct}%` }} />
-          : <div className="h-full w-2/3 rounded-full bg-gradient-to-r from-indigo-400 to-indigo-600 animate-pulse" />}
-      </div>
-      <p className="text-[11px] text-ink-muted text-center max-w-sm">
-        The server prepares the file, then your browser downloads it. You can close this: the export
-        carries on, and it's here when you come back.
-      </p>
-    </div>
   )
 }
 
