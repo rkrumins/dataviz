@@ -263,6 +263,15 @@ export const PAGE_INDEX: PageEntry[] = [
         path: '/me/identities',
         gate: { kind: 'always' },
     },
+    {
+        id: 'api-keys',
+        category: 'Setting',
+        title: 'API keys',
+        description: 'Keys that let scripts and services act as you, limited to what you choose',
+        keywords: ['api', 'key', 'token', 'bearer', 'script', 'automation', 'integration', 'service'],
+        path: '/me/api-keys',
+        gate: { kind: 'always' },
+    },
 
     // Admin sections. Titles mirror the nav catalogue's labels
     // (`backend/app/services/nav_catalogue.py`) so a search for what the
@@ -383,6 +392,15 @@ export const PAGE_INDEX: PageEntry[] = [
         keywords: ['admin', 'audit', 'log', 'history', 'compliance'],
         path: '/admin/audit',
         gate: { kind: 'admin', key: 'audit' },
+    },
+    {
+        id: 'admin-api-keys',
+        category: 'Setting',
+        title: 'API keys',
+        description: 'Every key, who it acts as, and when it was last used',
+        keywords: ['admin', 'api', 'keys', 'tokens', 'revoke', 'credentials'],
+        path: '/admin/api-keys',
+        gate: { kind: 'admin', key: 'api-keys' },
     },
 ]
 

@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
     Activity, AlertCircle, ChevronRight, Filter, History, Loader2,
-    RefreshCw, X, Shield, UserCog, KeyRound, Check, Copy
+    RefreshCw, X, Shield, UserCog, KeyRound, KeySquare, Check, Copy
 } from 'lucide-react'
 import { auditService, type AuditEvent, type AuditFilters } from '@/services/auditService'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -55,6 +55,14 @@ const CATEGORIES = [
         icon: Activity,
         accent: 'text-emerald-600 dark:text-emerald-400',
         iconBg: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
+    },
+    {
+        key: 'api_key',
+        label: 'API keys',
+        prefix: 'identity.api_key.',
+        icon: KeySquare,
+        accent: 'text-indigo-600 dark:text-indigo-400',
+        iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
     },
 ] as const
 
@@ -209,7 +217,7 @@ export function AdminAudit() {
                 </div>
 
                 {/* KPI strip — counts per category */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                     {CATEGORIES.map(c => {
                         const Icon = c.icon
                         const isActive = activeCategory === c.key

@@ -1319,7 +1319,8 @@ export function AdminUsers() {
                                         Every browser and device this person is signed in on is
                                         signed out on its next request. Their account is unchanged,
                                         and they can sign straight back in — for a lost laptop or a
-                                        session you do not trust.
+                                        session you do not trust. Their API keys keep working:
+                                        revoke those under Administration → API keys.
                                     </p>
                                     <ModalFooter onCancel={closeModal} onConfirm={handleEndSessionsConfirm}
                                         confirmLabel="End their sessions" confirmIcon={LogOut} confirmClass="bg-amber-500 hover:bg-amber-600 shadow-amber-500/20"
