@@ -401,8 +401,9 @@ Three ways out, one pipeline:
 - **`GET /exports/plan`, then `POST /exports`** — what the Export dialog does for a data source with
   version control. The plan says what the export would hold (counts, emptiness, whether Excel can
   hold it); then the job (`ExportWorker.run`, queued for the workers as §2 describes) writes the
-  file to the `result_uri` artifact, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB). While it runs, its
-  heartbeat (every 5 s) keeps its progress in `summary`: this pass's `nodes` and `edges`, the
+  file to the `result_uri` artifact, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB). While it runs, it
+  records its progress in `summary` at most every 5 s, as each page of records comes and each chunk
+  of the file goes, so a spreadsheet's column pass reports too: this pass's `nodes` and `edges`, the
   `passes` so far (a spreadsheet reads everything once for its columns, then again to write it), and
   the `bytes` written; the finished `{nodes, edges, bytes}` replaces it. Then
   **`GET /exports/{job}/download`** serves the file as a download that resumes: `Content-Length`,
@@ -420,6 +421,16 @@ Three ways out, one pipeline:
 Reading an export job (the list, its status, its download) checks again what creating it checked
 (`_check_export_access`): an export of a draft is for that draft's readers, and one of a view for
 the view's readers. Any other is a 404, as for a job that doesn't exist, and is left out of the list.
+
+**Cancelling.** `POST /exports/{job}/cancel` stops an export that hasn't ended. After the same read
+check, it is its creator's to stop (the job records who started it) or a data-source manager's;
+anyone else gets 403. `ImportExportService.cancel_export` sets the job `cancelled`, with
+`cancelledBy` in its summary, in one transaction holding the row's lock. A queued export is then
+never claimed. A running one's worker finds its row no longer running at its next fenced write (a
+progress checkpoint, every few seconds, in either pass) and stops; the store's `put_stream` removes
+the part of the file written so far. One cancelled just as its file was finished deletes that file
+instead of naming it the result. An export that has already ended is left as it is; the answer is
+the job, wherever it ended.
 
 All three take turns (`stream.Slots`). An export keeps about one CPU core busy, so a pod streams
 `GRAPH_EXPORT_CONCURRENCY` (2) at once, whichever of its worker processes serve them. A turn is an
@@ -632,9 +643,19 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   view-vs-whole-DS (when in a view), and "add property columns"; it asks for the plan, then for a
   data source with version control has the server prepare the file (`createExport`, then `getExport`
   polled: its place in the queue, then its progress) and downloads it once ready
-  (`downloadExportUrl`), named `.<format>` (`triggerBrowserDownload`). The export being prepared is
-  remembered in the browser, so the dialog closed meanwhile opens on it again. A data source without
+  (`downloadExportUrl`), named `.<format>` (`triggerBrowserDownload`). A data source without
   version control streams (`exportStreamUrl`). See [07 — Frontend Integration](07-frontend-integration.md).
+- **Exports in the background** (`features/import-export/backgroundExports.ts`, `ExportTray.tsx`,
+  `ExportProgress.tsx`). An export the server prepares — a data source's, or a view package's — is
+  followed app-wide, not by the dialog that started it. Closed, the dialog hands it to the export
+  tray, bottom right on every page, and opened again it shows it once more. Both show it with one
+  component: its steps, what it has written, elapsed time and time left. Its file downloads by
+  itself the moment it is ready, wherever the person is, and the tray says so up front. An export
+  can be cancelled from either, asked once more first. Each export is kept in the browser under a
+  key of its own, for the person who started it, for the day its file is kept. A reload picks it up
+  again, and other tabs hear of it through the `storage` event. Every tab follows it (a hidden tab
+  waits until it is shown); the first to see it finish downloads it, in a Web Lock, and marks it
+  downloaded for the others.
 
 ---
 
@@ -649,8 +670,8 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   rows). It runs on the transfer lane; `get_job` reports its phase and the rows processed.
 - **A large import's staged rows take their space in Postgres** until they are swept (§3c).
 - **A 50 GB export takes hours to prepare**: one job writes about 10 MB a second as NDJSON, 3.5 as
-  CSV (which reads everything twice), on one worker. Nothing splits an export across workers yet,
-  or cancels one being prepared; its file is swept a day after it is written.
+  CSV (which reads everything twice), on one worker. Nothing splits an export across workers yet;
+  its file is swept a day after it is written.
 - **Exports download uncompressed**, so that their size is known and a download resumes: a 50 GB
   CSV is 50 GB on the wire.
 - **The S3/GCS store is optional and off by default** (§9): boto3 isn't in the default image.
