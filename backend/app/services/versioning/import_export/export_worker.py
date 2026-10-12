@@ -13,7 +13,8 @@ It runs on the job's lease (:mod:`..job_lease`), and each attempt at it — each
 file of its own (:func:`epoch_key`): a worker taken over while still writing never writes into the
 file its successor writes (a local store writes a file in place). The fenced finish names the
 attempt's file as the job's result, so a superseded attempt's file is never the one downloaded. An
-export has no cursor: taken over, it starts again.
+export has no cursor: taken over, it starts again. Cancelled, it stops at its next progress
+checkpoint, and its file goes.
 
 A view package's export (``view_transfer.package.PackageExport``) writes the same data INTO the
 package as it streams: one file, written once, never read back.
@@ -116,30 +117,44 @@ class ExportWorker:
         written = 0
         said = time.monotonic()
 
+        async def progress() -> None:
+            """At most every ``_PROGRESS_SECS``, the job says how far it has got — this pass's
+            records (a spreadsheet reads them all once for its columns first) and the bytes so far
+            — in a fenced checkpoint, which is also where a superseded, stopping or cancelled
+            worker stops. Asked as each page of records comes and as each chunk of the file goes:
+            in either pass, not only once the file's bytes flow."""
+            nonlocal said
+            if time.monotonic() - said < _PROGRESS_SECS:
+                return
+            said = time.monotonic()
+            lease.check()
+            async with db.graphver_session() as s:
+                # Merged into the row's summary, not replacing it: its ``takeovers`` is the claim's
+                # poison count, and an export that cleared it with every tick would be taken over
+                # forever by a worker it keeps killing.
+                row = await s.get(JobORM, job_id)
+                await lease.checkpoint(s, summary={
+                    **(row.summary or {}), "nodes": tally["node"], "edges": tally["edge"],
+                    "passes": tally.get("passes", 0), "bytes": written})
+
+        async def checked(pages):
+            """The records, a page at a time, saying how far the export has got."""
+            async with contextlib.aclosing(pages):
+                async for page in pages:
+                    await progress()
+                    yield page
+
         async def counted(chunks):
-            """The file's bytes, counted. At most every ``_PROGRESS_SECS``, as a chunk comes, the
-            job says how far it has got — this pass's records (a spreadsheet reads them all once
-            for its columns first) and the bytes so far — in a fenced checkpoint, which is also
-            where a superseded or stopping worker stops writing."""
-            nonlocal written, said
+            """The file's bytes, counted, saying how far the export has got."""
+            nonlocal written
             async for chunk in chunks:
                 written += len(chunk)
-                if time.monotonic() - said >= _PROGRESS_SECS:
-                    said = time.monotonic()
-                    lease.check()
-                    async with db.graphver_session() as s:
-                        # Merged into the row's summary, not replacing it: its ``takeovers`` is
-                        # the claim's poison count, and an export that cleared it with every
-                        # tick would be taken over forever by a worker it keeps killing.
-                        row = await s.get(JobORM, job_id)
-                        await lease.checkpoint(s, summary={
-                            **(row.summary or {}), "nodes": tally["node"], "edges": tally["edge"],
-                            "passes": tally.get("passes", 0), "bytes": written})
+                await progress()
                 yield chunk
 
         # It takes its turn with the streamed exports (the lease keeps the job alive while it waits).
         body = stream.in_turn(stream.write_export(
-            lambda: stream.record_pages(snap, selection, tally=tally, stats=stats),
+            lambda: checked(stream.record_pages(snap, selection, tally=tally, stats=stats)),
             fmt=fmt, props=self._extra_props))
         if self._package is not None:
             body = self._package.write(body, tally, stats)
@@ -150,6 +165,10 @@ class ExportWorker:
         if self._package is not None:
             summary["package"] = self._package.summary(stat.size)
         if not await lease.finish("completed", summary=summary, result_uri=result_uri):
-            raise Superseded(f"export job {job_id} (epoch {lease.epoch}) was taken over before it "
-                             "could finish")
+            # Cancelled, or taken over, as the file was finished: it is this attempt's own, and
+            # nobody will download it.
+            with contextlib.suppress(Exception):
+                await self._store.delete(result_uri)
+            raise Superseded(f"export job {job_id} (epoch {lease.epoch}) was taken over or cancelled "
+                             "before it could finish")
         return summary

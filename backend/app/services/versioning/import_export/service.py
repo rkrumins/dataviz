@@ -26,7 +26,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 from .. import config, db
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import ImportRowORM, JobORM
-from ..service import GraphVersioningService
+from ..service import AccessDenied, GraphVersioningService, Viewer
 from . import stream
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
@@ -326,7 +326,8 @@ class ImportExportService:
         row-scope to just those entities / entity types. ``package`` makes the job a view package's
         (view_transfer.package): the views' file is built from the versions sealed for it, then the
         data is written into the package as it streams. ``file_name`` names the download."""
-        options: Dict[str, Any] = {}
+        # Who started it: theirs to cancel (cancel_export).
+        options: Dict[str, Any] = {"actor": actor}
         if package:
             options["package"] = package
         if file_name:
@@ -343,7 +344,7 @@ class ImportExportService:
                 data_source_id=data_source_id, provider_id=provider_id,
                 scope_view_id=scope_view_id, branch_id=branch_id,
                 import_format=export_format, as_of_seq=as_of_seq,
-                field_scope=options or None, idempotency_key=idempotency_key, status="pending",
+                field_scope=options, idempotency_key=idempotency_key, status="pending",
             )
             s.add(job)
             await s.flush()
@@ -487,6 +488,29 @@ class ImportExportService:
             row.status, row.current_phase = "pending", QUEUED
             row.error_message = row.completed_at = None
             row.updated_at = _now()
+        return True
+
+    async def cancel_export(self, job_id: str, *, viewer: Viewer) -> bool:
+        """Cancel export ``job_id`` unless it has ended — one started by mistake, or no longer
+        wanted. Its creator's to cancel, or a manager's (:class:`AccessDenied` for anyone else).
+
+        A queued export is never claimed. A running one's worker finds its row no longer running
+        at its next fenced write — a progress checkpoint, every few seconds — and stops, and the
+        store removes the part of the file it wrote. True when this call cancelled it; False when
+        it had already ended (completed, failed or cancelled), which leaves it as it was."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id, with_for_update=True)
+            if row is None or row.job_type != "export":
+                raise ValueError("export not found")
+            creator = row.field_scope.get("actor") if isinstance(row.field_scope, dict) else None
+            if creator != viewer.actor and not viewer.can_manage:
+                raise AccessDenied("Only the person who started this export, or a manager, can cancel it.")
+            if row.status not in ("pending", "running"):
+                return False
+            summary = row.summary if isinstance(row.summary, dict) else {}
+            row.summary = {**summary, "cancelledBy": viewer.actor}
+            row.status = "cancelled"
+            row.completed_at = row.updated_at = _now()
         return True
 
     async def build_template(self, *, graph_id: str, export_format: str = "csv", limit: int = 5) -> bytes:
