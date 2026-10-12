@@ -39,11 +39,11 @@ after the frontend proxy. A request refused at any step never reaches the code b
 
 ```mermaid
 flowchart TB
-    A["Browser"] --> B["Frontend proxy:<br/>page CSP and headers"]
+    A["Browser, or a script<br/>with an API key"] --> B["Frontend proxy:<br/>page CSP and headers"]
     B --> C["Deadline and<br/>body-size cap"]
     C --> D["Security headers and<br/>Host allowlist"]
-    D --> E["Origin check and<br/>CSRF token"]
-    E --> F["Session cookie and<br/>revocation check"]
+    D --> E["Origin check, and<br/>CSRF token with cookies"]
+    E --> F["Session cookie and revocation,<br/>or API key, owner and scope"]
     F --> G["Permission and<br/>feature-switch check"]
     G --> H["Change and its<br/>audit event commit together"]
 ```
@@ -54,9 +54,11 @@ flowchart TB
    reads it.
 3. Security headers are added to every response. If you set `ALLOWED_HOSTS`, a request
    naming any other host is refused.
-4. A write must come from an allowed origin and carry a CSRF token bound to the session.
+4. A write must come from an allowed origin and carry a CSRF token bound to the session. A
+   request carrying an API key has its cookies removed and needs no CSRF token.
 5. The session cookie's signature, issuer and expiry are verified, and the session is checked
-   against the revocation list.
+   against the revocation list. An API key is checked instead: the key, its owner and what the
+   key may reach, on every request — see [API keys](#api-keys).
 6. The route's permission is checked against the caller's roles, and a switched-off feature
    is refused.
 7. A security-relevant change writes its audit event in the same database transaction as the
@@ -302,6 +304,59 @@ CORS.
 
 **Where in the code.** `backend/auth_service/csrf.py` (`CSRFMiddleware`, `mint_csrf_token`,
 `verify_csrf_token`), registered in `backend/app/main.py`.
+
+## API keys
+
+**How it works.** Anyone can create keys under **Account → API keys** that let a script call
+the API as them — the person's side is in [API Keys](/guide/api-keys).
+
+- **The token.** `nxpat_`, 32 random base62 characters (about 190 bits) and a 6-character
+  checksum, so secret scanners can recognise a leaked key and a mistyped one is refused
+  without a database lookup. Only its SHA-256 hash is stored, and the token is shown once. It
+  is accepted only in the `Authorization: Bearer` header — never in a URL — and never logged.
+- **Minting needs a fresh sign-in.** Creating or rotating a key asks for the password, or for
+  a sign-in through the identity provider in the last 15 minutes. A person may hold 25 active
+  keys.
+- **Narrower than its owner, never wider.** A key reaches everything its owner can, or chosen
+  workspaces, views and data sources; and none, read, or read & write on views (with
+  publishing) and on data. On anything, it may do what its owner may do there *now*, narrowed
+  by the key — a role taken away reaches the key within 30 seconds. A key never carries
+  platform permissions, workspace administration or sharing.
+- **The data plane only.** Keys may call a reviewed list of routes — views, graphs, version
+  control, data-source signals and jobs — and everything else answers
+  `403 api_key_not_allowed`. A request naming a workspace, view or data source outside the
+  key's limits answers `403 api_key_out_of_scope`, or `404` across workspaces; a read-only key
+  asking to change something answers `403 api_key_read_only`.
+- **Checked on every request.** A revoked or expired key, a suspended owner, or a key used
+  from a network it isn't limited to is refused with `401`. So is the key of a person who signs
+  in through an identity provider and hasn't for a set time (30 days by default): the key
+  pauses, and resumes at their next sign-in, so a leaver's keys stop without anyone
+  remembering them. An owner left with no way to sign in pauses too.
+- **No cookies beside a key.** A request carrying a key has its cookies removed before any
+  route sees them, so it acts as the key alone. It needs no CSRF token — a browser cannot add
+  an `Authorization` header to a cross-site request without the API's consent — but a write
+  still passes the Origin check.
+- **Limits and outages.** Each key is limited to `RATELIMIT_API_KEY` requests (1,200 a minute
+  by default; `429` with `Retry-After`), and failed lookups to `RATELIMIT_API_KEY_FAILURES_PER_IP`
+  per client address. If the database can't be reached the answer is `503`, never "invalid
+  key".
+- **Not ended with sessions.** Sign Out, **Sign out everywhere**, password changes and **End
+  sessions** leave keys working; suspension stops them at once. To stop a key, revoke it: its
+  owner on **Account → API keys**, an administrator one key or all of a person's on
+  **Administration → API keys**, or whoever holds it with `DELETE /api/v1/api-keys/self`.
+
+**How to configure it.** Under **Administration → Features → Authentication**: **API keys**
+(`apiKeysEnabled`, on by default) refuses every key at once; **Longest an API key may live**
+(`apiKeyMaxLifetime`, no maximum by default) also shortens keys that already exist; **Pause keys
+of people who stop signing in** (`apiKeySsoSignInWindow`, 30 days by default). Keys are refused
+with `503` while RBAC enforcement is switched off. Behind a proxy, set `FORWARDED_ALLOW_IPS` so
+that per-key network limits and recorded addresses see the real client.
+
+**Where in the code.** `backend/auth_service/core/api_keys.py` (`generate`, `hash_token`,
+`lifecycle_refusal`), `backend/auth_service/service.py` (`validate_api_key`),
+`backend/app/auth/api_key_auth.py` (`authenticate`), `backend/app/auth/api_key_surface.py`
+(`SURFACE`), `backend/app/services/permission_service.py` (`resolve_for_api_key`, `KeyScope`),
+`backend/auth_service/csrf.py` (`_dispatch_api_key`), `backend/app/api/v1/endpoints/api_keys.py`.
 
 ## Who can do what
 
@@ -585,7 +640,10 @@ whole platform runs as one process), and only one copy of it works at a time. Re
   switches, identity links, and every failed SSO sign-in, keyed by the reference the user was
   shown;
 - refused permission checks (`user.access_denied`), sampled to one per person, permission and
-  scope per hour.
+  scope per hour;
+- API keys created, rotated and revoked, and keys refused — expired or paused, or misused: a
+  revoked key presented again, or a key used from a network it isn't limited to — once per key
+  and reason an hour. Every event a key's request writes carries the key's id.
 
 **How to read it.** Open **Administration → Identity & Access → Audit Log**. The page needs
 `system:audit:read`, which `super_admin` and `org_auditor` hold, on top of a permission that
@@ -699,6 +757,7 @@ didn't. The policy itself is `.github/SECURITY.md` in the repository.
 | Refresh-token rotation | `backend/auth_service/refresh.py` |
 | Rate limits | `backend/auth_service/ratelimit.py` |
 | CSRF | `backend/auth_service/csrf.py` |
+| API keys | `backend/auth_service/core/api_keys.py`, `backend/app/auth/api_key_auth.py`, `backend/app/auth/api_key_surface.py` |
 | Session check, permission checks and revocation | `backend/app/auth/dependencies.py`, `backend/app/services/revocation_service.py` |
 | Roles and permissions | `backend/app/config/rbac_seed.py`, `backend/app/services/permission_service.py` |
 | Middleware order, Host allowlist, body and time limits, startup checks | `backend/app/main.py` |
@@ -717,3 +776,5 @@ didn't. The policy itself is `.github/SECURITY.md` in the repository.
   sign-in gateway team needs to know what an **Enterprise gateway** requires of them.
 - [Users & Access](/guide/users-access) — when you want the administrator's view of roles,
   invitations and access.
+- [API Keys](/guide/api-keys) — when you want a person's side of keys: creating, limiting,
+  rotating and revoking them.

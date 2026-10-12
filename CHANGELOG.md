@@ -9,6 +9,90 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — API keys: scripts and services that act as you, limited to what you choose
+
+### Added
+
+**API keys.** Anyone can create a key under **Account → API keys** (or **API keys** in the menu
+under their avatar) that lets a script or a service call the API as them — people who sign in
+through an identity provider and have no password included. A key reaches everything its owner
+can, or only chosen workspaces, views and data sources, and may read, or read and change, views
+(with or without publishing to everyone) and data. On anything it reaches it may do what its owner
+may do there at that moment, never more: access taken from a person is taken from their keys
+within 30 seconds. Creating or rotating a key asks for the password, or for a sign-in through the
+identity provider in the last 15 minutes. The key is shown once. It expires — 30 days unless its
+owner chooses otherwise, never only where the deployment allows it — and can be limited to
+networks. **Rotate** makes a new token with the same access and keeps the old one working for up
+to a week; **Revoke** ends it at once. Expand a key to see what it can do right now, per workspace,
+view and data source.
+
+**Scripts send one header.** `Authorization: Bearer nxpat_…` replaces the cookie jar, the CSRF
+header and renewal. `GET /api/v1/api-keys/self` says what a key is and when it stops working;
+`DELETE /api/v1/api-keys/self` revokes it, for whoever holds it, even when it is paused or expired;
+and every answer carries `X-API-Key-Expires-At`. Keys are for the data plane — views, graphs,
+version control, data-source signals and jobs. The API reference marks each operation a key may
+call, and every other route answers `403 api_key_not_allowed`.
+
+**Paused, not forgotten.** The keys of someone who signs in through an identity provider pause when
+they haven't signed in there for 30 days, and resume at their next sign-in, so the keys of someone
+who has left stop without anyone remembering them. A suspended account's keys stop at once.
+
+**Administration → API keys** lists every key with its owner, what it reaches and when it was last
+used, filters to keys nobody has used for 90 days, and revokes one key or all of a person's.
+Seeing the list needs `system:audit:read`; revoking needs `system:users:manage`. Three switches
+under **Administration → Features → Authentication** govern keys: **API keys**, **Longest an API
+key may live** and **Pause keys of people who stop signing in**.
+
+**Reminders and alerts.** A key's owner hears in their inbox a week before it expires, when an
+administrator revokes it, and when a revoked key is presented again or a key is used from a network
+it isn't limited to.
+
+### Changed
+
+- **The API Guide leads with keys.** It, and the search and versioning references, show the key
+  first and say which routes still need a password session. Scripts that sign in with a password
+  keep working unchanged.
+- **Sign out everywhere** and **End sessions** say that API keys keep working, and where to revoke
+  them.
+
+### Security
+
+- **A graph import no longer rewrites a view its caller can't edit.** An import's `?viewId=` made
+  the import rewrite that view's layout, while the route checked only that the caller could manage
+  the data source — so it reached any view on the platform. The view must now be live, in the
+  import's workspace, and editable by the caller (`create_import`, `complete_import_upload`).
+- **Everything a key does is attributed.** Audit events written during a key's request carry the
+  key's id, and the access log records `authMethod=api_key` with it. Creating, rotating and
+  revoking keys, and keys refused or misused, are on the Audit Log and on the owner's **Recent
+  activity**.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261012_1000_api_keys` adds the `api_keys` table.
+- **Keys are on for everyone.** To hold them back, switch **API keys** off under **Administration →
+  Features → Authentication**; people can still see and revoke their keys while it is off.
+- **Two optional settings:** `RATELIMIT_API_KEY` (1200 requests a minute per key) and
+  `RATELIMIT_API_KEY_FAILURES_PER_IP` (120 failed lookups a minute per address). Behind a proxy,
+  `FORWARDED_ALLOW_IPS` must name it, or a key limited to networks sees the proxy's address.
+- The control plane runs one more hourly sweep, for expiry reminders.
+
+### Known limitations
+
+- **No service accounts.** A key acts as the person who made it and stops when they leave. An
+  integration that must outlive a person waits for service accounts, which this is built to take
+  ([ADR-027](/docs/decisions#adr-027-personal-api-keys-scoped-per-resource)).
+- **Data sources have no grants of their own.** A key's data access follows its owner's workspace
+  roles, or reads a data source through a view its owner can open.
+- **Keys can't call** administration, sharing, settings, the inbox, inspecting or importing a view
+  file, data-source administration beyond signals and jobs, or creating a version-controlled graph.
+  Use a password session for those.
+- **Signing out everywhere, changing a password and End sessions leave keys working**, by design:
+  revoke a key you no longer trust.
+- The refresh audit (`refresh_events`) and graph commits record a key's owner, not the key.
+- `publish_view_library.py` still signs in with a password.
+
+---
+
 ## [Unreleased] — Exports you can follow from anywhere, and cancel
 
 ### Added

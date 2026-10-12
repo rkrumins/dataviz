@@ -18,7 +18,7 @@ live OpenAPI explorer — see [Find the endpoint you need](/docs/api-guide#find-
 (`/api/v1/{ws_id}/versioning`) is the *only* path between a client and the `graphver` Postgres
 store — it delegates to `GraphVersioningService`. The **graph router** (`/api/v1/{ws_id}/graph`) is
 the provider and engine read and write plane, made **draft-aware** by a single `?branchId=` query
-parameter. Auth is a cookie session plus CSRF; authorization reuses **data-source permissions** (a
+parameter. Auth is a cookie session plus CSRF, or an API key; authorization reuses **data-source permissions** (a
 graph is 1:1 with a data source); a graph, request or data source in another workspace answers
 **404**, never 403.
 
@@ -40,6 +40,18 @@ tables call out.
 `POST /api/v1/auth/refresh` renews every cookie, `nx_csrf` included. Working curl, `requests` and
 `httpx` helpers are in the [API Guide](/docs/api-guide#sign-in-from-a-script). The routers trust the
 authenticated `User` and `PermissionClaims`; they never re-derive identity.
+
+### API keys
+
+`Authorization: Bearer nxpat_…` replaces the cookies and the CSRF header — see
+[API Keys](/guide/api-keys). The key acts as its owner, narrowed to what it was limited to: data
+read for the reads, data read & write for every write. Every route below accepts a key except
+creating a graph (`POST /graphs`, `/blank-graphs`, `…/forks`), opening a draft by data source
+(`POST /resolve`), adding or removing a draft's members, projection rebuild and reconcile, and on
+the graph router `bootstrap…`, `resync` and `edges/aggregated/materialize`. A
+key limited to particular data sources reaches a graph, branch or request only when the data
+source behind it is one of them — otherwise `403 api_key_out_of_scope`, or `404` across
+workspaces.
 
 ### Permissions (RBAC)
 

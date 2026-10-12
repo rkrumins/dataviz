@@ -62,12 +62,13 @@ How they fit together, and how a request flows through them: [Architecture](/doc
 
 ## Authentication
 
-The API uses cookie sessions, not bearer tokens. In short:
+The browser app uses cookie sessions, not bearer tokens; scripts can use an API key instead. In short:
 
 - **Signing in** (`POST /api/v1/auth/login`, or a single sign-on callback) sets four cookies: `nx_access` and `nx_refresh` (both `HttpOnly`), plus `nx_csrf` and `nx_access_exp`, which the app reads. The response body carries the user, never a token. With `AUTH_ENVIRONMENT_ID` set, each cookie name carries it as a suffix.
 - **Every request** is authenticated by `get_current_user` (`backend/app/auth/dependencies.py`), which verifies the access cookie's JWT and checks that the session has not been revoked. `get_permission_claims` adds the session's workspace grants from the session store (Redis, falling back to PostgreSQL); global permission claims ride in the token itself.
 - **Every state-changing request** (`POST`, `PUT`, `PATCH`, `DELETE`) must carry the `nx_csrf` value in an `X-CSRF-Token` header. `CSRFMiddleware` (`backend/auth_service/csrf.py`) checks the header against the cookie, the token's binding to the session, and the request's origin; a failure answers `403` with `csrf_failed`.
 - **Renewal.** `POST /api/v1/auth/refresh` rotates the refresh token and mints a new access token. The app does this before `nx_access` expires, and once more on a `401`.
+- **API keys.** A request carrying `Authorization: Bearer nxpat_…` is authenticated by the key alone: `api_key_auth.authenticate` (`backend/app/auth/api_key_auth.py`), called first by `get_current_user`, `get_optional_user` and `get_permission_claims`, checks the key and its owner through `validate_api_key`, refuses routes not in `api_key_surface.SURFACE` and resources outside the key's selection, and hands back the owner with claims narrowed to the key (`resolve_for_api_key`). `CSRFMiddleware` removes the cookies from such a request and skips the double-submit. A pending password change does not hold a key, as it does not hold an SSO session. See [API Keys](/guide/api-keys) and [ADR-027](/docs/decisions#adr-027-personal-api-keys-scoped-per-resource).
 - **Permissions.** Each route declares what it needs with the `requires(...)` dependency; the catalogue of roles and permissions is in [RBAC](/docs/rbac).
 
 Rules that are easy to trip over when you change these endpoints:
@@ -184,6 +185,7 @@ They are on unless `ENV` is `prod` or `production`; set `API_DOCS_ENABLED=true` 
 | Session routes | `backend/auth_service/api/router.py` |
 | Cookies and CSRF | `backend/auth_service/cookies.py`, `backend/auth_service/csrf.py` |
 | Request authentication and permissions | `backend/app/auth/dependencies.py` (`get_current_user`, `requires`) |
+| API keys on a request, and which routes take them | `backend/app/auth/api_key_auth.py` (`authenticate`), `backend/app/auth/api_key_surface.py` (`SURFACE`) |
 | Trace endpoints | `backend/app/api/v1/endpoints/graph.py` (`trace_v2`, `trace_closure`, `trace_expand`, `trace_expand_batch`) |
 | Trace request models | `backend/common/models/graph.py` (`TraceRequest`, `TraceClosureRequest`, `ExpandRequest`) |
 | Query orchestration | `backend/app/services/context_engine.py` (`ContextEngine`) |
