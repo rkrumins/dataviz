@@ -128,6 +128,9 @@ services:
   frontend:
     build:
       target: development
+    # Reinstalls node_modules whenever package-lock.json changes, so a newly
+    # merged dependency never fails as `Failed to resolve import` in Vite.
+    entrypoint: ["/bin/sh", "/docker-entrypoint.d/frontend-dev-entrypoint.sh"]
     command:
       - npm
       - run
@@ -146,10 +149,12 @@ services:
       # Docs site also renders the repo-root changelog (@root alias) —
       # needs its own mount since only ./docs is otherwise visible.
       - ./CHANGELOG.md:/CHANGELOG.md:ro
-      # Anonymous volume shadows host's node_modules (if any) so the
-      # container's Linux-built modules win over whatever npm install
-      # placed on macOS.
-      - /app/node_modules
+      - ./scripts/frontend-dev-entrypoint.sh:/docker-entrypoint.d/frontend-dev-entrypoint.sh:ro
+      # Volume shadows host's node_modules (if any) so the container's
+      # Linux-built modules win over whatever npm install placed on macOS.
+      # Named, not anonymous: an anonymous one is orphaned by every
+      # `./dev.sh down` and re-seeded from a possibly stale image on `up`.
+      - frontend_node_modules:/app/node_modules
     environment:
       VITE_PROXY_TARGET: http://viz-service:8000
 
@@ -163,3 +168,5 @@ volumes:
     name: synodic-redis-dev-data
   falkordb_data:
     name: synodic-falkordb-dev-data
+  frontend_node_modules:
+    name: synodic-frontend-dev-node-modules
