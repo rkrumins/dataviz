@@ -781,11 +781,15 @@ def _queue_for_connections(client: Any, timeout: float) -> Any:
 @functools.lru_cache(maxsize=None)
 def _blocking_sentinel_pool() -> type:
     """Sentinel's master-following pool, waiting for a free connection like
-    :func:`_queue_for_connections` instead of failing at once."""
-    from redis.asyncio.connection import BlockingConnectionPool
-    from redis.asyncio.sentinel import SentinelConnectionPool
+    :func:`_queue_for_connections` instead of failing at once.
 
-    class BlockingSentinelConnectionPool(SentinelConnectionPool, BlockingConnectionPool):
+    Both bases come from the ``redis.asyncio`` package, never through
+    ``redis.asyncio.sentinel`` as imported now: that module can be stood in
+    for (tests do), and the class built here is kept for the process.
+    """
+    import redis.asyncio as aioredis
+
+    class BlockingSentinelConnectionPool(aioredis.SentinelConnectionPool, aioredis.BlockingConnectionPool):
         pass
 
     return BlockingSentinelConnectionPool
